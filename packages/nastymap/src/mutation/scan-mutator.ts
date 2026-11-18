@@ -81,13 +81,13 @@ export function mergeScanResults(baseScan: NmapRun, newScan: NmapRun): NmapRun {
 
   // Populate base hosts
   for (const host of baseScan.hosts) {
-    const key = host.ipv4 || host.id;
+    const key = host.ipv4 || host.ipv6 || host.id;
     hostMap.set(key, { ...host });
   }
 
   // Merge in new scan hosts
   for (const newHost of newScan.hosts) {
-    const key = newHost.ipv4 || newHost.id;
+    const key = newHost.ipv4 || newHost.ipv6 || newHost.id;
 
     if (!hostMap.has(key)) {
       // New host discovered
@@ -107,9 +107,35 @@ export function mergeScanResults(baseScan: NmapRun, newScan: NmapRun): NmapRun {
       for (const s of existing.hostscripts || []) scriptMap.set(s.id, s);
       for (const s of newHost.hostscripts || []) scriptMap.set(s.id, s);
 
+      const mergedHostnames =
+        newHost.hostnames && newHost.hostnames.length > 0 ? newHost.hostnames : existing.hostnames;
+      const mergedPrimaryHostname =
+        newHost.primaryHostname && newHost.primaryHostname !== 'Unknown'
+          ? newHost.primaryHostname
+          : existing.primaryHostname;
+      const mergedOs =
+        newHost.os && newHost.os.osmatches && newHost.os.osmatches.length > 0
+          ? newHost.os
+          : (existing.os || newHost.os);
+      const mergedPrimaryOs =
+        newHost.primaryOs && newHost.primaryOs !== 'Unknown'
+          ? newHost.primaryOs
+          : existing.primaryOs;
+      const mergedOsFamily =
+        newHost.osFamily && newHost.osFamily !== 'Unknown'
+          ? newHost.osFamily
+          : existing.osFamily;
+
       const mergedHost: NmapHost = {
         ...existing,
         ...newHost,
+        addresses: newHost.addresses && newHost.addresses.length > 0 ? newHost.addresses : existing.addresses,
+        hostnames: mergedHostnames,
+        primaryHostname: mergedPrimaryHostname,
+        mac: newHost.mac || existing.mac,
+        os: mergedOs,
+        primaryOs: mergedPrimaryOs,
+        osFamily: mergedOsFamily,
         ports: mergedPorts,
         openPortCount: mergedPorts.filter((p) => p.state === 'open').length,
         hostscripts: Array.from(scriptMap.values()),
@@ -155,7 +181,8 @@ export function removeHostFromScan(scan: NmapRun, hostIdOrIp: string): NmapRun {
     (h) =>
       h.id.toLowerCase() !== targetId &&
       (!h.ipv4 || h.ipv4.toLowerCase() !== targetId) &&
-      (!h.ipv6 || h.ipv6.toLowerCase() !== targetId)
+      (!h.ipv6 || h.ipv6.toLowerCase() !== targetId) &&
+      (!h.primaryHostname || h.primaryHostname.toLowerCase() !== targetId)
   );
 
   return {

@@ -42,7 +42,6 @@ export function compileK3s(state: DesiredState, joinToken?: string): CompiledK3s
   };
 
   const isBarebones = k3s.profile === 'barebones-storage';
-  const nodeRole = k3s.role ?? 'server';
 
   const effectiveRole = state.ha?.role || state.ha?.nodeRole || 'master';
   const effectivePeer = state.ha?.peerIp || state.ha?.peerAddress || '';
@@ -52,6 +51,17 @@ export function compileK3s(state: DesiredState, joinToken?: string): CompiledK3s
     hasHaPeer &&
     effectiveRole === 'backup' &&
     k3s.autoJoinHaPeer !== false;
+
+  const isHaCluster = Boolean(hasHaPeer && k3s.autoJoinHaPeer !== false);
+  const haTopology = k3s.haTopology || 'embedded-etcd';
+  const datastore =
+    k3s.datastore ??
+    ((isBarebones && !hasHaPeer) || (isHaCluster && haTopology === 'single-server-ha-agent') ? 'sqlite' : 'etcd');
+  const nodeRole =
+    k3s.role === 'agent' ||
+    (isSecondaryJoin && (haTopology === 'single-server-ha-agent' || datastore === 'sqlite'))
+      ? 'agent'
+      : 'server';
 
   const formattedPeer = effectivePeer
     ? effectivePeer.includes(':') && !effectivePeer.startsWith('[')
@@ -127,11 +137,10 @@ export function compileK3s(state: DesiredState, joinToken?: string): CompiledK3s
     };
   }
 
-  const datastore = k3s.datastore ?? (isBarebones && !hasHaPeer ? 'sqlite' : 'etcd');
-
   const tlsSans = new Set<string>(['127.0.0.1', 'localhost']);
   if (effectivePeer) {
-    tlsSans.add(effectivePeer);
+    const cleanPeerSan = effectivePeer.split('/')[0]?.replace(/[\r\n"\\[\]]/g, '').trim();
+    if (cleanPeerSan) tlsSans.add(cleanPeerSan);
   }
   for (const iface of state.interfaces ?? []) {
     const cleanIp = (iface.ipv4Address || (iface as { address?: string }).address || '').split('/')[0];
@@ -173,7 +182,6 @@ export function compileK3s(state: DesiredState, joinToken?: string): CompiledK3s
     }
   }
 
-  const haTopology = k3s.haTopology || 'embedded-etcd';
   if (haTopology === 'external-datastore' && k3s.externalDatastoreEndpoint) {
     const safeDs = String(k3s.externalDatastoreEndpoint).replace(/[\r\n"]/g, '').trim();
     configLines.push(`datastore-endpoint: "${safeDs}"`);
@@ -404,7 +412,7 @@ export function compileK3s(state: DesiredState, joinToken?: string): CompiledK3s
       volumeLines.push(
         '        - name: bpf-token-bpffs',
         '          hostPath:',
-        `            path: /run/axonwall/bpf-tokens/${safeProfId}`,
+        `            path: /run/axonwall/bpffs-tokens/${safeProfId}`,
         '            type: Directory',
       );
     }
@@ -552,7 +560,7 @@ export function compileK3s(state: DesiredState, joinToken?: string): CompiledK3s
             '            operator: NotIn',
             '            values: ["never-used-value"]',
             '      neighbors:',
-            `        - peerAddress: "${primaryNodeIp || '127.0.0.1'}/32"`,
+            `        - peerAddress: "127.0.0.1/32"`,
             `          peerASN: ${state.frr.bgp.asNumber}`,
           ].join('\n'),
         );

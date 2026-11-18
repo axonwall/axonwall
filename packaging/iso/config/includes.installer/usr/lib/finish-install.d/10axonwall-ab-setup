@@ -417,6 +417,74 @@ if [ ! -s /target/etc/axonwall/certs/hub.crt ] || [ ! -s /target/etc/axonwall/ce
   in-target chmod 0644 /etc/axonwall/certs/hub.crt 2>/dev/null || true
 fi
 
+# 2a. Apply Vault Edition target staging & package isolation before Slot B sync
+if [ "${INSTALL_EDITION:-axonwall}" = "vault" ] || [ -f /target/etc/axonwall/.vault-edition ]; then
+  echo "[+] Configuring /target as Axonwall Vault Edition S3 Appliance..."
+  mkdir -p /target/etc/axonwall \
+           /target/etc/axonwall/certs \
+           /target/etc/systemd/network \
+           /target/etc/systemd/system/multi-user.target.wants \
+           /target/usr/local/bin \
+           /target/usr/sbin \
+           /target/usr/lib/sysusers.d \
+           /target/usr/lib/tmpfiles.d \
+           /target/var/lib/axonwall/vault \
+           /target/var/lib/axonwall/etc-axonwall
+  touch /target/etc/axonwall/.vault-edition /target/etc/axonwall/.vault-firstboot
+  rm -f /target/etc/axonwall/.firstboot \
+        /target/etc/axonwall/.k3s-firstboot \
+        /target/etc/axonwall/.k3s-edition
+
+  if ! in-target getent group axonwall-vault >/dev/null 2>&1; then
+    in-target groupadd --system axonwall-vault 2>/dev/null || true
+  fi
+  if ! in-target getent passwd axonwall-vault >/dev/null 2>&1; then
+    in-target useradd --system --gid axonwall-vault --home-dir /var/lib/axonwall/vault \
+      --no-create-home --shell /usr/sbin/nologin \
+      --comment "Axonwall Vault Service User" axonwall-vault 2>/dev/null || true
+  fi
+
+  if [ -d /target/usr/share/axonwall/vault ]; then
+    VSTAGE="/target/usr/share/axonwall/vault"
+    if [ -f "${VSTAGE}/weed" ]; then
+      cp -f "${VSTAGE}/weed" /target/usr/sbin/weed
+      chmod 0755 /target/usr/sbin/weed
+    fi
+    for vunit in seaweedfs.service axonwall-vault-firstboot.service axonwall-vault-provision.service; do
+      if [ -f "${VSTAGE}/${vunit}" ]; then
+        cp -f "${VSTAGE}/${vunit}" "/target/etc/systemd/system/${vunit}"
+        ln -sf "/etc/systemd/system/${vunit}" "/target/etc/systemd/system/multi-user.target.wants/${vunit}"
+      fi
+    done
+    [ -f "${VSTAGE}/axonwall-vault.sysusers" ] && cp -f "${VSTAGE}/axonwall-vault.sysusers" /target/usr/lib/sysusers.d/axonwall-vault.conf
+    [ -f "${VSTAGE}/axonwall-vault.tmpfiles" ] && cp -f "${VSTAGE}/axonwall-vault.tmpfiles" /target/usr/lib/tmpfiles.d/axonwall-vault.conf
+    [ -f "${VSTAGE}/nftables.conf" ] && cp -f "${VSTAGE}/nftables.conf" /target/etc/nftables.conf
+    ln -sf /lib/systemd/system/nftables.service /target/etc/systemd/system/multi-user.target.wants/nftables.service
+    ln -sf /lib/systemd/system/systemd-networkd.service /target/etc/systemd/system/multi-user.target.wants/systemd-networkd.service 2>/dev/null || true
+    for vbin in axonwall-vault-provision axonwall-vault-status axonwall-vault-firstboot; do
+      if [ -f "${VSTAGE}/${vbin}" ]; then
+        cp -f "${VSTAGE}/${vbin}" "/target/usr/local/bin/${vbin}"
+        chmod 0755 "/target/usr/local/bin/${vbin}"
+      fi
+    done
+  fi
+
+  if [ -f /target/etc/axonwall/certs/hub.key ]; then
+    in-target chown root:axonwall-vault /etc/axonwall/certs/hub.key 2>/dev/null || true
+    in-target chmod 0640 /etc/axonwall/certs/hub.key 2>/dev/null || true
+    in-target chmod 0644 /etc/axonwall/certs/hub.crt 2>/dev/null || true
+  fi
+
+  for fw_unit in axonwall-firstboot.service axonwalld.service axonwall-controller.service axonwall-ui.service headscale.service axonwall-satellite.service k3s.service; do
+    rm -f "/target/etc/systemd/system/${fw_unit}" "/target/etc/systemd/system/multi-user.target.wants/${fw_unit}"
+  done
+
+  _cur_hn="$(cat /target/etc/hostname 2>/dev/null | tr -d '\r\n ' || true)"
+  if [ -z "$_cur_hn" ] || [ "$_cur_hn" = "axonwall" ]; then
+    echo "axonwall-vault" > /target/etc/hostname
+  fi
+fi
+
 # 2b. Apply K3s + ZFS Storage Host target staging & package purge before Slot B sync
 if [ "${INSTALL_EDITION:-axonwall}" = "k3s-storage" ] || [ -f /target/etc/axonwall/.k3s-edition ]; then
   echo "[+] Configuring /target as Axonwall K3s + ZFS Storage Host (role=${K3S_ROLE:-server})..."
@@ -542,6 +610,12 @@ rm -rf /target/usr/share/axonwall/vault /target/usr/share/axonwall/k3s-storage
 if [ "${INSTALL_EDITION:-axonwall}" = "vault" ]; then
   rm -rf /target/usr/share/axonwall/k3s
 fi
+
+# Persist install-mode BEFORE replicating Slot A -> Slot B so standby Slot B
+# carries the exact same install-mode marker on first switch.
+mkdir -p /target/etc/axonwall /target/var/lib/axonwall 2>/dev/null || true
+echo "${INSTALL_MODE}" > /target/etc/axonwall/install-mode 2>/dev/null || true
+echo "${INSTALL_MODE}" > /target/var/lib/axonwall/install-mode 2>/dev/null || true
 
 # 3. Synchronize Slot A to Slot B for instant standby readiness
 # Unmount /target/media/cdrom* bind mount now (after pkgsel/grub-installer/10apt-cdrom-setup have finished)

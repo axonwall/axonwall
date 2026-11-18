@@ -49,7 +49,7 @@ import {
   setXdpSynLimitAction,
   renderK3sBpfTokenManifestAction,
   getCurrentDesiredState,
-  applyDesiredState,
+  applyDesiredStateAction,
   type NetworkInsightTelemetry,
   type K3sRuntimeStatus,
   type HostRootkitAuditApiResponse,
@@ -607,7 +607,7 @@ export default function EbpfObservabilityConsolePage() {
     zfsArcZilTelemetryEnabled: true,
   });
   const [savingConfig, setSavingConfig] = useState(false);
-  const [saveBanner, setSaveBanner] = useState<string | null>(null);
+  const [saveBanner, setSaveBanner] = useState<{ ok: boolean; text: string } | null>(null);
 
   // Live telemetry states
   const [insight, setInsight] = useState<NetworkInsightTelemetry | null>(null);
@@ -698,6 +698,8 @@ export default function EbpfObservabilityConsolePage() {
         });
         await fetchAllTelemetry();
       }
+    } catch (err: any) {
+      setActionNotice({ type: 'err', text: err?.message || 'Failed to mount delegated bpffs token profile.' });
     } finally {
       setActionBusy(false);
     }
@@ -714,6 +716,8 @@ export default function EbpfObservabilityConsolePage() {
         setActionNotice({ type: 'ok', text: `Unmounted and removed bpffs token profile "${name}".` });
         await fetchAllTelemetry();
       }
+    } catch (err: any) {
+      setActionNotice({ type: 'err', text: err?.message || 'Failed to delete token profile.' });
     } finally {
       setActionBusy(false);
     }
@@ -740,6 +744,8 @@ export default function EbpfObservabilityConsolePage() {
         setXdpDropIp('');
         await fetchAllTelemetry();
       }
+    } catch (err: any) {
+      setActionNotice({ type: 'err', text: err?.message || 'Failed to program XDP_DROP entry.' });
     } finally {
       setActionBusy(false);
     }
@@ -763,6 +769,8 @@ export default function EbpfObservabilityConsolePage() {
               : `Configured XDP Ring-0 TCP SYN-flood shield at ${res.maxSynPps.toLocaleString()} PPS.`,
         });
       }
+    } catch (err: any) {
+      setActionNotice({ type: 'err', text: err?.message || 'Failed to update XDP SYN-flood rate limit.' });
     } finally {
       setActionBusy(false);
     }
@@ -779,20 +787,29 @@ export default function EbpfObservabilityConsolePage() {
         setActionNotice({ type: 'ok', text: `Removed ${ip} from XDP_DROP map.` });
         await fetchAllTelemetry();
       }
+    } catch (err: any) {
+      setActionNotice({ type: 'err', text: err?.message || 'Failed to remove XDP_DROP entry.' });
     } finally {
       setActionBusy(false);
     }
   };
 
   const handleRenderK3sYaml = async () => {
-    const res = await renderK3sBpfTokenManifestAction({
-      name: k3sPodName,
-      profileName: tokenName || 'k3s-net-safe',
-      preset: tokenPreset,
-      kind: k3sKind,
-    });
-    if (res.success) {
-      setRenderedK3sYaml(res.manifestYaml);
+    setActionNotice(null);
+    try {
+      const res = await renderK3sBpfTokenManifestAction({
+        name: k3sPodName,
+        profileName: tokenName || 'k3s-net-safe',
+        preset: tokenPreset,
+        kind: k3sKind,
+      });
+      if (res.success) {
+        setRenderedK3sYaml(res.manifestYaml);
+      } else {
+        setActionNotice({ type: 'err', text: res.error || 'Failed to render K3s BPF token manifest.' });
+      }
+    } catch (err: any) {
+      setActionNotice({ type: 'err', text: err?.message || 'Failed to render K3s BPF token manifest.' });
     }
   };
 
@@ -830,11 +847,19 @@ export default function EbpfObservabilityConsolePage() {
           ebpfApm: apmConfig,
         },
       };
-      const res = await applyDesiredState(nextState);
+      const rpc = await applyDesiredStateAction(nextState);
+      if (!rpc.ok) {
+        setSaveBanner({ ok: false, text: rpc.error });
+        return;
+      }
       setDesiredState(nextState);
-      setSaveBanner(res.message || 'Saved Axonwall eBPF APM & probe configuration to DesiredState.');
+      setSaveBanner({
+        ok: true,
+        text: rpc.result.message || 'Saved Axonwall eBPF APM & probe configuration to DesiredState.',
+      });
+      window.dispatchEvent(new Event('axonwall:status-refresh'));
     } catch (err: any) {
-      setSaveBanner(err?.message || 'Failed to save eBPF APM configuration.');
+      setSaveBanner({ ok: false, text: err?.message || 'Failed to save eBPF APM configuration.' });
     } finally {
       setSavingConfig(false);
     }
@@ -1057,8 +1082,14 @@ export default function EbpfObservabilityConsolePage() {
         </div>
 
         {saveBanner && (
-          <div className="px-3 py-2 rounded-lg bg-emerald-950/50 border border-emerald-500/30 text-xs text-emerald-300">
-            {saveBanner}
+          <div
+            className={`px-3 py-2 rounded-lg border text-xs ${
+              saveBanner.ok
+                ? 'bg-emerald-950/50 border-emerald-500/30 text-emerald-300'
+                : 'bg-rose-950/50 border-rose-500/40 text-rose-300'
+            }`}
+          >
+            {saveBanner.text}
           </div>
         )}
 

@@ -16,7 +16,7 @@ import {
 } from '@axonwall/lib/kernel';
 import { getSession } from './auth';
 import { assertActionPermitted } from './auth-guard';
-import { callAgentApi } from './agent-client';
+import { callAgentApi, callAgentApiResponse } from './agent-client';
 
 export interface DaemonKernelStudioState {
   hardware: DetectedHardwareProfile;
@@ -389,7 +389,7 @@ export async function triggerCustomKernelBuild(rawSpec: unknown, configOnly = fa
   const hw = daemonRes && daemonRes.hardware ? daemonRes.hardware : collectFallbackKernelStudioState().hardware;
   const compiled = compileCustomKernelArtifacts(spec, hw);
 
-  const res = await callAgentApi<{
+  const res = await callAgentApiResponse<{
     success?: boolean;
     upid?: string;
     buildId?: string;
@@ -412,7 +412,7 @@ export async function triggerCustomKernelBuild(rawSpec: unknown, configOnly = fa
       enableProcKcore: spec.enableProcKcore,
       hardwareFragment: compiled.kconfigFragment,
     },
-    10000
+    30000
   );
 
   if (!res) {
@@ -434,14 +434,14 @@ export async function installBuiltKernelArtifact(artifactName: string) {
     return { success: false, message: 'Invalid kernel package filename.' };
   }
 
-  const res = await callAgentApi<{
+  const res = await callAgentApiResponse<{
     success?: boolean;
     upid?: string;
     installMode?: string;
     safetyNote?: string;
     message?: string;
     error?: string;
-  }>('/v1/system/kernel/install', 'POST', { artifactName: artifactName.trim() }, 10000);
+  }>('/v1/system/kernel/install', 'POST', { artifactName: artifactName.trim() }, 60000);
 
   if (!res) {
     return { success: false, message: 'axonwalld daemon unreachable over Unix socket.' };

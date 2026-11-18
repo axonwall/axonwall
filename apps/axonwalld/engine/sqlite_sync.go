@@ -80,6 +80,8 @@ type SqliteSyncManager struct {
 	k3sManager         *K3sManager
 	nasManager         *NasManager
 	lastZfsSync        time.Time
+	lastZfsAttempt     time.Time
+	zfsRetryBackoff    time.Duration
 	effectiveTransport string // transport the master server is actually serving ("token-http" or "mtls")
 	peerSignsPayloads  bool   // capability from the peer's latest sync status (D-04 P4b); set by the poller each round before any payload fetch
 }
@@ -416,9 +418,9 @@ func (m *SqliteSyncManager) peerClient(timeout time.Duration) (*http.Client, str
 }
 
 func (m *SqliteSyncManager) startMasterServer() error {
-	listenAddr := fmt.Sprintf("0.0.0.0:%d", m.cfg.ListenPort)
+	listenAddr := net.JoinHostPort("0.0.0.0", strconv.Itoa(m.cfg.ListenPort))
 	if m.cfg.LocalAddress != "" && m.cfg.LocalAddress != "0.0.0.0" {
-		listenAddr = fmt.Sprintf("%s:%d", m.cfg.LocalAddress, m.cfg.ListenPort)
+		listenAddr = net.JoinHostPort(m.cfg.LocalAddress, strconv.Itoa(m.cfg.ListenPort))
 	}
 
 	m.server = &http.Server{
@@ -1011,6 +1013,8 @@ func (m *SqliteSyncManager) handleZfsSendStream(w http.ResponseWriter, r *http.R
 
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("X-Zfs-Snapshot", targetSnap)
+	rc := http.NewResponseController(w)
+	_ = rc.SetWriteDeadline(time.Time{})
 
 	var sendArgs []string
 	if fromSnap != "" {
@@ -1019,10 +1023,12 @@ func (m *SqliteSyncManager) handleZfsSendStream(w http.ResponseWriter, r *http.R
 		sendArgs = []string{"send", "-w", targetSnap}
 	}
 
-	cmd := exec.Command("zfs", sendArgs...)
+	cmd := exec.CommandContext(r.Context(), "zfs", sendArgs...)
 	cmd.Stdout = w
 	if err := cmd.Run(); err != nil {
 		slog.Warn("zfs send stream finished with error", "dataset", dataset, "error", err)
+		_ = exec.Command("zfs", "destroy", targetSnap).Run()
+		pruneHaSyncSnapshots(dataset, 3)
 		return
 	}
 	pruneHaSyncSnapshots(dataset, 3)
@@ -1080,6 +1086,8 @@ func (m *SqliteSyncManager) syncZfsDatasetsFromPeer(peerPort int, peerDatasets [
 	authToken := m.cfg.AuthToken
 	nm := m.nasManager
 	lastSync := m.lastZfsSync
+	lastAttempt := m.lastZfsAttempt
+	retryBackoff := m.zfsRetryBackoff
 	m.mu.Unlock()
 
 	if peerAddr == "" {
@@ -1107,6 +1115,7 @@ func (m *SqliteSyncManager) syncZfsDatasetsFromPeer(peerPort int, peerDatasets [
 	}
 
 	// Rate-limit ZFS snapshot streaming to once every 60s unless a dataset has never been synced locally.
+	// When an initial sync fails, apply exponential backoff instead of polling tightly.
 	needsInitialSync := false
 	for _, ds := range datasets {
 		if latestLocalHaSyncSnapshot(ds) == "" {
@@ -1114,11 +1123,17 @@ func (m *SqliteSyncManager) syncZfsDatasetsFromPeer(peerPort int, peerDatasets [
 			break
 		}
 	}
-	if !needsInitialSync && !lastSync.IsZero() && time.Since(lastSync) < 60*time.Second {
+	if needsInitialSync {
+		if retryBackoff > 0 && !lastAttempt.IsZero() && time.Since(lastAttempt) < retryBackoff {
+			return
+		}
+	} else if !lastSync.IsZero() && time.Since(lastSync) < 60*time.Second {
 		return
 	}
 
 	zfsClient, _ := m.peerClient(120 * time.Second)
+	anyFailed := false
+	anySynced := false
 	for _, ds := range datasets {
 		if pollerStopped(stopCh) {
 			return
@@ -1132,17 +1147,34 @@ func (m *SqliteSyncManager) syncZfsDatasetsFromPeer(peerPort int, peerDatasets [
 			slog.Warn("Incremental ZFS HA receive failed; falling back to full stream", "dataset", ds, "from", fromSnap, "error", err)
 			if errFull := m.receiveZfsStream(zfsClient, scheme, peerAddr, peerPort, authToken, ds, "", pollerCtx); errFull != nil {
 				slog.Error("Full ZFS HA receive failed", "dataset", ds, "error", errFull)
+				anyFailed = true
 				continue
 			}
 		} else if err != nil {
 			slog.Error("ZFS HA receive failed", "dataset", ds, "error", err)
+			anyFailed = true
 			continue
 		}
+		anySynced = true
 		pruneHaSyncSnapshots(ds, 3)
 	}
 
+	now := time.Now()
 	m.mu.Lock()
-	m.lastZfsSync = time.Now()
+	m.lastZfsAttempt = now
+	if anyFailed {
+		if m.zfsRetryBackoff <= 0 {
+			m.zfsRetryBackoff = 5 * time.Second
+		} else {
+			m.zfsRetryBackoff *= 2
+			if m.zfsRetryBackoff > 60*time.Second {
+				m.zfsRetryBackoff = 60 * time.Second
+			}
+		}
+	} else if anySynced {
+		m.lastZfsSync = now
+		m.zfsRetryBackoff = 0
+	}
 	m.mu.Unlock()
 }
 

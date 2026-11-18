@@ -844,14 +844,19 @@ async function cmdApply(autoConfirm = true) {
   // warning that exits non-zero, never an "offline" message.
   let confirmed = false;
   try {
-    const resp = await sendAgentSocketRequest<{ success: boolean; message: string }>('/v1/apply', 'POST', {
-      jobId,
-      bundleHash,
-      nftScript,
-      files: filesPayload,
-      reloadServices,
-      confirmTimeoutSeconds: 120,
-    });
+    const resp = await sendAgentSocketRequest<{ success: boolean; message: string }>(
+      '/v1/apply',
+      'POST',
+      {
+        jobId,
+        bundleHash,
+        nftScript,
+        files: filesPayload,
+        reloadServices,
+        confirmTimeoutSeconds: 120,
+      },
+      Number(process.env.AXONWALL_APPLY_TIMEOUT_MS) || 120_000,
+    );
 
     if (!resp.success) {
       // B2-M4 follow-up: the restore is a full-state disk write, so
@@ -2399,6 +2404,7 @@ async function cmdUpdate(args: string[]) {
   let targetVersion = '';
   let targetSlot: 'A' | 'B' | undefined;
   let requestedPkgMgr: 'auto' | 'apt' | 'pacman' | 'apk' | null = null;
+  let wantsImage = false;
 
   for (let i = 0; i < args.length; i++) {
     const arg = args[i]!;
@@ -2409,6 +2415,8 @@ async function cmdUpdate(args: string[]) {
     } else if ((arg === '--slot' || arg === '-s') && args[i + 1]) {
       const s = args[++i]!.toUpperCase();
       if (s === 'A' || s === 'B') targetSlot = s;
+    } else if (arg === '--image') {
+      wantsImage = true;
     } else if (arg === '--pkg-upgrade') {
       requestedPkgMgr = 'auto';
     } else if (arg === '--pacman') {
@@ -2464,26 +2472,31 @@ async function cmdUpdate(args: string[]) {
         : requestedPkgMgr;
     if (pkgMgr === 'pacman') {
       console.log(`[+] Running Arch Linux package upgrade (pacman -Syu --noconfirm)...`);
-      spawnSync('pacman', ['-Syu', '--noconfirm'], { stdio: 'inherit' });
+      const res = spawnSync('pacman', ['-Syu', '--noconfirm'], { stdio: 'inherit' });
+      if (res.status !== 0) process.exit(res.status || 1);
     } else if (pkgMgr === 'apk') {
       console.log(`[+] Running Alpine Linux package upgrade (apk upgrade)...`);
-      spawnSync('apk', ['upgrade'], { stdio: 'inherit' });
+      const res = spawnSync('apk', ['upgrade'], { stdio: 'inherit' });
+      if (res.status !== 0) process.exit(res.status || 1);
     } else {
       console.log(`[+] Running Debian APT package upgrade (apt-get update && apt-get dist-upgrade -y)...`);
       const updateRes = spawnSync('apt-get', ['update', '-y'], {
         stdio: 'inherit',
         env: { ...process.env, DEBIAN_FRONTEND: 'noninteractive' },
       });
-      if (updateRes.status === 0) {
-        spawnSync(
-          'apt-get',
-          ['-o', 'Dpkg::Options::=--force-confdef', '-o', 'Dpkg::Options::=--force-confold', 'dist-upgrade', '-y'],
-          {
-            stdio: 'inherit',
-            env: { ...process.env, DEBIAN_FRONTEND: 'noninteractive' },
-          }
-        );
-      }
+      if (updateRes.status !== 0) process.exit(updateRes.status || 1);
+      const upgradeRes = spawnSync(
+        'apt-get',
+        ['-o', 'Dpkg::Options::=--force-confdef', '-o', 'Dpkg::Options::=--force-confold', 'dist-upgrade', '-y'],
+        {
+          stdio: 'inherit',
+          env: { ...process.env, DEBIAN_FRONTEND: 'noninteractive' },
+        }
+      );
+      if (upgradeRes.status !== 0) process.exit(upgradeRes.status || 1);
+    }
+    if (!wantsImage && !targetVersion && !targetSlot) {
+      return;
     }
   }
 
@@ -2608,12 +2621,13 @@ async function cmdMcp(args: string[]) {
     }
     case 'disable': {
       console.log(`[+] Disabling Axonwall MCP Server and revoking active leases...`);
-      persistMcpSettings(false, 'Disabled via axonwallctl');
       try {
         await sendAgentSocketRequest<any>('/v1/mcp/flush', 'POST', {});
+        await sendAgentSocketRequest<any>('/v1/ebpf/xdp/block', 'DELETE', { clearAll: true }).catch(() => {});
       } catch (err: any) {
         console.warn(`${cYellow}[!] Warning: Could not flush active kernel MCP leases on daemon (${err?.message || 'offline'}).${cReset}`);
       }
+      persistMcpSettings(false, 'Disabled via axonwallctl');
       const status = getMcpServerStatus();
       console.log(
         `${cGreen}[✓] MCP Master Switch is now ${status.enabled ? 'ENABLED' : 'DISABLED'}.${cReset}`
@@ -2638,9 +2652,37 @@ async function cmdMcp(args: string[]) {
   }
 }
 
+function parseCliArgs(args: string[], valueFlags: string[] = []): { positionals: string[]; flags: Record<string, string | boolean> } {
+  const valueSet = new Set(valueFlags);
+  const positionals: string[] = [];
+  const flags: Record<string, string | boolean> = {};
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    if (a.startsWith('--')) {
+      const eqIdx = a.indexOf('=');
+      if (eqIdx !== -1) {
+        flags[a.slice(2, eqIdx)] = a.slice(eqIdx + 1);
+      } else {
+        const key = a.slice(2);
+        if (valueSet.has(key) && i + 1 < args.length) {
+          flags[key] = args[++i]!;
+        } else {
+          flags[key] = true;
+        }
+      }
+    } else if (a.startsWith('-') && a.length === 2 && valueSet.has(a.slice(1)) && i + 1 < args.length) {
+      flags[a.slice(1)] = args[++i]!;
+    } else {
+      positionals.push(a);
+    }
+  }
+  return { positionals, flags };
+}
+
 async function cmdEbpf(args: string[]) {
-  const sub = (args[0] || 'overview').toLowerCase();
-  const asJson = args.includes('--json');
+  const { positionals, flags } = parseCliArgs(args);
+  const sub = (positionals[0] || 'overview').toLowerCase();
+  const asJson = Boolean(flags.json);
 
   switch (sub) {
     case 'overview':
@@ -2700,9 +2742,9 @@ async function cmdEbpf(args: string[]) {
     }
 
     case 'xdp-drop': {
-      const ip = args[1];
-      const ttl = args[2] ? Number(args[2]) : 900;
-      const reason = args.slice(3).join(' ') || 'CLI XDP fast-drop via axonwallctl';
+      const ip = positionals[1];
+      const ttl = positionals[2] ? Number(positionals[2]) : 900;
+      const reason = positionals.slice(3).join(' ') || 'CLI XDP fast-drop via axonwallctl';
       if (!ip) {
         console.error(`${cRed}Usage: axonwallctl ebpf xdp-drop <ip> [ttlSeconds] [reason]${cReset}`);
         process.exit(1);
@@ -2718,7 +2760,7 @@ async function cmdEbpf(args: string[]) {
     }
 
     case 'xdp-unblock': {
-      const ip = args[1];
+      const ip = positionals[1];
       if (!ip) {
         console.error(`${cRed}Usage: axonwallctl ebpf xdp-unblock <ip|cidr>${cReset}`);
         process.exit(1);
@@ -2729,7 +2771,7 @@ async function cmdEbpf(args: string[]) {
     }
 
     case 'syn-limit': {
-      const pps = args[1] !== undefined ? Number(args[1]) : NaN;
+      const pps = positionals[1] !== undefined ? Number(positionals[1]) : NaN;
       if (Number.isNaN(pps) || pps < 0) {
         const current = await sendAgentSocketRequest<any>('/v1/ebpf/xdp/syn-limit', 'GET');
         console.log(JSON.stringify(current, null, 2));
@@ -2741,9 +2783,9 @@ async function cmdEbpf(args: string[]) {
     }
 
     case 'render-k3s': {
-      const preset = args[1] || 'network-dataplane';
-      const workloadName = args[2] || 'ebpf-packet-inspector';
-      const kind = args.includes('--daemonset') ? 'DaemonSet' : 'Pod';
+      const preset = positionals[1] || 'network-dataplane';
+      const workloadName = positionals[2] || 'ebpf-packet-inspector';
+      const kind = flags.daemonset ? 'DaemonSet' : 'Pod';
       const res = await sendAgentSocketRequest<{ success: boolean; manifestYaml?: string; error?: string }>(
         '/v1/ebpf/tokens/render-k3s',
         'POST',
@@ -2780,8 +2822,9 @@ async function cmdEbpf(args: string[]) {
 }
 
 async function cmdHarvester(args: string[]) {
-  const sub = (args[0] || 'status').toLowerCase();
-  const asJson = args.includes('--json');
+  const { positionals, flags } = parseCliArgs(args, ['limit', 'tier', 'review']);
+  const sub = (positionals[0] || 'status').toLowerCase();
+  const asJson = Boolean(flags.json);
 
   switch (sub) {
     case 'status': {
@@ -2818,13 +2861,10 @@ async function cmdHarvester(args: string[]) {
     }
 
     case 'episodes': {
-      const limitFlag = args.find((a) => a.startsWith('--limit='));
-      const tierFlag = args.find((a) => a.startsWith('--tier='));
-      const statusFlag = args.find((a) => a.startsWith('--review='));
       const qs = new URLSearchParams();
-      qs.set('limit', limitFlag ? limitFlag.split('=')[1] : '25');
-      if (tierFlag) qs.set('tier', tierFlag.split('=')[1]);
-      if (statusFlag) qs.set('reviewStatus', statusFlag.split('=')[1]);
+      qs.set('limit', typeof flags.limit === 'string' ? flags.limit : '25');
+      if (typeof flags.tier === 'string') qs.set('tier', flags.tier);
+      if (typeof flags.review === 'string') qs.set('reviewStatus', flags.review);
 
       const data = await sendAgentSocketRequest<any>(`/v1/security/threat-harvester/episodes?${qs.toString()}`, 'GET');
       if (asJson) {
@@ -2852,7 +2892,7 @@ async function cmdHarvester(args: string[]) {
     }
 
     case 'simulate': {
-      const scenario = args[1] && !args[1].startsWith('--') ? args[1] : 'honeypot_rce_memfd';
+      const scenario = positionals[1] || 'honeypot_rce_memfd';
       const validScenarios = [
         'honeypot_rce_memfd',
         'dns_c2_exfil',
@@ -2876,9 +2916,8 @@ async function cmdHarvester(args: string[]) {
     }
 
     case 'export': {
-      const raw = args.includes('--raw');
-      const positional = args.slice(1).find((a) => !a.startsWith('--'));
-      const outPath = positional || 'axonwall-threat-corpus.tar.zst';
+      const raw = Boolean(flags.raw);
+      const outPath = positionals[1] || 'axonwall-threat-corpus.tar.zst';
       const bundle = await sendAgentSocketBuffer(
         `/v1/security/threat-harvester/export?anonymize=${raw ? 'false' : 'true'}`,
         'GET',
@@ -2910,7 +2949,8 @@ async function cmdHarvester(args: string[]) {
 }
 
 async function cmdNas(args: string[]) {
-  const sub = (args[0] || 'pools').toLowerCase();
+  const { positionals, flags } = parseCliArgs(args);
+  const sub = (positionals[0] || 'pools').toLowerCase();
   switch (sub) {
     case 'pools':
       console.log(JSON.stringify(await sendAgentSocketRequest<any>('/v1/nas/pools', 'GET'), null, 2));
@@ -2922,8 +2962,8 @@ async function cmdNas(args: string[]) {
       console.log(JSON.stringify(await sendAgentSocketRequest<any>('/v1/nas/snapshots', 'GET'), null, 2));
       return;
     case 'snapshot': {
-      const dataset = args[1];
-      const label = args[2] || '';
+      const dataset = positionals[1];
+      const label = positionals[2] || '';
       if (!dataset) {
         console.error(`${cRed}Usage: axonwallctl nas snapshot <dataset> [label]${cReset}`);
         process.exit(1);
@@ -2932,7 +2972,7 @@ async function cmdNas(args: string[]) {
       return;
     }
     case 'rollback': {
-      const snapshot = args[1];
+      const snapshot = positionals[1];
       if (!snapshot) {
         console.error(`${cRed}Usage: axonwallctl nas rollback <dataset@label> [--destroy-newer]${cReset}`);
         process.exit(1);
@@ -2941,7 +2981,7 @@ async function cmdNas(args: string[]) {
         JSON.stringify(
           await sendAgentSocketRequest<any>('/v1/nas/snapshots/rollback', 'POST', {
             snapshot,
-            destroyNewer: args.includes('--destroy-newer'),
+            destroyNewer: Boolean(flags['destroy-newer']),
           }),
           null,
           2,
@@ -2951,7 +2991,7 @@ async function cmdNas(args: string[]) {
     }
     case 'scrub':
     case 'trim': {
-      const pool = args[1];
+      const pool = positionals[1];
       if (!pool) {
         console.error(`${cRed}Usage: axonwallctl nas ${sub} <pool>${cReset}`);
         process.exit(1);
@@ -2960,7 +3000,7 @@ async function cmdNas(args: string[]) {
       return;
     }
     case 'checkpoint': {
-      const pool = args[1];
+      const pool = positionals[1];
       if (!pool) {
         console.error(`${cRed}Usage: axonwallctl nas checkpoint <pool> [--discard]${cReset}`);
         process.exit(1);
@@ -2969,7 +3009,7 @@ async function cmdNas(args: string[]) {
         JSON.stringify(
           await sendAgentSocketRequest<any>('/v1/nas/checkpoint', 'POST', {
             pool,
-            discard: args.includes('--discard'),
+            discard: Boolean(flags.discard),
           }),
           null,
           2,
@@ -2979,8 +3019,8 @@ async function cmdNas(args: string[]) {
     }
     case 'unlock':
     case 'lock': {
-      const dataset = args[1];
-      const keyMaterial = args[2] || '';
+      const dataset = positionals[1];
+      const keyMaterial = positionals[2] || '';
       if (!dataset) {
         console.error(`${cRed}Usage: axonwallctl nas ${sub} <dataset> [passphrase]${cReset}`);
         process.exit(1);
@@ -2999,8 +3039,8 @@ async function cmdNas(args: string[]) {
       return;
     }
     case 'smart': {
-      const device = args[1];
-      const testType = args[2] || 'short';
+      const device = positionals[1];
+      const testType = positionals[2] || 'short';
       if (!device) {
         console.error(`${cRed}Usage: axonwallctl nas smart </dev/sdX|/dev/nvmeXnY> [short|long]${cReset}`);
         process.exit(1);
@@ -3009,12 +3049,12 @@ async function cmdNas(args: string[]) {
       return;
     }
     case 'cloudsync': {
-      const taskName = args[1];
+      const taskName = positionals[1];
       if (!taskName) {
         console.error(`${cRed}Usage: axonwallctl nas cloudsync <taskName>${cReset}`);
         process.exit(1);
       }
-      console.log(JSON.stringify(await sendAgentSocketRequest<any>('/v1/nas/cloudsync', 'POST', { taskName }), null, 2));
+      console.log(JSON.stringify(await sendAgentSocketRequest<any>('/v1/nas/cloudsync', 'POST', { taskName }, 120_000), null, 2));
       return;
     }
     default:
@@ -3026,7 +3066,8 @@ async function cmdNas(args: string[]) {
 }
 
 async function cmdVirt(args: string[]) {
-  const sub = (args[0] || 'list').toLowerCase();
+  const { positionals, flags } = parseCliArgs(args);
+  const sub = (positionals[0] || 'list').toLowerCase();
   switch (sub) {
     case 'list': {
       const [vms, cts] = await Promise.all([
@@ -3041,7 +3082,7 @@ async function cmdVirt(args: string[]) {
     case 'reset':
     case 'pause':
     case 'resume': {
-      const vmid = Number(args[1]);
+      const vmid = Number(positionals[1]);
       if (!vmid) {
         console.error(`${cRed}Usage: axonwallctl virt ${sub} <vmid> [--force]${cReset}`);
         process.exit(1);
@@ -3051,7 +3092,7 @@ async function cmdVirt(args: string[]) {
           await sendAgentSocketRequest<any>('/v1/virt/vms', 'POST', {
             action: sub,
             vmid,
-            force: args.includes('--force'),
+            force: Boolean(flags.force),
           }),
           null,
           2,
@@ -3060,9 +3101,9 @@ async function cmdVirt(args: string[]) {
       return;
     }
     case 'clone': {
-      const sourceVmid = Number(args[1]);
-      const newVmid = Number(args[2]);
-      const newName = args[3] && !args[3].startsWith('-') ? args[3] : '';
+      const sourceVmid = Number(positionals[1]);
+      const newVmid = Number(positionals[2]);
+      const newName = positionals[3] || '';
       if (!sourceVmid || !newVmid) {
         console.error(`${cRed}Usage: axonwallctl virt clone <sourceVmid> <newVmid> [newName] [--full]${cReset}`);
         process.exit(1);
@@ -3073,8 +3114,8 @@ async function cmdVirt(args: string[]) {
             sourceVmid,
             newVmid,
             newName,
-            linked: !args.includes('--full'),
-          }),
+            linked: !Boolean(flags.full),
+          }, 120_000),
           null,
           2,
         ),
@@ -3083,9 +3124,14 @@ async function cmdVirt(args: string[]) {
     }
     case 'snapshot':
     case 'rollback': {
-      const targetType = args[1] === 'lxc' ? 'lxc' : 'vm';
-      const targetId = Number(args[2]);
-      const label = args[3] || '';
+      const rawType = (positionals[1] || '').toLowerCase();
+      if (rawType !== 'vm' && rawType !== 'lxc') {
+        console.error(`${cRed}Usage: axonwallctl virt ${sub} <vm|lxc> <id> <label>${cReset}`);
+        process.exit(1);
+      }
+      const targetType = rawType;
+      const targetId = Number(positionals[2]);
+      const label = positionals[3] || '';
       if (!targetId || (sub === 'rollback' && !label)) {
         console.error(`${cRed}Usage: axonwallctl virt ${sub} <vm|lxc> <id> <label>${cReset}`);
         process.exit(1);
@@ -3105,19 +3151,19 @@ async function cmdVirt(args: string[]) {
       return;
     }
     case 'migrate': {
-      const vmid = Number(args[1]);
-      const targetPeerIp = args[2] || '';
+      const vmid = Number(positionals[1]);
+      const targetPeerIp = positionals[2] || '';
       if (!vmid || !targetPeerIp) {
         console.error(`${cRed}Usage: axonwallctl virt migrate <vmid> <targetPeerIp>${cReset}`);
         process.exit(1);
       }
       console.log(
-        JSON.stringify(await sendAgentSocketRequest<any>('/v1/virt/migrate', 'POST', { vmid, targetPeerIp }), null, 2),
+        JSON.stringify(await sendAgentSocketRequest<any>('/v1/virt/migrate', 'POST', { vmid, targetPeerIp }, 120_000), null, 2),
       );
       return;
     }
     case 'qga': {
-      const vmid = Number(args[1]);
+      const vmid = Number(positionals[1]);
       if (!vmid) {
         console.error(`${cRed}Usage: axonwallctl virt qga <vmid>${cReset}`);
         process.exit(1);
@@ -3126,7 +3172,7 @@ async function cmdVirt(args: string[]) {
       return;
     }
     case 'libvirt-xml': {
-      const vmid = Number(args[1] || '0');
+      const vmid = Number(positionals[1] || '0');
       const url = vmid > 0 ? `/v1/virt/libvirt-xml?vmid=${vmid}` : '/v1/virt/libvirt-xml';
       const res = await sendAgentSocketRequest<any>(url, 'GET');
       if (typeof res?.libvirtXml === 'string') {
@@ -3140,13 +3186,14 @@ async function cmdVirt(args: string[]) {
       console.log(JSON.stringify(await sendAgentSocketRequest<any>('/v1/virt/backups', 'GET'), null, 2));
       return;
     case 'restore': {
-      const archiveName = args[1] || '';
-      const targetType = args[2] === 'lxc' ? 'lxc' : 'vm';
-      const targetId = Number(args[3]);
-      if (!archiveName || !targetId) {
+      const archiveName = positionals[1] || '';
+      const rawType = (positionals[2] || '').toLowerCase();
+      const targetId = Number(positionals[3]);
+      if (!archiveName || (rawType !== 'vm' && rawType !== 'lxc') || !targetId) {
         console.error(`${cRed}Usage: axonwallctl virt restore <archive.vma.zst> <vm|lxc> <id>${cReset}`);
         process.exit(1);
       }
+      const targetType = rawType;
       console.log(
         JSON.stringify(
           await sendAgentSocketRequest<any>('/v1/virt/backups', 'POST', {
@@ -3154,7 +3201,7 @@ async function cmdVirt(args: string[]) {
             archiveName,
             targetType,
             targetId,
-          }),
+          }, 120_000),
           null,
           2,
         ),
@@ -3181,7 +3228,7 @@ async function cmdK3s(args: string[]) {
     case 'etcd-save': {
       const name = args[1] || '';
       console.log(
-        JSON.stringify(await sendAgentSocketRequest<any>('/v1/k3s/etcd-snapshots', 'POST', { action: 'save', name }), null, 2),
+        JSON.stringify(await sendAgentSocketRequest<any>('/v1/k3s/etcd-snapshots', 'POST', { action: 'save', name }, 120_000), null, 2),
       );
       return;
     }
@@ -3192,7 +3239,7 @@ async function cmdK3s(args: string[]) {
         process.exit(1);
       }
       console.log(
-        JSON.stringify(await sendAgentSocketRequest<any>('/v1/k3s/etcd-snapshots', 'POST', { action: 'restore', name }), null, 2),
+        JSON.stringify(await sendAgentSocketRequest<any>('/v1/k3s/etcd-snapshots', 'POST', { action: 'restore', name }, 120_000), null, 2),
       );
       return;
     }
@@ -3203,17 +3250,17 @@ async function cmdK3s(args: string[]) {
 }
 
 async function cmdImport(args: string[]) {
-  const filePath = args.find((a) => !a.startsWith('-'));
+  const { positionals, flags } = parseCliArgs(args, ['vendor']);
+  const filePath = positionals[0];
   if (!filePath || !fs.existsSync(filePath)) {
     console.error(
       `${cRed}Usage: axonwallctl import <config-file> [--vendor <proxmox|truenas|opnsense|pfsense|vyos|mikrotik|cisco|iptables|firewalld>] [--stage] [--apply]${cReset}`,
     );
     process.exit(1);
   }
-  const vendorIdx = args.indexOf('--vendor');
-  const forcedVendor = vendorIdx >= 0 && args[vendorIdx + 1] ? (args[vendorIdx + 1] as FirewallVendor) : undefined;
-  const doStage = args.includes('--stage') || args.includes('--apply');
-  const doApply = args.includes('--apply');
+  const forcedVendor = typeof flags.vendor === 'string' ? (flags.vendor as FirewallVendor) : undefined;
+  const doApply = Boolean(flags.apply);
+  const doStage = Boolean(flags.stage) || doApply;
 
   const rawContent = fs.readFileSync(filePath, 'utf8');
   const report = importFirewallConfig(rawContent, forcedVendor);
@@ -3273,7 +3320,6 @@ async function cmdKubeconfig(args: string[]) {
     '/usr/local/bin/axonwall-kubeconfig',
     '/opt/axonwall/scripts/update-kubeconfig.sh',
     path.join(process.cwd(), 'scripts/update-kubeconfig.sh'),
-    '/home/djehauti/git/axonwall/scripts/update-kubeconfig.sh',
   ];
   const scriptPath = scriptCandidates.find((p) => fs.existsSync(p));
   if (scriptPath) {
@@ -3389,7 +3435,7 @@ function collectLocalKernelStudioFallback(): {
   posture?: LiveAuditPosture;
 } {
   const release = os.release();
-  const rawArch = os.arch();
+  const rawArch = os.arch() === 'x64' ? 'amd64' : os.arch();
   const cpuRaw = fs.existsSync('/proc/cpuinfo') ? fs.readFileSync('/proc/cpuinfo', 'utf-8') : '';
   let cpuVendor = 'Unknown';
   let cpuModel = os.cpus()[0]?.model || 'Unknown CPU';
@@ -3521,9 +3567,9 @@ async function fetchKernelStudioForCli() {
 }
 
 async function cmdKernel(subArgs: string[]) {
-  const sub = (subArgs[0] || 'detect').toLowerCase();
-  const rest = subArgs.slice(1);
-  const asJson = rest.includes('--json');
+  const { positionals, flags } = parseCliArgs(subArgs, ['mode', 'capabilities', 'lockdown', 'march', 'out']);
+  const sub = (positionals[0] || 'detect').toLowerCase();
+  const asJson = Boolean(flags.json);
 
   const studio = await fetchKernelStudioForCli();
   const resolved = resolveHardwareKconfigSymbols(studio.hardware);
@@ -3565,8 +3611,8 @@ async function cmdKernel(subArgs: string[]) {
 
   if (sub === 'config') {
     const getArg = (flag: string): string | undefined => {
-      const idx = rest.indexOf(flag);
-      return idx >= 0 ? rest[idx + 1] : undefined;
+      const val = flags[flag.replace(/^--/, '')];
+      return typeof val === 'string' ? val : undefined;
     };
     const mode = (getArg('--mode') || 'stripped') as 'universal' | 'stripped';
     const capsRaw = getArg('--capabilities');

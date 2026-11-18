@@ -209,7 +209,7 @@ function parseProxmoxVm(vmid: number, lines: string[], defaultPool: string, warn
         sizeGb: parseSizeToGb(kv.size, 32),
         bus: busPrefix,
         cache: 'none',
-        discard: kv.discard === 'on' || kv.ssd === '1' || true,
+        discard: kv.discard === 'on' || kv.ssd === '1',
         iopsReadLimit: Number.parseInt(kv.iops_rd || '0', 10) || 0,
         iopsWriteLimit: Number.parseInt(kv.iops_wr || '0', 10) || 0,
         readOnly: kv.ro === '1',
@@ -531,7 +531,7 @@ export function importProxmoxConfig(content: string): ImportReport {
             const srcMatch = rest.match(/-source\s+(\S+)/i);
             const dstMatch = rest.match(/-dest\s+(\S+)/i);
             const proto = (protoMatch?.[1]?.toLowerCase() || 'any') as 'any' | 'tcp' | 'udp' | 'icmp';
-            const portSpec = (dportMatch?.[1] || '').replace(':', '-');
+            const portSpec = (dportMatch?.[1] || '').replace(/:/g, '-');
 
             if (activeSg) {
               activeSg.rules.push({

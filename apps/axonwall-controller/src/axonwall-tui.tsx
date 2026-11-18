@@ -282,7 +282,6 @@ export function saveStateToDisk(state: DesiredState): { daemonFiles: Record<stri
     const daemonFiles: Record<string, string> = {};
     for (const [fn, content] of Object.entries(serialized)) {
       daemonFiles[path.join(ETC_CONFIG_DIR, fn)] = content;
-      daemonFiles[path.join(VAR_ETC_CONFIG_DIR, fn)] = content;
     }
     for (const dir of [VAR_ETC_CONFIG_DIR, ETC_CONFIG_DIR]) {
       try {
@@ -301,6 +300,7 @@ export function saveStateToDisk(state: DesiredState): { daemonFiles: Record<stri
       } catch {}
     }
     const serializedJson = JSON.stringify(state, null, 2);
+    daemonFiles[path.join(ETC_CONFIG_DIR, 'state.json')] = serializedJson;
     for (const jsonTarget of [STATE_JSON_PATH, path.join(VAR_ETC_CONFIG_DIR, 'state.json'), path.join(ETC_CONFIG_DIR, 'state.json')]) {
       try {
         fs.mkdirSync(path.dirname(jsonTarget), { recursive: true, mode: 0o775 });
@@ -669,7 +669,7 @@ export function AxonwallTuiApp({
         confirmTimeoutSeconds: 120,
         confirm_timeout_seconds: 120,
       },
-      20000
+      120_000
     );
 
     // B2-M6: a timeout is neither a rejection nor an offline save
@@ -806,8 +806,11 @@ export function AxonwallTuiApp({
       }
     }
 
+    if (!saveStateToDisk(next)) {
+      setStatusMessage('✖ Could not lock DesiredState — another save is in progress; plugin toggle was not saved. Try again.');
+      return;
+    }
     setState(next);
-    saveStateToDisk(next);
     await callDaemon('/v1/system/plugins/action', 'POST', {
       pluginId,
       action: nextEnabled ? 'enable' : 'disable',
@@ -1108,7 +1111,7 @@ export function AxonwallTuiApp({
       return;
     }
 
-    if (input === 'q' || input === 'Q') {
+    if ((input === 'q' || input === 'Q') && activeTab !== 'nastymap') {
       exit();
       return;
     }
@@ -1750,21 +1753,39 @@ export function AxonwallTuiApp({
                 }),
           };
           const serialized = JSON.stringify(settingsObj, null, 2);
-          for (const p of Array.from(
-            new Set([
-              resolveMcpSettingsPath(),
-              path.join(CONTROLLER_DIRS.varDir, 'mcp-settings.json'),
-              path.join(VAR_ETC_CONFIG_DIR, 'mcp-settings.json'),
-              path.join(ETC_CONFIG_DIR, 'mcp-settings.json'),
-            ])
-          )) {
-            try {
-              fs.mkdirSync(path.dirname(p), { recursive: true, mode: 0o775 });
-              fs.writeFileSync(p, serialized, { mode: 0o660 });
-            } catch {}
-          }
           if (!nextEnabled) {
-            callDaemon('/v1/mcp/flush', 'POST', {}).catch(() => {});
+            callDaemon('/v1/mcp/flush', 'POST', {})
+              .catch(() => {})
+              .finally(() => {
+                callDaemon('/v1/ebpf/xdp/block', 'DELETE', { clearAll: true }).catch(() => {});
+                for (const p of Array.from(
+                  new Set([
+                    resolveMcpSettingsPath(),
+                    path.join(CONTROLLER_DIRS.varDir, 'mcp-settings.json'),
+                    path.join(VAR_ETC_CONFIG_DIR, 'mcp-settings.json'),
+                    path.join(ETC_CONFIG_DIR, 'mcp-settings.json'),
+                  ])
+                )) {
+                  try {
+                    fs.mkdirSync(path.dirname(p), { recursive: true, mode: 0o775 });
+                    fs.writeFileSync(p, serialized, { mode: 0o660 });
+                  } catch {}
+                }
+              });
+          } else {
+            for (const p of Array.from(
+              new Set([
+                resolveMcpSettingsPath(),
+                path.join(CONTROLLER_DIRS.varDir, 'mcp-settings.json'),
+                path.join(VAR_ETC_CONFIG_DIR, 'mcp-settings.json'),
+                path.join(ETC_CONFIG_DIR, 'mcp-settings.json'),
+              ])
+            )) {
+              try {
+                fs.mkdirSync(path.dirname(p), { recursive: true, mode: 0o775 });
+                fs.writeFileSync(p, serialized, { mode: 0o660 });
+              } catch {}
+            }
           }
           setMcpStatus({
             masterEnabled: nextEnabled,

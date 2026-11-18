@@ -28,20 +28,25 @@ export function getAgentToken(): string | undefined {
   return undefined;
 }
 
-export async function callAgentApi<T>(
-  path: string,
-  method = 'GET',
-  body?: any,
-  timeoutMs = 4000
-): Promise<T | null> {
+export type AgentApiResult<T> =
+  | { kind: 'ok'; data: T }
+  | { kind: 'http_error'; status: number; message: string; data?: any }
+  | { kind: 'timeout' }
+  | { kind: 'unreachable' };
+
+function sendAgentApiRequest<T>(
+  reqPath: string,
+  method: string,
+  postData: string | undefined,
+  agentToken: string | undefined,
+  socketPath: string,
+  timeoutMs: number
+): Promise<AgentApiResult<T>> {
   return new Promise((resolve) => {
-    const postData = body ? JSON.stringify(body) : undefined;
-    const agentToken = getAgentToken();
-    const socketPath = getAgentApiSocketPath();
     const req = http.request(
       {
         socketPath,
-        path,
+        path: reqPath,
         method,
         headers: {
           ...(postData
@@ -60,37 +65,42 @@ export async function callAgentApi<T>(
           data += chunk;
         });
         res.on('end', () => {
-          if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
+          const status = res.statusCode || 500;
+          if (status >= 200 && status < 300) {
             try {
-              resolve(JSON.parse(data) as T);
+              resolve({ kind: 'ok', data: JSON.parse(data) as T });
             } catch {
-              resolve(null);
+              resolve({
+                kind: 'http_error',
+                status,
+                message: 'Invalid JSON response from daemon API',
+              });
             }
           } else {
+            let parsedBody: any = undefined;
             let errorMsg = '';
             try {
-              const parsed = JSON.parse(data);
-              errorMsg = parsed.message || parsed.error || '';
+              parsedBody = JSON.parse(data);
+              errorMsg = parsedBody?.message || parsedBody?.error || '';
             } catch {
               errorMsg = data.trim();
             }
             if (!errorMsg) {
-              errorMsg = `Daemon API error (${res.statusCode || 'unknown'})`;
+              errorMsg = `Daemon API error (${status})`;
             }
-            // Return failure object carrying the daemon error message
-            resolve({ success: false, message: errorMsg, error: errorMsg } as unknown as T);
+            resolve({ kind: 'http_error', status, message: errorMsg, data: parsedBody });
           }
         });
       }
     );
 
     req.on('error', () => {
-      resolve(null);
+      resolve({ kind: 'unreachable' });
     });
 
     req.on('timeout', () => {
       req.destroy();
-      resolve(null);
+      resolve({ kind: 'timeout' });
     });
 
     if (postData) {
@@ -98,6 +108,58 @@ export async function callAgentApi<T>(
     }
     req.end();
   });
+}
+
+export async function callAgentApiDetailed<T>(
+  path: string,
+  method = 'GET',
+  body?: any,
+  timeoutMs = 4000
+): Promise<AgentApiResult<T>> {
+  const postData = body ? JSON.stringify(body) : undefined;
+  const socketPath = getAgentApiSocketPath();
+  let agentToken = getAgentToken();
+  let res = await sendAgentApiRequest<T>(path, method, postData, agentToken, socketPath, timeoutMs);
+  if (res.kind === 'http_error' && res.status === 401) {
+    cachedAgentToken = undefined;
+    agentToken = getAgentToken();
+    res = await sendAgentApiRequest<T>(path, method, postData, agentToken, socketPath, timeoutMs);
+  }
+  return res;
+}
+
+export async function callAgentApi<T>(
+  path: string,
+  method = 'GET',
+  body?: any,
+  timeoutMs = 4000
+): Promise<T | null> {
+  const res = await callAgentApiDetailed<T>(path, method, body, timeoutMs);
+  if (res.kind === 'ok') {
+    return res.data;
+  }
+  return null;
+}
+
+export async function callAgentApiResponse<T extends { success?: boolean; message?: string; error?: string }>(
+  path: string,
+  method = 'GET',
+  body?: any,
+  timeoutMs = 4000
+): Promise<T | null> {
+  const res = await callAgentApiDetailed<T>(path, method, body, timeoutMs);
+  if (res.kind === 'ok') {
+    return res.data;
+  }
+  if (res.kind === 'http_error') {
+    return {
+      ...(res.data && typeof res.data === 'object' ? res.data : {}),
+      success: false,
+      message: res.message,
+      error: res.message,
+    } as T;
+  }
+  return null;
 }
 
 export async function callAgentApiBinary(

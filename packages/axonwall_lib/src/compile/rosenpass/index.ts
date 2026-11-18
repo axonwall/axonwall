@@ -13,8 +13,13 @@ export function compileRosenpass(config?: RosenpassConfig): RosenpassCompileResu
   const lines: string[] = [];
 
   const listenPort = config?.listenPort && config.listenPort >= 1 && config.listenPort <= 65535 ? config.listenPort : 9999;
+  const isDefaultListenList =
+    config?.listenAddresses &&
+    config.listenAddresses.length === 2 &&
+    config.listenAddresses[0] === '0.0.0.0:9999' &&
+    config.listenAddresses[1] === '[::]:9999';
   const rawListen =
-    config?.listenAddresses && config.listenAddresses.length > 0
+    config?.listenAddresses && config.listenAddresses.length > 0 && !(isDefaultListenList && listenPort !== 9999)
       ? config.listenAddresses
       : [`0.0.0.0:${listenPort}`, `[::]:${listenPort}`];
   const listenList = rawListen
@@ -42,9 +47,11 @@ export function compileRosenpass(config?: RosenpassConfig): RosenpassCompileResu
   for (const peer of peers) {
     if (!peer.enabled) continue;
     const safeName = peer.name.replace(/[^a-zA-Z0-9_-]/g, '');
-    const peerPubPath = sanitizeTomlString(
-      peer.pqPublicKeyPath || `/etc/rosenpass/peers/${safeName || 'peer'}-pq.pk`,
-    );
+    const effectivePeerPubPath =
+      peer.pqPublicKeyPath && !(peer.pqPublicKeyPath === '/etc/rosenpass/peers/peer-pq.pk' && safeName)
+        ? peer.pqPublicKeyPath
+        : `/etc/rosenpass/peers/${safeName || 'peer'}-pq.pk`;
+    const peerPubPath = sanitizeTomlString(effectivePeerPubPath);
     const wgPeerKey = sanitizeTomlString(peer.wgPeerPublicKey);
     if (!wgPeerKey) continue;
     const wgDev = sanitizeTomlString(peer.wgDevice || defaultWgDevice) || defaultWgDevice;

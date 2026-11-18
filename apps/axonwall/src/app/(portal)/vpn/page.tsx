@@ -25,17 +25,16 @@ export default function VPNPortal() {
     setError('');
     try {
       const res = await generateMfaSetup();
+      if ('exempt' in res && res.exempt) {
+        // SSO / Directory users authenticate via IdP MFA and can provision directly.
+        // D18: this is an IdP-MFA exemption, not a local MFA verification.
+        setMfaIdpExempt(true);
+        return;
+      }
       setMfaSecret(res.secret);
       setMfaQr(res.qrDataUrl);
     } catch (err: any) {
-      if (err.message?.includes('local break-glass administrator')) {
-        // SSO / Directory users authenticate via IdP MFA and can provision directly.
-        // D18: this is an IdP-MFA exemption, not a local MFA verification —
-        // do not set mfaVerified or show the verified banner for it.
-        setMfaIdpExempt(true);
-      } else {
-        setError(err.message);
-      }
+      setError(err.message || 'Failed to initiate MFA setup');
     } finally {
       setLoading(false);
     }

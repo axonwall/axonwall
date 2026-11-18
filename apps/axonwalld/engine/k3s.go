@@ -348,6 +348,8 @@ func (m *K3sManager) ApplyConfig(rawJSON []byte) error {
 			content: bundle.WorkloadsManifestYaml,
 			perm:    0644,
 		})
+	} else {
+		_ = removeFileIfExists(filepath.Join(k3sServerManifestDir, "axonwall-workloads.yaml"))
 	}
 	if bundle.CiliumManifestYaml != "" {
 		writes = append(writes, atomicFileWrite{
@@ -618,6 +620,11 @@ func (m *K3sManager) GetStatus() K3sClusterStatus {
 		haTopo = "embedded-etcd"
 	}
 
+	zfsPool := strings.TrimSpace(cfg.ZfsLocalPvPool)
+	if zfsPool == "" {
+		zfsPool = "tank"
+	}
+
 	return K3sClusterStatus{
 		Enabled:         cfg.Enabled,
 		Running:         running,
@@ -629,7 +636,7 @@ func (m *K3sManager) GetStatus() K3sClusterStatus {
 		HaAutoJoined:    joined,
 		OpenEbsReady:    openEbsReady,
 		OpenEbsHealthy:  openEbsHealthy,
-		ZfsLocalPvPool:  "tank",
+		ZfsLocalPvPool:  zfsPool,
 		Nodes:           nodes,
 		Volumes:         volumes,
 		LastSyncMessage: lastMsg,

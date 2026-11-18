@@ -13,12 +13,45 @@ import type {
 } from '../../schemas/index.js';
 import type { ImportReport, ImportReviewItem } from '../types.js';
 
+function isXmlFlagSet(val: unknown): boolean {
+  return val === '' || val === '1' || val === 1 || val === true || val === 'true' || val === 'yes';
+}
+
+function normalizeXmlPort(raw: unknown, aliasMap: Map<string, string>): string {
+  const s = String(raw ?? '').trim();
+  if (!s) return '';
+  const alias = aliasMap.get(s);
+  if (alias) return `$${alias}`;
+  const lower = s.toLowerCase();
+  const named: Record<string, string> = {
+    http: '80',
+    https: '443',
+    ssh: '22',
+    telnet: '23',
+    smtp: '25',
+    domain: '53',
+    dns: '53',
+    bootps: '67',
+    bootpc: '68',
+    tftp: '69',
+    ntp: '123',
+    snmp: '161',
+    ldap: '389',
+    ldaps: '636',
+    rdp: '3389',
+    'ms-wbt-server': '3389',
+  };
+  if (named[lower]) return named[lower];
+  return s.replace(/:/g, '-');
+}
+
 export function importPfsenseConfig(xmlContent: string): ImportReport {
   const warnings: string[] = [];
   const reviewItems: ImportReviewItem[] = [];
   const parser = new XMLParser({
     ignoreAttributes: false,
     attributeNamePrefix: '@_',
+    parseTagValue: false,
     isArray: (name) => {
       return [
         'alias',
@@ -77,7 +110,7 @@ export function importPfsenseConfig(xmlContent: string): ImportReport {
       }
 
       // In pfSense, presence of <enable> (even empty string or undefined in core WAN/LAN) denotes enabled
-      const isEnabled = ifData.enable !== undefined && ifData.enable !== '0';
+      const isEnabled = ifData.enable === undefined ? true : isXmlFlagSet(ifData.enable);
 
       let ip6 = '';
       if (ifData.ipaddrv6 && ifData.ipaddrv6 !== 'none' && ifData.ipaddrv6 !== 'track6') {
@@ -121,15 +154,21 @@ export function importPfsenseConfig(xmlContent: string): ImportReport {
 
   // 3. Aliases
   const aliases: Alias[] = [];
+  const aliasMap = new Map<string, string>();
   if (root.aliases?.alias) {
     const rawAliases = Array.isArray(root.aliases.alias) ? root.aliases.alias : [root.aliases.alias];
     for (const a of rawAliases) {
       if (!a.name) continue;
+      const origName = String(a.name).trim();
+      const safeName = origName.replace(/[^a-zA-Z0-9_]/g, '_');
+      aliasMap.set(origName, safeName);
+      aliasMap.set(safeName, safeName);
+
       let rawEntries: string[] = [];
-      if (typeof a.address === 'string') {
-        rawEntries = a.address.split(/[\s,]+/).filter(Boolean);
-      } else if (typeof a.content === 'string') {
-        rawEntries = a.content.split(/[\s,]+/).filter(Boolean);
+      if (a.address !== undefined && a.address !== null && String(a.address).trim() !== '') {
+        rawEntries = String(a.address).split(/[\s,]+/).filter(Boolean);
+      } else if (a.content !== undefined && a.content !== null && String(a.content).trim() !== '') {
+        rawEntries = String(a.content).split(/[\s,]+/).filter(Boolean);
       }
 
       let aliasType: 'host' | 'network' | 'port' | 'mac' | 'urltable' = 'host';
@@ -140,11 +179,11 @@ export function importPfsenseConfig(xmlContent: string): ImportReport {
       else if (pType.includes('url')) aliasType = 'urltable';
 
       aliases.push({
-        name: a.name.replace(/[^a-zA-Z0-9_]/g, '_'),
+        name: safeName,
         type: aliasType,
-        entries: rawEntries,
-        description: a.descr || '',
-        enabled: a.enabled !== '0',
+        entries: aliasType === 'port' ? rawEntries.map((e) => e.replace(/:/g, '-')) : rawEntries,
+        description: a.descr ? String(a.descr) : '',
+        enabled: a.enabled !== '0' && a.enabled !== 0 && a.enabled !== 'no',
       });
     }
   }
@@ -180,13 +219,15 @@ export function importPfsenseConfig(xmlContent: string): ImportReport {
           const rawNet = String(r.source.network);
           src = rawNet === '(self)' ? 'self' : `$${rawNet.replace(/[^a-zA-Z0-9_]/g, '_')}`;
         } else if (r.source.address) {
-          src = String(r.source.address);
+          const rawAddr = String(r.source.address).trim();
+          const aliasMatch = aliasMap.get(rawAddr);
+          src = aliasMatch ? `$${aliasMatch}` : rawAddr;
         }
         if (r.source.not !== undefined && src !== 'any') {
           negatedSrc = true;
         }
         if (r.source.port) {
-          srcPort = String(r.source.port);
+          srcPort = normalizeXmlPort(r.source.port, aliasMap);
         }
       }
 
@@ -201,13 +242,15 @@ export function importPfsenseConfig(xmlContent: string): ImportReport {
           const rawNet = String(r.destination.network);
           dst = rawNet === '(self)' ? 'self' : `$${rawNet.replace(/[^a-zA-Z0-9_]/g, '_')}`;
         } else if (r.destination.address) {
-          dst = String(r.destination.address);
+          const rawAddr = String(r.destination.address).trim();
+          const aliasMatch = aliasMap.get(rawAddr);
+          dst = aliasMatch ? `$${aliasMatch}` : rawAddr;
         }
         if (r.destination.not !== undefined && dst !== 'any') {
           negatedDst = true;
         }
         if (r.destination.port) {
-          dstPort = String(r.destination.port);
+          dstPort = normalizeXmlPort(r.destination.port, aliasMap);
         }
       }
 
@@ -217,9 +260,7 @@ export function importPfsenseConfig(xmlContent: string): ImportReport {
       const finalDescr = hasNegation
         ? `[REVIEW: Negated match] ${baseDescr}`.trim()
         : baseDescr;
-      const isEnabled = hasNegation
-        ? false
-        : r.disabled !== '1' && r.disabled !== 'yes';
+      const isEnabled = hasNegation ? false : !isXmlFlagSet(r.disabled);
 
       if (hasNegation) {
         const reason: ImportReviewItem['reason'] =
@@ -267,24 +308,28 @@ export function importPfsenseConfig(xmlContent: string): ImportReport {
   let natSort = 10;
 
   // Port Forward (DNAT)
+  const validNatProtos = new Set(['any', 'tcp', 'udp', 'tcp_udp', 'icmp', 'ipv6-icmp', 'esp', 'ah', 'gre']);
   if (root.nat?.rule) {
     const rawNat = Array.isArray(root.nat.rule) ? root.nat.rule : [root.nat.rule];
     for (const n of rawNat) {
       const iface = (n.interface || 'wan').toLowerCase();
       const localPort = n['local-port'] || n.local_port || n.destination?.port || '';
+      const rawNatProto = String(n.protocol || 'tcp').toLowerCase();
+      let natProto = rawNatProto === 'tcp/udp' || rawNatProto === 'tcp_udp' ? 'tcp_udp' : rawNatProto === 'icmpv6' ? 'ipv6-icmp' : rawNatProto;
+      if (!validNatProtos.has(natProto)) natProto = 'tcp';
       nat.push({
         type: 'dnat',
         interface: iface,
-        protocol: (n.protocol as any) || 'tcp',
+        protocol: natProto as any,
         source: 'any',
         sourcePort: '',
         destination: 'wan_ip',
-        destinationPort: String(n.destination?.port || localPort || ''),
-        targetIp: n.target || '',
-        targetPort: String(localPort || ''),
+        destinationPort: normalizeXmlPort(n.destination?.port || localPort || '', aliasMap),
+        targetIp: n.target ? String(n.target) : '',
+        targetPort: normalizeXmlPort(localPort || '', aliasMap),
         log: Boolean(n.log),
-        enabled: n.disabled !== '1' && n.disabled !== 'yes',
-        description: n.descr || '',
+        enabled: !isXmlFlagSet(n.disabled),
+        description: n.descr ? String(n.descr) : '',
         sortOrder: natSort,
       });
       natSort += 10;
@@ -297,8 +342,14 @@ export function importPfsenseConfig(xmlContent: string): ImportReport {
     for (const o of rawOutbound) {
       const iface = (o.interface || 'wan').toLowerCase();
       let src = 'any';
-      if (o.source?.network) src = o.source.network;
-      else if (o.source?.address) src = o.source.address;
+      if (o.source?.network) {
+        const rawNet = String(o.source.network).trim();
+        src = rawNet === '(self)' ? 'self' : `$${rawNet.replace(/[^a-zA-Z0-9_]/g, '_')}`;
+      } else if (o.source?.address) {
+        const rawAddr = String(o.source.address).trim();
+        const aliasMatch = aliasMap.get(rawAddr);
+        src = aliasMatch ? `$${aliasMatch}` : rawAddr;
+      }
 
       nat.push({
         type: o.target ? 'snat' : 'masquerade',
@@ -308,10 +359,10 @@ export function importPfsenseConfig(xmlContent: string): ImportReport {
         sourcePort: '',
         destination: 'any',
         destinationPort: '',
-        targetIp: o.target || undefined,
+        targetIp: o.target ? String(o.target) : undefined,
         log: Boolean(o.log),
-        enabled: o.disabled !== '1' && o.disabled !== 'yes',
-        description: o.descr || 'Outbound NAT',
+        enabled: !isXmlFlagSet(o.disabled),
+        description: o.descr ? String(o.descr) : 'Outbound NAT',
         sortOrder: natSort,
       });
       natSort += 10;
@@ -322,7 +373,7 @@ export function importPfsenseConfig(xmlContent: string): ImportReport {
   const subnets: DhcpSubnet[] = [];
   if (root.dhcpd) {
     for (const [ifKey, dData] of Object.entries<any>(root.dhcpd)) {
-      if (typeof dData !== 'object' || !dData || dData.enable === undefined) continue;
+      if (typeof dData !== 'object' || !dData || !isXmlFlagSet(dData.enable)) continue;
       const range = dData.range || {};
       const staticMappings = [];
       if (dData.staticmap) {
@@ -394,16 +445,16 @@ export function importPfsenseConfig(xmlContent: string): ImportReport {
   if (root.gateways?.gateway_item) {
     const rawGw = Array.isArray(root.gateways.gateway_item) ? root.gateways.gateway_item : [root.gateways.gateway_item];
     for (const g of rawGw) {
-      if (g.name && g.gateway) {
+      if (g.name && g.gateway && String(g.gateway).trim().toLowerCase() !== 'dynamic') {
         gateways.push({
-          name: g.name,
+          name: String(g.name),
           interface: (g.interface || 'wan').toLowerCase(),
-          gatewayIp: g.gateway,
-          monitorIp: g.monitor || undefined,
+          gatewayIp: String(g.gateway).trim(),
+          monitorIp: g.monitor ? String(g.monitor) : undefined,
           weight: g.weight ? Number.parseInt(String(g.weight), 10) : 1,
-          isDefault: Boolean(g.defaultgw),
-          enabled: !g.disabled,
-          description: g.descr || '',
+          isDefault: isXmlFlagSet(g.defaultgw) || Boolean(g.defaultgw),
+          enabled: !isXmlFlagSet(g.disabled),
+          description: g.descr ? String(g.descr) : '',
         });
       }
     }

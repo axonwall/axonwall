@@ -25,6 +25,7 @@ var (
 	reEmailAddr  = regexp.MustCompile(`\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,12}\b`)
 	reCardCand   = regexp.MustCompile(`\b(?:\d[ -]*?){13,19}\b`)
 	reEmbeddedV4 = regexp.MustCompile(`\b(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)\b`)
+	reEmbeddedV6 = regexp.MustCompile(`(?i)(?:[a-f0-9]{0,4}:){2,7}[a-f0-9]{0,4}`)
 )
 
 func passesLuhnCheck(digits string) bool {
@@ -268,12 +269,19 @@ func (c *CryptoPanAnonymizer) AnonymizeHostname(host string) string {
 	return "h-" + hex.EncodeToString(sum[:6]) + ".anon.axonwall"
 }
 
-// AnonymizeText rewrites embedded IPv4 literals inside Causal DSL traces or payloads.
+// AnonymizeText rewrites embedded IPv4 and IPv6 literals inside Causal DSL traces or payloads.
 func (c *CryptoPanAnonymizer) AnonymizeText(text string) string {
 	if text == "" || c == nil {
 		return text
 	}
-	return reEmbeddedV4.ReplaceAllStringFunc(text, func(ipStr string) string {
+	scrubbed := reEmbeddedV4.ReplaceAllStringFunc(text, func(ipStr string) string {
 		return c.AnonymizeIP(ipStr)
+	})
+	return reEmbeddedV6.ReplaceAllStringFunc(scrubbed, func(cand string) string {
+		ip := net.ParseIP(cand)
+		if ip == nil || ip.To4() != nil {
+			return cand
+		}
+		return c.AnonymizeIP(cand)
 	})
 }

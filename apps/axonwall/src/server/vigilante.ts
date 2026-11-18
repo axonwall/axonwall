@@ -9,7 +9,7 @@ import {
 } from '@axonwall/lib/schemas';
 import { enablePluginWithDependencies } from '@axonwall/lib/plugins';
 import { getCurrentDesiredState, applyDesiredState } from './agent';
-import { callAgentApi } from './agent-client';
+import { callAgentApi, callAgentApiResponse } from './agent-client';
 import { getSession } from './auth';
 import { assertActionPermitted } from './auth-guard';
 
@@ -189,7 +189,7 @@ export async function soarBlockIPAction(
   assertActionPermitted(session, 'operator');
   const validIp = validateIpOrCidr(ip);
 
-  const res = await callAgentApi<{ success: boolean; message: string }>(
+  const res = await callAgentApiResponse<{ success: boolean; message: string }>(
     '/v1/vigilante/soar/block-ip',
     'POST',
     { ip: validIp, timeoutSec }
@@ -205,7 +205,7 @@ export async function soarUnblockIPAction(
   assertActionPermitted(session, 'operator');
   const validIp = validateIpOrCidr(ip);
 
-  const res = await callAgentApi<{ success: boolean; message: string }>(
+  const res = await callAgentApiResponse<{ success: boolean; message: string }>(
     '/v1/vigilante/soar/unblock-ip',
     'POST',
     { ip: validIp }
@@ -243,7 +243,7 @@ export async function provisionEvidenceVaultAction(
     return { success: false, message: 'Invalid ZFS pool or dataset name' };
   }
 
-  const res = await callAgentApi<{ success: boolean; message: string }>(
+  const res = await callAgentApiResponse<{ success: boolean; message: string }>(
     '/v1/vigilante/vault/provision',
     'POST',
     { pool, dataset }
@@ -268,7 +268,7 @@ export async function createIncidentSnapshotAction(
     return { success: false, error: 'Invalid pool, dataset, or incident ID format' };
   }
 
-  const res = await callAgentApi<{ success: boolean; snapshot?: string; error?: string }>(
+  const res = await callAgentApiResponse<{ success: boolean; snapshot?: string; error?: string }>(
     '/v1/vigilante/vault/snapshot',
     'POST',
     { pool, dataset, incidentId }

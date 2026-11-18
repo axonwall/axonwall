@@ -599,14 +599,12 @@ export async function runOobScan({
     // Copy to host evidence directory if applicable
     if (!cleanTarget.includes('/') && !cleanTarget.startsWith('ff02')) {
       try {
-        await saveEvidenceFile({
-          networkCidr: 'out-of-band',
-          hostIp: cleanTarget,
-          category: 'oobscan',
-          filename: `${baseName}.jsonl`,
-          content: fileContent,
-          command: `oobscan ${args.join(' ')}`
-        });
+        await saveEvidenceFile(
+          'out-of-band',
+          cleanTarget,
+          `${baseName}.jsonl`,
+          fileContent
+        );
       } catch (err) {
         logger.warn('OOBSCAN:EVIDENCE', `Failed to save host evidence: ${err.message}`);
       }

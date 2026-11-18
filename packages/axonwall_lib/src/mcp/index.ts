@@ -398,11 +398,17 @@ export function validateVirtWorkloadSafety(
   action: string,
   hostedEdgeEnabled?: boolean,
 ): McpValidationResult {
-  const destructiveActions = new Set(['stop', 'pause']);
+  const destructiveActions = new Set(['stop', 'pause', 'reboot', 'restore', 'rollback', 'live_migrate']);
   if (!destructiveActions.has(action)) {
     return { valid: true };
   }
   const lower = (workloadName || '').trim().toLowerCase();
+  if (hostedEdgeEnabled && !lower) {
+    return {
+      valid: false,
+      reason: `Anti-lockout guard: refusing to ${action} an unidentified workload while Hosted Edge is enabled`,
+    };
+  }
   if (
     lower === 'edge' ||
     lower.startsWith('edge-') ||

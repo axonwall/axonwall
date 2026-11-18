@@ -342,14 +342,32 @@ export function importVyosConfig(configText: string): ImportReport {
   let natSort = 10;
 
   // Destination NAT (Port forwarding)
+  const extractVyosIface = (raw: unknown): string => {
+    if (typeof raw === 'string') return raw.toLowerCase();
+    if (raw && typeof raw === 'object') {
+      const obj = raw as Record<string, unknown>;
+      const candidate = obj.name || obj['interface-name'];
+      if (typeof candidate === 'string') return candidate.toLowerCase();
+    }
+    return 'wan';
+  };
+  const validNatProtos = new Set(['any', 'tcp', 'udp', 'tcp_udp', 'icmp', 'ipv6-icmp', 'esp', 'ah', 'gre']);
+  const normalizeVyosNatProto = (raw: unknown): any => {
+    const p = String(raw || 'tcp').toLowerCase();
+    if (p === 'all') return 'any';
+    if (p === 'tcp_udp' || p === 'tcp/udp') return 'tcp_udp';
+    if (p.includes('icmpv6')) return 'ipv6-icmp';
+    if (validNatProtos.has(p)) return p;
+    return 'tcp';
+  };
   const dnatRules = root.nat?.destination?.rule || {};
   for (const [rId, d] of Object.entries<any>(dnatRules)) {
     if (typeof d !== 'object' || !d) continue;
-    const iface = d['inbound-interface'] || 'wan';
+    const iface = extractVyosIface(d['inbound-interface']);
     nat.push({
       type: 'dnat',
-      interface: iface.toLowerCase(),
-      protocol: (d.protocol as any) || 'tcp',
+      interface: iface,
+      protocol: normalizeVyosNatProto(d.protocol),
       source: 'any',
       sourcePort: '',
       destination: 'wan_ip',
@@ -368,11 +386,11 @@ export function importVyosConfig(configText: string): ImportReport {
   const snatRules = root.nat?.source?.rule || {};
   for (const [rId, s] of Object.entries<any>(snatRules)) {
     if (typeof s !== 'object' || !s) continue;
-    const iface = s['outbound-interface'] || 'wan';
+    const iface = extractVyosIface(s['outbound-interface']);
     const isMasq = s.translation?.address === 'masquerade';
     nat.push({
       type: isMasq ? 'masquerade' : 'snat',
-      interface: iface.toLowerCase(),
+      interface: iface,
       protocol: 'any',
       source: s.source?.address || 'any',
       sourcePort: '',

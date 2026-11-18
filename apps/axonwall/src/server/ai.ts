@@ -10,7 +10,7 @@ import {
 import type { AiProviderType, AiConfig } from '@axonwall/lib/schemas';
 import { getSession } from './auth';
 import { assertActionPermitted } from './auth-guard';
-import { getCurrentDesiredState } from './agent';
+import { getDesiredStateInternal } from './desired-state-internal';
 
 export interface AiProbeResult {
   ok: boolean;
@@ -95,7 +95,7 @@ export async function testAiProviderProbe(
   const session = await getSession();
   assertActionPermitted(session, currentConfig ? 'admin' : 'operator');
 
-  const state = await getCurrentDesiredState();
+  const state = await getDesiredStateInternal();
   const aiCfg = currentConfig || state.ai;
   const isClientConfig = Boolean(currentConfig);
   const start = Date.now();
@@ -384,7 +384,7 @@ export async function generateAiCompletion(
   const session = await getSession();
   assertActionPermitted(session, (currentConfig || mode === 'audit') ? 'admin' : 'operator');
 
-  const state = await getCurrentDesiredState();
+  const state = await getDesiredStateInternal();
   const aiCfg = currentConfig || state.ai;
   const isClientConfig = Boolean(currentConfig);
 

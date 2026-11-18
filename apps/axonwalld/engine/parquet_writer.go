@@ -535,9 +535,15 @@ func ReadThreatParquetMetadata(data []byte) (*ThreatParquetSummary, error) {
 			v, _ := r.readZigZag32()
 			summary.Version = v
 		case 2:
-			elemType, count, _ := r.readListBegin()
+			elemType, count, ok2 := r.readListBegin()
+			if !ok2 {
+				return nil, fmt.Errorf("malformed parquet schema list header: %v", r.err)
+			}
 			if elemType != tcStruct {
 				return nil, fmt.Errorf("unexpected schema list elemType=%d", elemType)
+			}
+			if count < 0 || count > len(r.data)-r.pos {
+				return nil, fmt.Errorf("parquet schema list count %d out of bounds", count)
 			}
 			for i := 0; i < count; i++ {
 				var slast int16
@@ -549,11 +555,17 @@ func ReadThreatParquetMetadata(data []byte) (*ThreatParquetSummary, error) {
 					slast = fid
 					if fid == 4 && ft == tcBinary {
 						name := r.readString()
+						if r.err != nil {
+							return nil, r.err
+						}
 						if name != "axonwall_threat_episode" {
 							summary.ColNames = append(summary.ColNames, name)
 						}
 					} else {
 						r.skipValue(ft)
+						if r.err != nil {
+							return nil, r.err
+						}
 					}
 				}
 			}
@@ -564,17 +576,31 @@ func ReadThreatParquetMetadata(data []byte) (*ThreatParquetSummary, error) {
 		default:
 			r.skipValue(ctype)
 		}
+		if r.err != nil {
+			return nil, r.err
+		}
+	}
+	if r.err != nil {
+		return nil, r.err
 	}
 	return summary, nil
+}
+
+func (r *thriftCompactReader) setErr(err error) {
+	if r.err == nil {
+		r.err = err
+	}
 }
 
 type thriftCompactReader struct {
 	data []byte
 	pos  int
+	err  error
 }
 
 func (r *thriftCompactReader) readByte() (byte, bool) {
-	if r.pos >= len(r.data) {
+	if r.err != nil || r.pos < 0 || r.pos >= len(r.data) {
+		r.setErr(fmt.Errorf("unexpected EOF reading byte at offset %d", r.pos))
 		return 0, false
 	}
 	b := r.data[r.pos]
@@ -583,8 +609,13 @@ func (r *thriftCompactReader) readByte() (byte, bool) {
 }
 
 func (r *thriftCompactReader) readUvarint() (uint64, bool) {
+	if r.err != nil || r.pos < 0 || r.pos >= len(r.data) {
+		r.setErr(fmt.Errorf("unexpected EOF reading uvarint at offset %d", r.pos))
+		return 0, false
+	}
 	v, n := binary.Uvarint(r.data[r.pos:])
 	if n <= 0 {
+		r.setErr(fmt.Errorf("invalid uvarint at offset %d", r.pos))
 		return 0, false
 	}
 	r.pos += n
@@ -611,7 +642,11 @@ func (r *thriftCompactReader) readZigZag64() (int64, bool) {
 
 func (r *thriftCompactReader) readString() string {
 	n, ok := r.readUvarint()
-	if !ok || r.pos+int(n) > len(r.data) {
+	if !ok {
+		return ""
+	}
+	if r.pos < 0 || r.pos > len(r.data) || n > uint64(len(r.data)-r.pos) {
+		r.setErr(fmt.Errorf("parquet string length %d out of bounds (remaining=%d)", n, len(r.data)-r.pos))
 		return ""
 	}
 	s := string(r.data[r.pos : r.pos+int(n)])
@@ -648,12 +683,29 @@ func (r *thriftCompactReader) readListBegin() (byte, int, bool) {
 		if !ok2 {
 			return 0, 0, false
 		}
+		if r.pos < 0 || u > uint64(len(r.data)-r.pos) {
+			r.setErr(fmt.Errorf("parquet list count %d out of bounds", u))
+			return 0, 0, false
+		}
 		count = int(u)
 	}
 	return elemType, count, true
 }
 
+const maxParquetSkipDepth = 32
+
 func (r *thriftCompactReader) skipValue(ctype byte) {
+	r.skipValueDepth(ctype, 0)
+}
+
+func (r *thriftCompactReader) skipValueDepth(ctype byte, depth int) {
+	if r.err != nil {
+		return
+	}
+	if depth > maxParquetSkipDepth {
+		r.setErr(fmt.Errorf("parquet metadata nesting depth exceeds %d", maxParquetSkipDepth))
+		return
+	}
 	switch ctype {
 	case 1, 2:
 		return
@@ -664,35 +716,63 @@ func (r *thriftCompactReader) skipValue(ctype byte) {
 	case 6:
 		r.readUvarint()
 	case 7:
+		if r.pos < 0 || len(r.data)-r.pos < 8 {
+			r.setErr(fmt.Errorf("parquet double field out of bounds"))
+			return
+		}
 		r.pos += 8
 	case 8:
-		n, _ := r.readUvarint()
+		n, ok := r.readUvarint()
+		if !ok {
+			return
+		}
+		if r.pos < 0 || r.pos > len(r.data) || n > uint64(len(r.data)-r.pos) {
+			r.setErr(fmt.Errorf("parquet binary field length %d out of bounds", n))
+			return
+		}
 		r.pos += int(n)
 	case 9, 10:
-		et, cnt, _ := r.readListBegin()
-		for i := 0; i < cnt; i++ {
-			r.skipValue(et)
+		et, cnt, ok := r.readListBegin()
+		if !ok {
+			return
+		}
+		if cnt < 0 || cnt > len(r.data)-r.pos {
+			r.setErr(fmt.Errorf("parquet list/set count %d out of bounds", cnt))
+			return
+		}
+		for i := 0; i < cnt && r.err == nil; i++ {
+			r.skipValueDepth(et, depth+1)
 		}
 	case 11:
-		cnt, _ := r.readUvarint()
+		cnt, ok := r.readUvarint()
+		if !ok {
+			return
+		}
 		if cnt > 0 {
-			kt, _ := r.readByte()
+			if r.pos < 0 || cnt > uint64(len(r.data)-r.pos) {
+				r.setErr(fmt.Errorf("parquet map count %d out of bounds", cnt))
+				return
+			}
+			kt, ok2 := r.readByte()
+			if !ok2 {
+				return
+			}
 			ktype := (kt >> 4) & 0x0F
 			vtype := kt & 0x0F
-			for i := 0; i < int(cnt); i++ {
-				r.skipValue(ktype)
-				r.skipValue(vtype)
+			for i := 0; i < int(cnt) && r.err == nil; i++ {
+				r.skipValueDepth(ktype, depth+1)
+				r.skipValueDepth(vtype, depth+1)
 			}
 		}
 	case 12:
 		var last int16
-		for {
+		for r.err == nil {
 			fid, ft, ok := r.readFieldBegin(last)
 			if !ok || ft == tcStop {
 				break
 			}
 			last = fid
-			r.skipValue(ft)
+			r.skipValueDepth(ft, depth+1)
 		}
 	}
 }

@@ -4,6 +4,11 @@ Documentation=https://k3s.io
 Wants=network-online.target
 After=network-online.target
 ConditionPathExists=/etc/rancher/k3s/config.yaml
+ConditionPathExists=!/etc/rancher/k3s/agent-mode
+ConditionPathExists=!/etc/axonwall/.vault-edition
+ConditionKernelCommandLine=!axonwall_install=1
+ConditionKernelCommandLine=!axonwall.install=1
+ConditionKernelCommandLine=!axonwall.unattended=1
 
 [Install]
 WantedBy=multi-user.target

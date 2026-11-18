@@ -162,10 +162,19 @@ case "$1" in
         fi
 
         if [ -f /etc/axonwall/certs/hub.key ]; then
-            # The controller is the only reader of the hub key (audit B-12).
-            chown axonwall-controller:axonwall-controller /etc/axonwall/certs/hub.key /etc/axonwall/certs/hub.crt 2>/dev/null || true
-            chmod 0600 /etc/axonwall/certs/hub.key 2>/dev/null || true
-            chmod 0644 /etc/axonwall/certs/hub.crt 2>/dev/null || true
+            if [ -f /etc/axonwall/.vault-edition ]; then
+                # Vault Edition runs SeaweedFS S3 under the axonwall-vault group,
+                # which must read hub.key without exposing it to other services.
+                chown root:axonwall-vault /etc/axonwall/certs/hub.key 2>/dev/null || true
+                chmod 0640 /etc/axonwall/certs/hub.key 2>/dev/null || true
+                chown root:root /etc/axonwall/certs/hub.crt 2>/dev/null || true
+                chmod 0644 /etc/axonwall/certs/hub.crt 2>/dev/null || true
+            else
+                # The controller is the only reader of the hub key (audit B-12).
+                chown axonwall-controller:axonwall-controller /etc/axonwall/certs/hub.key /etc/axonwall/certs/hub.crt 2>/dev/null || true
+                chmod 0600 /etc/axonwall/certs/hub.key 2>/dev/null || true
+                chmod 0644 /etc/axonwall/certs/hub.crt 2>/dev/null || true
+            fi
         fi
 
         # 4. Generate default environment secrets if absent
@@ -314,6 +323,9 @@ ENV_EOF
 
         # 5c. Sync any regular systemd unit files in /etc/systemd/system/ so ISO-placed copies do not shadow updated /lib/systemd/system/ units
         for unit in axonwalld.service axonwall-controller.service axonwall-ui.service axonwall-console.service headscale.service k3s.service; do
+            if [ "$unit" = "k3s.service" ] && { [ -f /etc/axonwall/.vault-edition ] || [ -f /etc/axonwall/.k3s-edition ]; }; then
+                continue
+            fi
             if [ -f "/etc/systemd/system/${unit}" ] && [ ! -L "/etc/systemd/system/${unit}" ] && [ -f "/lib/systemd/system/${unit}" ]; then
                 cp "/lib/systemd/system/${unit}" "/etc/systemd/system/${unit}" 2>/dev/null || true
             fi
@@ -327,11 +339,17 @@ ENV_EOF
             fi
         fi
 
-        # 6. Reload systemd daemon and enable services if systemd is running
+        # 6. Reload systemd daemon and enable services if systemd is running (preserve edition isolation)
         if [ -d /run/systemd/system ]; then
             systemctl daemon-reload || true
-            systemctl enable axonwalld.service axonwall-controller.service axonwall-ui.service headscale.service k3s.service axonwall-console.service axonwall-hub-cert-renew.timer ssh.service chrony.service sysstat.service || true
-            systemctl restart --no-block axonwalld.service axonwall-controller.service axonwall-ui.service headscale.service ssh.service chrony.service sysstat.service || true
+            if [ -f /etc/axonwall/.vault-edition ]; then
+                systemctl enable seaweedfs.service axonwall-vault-firstboot.service axonwall-vault-provision.service ssh.service || true
+            elif [ -f /etc/axonwall/.k3s-edition ]; then
+                systemctl enable ssh.service || true
+            else
+                systemctl enable axonwalld.service axonwall-controller.service axonwall-ui.service headscale.service k3s.service axonwall-console.service axonwall-hub-cert-renew.timer ssh.service chrony.service sysstat.service || true
+                systemctl restart --no-block axonwalld.service axonwall-controller.service axonwall-ui.service headscale.service ssh.service chrony.service sysstat.service || true
+            fi
         fi
         ;;
     abort-upgrade|abort-remove|abort-deconfigure)

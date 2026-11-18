@@ -25,6 +25,10 @@ export function desiredStateLockPath(): string {
   if (configDir) {
     return path.join(configDir, 'state.json.lock');
   }
+  const stateDir = process.env.AXONWALL_STATE_DIR?.trim();
+  if (stateDir) {
+    return path.join(stateDir, 'state.json.lock');
+  }
   if (isControllerDevRuntime()) {
     return path.join(resolveControllerDirs().etcDir, 'state.json.lock');
   }

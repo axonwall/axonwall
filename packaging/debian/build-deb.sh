@@ -32,7 +32,7 @@ Section: net
 Priority: optional
 Architecture: ${ARCH}
 Maintainer: Axonwall Core Team <ops@axonwall.io>
-Depends: nftables (>= 1.0.0), iproute2, wireguard-tools, keepalived, conntrack, conntrackd, nodejs (>= 20.0.0), openssh-server, openssh-client, slapd, ldap-utils, sssd-ldap, sssd-tools, libnss-sss, libpam-sss, libpam-modules, chrony, openssl, curl, wget, jq, ca-certificates, rsync, python3, sqlite3, ethtool, pciutils, tcpdump, kmod, procps, iputils-ping, nano, less, binutils, zstd, xz-utils, bzip2, unzip, zsh, zsh-autosuggestions, zsh-syntax-highlighting, vim, neovim, tmux, fzf, ripgrep, fd-find, bat, mtr-tiny, btop, htop, sysstat, iotop, iftop, slurm, net-tools, dnsutils, bind9-host, nmap, kubectl, mkcert
+Depends: nftables (>= 1.1.0), iproute2, wireguard-tools, keepalived, conntrack, conntrackd, nodejs (>= 22.0.0), openssh-server, openssh-client, slapd, ldap-utils, sssd-ldap, sssd-tools, libnss-sss, libpam-sss, libpam-modules, chrony, openssl, curl, wget, jq, ca-certificates, rsync, python3, sqlite3, ethtool, pciutils, tcpdump, kmod, procps, iputils-ping, nano, less, binutils, zstd, xz-utils, bzip2, unzip, zsh, zsh-autosuggestions, zsh-syntax-highlighting, vim, neovim, tmux, fzf, ripgrep, fd-find, bat, mtr-tiny, btop, htop, sysstat, iotop, iftop, slurm, net-tools, dnsutils, bind9-host, nmap, kubectl, mkcert
 Recommends: starship, zoxide, unbound, kea-dhcp4-server, frr, suricata, strongswan, openvpn, etckeeper, git, qemu-system-x86, qemu-utils, ovmf, xorriso, bridge-utils, libvirt-clients, lxc, zfsutils-linux, zfs-initramfs, mdadm, gdisk, parted, smartmontools, xfsprogs, cryptsetup, tpm2-tools, samba, nfs-kernel-server, open-iscsi, tgt, cloud-init, cloud-guest-utils, rkhunter, chkrootkit, yara, unhide, lynis, debsums, bpftool, python3-drgn, linux-perf, plymouth, plymouth-label
 Homepage: https://axonwall.com
 Description: Modern Linux Router & Next-Gen Firewall
@@ -184,6 +184,7 @@ for bin_script in \
   axonwall-tui \
   axonwall-config \
   axonwall-install \
+  axonwall-kubeconfig \
   axonwall-cloud-init \
   axonwall-zbm-theme \
   axonwall-hunt-rootkits \
@@ -361,9 +362,9 @@ if [[ -f "${ROOT_DIR}/apps/axonwall-controller/dist/axonwall-tui.js" ]]; then
   cp "${ROOT_DIR}/apps/axonwall-controller/dist/axonwall-tui.js" "${WORK_DIR}/opt/axonwall/apps/axonwall-controller/dist/"
 fi
 
-# 7b. Declare all packaged /etc files in DEBIAN/conffiles so dpkg preserves operator edits
+# 7b. Declare packaged /etc files in DEBIAN/conffiles (exclude generated/release metadata updated on upgrades)
 if [[ -d "${WORK_DIR}/etc" ]]; then
-  (cd "${WORK_DIR}" && find etc -type f | sed 's|^|/|' | LC_ALL=C sort) > "${WORK_DIR}/DEBIAN/conffiles"
+  (cd "${WORK_DIR}" && find etc -type f | sed 's|^|/|' | grep -vE '^/etc/axonwall/(version|release-signing\.pub)$' | LC_ALL=C sort) > "${WORK_DIR}/DEBIAN/conffiles"
   chmod 0644 "${WORK_DIR}/DEBIAN/conffiles"
 fi
 

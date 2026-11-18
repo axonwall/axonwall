@@ -204,8 +204,10 @@ export default function VirtualMachinesPage() {
     setStatusBanner(null);
     try {
       const res = await deleteVmAction(targetVmid);
-      setStatusBanner({ type: 'success', message: res.message });
-      await loadData();
+      setStatusBanner({ type: res.success ? 'success' : 'error', message: res.message });
+      if (res.success) {
+        await loadData();
+      }
     } catch (err: any) {
       setStatusBanner({ type: 'error', message: err?.message || 'Failed to delete VM' });
     }

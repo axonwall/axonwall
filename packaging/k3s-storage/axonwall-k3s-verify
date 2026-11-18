@@ -17,13 +17,33 @@ if [ -f "$AGENT_FLAG" ]; then
     _elapsed=0
     while [ "$_elapsed" -lt 60 ]; do
         if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet k3s-agent; then
-            log "k3s-agent is active and running"
-            rm -f "$MARKER"
-            exit 0
+            _pid1="$(systemctl show -p MainPID --value k3s-agent 2>/dev/null || echo 0)"
+            sleep 3
+            _elapsed=$(( _elapsed + 3 ))
+            _pid2="$(systemctl show -p MainPID --value k3s-agent 2>/dev/null || echo 0)"
+            if systemctl is-active --quiet k3s-agent && [ -n "$_pid1" ] && [ "$_pid1" != "0" ] && [ "$_pid1" = "$_pid2" ]; then
+                if command -v curl >/dev/null 2>&1; then
+                    if curl -fsS --max-time 2 http://127.0.0.1:10248/healthz >/dev/null 2>&1; then
+                        log "k3s-agent is active, stable (PID=$_pid2), and kubelet /healthz is ready"
+                        rm -f "$MARKER"
+                        exit 0
+                    fi
+                else
+                    log "k3s-agent is active and stable (PID=$_pid2)"
+                    rm -f "$MARKER"
+                    exit 0
+                fi
+            fi
+            continue
         elif command -v rc-service >/dev/null 2>&1 && rc-service k3s-agent status >/dev/null 2>&1; then
-            log "k3s-agent (OpenRC) is active and running"
-            rm -f "$MARKER"
-            exit 0
+            sleep 3
+            _elapsed=$(( _elapsed + 3 ))
+            if rc-service k3s-agent status >/dev/null 2>&1; then
+                log "k3s-agent (OpenRC) is active and sustained"
+                rm -f "$MARKER"
+                exit 0
+            fi
+            continue
         fi
         sleep 2
         _elapsed=$(( _elapsed + 2 ))

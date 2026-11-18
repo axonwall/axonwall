@@ -172,7 +172,7 @@ describe('pfSense XML Importer', () => {
 
     // Rules
     expect(report.state.rules[0].action).toBe('pass');
-    expect(report.state.rules[0].destinationPort).toBe('Web_Services');
+    expect(report.state.rules[0].destinationPort).toBe('$Web_Services');
     expect(report.state.rules[1].action).toBe('block');
 
     // NAT

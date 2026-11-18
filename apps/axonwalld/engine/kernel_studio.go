@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -133,10 +134,12 @@ type KernelBuildRequest struct {
 	EnforceModuleSig     bool     `json:"enforceModuleSig"`
 	EnableProcKcore      bool     `json:"enableProcKcore"`
 	HardwareFragment     string   `json:"hardwareFragment"`
+	KernelSha256         string   `json:"kernelSha256,omitempty"`
 }
 
 type KernelStudioManager struct {
 	mu                      sync.RWMutex
+	buildActive             atomic.Bool
 	procRoot                string
 	sysRoot                 string
 	bootRoot                string
@@ -162,6 +165,7 @@ func NewKernelStudioManager() *KernelStudioManager {
 
 var (
 	kernelVersionRe    = regexp.MustCompile(`^(6|7)\.[0-9]+\.[0-9]+(-[a-zA-Z0-9._+-]+)?$`)
+	kernelSha256Re     = regexp.MustCompile(`^[a-fA-F0-9]{64}$`)
 	kconfigSetLineRe   = regexp.MustCompile(`^CONFIG_[A-Z0-9_]{2,64}=(y|m|n|"[a-zA-Z0-9_,.-]*")$`)
 	kconfigUnsetLineRe = regexp.MustCompile(`^# CONFIG_[A-Z0-9_]{2,64} is not set$`)
 	kconfigCommentRe   = regexp.MustCompile(`^#[ a-zA-Z0-9._:,/()=+-]*$`)
@@ -838,10 +842,25 @@ func (m *KernelStudioManager) StartBuild(taskMgr *TaskManager, req KernelBuildRe
 		}
 	}
 
+	cleanSha := strings.TrimSpace(req.KernelSha256)
+	if cleanSha != "" && !kernelSha256Re.MatchString(cleanSha) {
+		return "", "", fmt.Errorf("invalid kernelSha256 (expected 64 hex characters)")
+	}
+
 	scriptPath := m.resolveBuilderScript()
 	if scriptPath == "" {
 		return "", "", fmt.Errorf("kernel builder script not found on host")
 	}
+
+	if !m.buildActive.CompareAndSwap(false, true) {
+		return "", "", fmt.Errorf("a kernel build is already in progress")
+	}
+	startedTask := false
+	defer func() {
+		if !startedTask {
+			m.buildActive.Store(false)
+		}
+	}()
 
 	buildID := fmt.Sprintf("kbuild-%s-%s", mode, time.Now().UTC().Format("20060102-150405"))
 	jobDir := filepath.Join(m.workRoot, buildID)
@@ -861,6 +880,9 @@ func (m *KernelStudioManager) StartBuild(taskMgr *TaskManager, req KernelBuildRe
 		"--capabilities", strings.Join(cleanCaps, ","),
 		"--lockdown", lockdown,
 		"--output-dir", outDir,
+	}
+	if cleanSha != "" {
+		args = append(args, "--kernel-sha256", cleanSha)
 	}
 
 	if req.HardwareFragment != "" {
@@ -893,7 +915,9 @@ func (m *KernelStudioManager) StartBuild(taskMgr *TaskManager, req KernelBuildRe
 		args = append(args, "--disable-kcore")
 	}
 
+	startedTask = true
 	upid := taskMgr.StartTask("kernelbuild", buildID, user, func(logfn func(format string, a ...any)) error {
+		defer m.buildActive.Store(false)
 		logfn("Starting %s (%s) with args: %s", scriptPath, buildID, strings.Join(args, " "))
 		cmd := exec.Command(scriptPath, args...)
 		stdout, err := cmd.StdoutPipe()
@@ -905,8 +929,13 @@ func (m *KernelStudioManager) StartBuild(taskMgr *TaskManager, req KernelBuildRe
 			return err
 		}
 		scanner := bufio.NewScanner(stdout)
+		scanner.Buffer(make([]byte, 64*1024), 1024*1024)
 		for scanner.Scan() {
 			logfn("%s", scanner.Text())
+		}
+		if scanErr := scanner.Err(); scanErr != nil {
+			_ = cmd.Wait()
+			return scanErr
 		}
 		return cmd.Wait()
 	})
@@ -970,6 +999,9 @@ func (m *KernelStudioManager) InstallArtifactSafely(taskMgr *TaskManager, watchd
 
 	var safetyNote string
 	if installMode == "zbm" {
+		if watchdog == nil || activeBE == "" {
+			return "", installMode, "", fmt.Errorf("refusing kernel install in zbm mode: active ZFS Boot Environment unknown (watchdog=%v activeBE=%q)", watchdog != nil, activeBE)
+		}
 		safetyNote = "Clones a standby ZFS Boot Environment before installing the custom kernel so active root stays untouched for ZFSBootMenu rollback."
 	} else {
 		safetyNote = "Installs custom kernel alongside running Debian kernel and arms one-shot grub-reboot when available; previous kernel remains default fallback."
@@ -977,7 +1009,10 @@ func (m *KernelStudioManager) InstallArtifactSafely(taskMgr *TaskManager, watchd
 
 	upid := taskMgr.StartTask("kernelinstall", cleanName, user, func(logfn func(format string, a ...any)) error {
 		logfn("Staging custom kernel package %s (mode=%s)", cleanName, installMode)
-		if installMode == "zbm" && watchdog != nil && activeBE != "" {
+		if installMode == "zbm" {
+			if watchdog == nil || activeBE == "" {
+				return fmt.Errorf("zbm kernel install aborted: active Boot Environment missing")
+			}
 			snapLabel := "pre-kernel-" + time.Now().UTC().Format("20060102-150405")
 			fullSnap, err := watchdog.CreateBootEnvironmentSnapshot(activeBE, snapLabel)
 			if err != nil {
@@ -987,9 +1022,18 @@ func (m *KernelStudioManager) InstallArtifactSafely(taskMgr *TaskManager, watchd
 			newBeName := "axonwall-kcustom-" + time.Now().UTC().Format("20060102-150405")
 			dataset, err := watchdog.CloneSnapshotToBootEnvironment(fullSnap, newBeName)
 			if err != nil {
+				_ = exec.Command("zfs", "destroy", fullSnap).Run()
 				return fmt.Errorf("cloning ZFS BE for kernel install: %w", err)
 			}
 			logfn("Cloned standby ZFS Boot Environment: %s (%s)", newBeName, dataset)
+
+			installSucceeded := false
+			defer func() {
+				if !installSucceeded {
+					_ = exec.Command("zfs", "destroy", "-r", dataset).Run()
+					_ = exec.Command("zfs", "destroy", fullSnap).Run()
+				}
+			}()
 
 			mntDir, err := os.MkdirTemp("", "axonwall-be-mnt.")
 			if err != nil {
@@ -997,13 +1041,32 @@ func (m *KernelStudioManager) InstallArtifactSafely(taskMgr *TaskManager, watchd
 			}
 			defer os.RemoveAll(mntDir)
 
-			if out, err := exec.Command("mount", "-t", "zfs", dataset, mntDir).CombinedOutput(); err != nil {
+			if out, err := exec.Command("mount", "-t", "zfs", "-o", "zfsutil", dataset, mntDir).CombinedOutput(); err != nil {
 				return fmt.Errorf("mounting cloned ZFS BE %s: %v (%s)", dataset, err, strings.TrimSpace(string(out)))
 			}
 			defer func() {
 				_ = exec.Command("umount", mntDir).Run()
 			}()
 
+			var bindMounts []string
+			for _, sub := range []string{"dev", "proc", "sys"} {
+				targetDir := filepath.Join(mntDir, sub)
+				_ = os.MkdirAll(targetDir, 0755)
+				if out, err := exec.Command("mount", "--bind", "/"+sub, targetDir).CombinedOutput(); err != nil {
+					for i := len(bindMounts) - 1; i >= 0; i-- {
+						_ = exec.Command("umount", bindMounts[i]).Run()
+					}
+					return fmt.Errorf("bind-mounting /%s into ZFS BE %s: %v (%s)", sub, newBeName, err, strings.TrimSpace(string(out)))
+				}
+				bindMounts = append(bindMounts, targetDir)
+			}
+			defer func() {
+				for i := len(bindMounts) - 1; i >= 0; i-- {
+					_ = exec.Command("umount", bindMounts[i]).Run()
+				}
+			}()
+
+			_ = os.MkdirAll(filepath.Join(mntDir, "tmp"), 01777)
 			tmpDeb := filepath.Join(mntDir, "tmp", cleanName)
 			if raw, err := os.ReadFile(debPath); err != nil {
 				return err
@@ -1021,6 +1084,7 @@ func (m *KernelStudioManager) InstallArtifactSafely(taskMgr *TaskManager, watchd
 					return fmt.Errorf("installing %s inside ZFS BE %s: %v (%s)", cleanName, newBeName, err, strings.TrimSpace(string(out)))
 				}
 			}
+			installSucceeded = true
 			logfn("Installed %s inside standby ZFS Boot Environment %s", cleanName, newBeName)
 			return nil
 		}

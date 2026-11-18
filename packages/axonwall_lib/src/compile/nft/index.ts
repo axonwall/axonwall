@@ -847,24 +847,27 @@ export function compileNftables(state: DesiredState): CompileResult {
     lines.push('    icmp type { echo-request, echo-reply, destination-unreachable, time-exceeded } accept');
     lines.push('    icmpv6 type { echo-request, echo-reply, nd-router-solicit, nd-router-advert, nd-neighbor-solicit, nd-neighbor-advert } accept');
 
-    if (state.system.antiLockout?.enabled) {
+    if (state.system.antiLockout?.enabled && (state.system.antiLockout.ports?.length ?? 0) > 0) {
       const ifaceList = normalizeAntiLockoutInterfaces(state.system.antiLockout);
-      const ports = state.system.antiLockout.ports.join(', ');
-      const seenDevs = new Set<string>();
+      const validPorts = state.system.antiLockout.ports.filter((p) => Number.isInteger(p) && p >= 1 && p <= 65535);
+      if (validPorts.length > 0) {
+        const ports = validPorts.join(', ');
+        const seenDevs = new Set<string>();
 
-      // In Host Mode (core-firewall disabled), there is no untrusted WAN router perimeter:
-      // allow anti-lockout on configured anti-lockout interfaces AND all enabled host interfaces
-      // so 1-NIC nodes (where eth0 is named 'wan') are never locked out of SSH/Web Console.
-      const hostCandidates = [
-        ...ifaceList,
-        ...state.interfaces.filter((i) => i.enabled).map((i) => i.name),
-      ];
-      for (const ifaceName of hostCandidates) {
-        const dev = ifDeviceMap.get(ifaceName) || ifaceName;
-        if (isValidDevice(dev) && !seenDevs.has(dev)) {
-          seenDevs.add(dev);
-          const comment = ifaceName === 'lan' ? 'anti-lockout' : `anti-lockout-${ifaceName}`;
-          lines.push(`    iifname "${dev}" tcp dport { ${ports} } accept comment "${comment}"`);
+        // In Host Mode (core-firewall disabled), there is no untrusted WAN router perimeter:
+        // allow anti-lockout on configured anti-lockout interfaces AND all enabled host interfaces
+        // so 1-NIC nodes (where eth0 is named 'wan') are never locked out of SSH/Web Console.
+        const hostCandidates = [
+          ...ifaceList,
+          ...state.interfaces.filter((i) => i.enabled).map((i) => i.name),
+        ];
+        for (const ifaceName of hostCandidates) {
+          const dev = ifDeviceMap.get(ifaceName) || ifaceName;
+          if (isValidDevice(dev) && !seenDevs.has(dev)) {
+            seenDevs.add(dev);
+            const comment = ifaceName === 'lan' ? 'anti-lockout' : `anti-lockout-${ifaceName}`;
+            lines.push(`    iifname "${dev}" tcp dport { ${ports} } accept comment "${comment}"`);
+          }
         }
       }
     }
@@ -1040,6 +1043,7 @@ export function compileNftables(state: DesiredState): CompileResult {
           alias.type === 'asn'
         ) {
           lines.push('    flags interval;');
+          lines.push('    auto-merge;');
         }
         lines.push(`    elements = { ${elements} };`);
         lines.push('  }');
@@ -1172,8 +1176,8 @@ export function compileNftables(state: DesiredState): CompileResult {
     }
 
     if (nat.type !== 'dnat') continue;
-    if (nat.sourcePort?.startsWith('$') && !emittedSets.has(`set_${sanitizeIdentifier(nat.sourcePort.slice(1))}`)) continue;
-    if (nat.destinationPort?.startsWith('$') && !emittedSets.has(`set_${sanitizeIdentifier(nat.destinationPort.slice(1))}`)) continue;
+    if (nat.sourcePort?.startsWith('$') && emittedSets.get(`set_${sanitizeIdentifier(nat.sourcePort.slice(1))}`)?.setType !== 'inet_service') continue;
+    if (nat.destinationPort?.startsWith('$') && emittedSets.get(`set_${sanitizeIdentifier(nat.destinationPort.slice(1))}`)?.setType !== 'inet_service') continue;
 
     const addrClauses: string[] = [];
     if (nat.source && nat.source !== 'any') {
@@ -1254,25 +1258,30 @@ export function compileNftables(state: DesiredState): CompileResult {
   lines.push('    icmpv6 type { echo-request, echo-reply, nd-router-solicit, nd-router-advert, nd-neighbor-solicit, nd-neighbor-advert } accept');
 
   // Anti-Lockout Rule (Evaluated BEFORE dynamic AI/SOAR blocklists so management access can never be locked out)
-  if (state.system.antiLockout?.enabled) {
+  if (state.system.antiLockout?.enabled && (state.system.antiLockout.ports?.length ?? 0) > 0) {
     const ifaceList = normalizeAntiLockoutInterfaces(state.system.antiLockout);
-    const ports = state.system.antiLockout.ports.join(', ');
-    for (const ifaceName of ifaceList) {
-      if (!isWanInterfaceName(ifaceName)) {
-        const dev = ifDeviceMap.get(ifaceName) || ifaceName;
-        if (isValidDevice(dev)) {
-          lines.push(`    # Anti-Lockout: Allow management access from ${ifaceName}`);
-          const comment = ifaceName === 'lan' ? 'anti-lockout' : `anti-lockout-${ifaceName}`;
-          lines.push(`    iifname "${dev}" tcp dport { ${ports} } accept comment "${comment}"`);
+    const validPorts = state.system.antiLockout.ports.filter((p) => Number.isInteger(p) && p >= 1 && p <= 65535);
+    if (validPorts.length > 0) {
+      const ports = validPorts.join(', ');
+      for (const ifaceName of ifaceList) {
+        if (!isWanInterfaceName(ifaceName)) {
+          const dev = ifDeviceMap.get(ifaceName) || ifaceName;
+          if (isValidDevice(dev)) {
+            lines.push(`    # Anti-Lockout: Allow management access from ${ifaceName}`);
+            const comment = ifaceName === 'lan' ? 'anti-lockout' : `anti-lockout-${ifaceName}`;
+            lines.push(`    iifname "${dev}" tcp dport { ${ports} } accept comment "${comment}"`);
+          }
+        } else {
+          warnings.push("Anti-Lockout interface was set to 'wan'; suppressed generation on WAN for appliance security.");
         }
-      } else {
-        warnings.push("Anti-Lockout interface was set to 'wan'; suppressed generation on WAN for appliance security.");
       }
     }
   }
 
-  if (state.crowdsec?.enabled) {
-    lines.push(`    ${crowdsecCompiled.nftRule} comment "crowdsec-drop"`);
+  if (state.crowdsec?.enabled && crowdsecCompiled.nftRule) {
+    for (const csLine of crowdsecCompiled.nftRule.split('\n').map((l) => l.trim()).filter(Boolean)) {
+      lines.push(`    ${csLine} comment "crowdsec-drop"`);
+    }
   }
   if (state.geoip?.enabled && geoipCompiled.inputRules.length > 0) {
     for (const rule of geoipCompiled.inputRules) {
@@ -1383,6 +1392,11 @@ export function compileNftables(state: DesiredState): CompileResult {
   lines.push('    type filter hook forward priority filter; policy drop;');
   // Suricata IPS rules
   lines.push(...suricataCompiled.nftRules.map(r => '    ' + r));
+  if (state.crowdsec?.enabled && crowdsecCompiled.nftRule) {
+    for (const csLine of crowdsecCompiled.nftRule.split('\n').map((l) => l.trim()).filter(Boolean)) {
+      lines.push(`    ${csLine} comment "crowdsec-drop"`);
+    }
+  }
   if (state.geoip?.enabled && geoipCompiled.forwardRules.length > 0) {
     for (const rule of geoipCompiled.forwardRules) {
       lines.push(`    ${rule}`);
@@ -1648,6 +1662,10 @@ export function compileNftables(state: DesiredState): CompileResult {
       parts.push(`${fam} ${addrDir} ${sgRule.cidr}`);
     }
     const hasPort = Boolean(sgRule.port && sgRule.port !== 'any' && !/[;\r\n#{}'"]/.test(sgRule.port));
+    if (hasPort && sgRule.port.startsWith('$')) {
+      const setName = `set_${sanitizeIdentifier(sgRule.port.slice(1))}`;
+      if (emittedSets.get(setName)?.setType !== 'inet_service') return '';
+    }
     if (sgRule.protocol === 'tcp' || sgRule.protocol === 'udp') {
       if (hasPort) {
         parts.push(`${sgRule.protocol} dport ${formatPort(sgRule.port)}`);
@@ -2014,7 +2032,7 @@ function resolveEndpointClause(
     const setName = forceV6Set ? `${baseSetName}_v6` : baseSetName;
     if (emittedSets) {
       const setInfo = emittedSets.get(setName);
-      if (!setInfo) return null;
+      if (!setInfo || setInfo.setType === 'inet_service') return null;
       if (setInfo.setType === 'ether_addr') {
         return `ether ${dir} ${op}@${setName}`;
       }
@@ -2108,14 +2126,14 @@ function formatSingleRuleStatement(
     return '';
   }
 
-  // Verify port aliases exist in emittedSets before emitting rule
+  // Verify port aliases exist as inet_service sets before emitting rule
   if (rule.sourcePort?.startsWith('$')) {
     const setName = `set_${sanitizeIdentifier(rule.sourcePort.slice(1))}`;
-    if (emittedSets && !emittedSets.has(setName)) return '';
+    if (emittedSets && emittedSets.get(setName)?.setType !== 'inet_service') return '';
   }
   if (rule.destinationPort?.startsWith('$')) {
     const setName = `set_${sanitizeIdentifier(rule.destinationPort.slice(1))}`;
-    if (emittedSets && !emittedSets.has(setName)) return '';
+    if (emittedSets && emittedSets.get(setName)?.setType !== 'inet_service') return '';
   }
 
   // Source Address

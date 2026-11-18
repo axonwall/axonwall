@@ -759,7 +759,8 @@ export function isPluginEnabled(pluginId: string, state?: Partial<DesiredState> 
     return (
       pluginId === 'core-firewall' ||
       pluginId === 'cli-workstation' ||
-      pluginId === 'host-malware-rootkit'
+      pluginId === 'host-malware-rootkit' ||
+      pluginId === 'coroot-ebpf-apm'
     );
   }
 
@@ -838,6 +839,13 @@ export function isPluginEnabled(pluginId: string, state?: Partial<DesiredState> 
   }
   if (pluginId === 'snmp') {
     return Boolean(state.snmp?.enabled) || Boolean(state.plugins?.some((p) => p.id === 'snmp' && p.enabled));
+  }
+  if (pluginId === 'coroot-ebpf-apm') {
+    const pluginEntry = state.plugins?.find((p) => p.id === 'coroot-ebpf-apm');
+    if (state.observability?.ebpfApm?.enabled !== undefined) {
+      return state.observability.ebpfApm.enabled && (pluginEntry ? pluginEntry.enabled !== false : true);
+    }
+    return pluginEntry ? pluginEntry.enabled !== false : true;
   }
 
   // Generic extension plugin check
@@ -963,7 +971,25 @@ export function disablePluginWithDependents(
       autoDisabledDependents.push(id);
     }
 
-    if (id === 'core-k3s') {
+    if (id === 'core-firewall') {
+      if (next.capabilities) {
+        next.capabilities.firewallEnabled = false;
+      }
+    } else if (id === 'core-nas') {
+      if (next.capabilities) {
+        next.capabilities.nasEnabled = false;
+      }
+      if (next.nas) {
+        next.nas.enabled = false;
+      }
+    } else if (id === 'core-virt') {
+      if (next.capabilities) {
+        next.capabilities.virtEnabled = false;
+      }
+      if (next.virt) {
+        next.virt.enabled = false;
+      }
+    } else if (id === 'core-k3s') {
       if (next.capabilities) {
         next.capabilities.k3sEnabled = false;
       }
@@ -992,6 +1018,34 @@ export function disablePluginWithDependents(
     } else if (id === 'eluvix') {
       if (next.eluvix) {
         next.eluvix.enabled = false;
+      }
+    } else if (id === 'haproxy') {
+      if (next.haproxy) {
+        next.haproxy.enabled = false;
+      }
+    } else if (id === 'rosenpass') {
+      if (next.rosenpass) {
+        next.rosenpass.enabled = false;
+      }
+    } else if (id === 'freeradius') {
+      if (next.freeradius) {
+        next.freeradius.enabled = false;
+      }
+    } else if (id === 'snmp') {
+      if (next.snmp) {
+        next.snmp.enabled = false;
+      }
+    } else if (id === 'nut-ups') {
+      if (next.ups) {
+        next.ups.enabled = false;
+      }
+    } else if (id === 'headscale') {
+      if (next.headscale) {
+        next.headscale.enabled = false;
+      }
+    } else if (id === 'coroot-ebpf-apm') {
+      if (next.observability?.ebpfApm) {
+        next.observability.ebpfApm.enabled = false;
       }
     }
 

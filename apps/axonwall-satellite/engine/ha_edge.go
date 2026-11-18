@@ -4,7 +4,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
+	"strings"
 	"sync"
 	"time"
 )
@@ -27,6 +29,7 @@ type EdgeHAEngine struct {
 	mu         sync.RWMutex
 	placement  string
 	role       string
+	lastWanDev string
 	lastLanDev string
 	lastVipV4  string
 	lastVipV6  string
@@ -134,6 +137,7 @@ func (h *EdgeHAEngine) Promote(netEngine *EdgeNetworkEngine, p EdgeHATransitionP
 		return errors.Join(errs...)
 	}
 
+	h.lastWanDev = wanDev
 	h.lastLanDev = lanDev
 	if p.LanVipV4 != "" {
 		h.lastVipV4 = p.LanVipV4
@@ -157,6 +161,9 @@ func (h *EdgeHAEngine) Demote(netEngine *EdgeNetworkEngine, p EdgeHATransitionPa
 		h.placement = p.Placement
 	}
 	wanDev := p.WanDevice
+	if wanDev == "" {
+		wanDev = h.lastWanDev
+	}
 	if wanDev == "" {
 		wanDev = "eth0"
 	}
@@ -209,8 +216,84 @@ func (h *EdgeHAEngine) Demote(netEngine *EdgeNetworkEngine, p EdgeHATransitionPa
 		}
 		return errors.Join(errs...)
 	}
+	h.lastWanDev = wanDev
+	h.lastLanDev = lanDev
+	if vip4 != "" {
+		h.lastVipV4 = vip4
+	}
+	if vip6 != "" {
+		h.lastVipV6 = vip6
+	}
 	h.role = "standby"
 	return nil
+}
+
+func sameHAAddrOrCIDR(a, b string) bool {
+	a = strings.TrimSpace(a)
+	b = strings.TrimSpace(b)
+	if a == "" || b == "" {
+		return false
+	}
+	if a == b {
+		return true
+	}
+	aIP, _, aErr := net.ParseCIDR(a)
+	if aErr != nil {
+		aIP = net.ParseIP(a)
+	}
+	bIP, _, bErr := net.ParseCIDR(b)
+	if bErr != nil {
+		bIP = net.ParseIP(b)
+	}
+	return aIP != nil && bIP != nil && aIP.Equal(bIP)
+}
+
+// PrepareSyncedInterface enforces standby fencing when a hub SYNC_INTERFACES
+// payload arrives while this node is in "standby" HA role: WAN stays admin-down
+// and shared LAN VIPs are stripped before kernel application.
+func (h *EdgeHAEngine) PrepareSyncedInterface(iface EdgeInterfaceSpec) (EdgeInterfaceSpec, bool) {
+	h.mu.RLock()
+	role := h.role
+	wanDev := h.lastWanDev
+	lanDev := h.lastLanDev
+	vip4 := h.lastVipV4
+	vip6 := h.lastVipV6
+	h.mu.RUnlock()
+
+	if role != "standby" {
+		return iface, true
+	}
+
+	dev := strings.TrimSpace(iface.Device)
+	isWan := (wanDev != "" && dev == wanDev) || (wanDev == "" && strings.EqualFold(strings.TrimSpace(iface.Name), "wan"))
+	if isWan {
+		iface.Enabled = false
+	}
+
+	isLan := lanDev == "" || dev == lanDev
+	if isLan {
+		if sameHAAddrOrCIDR(iface.Address, vip4) || sameHAAddrOrCIDR(iface.Address, vip6) {
+			iface.Address = ""
+		}
+		if sameHAAddrOrCIDR(iface.IPv6Address, vip6) || sameHAAddrOrCIDR(iface.IPv6Address, vip4) {
+			iface.IPv6Address = ""
+		}
+		if iface.Address == "" && iface.IPv6Address == "" &&
+			strings.HasPrefix(strings.ToLower(strings.TrimSpace(iface.Name)), "lan-vip") {
+			return iface, false
+		}
+	}
+
+	return iface, true
+}
+
+// ApplySyncedInterface applies a hub-pushed EdgeInterfaceSpec while preserving HA standby fencing.
+func (h *EdgeHAEngine) ApplySyncedInterface(netEngine *EdgeNetworkEngine, iface EdgeInterfaceSpec) error {
+	filtered, apply := h.PrepareSyncedInterface(iface)
+	if !apply {
+		return nil
+	}
+	return netEngine.ConfigureInterface(filtered)
 }
 
 // StartHardwareWatchdog pets /dev/watchdog (e.g. QEMU i6300esb or Intel iTCO_wdt) every 10s.

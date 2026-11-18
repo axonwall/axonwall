@@ -17,7 +17,6 @@ import {
   AXONWALL_YAML_FILENAMES,
   serializeDesiredStateToYamlFiles,
   serializeDesiredStateToSingleYaml,
-  parseDesiredStateFromYamlFiles,
   validateYamlConfigFiles,
 } from '@axonwall/lib/yaml';
 import {
@@ -58,18 +57,39 @@ import { headers } from 'next/headers';
 
 const execFileAsync = promisify(execFile);
 
-import { callAgentApi } from './agent-client';
+import { callAgentApi, callAgentApiDetailed, callAgentApiResponse } from './agent-client';
 import {
-  discoverHostPrimaryDevices,
-  getEtcConfigDir,
-  getPersistConfigDir,
+  BASELINE_STATE,
+  ETC_CONFIG_DIR,
+  PERSIST_CONFIG_DIR,
+  YAML_CONFIG_DIRS,
+  computeSubnetAndDefaultPool,
+  getDesiredStateInternal,
+  invalidateDesiredStateCacheInternal,
+  ipToUint32,
+  persistDesiredStateToDisk,
+  readAllYamlConfigFiles,
+  restoreDesiredStateSnapshot,
+  snapshotDesiredStateOnDisk,
+  syncNetworkInterfacesFiles,
+  writeConfigFileSafe,
+} from './desired-state-internal';
+import {
   getStateDir,
-  getStateJsonPath,
   isApplianceRuntime,
   isDevRuntime,
   isVirtualOrLoopbackInterface,
   readHostOSRelease,
 } from './dev-paths';
+
+function isDevModeRuntime(): boolean {
+  return (
+    isDevRuntime() ||
+    process.env.AXONWALL_DEV_MODE === '1' ||
+    process.env.AXONWALL_DEV_MODE === 'true' ||
+    process.env.NODE_ENV === 'development'
+  );
+}
 
 export interface AgentStatus {
   nodeId: string;
@@ -220,650 +240,6 @@ export async function getAgentStatus(): Promise<AgentStatus> {
     runtimeMode: fallbackMode,
     interfaces: interfaceList,
   };
-}
-
-function buildBaselineState(): DesiredState {
-  const hostDevices = !isApplianceRuntime() ? discoverHostPrimaryDevices() : [];
-  let wanDev = hostDevices[0] || 'eth0';
-  let wanMode: 'dhcp' | 'static' = 'dhcp';
-  let wanIp: string | undefined;
-  let wanGw: string | undefined;
-  let lanDev = hostDevices.length >= 2 ? hostDevices[1] : isApplianceRuntime() || hostDevices.length === 0 ? 'eth1' : '';
-  let lanMode: 'dhcp' | 'static' = 'static';
-  let lanIp = '192.168.1.1/24';
-  let opt1Dev = '';
-  let opt1Mode: 'dhcp' | 'static' = 'dhcp';
-  let opt1Ip: string | undefined;
-  let opt2Dev = '';
-  let opt2Mode: 'dhcp' | 'static' = 'dhcp';
-  let opt2Ip: string | undefined;
-
-  try {
-    const confPath = path.join(getEtcConfigDir(), 'interfaces.conf');
-    if (fs.existsSync(confPath)) {
-      const conf = fs.readFileSync(confPath, 'utf8');
-      for (const rawLine of conf.split('\n')) {
-        const line = rawLine.trim();
-        if (!line || line.startsWith('#') || !line.includes('=')) continue;
-        const idx = line.indexOf('=');
-        const k = line.slice(0, idx).trim();
-        const v = line.slice(idx + 1).trim();
-        if (k === 'WAN_INTERFACE') wanDev = isValidDevice(v) ? v : '';
-        else if (k === 'WAN_MODE' && (v === 'dhcp' || v === 'static')) wanMode = v;
-        else if (k === 'WAN_IPV4_ADDRESS' && v) wanIp = v;
-        else if (k === 'WAN_IPV4_GATEWAY' && v) wanGw = v;
-        else if (k === 'LAN_INTERFACE') lanDev = isValidDevice(v) ? v : '';
-        else if (k === 'LAN_MODE' && (v === 'dhcp' || v === 'static')) lanMode = v;
-        else if (k === 'LAN_IPV4_ADDRESS' && v) lanIp = v;
-        else if (k === 'OPT1_INTERFACE') opt1Dev = isValidDevice(v) ? v : '';
-        else if (k === 'OPT1_MODE' && (v === 'dhcp' || v === 'static')) opt1Mode = v;
-        else if (k === 'OPT1_IPV4_ADDRESS' && v) opt1Ip = v;
-        else if (k === 'OPT2_INTERFACE') opt2Dev = isValidDevice(v) ? v : '';
-        else if (k === 'OPT2_MODE' && (v === 'dhcp' || v === 'static')) opt2Mode = v;
-        else if (k === 'OPT2_IPV4_ADDRESS' && v) opt2Ip = v;
-      }
-    }
-  } catch {}
-
-  const antiLockoutIfaces = ['lan'];
-  if (opt1Dev) antiLockoutIfaces.push('opt1');
-  if (opt2Dev) antiLockoutIfaces.push('opt2');
-
-  return DesiredStateSchema.parse({
-    version: 1,
-    system: {
-      hostname: 'axonwall-core',
-      domain: 'axonwall.local',
-      dnsServers: ['1.1.1.1', '8.8.8.8'],
-      timezone: 'UTC',
-      flowtableOffload: true,
-      antiLockout: {
-        enabled: true,
-        interface: 'lan',
-        interfaces: antiLockoutIfaces,
-        ports: [22, 80, 443, 2966, 3000],
-      },
-    },
-    interfaces: [
-      {
-        name: 'wan',
-        role: 'wan',
-        device: wanDev || 'none',
-        type: wanMode,
-        enabled: Boolean(wanDev),
-        dhcpServer: false,
-        ...(wanMode === 'static' && wanIp ? { ipv4Address: wanIp } : {}),
-        ...(wanMode === 'static' && wanGw ? { ipv4Gateway: wanGw } : {}),
-        mtu: 1500,
-        description: 'WAN Gateway',
-      },
-      {
-        name: 'lan',
-        role: 'lan',
-        device: lanDev || 'none',
-        type: lanMode,
-        enabled: Boolean(lanDev),
-        dhcpServer: lanMode === 'static',
-        ...(lanMode === 'static' && lanIp ? { ipv4Address: lanIp } : {}),
-        mtu: 1500,
-        description: 'LAN Network',
-      },
-      ...(opt1Dev
-        ? [
-            {
-              name: 'opt1',
-              role: 'lan' as const,
-              device: opt1Dev,
-              type: opt1Mode,
-              enabled: true,
-              dhcpServer: false,
-              ...(opt1Mode === 'static' && opt1Ip ? { ipv4Address: opt1Ip } : {}),
-              mtu: 1500,
-              description: 'OPT1 (Attached Network / Non-authoritative)',
-            },
-          ]
-        : []),
-      ...(opt2Dev
-        ? [
-            {
-              name: 'opt2',
-              role: 'lan' as const,
-              device: opt2Dev,
-              type: opt2Mode,
-              enabled: true,
-              dhcpServer: false,
-              ...(opt2Mode === 'static' && opt2Ip ? { ipv4Address: opt2Ip } : {}),
-              mtu: 1500,
-              description: 'OPT2 (Attached Network / Non-authoritative)',
-            },
-          ]
-        : []),
-    ],
-    aliases: [],
-    rules: [],
-    nat: [],
-    gateways: [],
-    gatewayGroups: [],
-    vlans: [],
-    bridges: [],
-    bonds: [],
-    virtualIps: [],
-    vrfs: [],
-    dhcp: { enabled: true, subnets: [] },
-    dns: { enabled: true, listenPort: 53, dnssec: true, dotEnabled: true, dotUpstreams: [], hostOverrides: [] },
-    routes: [],
-  });
-}
-
-const BASELINE_STATE: DesiredState = buildBaselineState();
-
-const ETC_CONFIG_DIR = getEtcConfigDir();
-const PERSIST_CONFIG_DIR = getPersistConfigDir();
-const YAML_CONFIG_DIRS = Array.from(new Set([PERSIST_CONFIG_DIR, ETC_CONFIG_DIR]));
-
-let cachedDesiredState: DesiredState | null = null;
-let lastLoadedFingerprint = '';
-
-function readAllYamlConfigFiles(): {
-  files: Record<string, string>;
-  fingerprint: string;
-} {
-  const files: Record<string, string> = {};
-
-  // Read fallback from /var/lib/axonwall/etc-axonwall first, then overlay /etc/axonwall
-  for (const dir of [PERSIST_CONFIG_DIR, ETC_CONFIG_DIR]) {
-    if (!fs.existsSync(dir)) continue;
-    for (const filename of AXONWALL_YAML_FILENAMES) {
-      const fullPath = path.join(dir, filename);
-      if (fs.existsSync(fullPath)) {
-        try {
-          files[filename] = fs.readFileSync(fullPath, 'utf8');
-        } catch {}
-      }
-    }
-    const singlePath = path.join(dir, 'axonwall.yaml');
-    if (fs.existsSync(singlePath)) {
-      try {
-        files['axonwall.yaml'] = fs.readFileSync(singlePath, 'utf8');
-      } catch {}
-    }
-    const confD = path.join(dir, 'conf.d');
-    if (fs.existsSync(confD)) {
-      try {
-        for (const entry of fs.readdirSync(confD).sort()) {
-          if (entry.endsWith('.yaml') || entry.endsWith('.yml')) {
-            const entryPath = path.join(confD, entry);
-            files[`conf.d/${entry}`] = fs.readFileSync(entryPath, 'utf8');
-          }
-        }
-      } catch {}
-    }
-  }
-
-  const hash = crypto.createHash('sha256');
-  for (const [k, v] of Object.entries(files).sort()) {
-    hash.update(`${k}:${v}\n`);
-  }
-
-  return { files, fingerprint: hash.digest('hex') };
-}
-
-function writeConfigFileSafe(targetPath: string, content: string, mode = 0o660): boolean {
-  try {
-    const parent = path.dirname(targetPath);
-    if (!fs.existsSync(parent)) {
-      fs.mkdirSync(parent, { recursive: true, mode: 0o775 });
-    }
-    try {
-      fs.writeFileSync(targetPath, content, { mode });
-      return true;
-    } catch {
-      try {
-        if (fs.existsSync(targetPath)) {
-          fs.unlinkSync(targetPath);
-        }
-        fs.writeFileSync(targetPath, content, { mode });
-        return true;
-      } catch {}
-    }
-  } catch {}
-  return false;
-}
-
-function persistDesiredStateToDisk(state: DesiredState): Record<string, string> {
-  const normalized = DesiredStateSchema.parse(state);
-
-  // Ensure any enabled authoritative LAN interface with a static CIDR has a matching subnet in normalized.dhcp.subnets
-  if (normalized.dhcp?.enabled !== false) {
-    if (!normalized.dhcp) {
-      normalized.dhcp = { enabled: true, subnets: [] };
-    }
-    for (const iface of normalized.interfaces || []) {
-      if (!iface.enabled || !isValidDevice(iface.device)) continue;
-      if (inferInterfaceRole(iface) === 'wan') continue;
-      if (iface.type !== 'static' || iface.dhcpServer !== true || !iface.ipv4Address) continue;
-      const hasSubnet = (normalized.dhcp.subnets || []).some((s) => s.interface === iface.name);
-      if (!hasSubnet) {
-        const subnetInfo = computeSubnetAndDefaultPool(iface.ipv4Address);
-        if (subnetInfo) {
-          normalized.dhcp.subnets.push({
-            id: crypto.randomUUID(),
-            interface: iface.name,
-            subnet: subnetInfo.subnetCidr,
-            poolStart: subnetInfo.poolStart,
-            poolEnd: subnetInfo.poolEnd,
-            routers: [subnetInfo.routerIp],
-            dnsServers: [subnetInfo.routerIp],
-            staticMappings: [],
-            enabled: true,
-          });
-        }
-      }
-    }
-  }
-
-  const yamlFiles = serializeDesiredStateToYamlFiles(normalized);
-  const daemonFileMap: Record<string, string> = {};
-
-  for (const [filename, content] of Object.entries(yamlFiles)) {
-    daemonFileMap[`/etc/axonwall/${filename}`] = content;
-  }
-
-  for (const dir of [PERSIST_CONFIG_DIR, ETC_CONFIG_DIR]) {
-    try {
-      if (!fs.existsSync(dir)) {
-        fs.mkdirSync(dir, { recursive: true, mode: 0o775 });
-      }
-      for (const [filename, content] of Object.entries(yamlFiles)) {
-        writeConfigFileSafe(path.join(dir, filename), content, 0o660);
-      }
-      // Remove legacy monolithic axonwall.yaml so it cannot shadow split YAML files on reload
-      const legacyMonolithic = path.join(dir, 'axonwall.yaml');
-      if (fs.existsSync(legacyMonolithic)) {
-        try {
-          fs.unlinkSync(legacyMonolithic);
-        } catch {}
-      }
-    } catch {}
-  }
-
-  const jsonSerialized = JSON.stringify(normalized, null, 2);
-  for (const jsonPath of Array.from(
-    new Set([
-      getStateJsonPath(),
-      path.join(PERSIST_CONFIG_DIR, 'state.json'),
-      path.join(ETC_CONFIG_DIR, 'state.json'),
-    ])
-  )) {
-    writeConfigFileSafe(jsonPath, jsonSerialized, 0o660);
-  }
-
-  // Keep interfaces.conf and /etc/network/interfaces synchronized whenever desired state is persisted
-  const { confContent } = syncNetworkInterfacesFiles(normalized);
-  daemonFileMap['/etc/axonwall/interfaces.conf'] = confContent;
-
-  cachedDesiredState = normalized;
-  const { fingerprint } = readAllYamlConfigFiles();
-  lastLoadedFingerprint = fingerprint;
-  return daemonFileMap;
-}
-
-function syncNetworkInterfacesFiles(state: DesiredState): { ifacesContent: string; confContent: string } {
-  const wanIface =
-    state.interfaces?.find((i) => i.name === 'wan') ||
-    state.interfaces?.find((i) => inferInterfaceRole(i) === 'wan' && i.enabled);
-  const lanIface =
-    state.interfaces?.find((i) => i.name === 'lan') ||
-    state.interfaces?.find((i) => inferInterfaceRole(i) === 'lan' && i.enabled);
-  const opt1Iface = state.interfaces?.find((i) => i.name === 'opt1');
-  const opt2Iface = state.interfaces?.find((i) => i.name === 'opt2');
-
-  const cleanDev = (iface?: typeof wanIface): string => {
-    if (!iface || !iface.enabled || !isValidDevice(iface.device)) return '';
-    return iface.device;
-  };
-
-  const confLines = [
-    `WAN_INTERFACE=${cleanDev(wanIface)}`,
-    `WAN_MODE=${wanIface?.type || 'dhcp'}`,
-    `WAN_IPV4_ADDRESS=${wanIface?.ipv4Address || ''}`,
-    `WAN_IPV4_GATEWAY=${wanIface?.ipv4Gateway || ''}`,
-    `WAN_DNS1=${state.system?.dnsServers?.[0] || '1.1.1.1'}`,
-    `WAN_DNS2=${state.system?.dnsServers?.[1] || '8.8.8.8'}`,
-    `LAN_INTERFACE=${cleanDev(lanIface)}`,
-    `LAN_MODE=${lanIface?.type || 'static'}`,
-    `LAN_IPV4_ADDRESS=${lanIface?.ipv4Address || '192.168.1.1/24'}`,
-    `LAN_DHCP_ENABLED=${Boolean(cleanDev(lanIface)) && isInterfaceAuthoritativeDhcp(lanIface || { name: 'lan', type: 'static' }, state.dhcp)}`,
-    `OPT1_INTERFACE=${cleanDev(opt1Iface)}`,
-    `OPT1_MODE=${opt1Iface?.type || 'dhcp'}`,
-    `OPT1_IPV4_ADDRESS=${opt1Iface?.ipv4Address || ''}`,
-    `OPT2_INTERFACE=${cleanDev(opt2Iface)}`,
-    `OPT2_MODE=${opt2Iface?.type || 'dhcp'}`,
-    `OPT2_IPV4_ADDRESS=${opt2Iface?.ipv4Address || ''}`,
-  ];
-
-  // Also emit N-interface metadata for boot scripts and console tools
-  const allIfaces = state.interfaces || [];
-  const activeNames = allIfaces.filter((i) => Boolean(cleanDev(i))).map((i) => i.name);
-  confLines.push(`AXONWALL_INTERFACES=${activeNames.join(',')}`);
-  for (const iface of allIfaces) {
-    const dev = cleanDev(iface);
-    if (!dev) continue;
-    const keyPrefix = `IFACE_${iface.name.toUpperCase().replace(/[^A-Z0-9_]/g, '_')}`;
-    const role = inferInterfaceRole(iface);
-    const authDhcp = isInterfaceAuthoritativeDhcp(iface, state.dhcp);
-    confLines.push(`${keyPrefix}_NAME=${iface.name}`);
-    confLines.push(`${keyPrefix}_DEVICE=${dev}`);
-    confLines.push(`${keyPrefix}_ROLE=${role}`);
-    confLines.push(`${keyPrefix}_MODE=${iface.type}`);
-    confLines.push(`${keyPrefix}_IPV4_ADDRESS=${iface.ipv4Address || ''}`);
-    confLines.push(`${keyPrefix}_IPV4_GATEWAY=${iface.ipv4Gateway || ''}`);
-    confLines.push(`${keyPrefix}_DHCP_SERVER=${authDhcp ? 'true' : 'false'}`);
-  }
-
-  const confContent = confLines.join('\n') + '\n';
-
-  for (const dir of YAML_CONFIG_DIRS) {
-    writeConfigFileSafe(path.join(dir, 'interfaces.conf'), confContent, 0o664);
-  }
-
-  const cidrToNetmask = (cidr: number): string => {
-    const mask = [];
-    for (let i = 0; i < 4; i++) {
-      const bits = Math.max(0, Math.min(8, cidr - i * 8));
-      mask.push(256 - Math.pow(2, 8 - bits));
-    }
-    return mask.join('.');
-  };
-
-  const routes = (state.routes || []).filter((r) => r.enabled ?? true);
-
-  const renderIfaceStanza = (label: string, ifaceObj?: typeof wanIface) => {
-    if (!ifaceObj || !ifaceObj.device || !ifaceObj.enabled || !isValidDevice(ifaceObj.device)) return '';
-    const roleLabel = inferInterfaceRole(ifaceObj).toUpperCase();
-    let s = `# ${label} (${roleLabel}) Interface\nauto ${ifaceObj.device}\n`;
-    if (ifaceObj.type === 'static' && ifaceObj.ipv4Address) {
-      const parts = ifaceObj.ipv4Address.split('/');
-      const ip = parts[0];
-      const cidr = parts[1] ? parseInt(parts[1], 10) : 24;
-      s += `iface ${ifaceObj.device} inet static\n`;
-      s += `    address ${ip}\n`;
-      s += `    netmask ${cidrToNetmask(cidr)}\n`;
-      if (ifaceObj.ipv4Gateway) {
-        s += `    gateway ${ifaceObj.ipv4Gateway}\n`;
-      }
-      if (state.system?.dnsServers && state.system.dnsServers.length > 0) {
-        s += `    dns-nameservers ${state.system.dnsServers.join(' ')}\n`;
-      }
-    } else {
-      s += `iface ${ifaceObj.device} inet dhcp\n`;
-    }
-
-    // Attach static routes bound to this interface
-    const ifaceRoutes = routes.filter((r) => {
-      const iface = (r.interface || '').toLowerCase().trim();
-      return iface === label.toLowerCase() || iface === ifaceObj.name?.toLowerCase() || iface === ifaceObj.device.toLowerCase();
-    });
-
-    for (const r of ifaceRoutes) {
-      if (r.network && r.gateway) {
-        s += `    up ip route replace ${r.network} via ${r.gateway} dev ${ifaceObj.device} proto static || true\n`;
-        s += `    down ip route del ${r.network} proto static || true\n`;
-      }
-    }
-
-    return s + '\n';
-  };
-
-  let ifaces = '# /etc/network/interfaces -- Generated by Axonwall\n';
-  ifaces += '# This file is managed by Axonwall. Manual changes will be overwritten.\n\n';
-  ifaces += 'auto lo\niface lo inet loopback\n\n';
-
-  const seenDevices = new Set<string>();
-  for (const ifaceObj of allIfaces) {
-    if (!ifaceObj || !ifaceObj.device || !ifaceObj.enabled || !isValidDevice(ifaceObj.device)) continue;
-    if (seenDevices.has(ifaceObj.device)) continue;
-    seenDevices.add(ifaceObj.device);
-    ifaces += renderIfaceStanza(ifaceObj.name.toUpperCase(), ifaceObj);
-  }
-
-  const unboundRoutes = routes.filter((r) => {
-    const iface = (r.interface || '').toLowerCase().trim();
-    return !iface || iface === 'auto';
-  });
-
-  if (unboundRoutes.length > 0) {
-    ifaces += '# System-wide Static Routes\n';
-    for (const r of unboundRoutes) {
-      if (r.network && r.gateway) {
-        ifaces += `# Route ${r.network} via ${r.gateway}\n`;
-      }
-    }
-  }
-
-  if (isApplianceRuntime() && readHostOSRelease().family === 'debian') {
-    try {
-      if (!fs.existsSync('/etc/network')) {
-        fs.mkdirSync('/etc/network', { recursive: true });
-      }
-      fs.writeFileSync('/etc/network/interfaces', ifaces, 'utf8');
-      if (fs.existsSync('/etc/network/interfaces.d/axonwall')) {
-        try {
-          fs.unlinkSync('/etc/network/interfaces.d/axonwall');
-        } catch {}
-      }
-    } catch {}
-  }
-
-  return { ifacesContent: ifaces, confContent };
-}
-
-function reconcileStateWithInterfacesConf(state: DesiredState): boolean {
-  let rawConf = '';
-  let activeConfPath = '';
-  for (const confPath of Array.from(
-    new Set([path.join(PERSIST_CONFIG_DIR, 'interfaces.conf'), path.join(ETC_CONFIG_DIR, 'interfaces.conf')])
-  )) {
-    try {
-      if (fs.existsSync(confPath)) {
-        const text = fs.readFileSync(confPath, 'utf8');
-        if (text && text.includes('AXONWALL_INTERFACES=')) {
-          rawConf = text;
-          activeConfPath = confPath;
-          break;
-        }
-        if (!rawConf && text) {
-          rawConf = text;
-          activeConfPath = confPath;
-        }
-      }
-    } catch {}
-  }
-  if (!rawConf) return false;
-
-  // If interfaces.yaml was edited more recently than interfaces.conf (e.g. via CLI/vim),
-  // do not resurrect deleted interfaces from a stale interfaces.conf.
-  try {
-    if (activeConfPath && fs.existsSync(activeConfPath) && Array.isArray(state.interfaces) && state.interfaces.length > 0) {
-      const confMtimeMs = fs.statSync(activeConfPath).mtimeMs;
-      for (const yamlPath of Array.from(
-        new Set([path.join(ETC_CONFIG_DIR, 'interfaces.yaml'), path.join(PERSIST_CONFIG_DIR, 'interfaces.yaml')])
-      )) {
-        if (fs.existsSync(yamlPath)) {
-          const yamlMtimeMs = fs.statSync(yamlPath).mtimeMs;
-          if (yamlMtimeMs > confMtimeMs + 2000) {
-            return false;
-          }
-        }
-      }
-    }
-  } catch {}
-
-  const kv: Record<string, string> = {};
-  for (const line of rawConf.split('\n')) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith('#') || !trimmed.includes('=')) continue;
-    const idx = trimmed.indexOf('=');
-    kv[trimmed.slice(0, idx).trim()] = trimmed.slice(idx + 1).trim();
-  }
-
-  if (!('AXONWALL_INTERFACES' in kv)) return false;
-
-  const activeNames = (kv.AXONWALL_INTERFACES || '')
-    .split(',')
-    .map((s) => s.trim().toLowerCase())
-    .filter(Boolean);
-  if (activeNames.length === 0) return false;
-
-  let changed = false;
-  if (!Array.isArray(state.interfaces)) {
-    state.interfaces = [];
-  }
-
-  for (const name of activeNames) {
-    const keyPrefix = `IFACE_${name.toUpperCase().replace(/[^A-Z0-9_]/g, '_')}`;
-    const dev = (kv[`${keyPrefix}_DEVICE`] || '').trim();
-    if (!isValidDevice(dev)) continue;
-
-    const rawRole = (kv[`${keyPrefix}_ROLE`] || '').trim().toLowerCase();
-    const role: InterfaceRole = rawRole === 'wan' ? 'wan' : rawRole === 'lan' ? 'lan' : name.startsWith('wan') ? 'wan' : 'lan';
-    const rawMode = (kv[`${keyPrefix}_MODE`] || '').trim().toLowerCase();
-    const mode: 'dhcp' | 'static' = rawMode === 'static' ? 'static' : 'dhcp';
-    const ipv4Address = (kv[`${keyPrefix}_IPV4_ADDRESS`] || '').trim() || undefined;
-    const ipv4Gateway = (kv[`${keyPrefix}_IPV4_GATEWAY`] || '').trim() || undefined;
-    const dhcpServer = role === 'lan' && mode === 'static' && (kv[`${keyPrefix}_DHCP_SERVER`] || '').trim().toLowerCase() === 'true';
-
-    const existingIdx = state.interfaces.findIndex((i) => i.name.toLowerCase() === name);
-    const devUsedElsewhere = state.interfaces.some(
-      (i, idx) => idx !== existingIdx && i.enabled && i.device === dev,
-    );
-    if (devUsedElsewhere) continue;
-
-    const defaultDesc =
-      role === 'wan'
-        ? `${name.toUpperCase()} WAN Uplink`
-        : dhcpServer
-          ? `${name.toUpperCase()} LAN (Authoritative DHCP)`
-          : `${name.toUpperCase()} LAN (Joined Network)`;
-
-    if (existingIdx < 0) {
-      state.interfaces.push(
-        InterfaceSchema.parse({
-          name,
-          role,
-          device: dev,
-          enabled: true,
-          type: mode,
-          dhcpServer,
-          ipv4Address: mode === 'static' ? ipv4Address : undefined,
-          ipv4Gateway: mode === 'static' ? ipv4Gateway : undefined,
-          description: defaultDesc,
-          mtu: 1500,
-        }),
-      );
-      changed = true;
-    } else {
-      const cur = state.interfaces[existingIdx];
-      if (!cur.enabled || !isValidDevice(cur.device)) {
-        state.interfaces[existingIdx] = InterfaceSchema.parse({
-          ...cur,
-          name,
-          role,
-          device: dev,
-          enabled: true,
-          type: mode,
-          dhcpServer,
-          ipv4Address: mode === 'static' ? ipv4Address || cur.ipv4Address : undefined,
-          ipv4Gateway: mode === 'static' ? ipv4Gateway || cur.ipv4Gateway : undefined,
-          description: cur.description || defaultDesc,
-          mtu: cur.mtu || 1500,
-        });
-        changed = true;
-      }
-    }
-
-    if (role === 'lan' && mode === 'static' && dhcpServer && ipv4Address) {
-      if (!state.dhcp) {
-        state.dhcp = { enabled: true, subnets: [] };
-      }
-      const hasSubnet = (state.dhcp.subnets || []).some((s) => s.interface === name);
-      if (!hasSubnet) {
-        const subnetInfo = computeSubnetAndDefaultPool(ipv4Address);
-        if (subnetInfo) {
-          state.dhcp.subnets.push({
-            id: crypto.randomUUID(),
-            interface: name,
-            subnet: subnetInfo.subnetCidr,
-            poolStart: subnetInfo.poolStart,
-            poolEnd: subnetInfo.poolEnd,
-            routers: [subnetInfo.routerIp],
-            dnsServers: [subnetInfo.routerIp],
-            staticMappings: [],
-            enabled: true,
-          });
-          state.dhcp.enabled = true;
-          changed = true;
-        }
-      }
-    }
-  }
-
-  if (changed && state.system?.antiLockout) {
-    const lanNames = state.interfaces
-      .filter((i) => inferInterfaceRole(i) === 'lan' && i.enabled && isValidDevice(i.device))
-      .map((i) => i.name);
-    if (lanNames.length > 0) {
-      state.system.antiLockout.interfaces = Array.from(new Set(lanNames));
-      state.system.antiLockout.interface = lanNames[0] || 'lan';
-    }
-  }
-
-  return changed;
-}
-
-async function getDesiredStateInternal(): Promise<DesiredState> {
-  // 1. Read overlaid /var/lib/axonwall/etc-axonwall and /etc/axonwall YAML configuration
-  const { files, fingerprint } = readAllYamlConfigFiles();
-
-  if (Object.keys(files).length > 0) {
-    if (cachedDesiredState && fingerprint === lastLoadedFingerprint) {
-      return structuredClone(cachedDesiredState);
-    }
-    try {
-      const parsed = parseDesiredStateFromYamlFiles(files);
-      if (reconcileStateWithInterfacesConf(parsed)) {
-        persistDesiredStateToDisk(parsed);
-      } else {
-        cachedDesiredState = parsed;
-        lastLoadedFingerprint = fingerprint;
-      }
-      return structuredClone(cachedDesiredState!);
-    } catch (err: any) {
-      console.error('[axonwall] Failed to parse YAML files:', err?.message || err);
-    }
-  }
-
-  if (cachedDesiredState) {
-    return structuredClone(cachedDesiredState);
-  }
-
-  // 2. Fallback/migration from legacy state.json if *.yaml was not initialized yet
-  for (const jsonPath of Array.from(
-    new Set([getStateJsonPath(), path.join(ETC_CONFIG_DIR, 'state.json'), './state.json'])
-  )) {
-    try {
-      if (fs.existsSync(jsonPath)) {
-        const raw = fs.readFileSync(jsonPath, 'utf8');
-        const parsed = DesiredStateSchema.parse(JSON.parse(raw));
-        persistDesiredStateToDisk(parsed);
-        return structuredClone(parsed);
-      }
-    } catch {}
-  }
-
-  // 3. First boot: initialize /etc/axonwall/*.yaml with BASELINE_STATE
-  persistDesiredStateToDisk(BASELINE_STATE);
-  return structuredClone(BASELINE_STATE);
 }
 
 function redactDesiredStateForSession(state: DesiredState, session: UserSession): DesiredState {
@@ -1441,69 +817,8 @@ export async function exportCloudInitConfigAction(
   };
 }
 
-type OnDiskConfigSnapshotEntry = {
-  path: string;
-  existed: boolean;
-  content: string | null;
-};
-
-// Snapshot every file persistDesiredStateToDisk / syncNetworkInterfacesFiles
-// can write, so a daemon rejection (C9) or a rejected interface change (C10)
-// can roll the on-disk config back to its pre-apply contents instead of
-// leaving disk ahead of the live daemon ruleset.
-function snapshotDesiredStateOnDisk(): OnDiskConfigSnapshotEntry[] {
-  const paths = new Set<string>();
-  for (const dir of YAML_CONFIG_DIRS) {
-    for (const filename of AXONWALL_YAML_FILENAMES) {
-      paths.add(path.join(dir, filename));
-    }
-    paths.add(path.join(dir, 'interfaces.conf'));
-  }
-  for (const jsonPath of [
-    getStateJsonPath(),
-    path.join(PERSIST_CONFIG_DIR, 'state.json'),
-    path.join(ETC_CONFIG_DIR, 'state.json'),
-    ...(isApplianceRuntime() && readHostOSRelease().family === 'debian' ? ['/etc/network/interfaces'] : []),
-  ]) {
-    paths.add(jsonPath);
-  }
-  const snapshot: OnDiskConfigSnapshotEntry[] = [];
-  for (const filePath of paths) {
-    try {
-      if (fs.existsSync(filePath)) {
-        snapshot.push({ path: filePath, existed: true, content: fs.readFileSync(filePath, 'utf8') });
-      } else {
-        snapshot.push({ path: filePath, existed: false, content: null });
-      }
-    } catch {
-      snapshot.push({ path: filePath, existed: false, content: null });
-    }
-  }
-  return snapshot;
-}
-
-// Best-effort restore of a snapshot from snapshotDesiredStateOnDisk.
-// Returns false if any file could not be restored, so the caller can report
-// the disk/daemon divergence instead of silently claiming success.
-function restoreDesiredStateSnapshot(snapshot: OnDiskConfigSnapshotEntry[]): boolean {
-  let ok = true;
-  for (const entry of snapshot) {
-    try {
-      if (entry.existed && entry.content !== null) {
-        fs.writeFileSync(entry.path, entry.content, 'utf8');
-      } else if (fs.existsSync(entry.path)) {
-        fs.unlinkSync(entry.path);
-      }
-    } catch {
-      ok = false;
-    }
-  }
-  return ok;
-}
-
 export async function invalidateDesiredStateCache(): Promise<void> {
-  cachedDesiredState = null;
-  lastLoadedFingerprint = '';
+  invalidateDesiredStateCacheInternal();
 }
 
 export async function applyDesiredState(
@@ -1584,23 +899,25 @@ export async function applyDesiredState(
   // 4. Delegate to root axonwalld daemon if active
   const jobId = `ui-${Date.now()}`;
   lastPendingJobId = jobId;
-  const daemonResp = await callAgentApi<any>('/v1/apply', 'POST', {
-    job_id: jobId,
-    bundle_hash: bundleHash,
-    nft_script: nftScript,
-    files: allFiles,
-    reload_services: reloadServices,
-    confirm_timeout_seconds: confirmTimeoutSeconds,
-  });
+  const applyRes = await callAgentApiDetailed<any>(
+    '/v1/apply',
+    'POST',
+    {
+      job_id: jobId,
+      bundle_hash: bundleHash,
+      nft_script: nftScript,
+      files: allFiles,
+      reload_services: reloadServices,
+      confirm_timeout_seconds: confirmTimeoutSeconds,
+    },
+    120_000
+  );
 
-  if (daemonResp) {
+  if (applyRes.kind === 'ok') {
+    const daemonResp = applyRes.data;
     if (!daemonResp.success) {
-      // C9: the daemon rejected the bundle. Roll the on-disk config back
-      // to its pre-apply contents so disk, daemon, and UI agree again, and
-      // report the divergence if the rollback itself could not complete.
-      // The rejected bundle never entered pending-confirm, so drop its job id.
       const restored = restoreDesiredStateSnapshot(diskSnapshot);
-      invalidateDesiredStateCache();
+      invalidateDesiredStateCacheInternal();
       lastPendingJobId = '';
       throw new Error(
         (daemonResp.message || 'Ruleset validation failed on daemon') +
@@ -1609,8 +926,6 @@ export async function applyDesiredState(
             : ' WARNING: on-disk configuration could not be fully restored to its pre-apply state; disk and daemon state may diverge.')
       );
     }
-    // Automatically record state changeset (including modular YAML files) in GitOps audit repository.
-    // Recorded only once the daemon has accepted the bundle, never on rejection.
     try {
       const { recordGitOpsChange } = await import('./gitops');
       await recordGitOpsChange(
@@ -1627,31 +942,39 @@ export async function applyDesiredState(
     };
   }
 
-  // Automatically record state changeset (including modular YAML files) in GitOps audit repository
-  try {
-    const { recordGitOpsChange } = await import('./gitops');
-    await recordGitOpsChange(
-      normalizedState,
-      session?.username || 'admin',
-      `Configuration applied to /etc/axonwall/*.yaml (SHA256: ${bundleHash.slice(0, 12)})`
+  if (applyRes.kind === 'http_error') {
+    const restored = restoreDesiredStateSnapshot(diskSnapshot);
+    invalidateDesiredStateCacheInternal();
+    lastPendingJobId = '';
+    throw new Error(
+      (applyRes.message || 'Ruleset validation failed on daemon') +
+        (restored
+          ? ''
+          : ' WARNING: on-disk configuration could not be fully restored to its pre-apply state; disk and daemon state may diverge.')
     );
-  } catch {}
+  }
 
-  // C-B2: the daemon did not answer, so the live ruleset was never
-  // changed. Never report "applied" and never arm a (mock)
-  // commit-confirm: no daemon watchdog will roll anything back at the
-  // mock deadline. The local fallback below runs ONLY in explicit dev
-  // mode (AXONWALL_DEV_MODE=1, or a Next.js dev server), where there
-  // is no daemon to apply to. On a production box the on-disk config
-  // is rolled back to its pre-apply contents (C9) and the apply fails
-  // loudly instead.
-  const devMode =
-    process.env.AXONWALL_DEV_MODE === '1' ||
-    process.env.AXONWALL_DEV_MODE === 'true' ||
-    process.env.NODE_ENV === 'development';
+  if (applyRes.kind === 'timeout') {
+    // Prevent split-brain on slow applies: do NOT revert disk files and do NOT
+    // clear lastPendingJobId; sync pending job id from /v1/status if armed.
+    try {
+      const status = await callAgentApi<any>('/v1/status', 'GET', undefined, 5000);
+      const livePending = status?.pending_job_id || status?.pendingJobId;
+      if (livePending) {
+        lastPendingJobId = livePending;
+      }
+    } catch {}
+    throw new Error(
+      'axonwalld apply request timed out after 120s — the configuration may still be committing or awaiting confirm/rollback on axonwalld. Check pending commit-confirm status before retrying.'
+    );
+  }
+
+  // Daemon unreachable: in production, fail closed and restore pre-apply disk state
+  // BEFORE recording any GitOps commit so failed applies never leave false history.
+  const devMode = isDevModeRuntime();
   if (!devMode) {
     const restored = restoreDesiredStateSnapshot(diskSnapshot);
-    invalidateDesiredStateCache();
+    invalidateDesiredStateCacheInternal();
     lastPendingJobId = '';
     throw new Error(
       'axonwalld is unreachable — the configuration was NOT applied and no commit-confirm is active' +
@@ -1660,6 +983,15 @@ export async function applyDesiredState(
           : ' WARNING: on-disk configuration could not be fully restored to its pre-apply state; disk and daemon state may diverge.')
     );
   }
+
+  try {
+    const { recordGitOpsChange } = await import('./gitops');
+    await recordGitOpsChange(
+      normalizedState,
+      session?.username || 'admin',
+      `Configuration applied to /etc/axonwall/*.yaml (SHA256: ${bundleHash.slice(0, 12)})`
+    );
+  } catch {}
 
   // Fallback for dev mode / local execution only (see C-B2 above).
   try {
@@ -1694,20 +1026,32 @@ export async function applyDesiredState(
   };
 }
 
+export async function applyDesiredStateAction(
+  state: DesiredState,
+  confirmTimeoutSeconds = 120,
+  options?: { expectedFingerprint?: string }
+): Promise<
+  | { ok: true; result: { success: boolean; message: string; nftScript: string; warnings: string[] } }
+  | { ok: false; error: string }
+> {
+  try {
+    const result = await applyDesiredState(state, confirmTimeoutSeconds, options);
+    return { ok: true, result };
+  } catch (err: any) {
+    return {
+      ok: false,
+      error: err?.message || 'Failed to apply configuration',
+    };
+  }
+}
+
 export async function confirmActiveRuleset(): Promise<{ success: boolean; message: string }> {
   const session = await getSession();
   assertActionPermitted(session, 'admin');
 
-  // Retrieve any pending job ID from daemon if available. C10/C11-
-  // downstream: never send the literal 'confirm' as a job id — the
-  // daemon now requires an exact match, and before that fix the
-  // literal wildcard-confirmed whatever bundle happened to be
-  // pending. If no job id is known, fail without calling the daemon.
-  // (The dev-mode mock path is unaffected: every apply, daemon or
-  // mock, sets lastPendingJobId first.)
   let targetJobId: string | null = lastPendingJobId || null;
   try {
-    const daemonStatus = await callAgentApi<any>('/v1/status');
+    const daemonStatus = await callAgentApi<any>('/v1/status', 'GET', undefined, 5000);
     if (daemonStatus?.pending_job_id || daemonStatus?.pendingJobId) {
       targetJobId = daemonStatus.pending_job_id || daemonStatus.pendingJobId;
     }
@@ -1719,14 +1063,17 @@ export async function confirmActiveRuleset(): Promise<{ success: boolean; messag
     };
   }
 
-  const daemonResp = await callAgentApi<any>('/v1/confirm', 'POST', {
-    job_id: targetJobId,
-    jobId: targetJobId,
-  });
-  if (daemonResp) {
-    // C11: clear pending state only once the daemon has acknowledged the
-    // confirm. On failure the job id and banner survive, so the operator
-    // can retry the confirm before the daemon auto-rolls back.
+  const confirmRes = await callAgentApiDetailed<any>(
+    '/v1/confirm',
+    'POST',
+    {
+      job_id: targetJobId,
+      jobId: targetJobId,
+    },
+    60_000
+  );
+  if (confirmRes.kind === 'ok') {
+    const daemonResp = confirmRes.data;
     if (daemonResp.success) {
       mockPendingConfirm = false;
       mockDeadline = 0;
@@ -1737,10 +1084,19 @@ export async function confirmActiveRuleset(): Promise<{ success: boolean; messag
       message: daemonResp.message,
     };
   }
+  if (confirmRes.kind === 'http_error') {
+    return {
+      success: false,
+      message: confirmRes.message || 'Daemon rejected ruleset confirmation.',
+    };
+  }
+  if (confirmRes.kind === 'timeout') {
+    return {
+      success: false,
+      message: 'Daemon confirm timed out — pending commit-confirm state preserved; retry confirm or check status.',
+    };
+  }
 
-  // C11: daemon unreachable — do NOT clear the local pending state or
-  // claim success. The daemon may still auto-roll back at its deadline,
-  // so the job id and banner survive for a retry once it is back.
   return {
     success: false,
     message: 'Daemon unavailable — confirm not acknowledged; pending state preserved. Retry once axonwalld is reachable.',
@@ -1751,26 +1107,37 @@ export async function rollbackActiveRuleset(): Promise<{ success: boolean; messa
   const session = await getSession();
   assertActionPermitted(session, 'admin');
 
-  const daemonResp = await callAgentApi<any>('/v1/rollback', 'POST', { reason: 'operator rollback' });
-  if (daemonResp) {
-    // C11: clear local pending/cache state only once the daemon has
-    // acknowledged the rollback. On failure the cache still describes the
-    // ruleset the daemon is actually running.
+  const rollbackRes = await callAgentApiDetailed<any>(
+    '/v1/rollback',
+    'POST',
+    { reason: 'operator rollback' },
+    60_000
+  );
+  if (rollbackRes.kind === 'ok') {
+    const daemonResp = rollbackRes.data;
     if (daemonResp.success) {
       mockPendingConfirm = false;
       mockDeadline = 0;
-      cachedDesiredState = null;
-      lastLoadedFingerprint = '';
+      invalidateDesiredStateCacheInternal();
     }
     return {
       success: daemonResp.success,
       message: daemonResp.message,
     };
   }
+  if (rollbackRes.kind === 'http_error') {
+    return {
+      success: false,
+      message: rollbackRes.message || 'Daemon rejected ruleset rollback.',
+    };
+  }
+  if (rollbackRes.kind === 'timeout') {
+    return {
+      success: false,
+      message: 'Daemon rollback timed out — check pending commit-confirm status before retrying.',
+    };
+  }
 
-  // C11: daemon unreachable — do NOT clear the local pending/cache state
-  // or claim success. The daemon still holds the unconfirmed ruleset, so
-  // the cached state keeps describing what it is actually running.
   return {
     success: false,
     message: 'Daemon unavailable — rollback not acknowledged; pending state preserved. Retry once axonwalld is reachable.',
@@ -2438,7 +1805,7 @@ export interface LiveInterfaceInfo {
 function getLogicalInterfaceMappings(): Record<string, string> {
   const mapping: Record<string, string> = {};
   try {
-    const confPath = path.join(getEtcConfigDir(), 'interfaces.conf');
+    const confPath = path.join(ETC_CONFIG_DIR, 'interfaces.conf');
     if (fs.existsSync(confPath)) {
       const content = fs.readFileSync(confPath, 'utf8');
       const rawKv: Record<string, string> = {};
@@ -2478,84 +1845,6 @@ function getLogicalInterfaceMappings(): Record<string, string> {
     }
   } catch {}
   return mapping;
-}
-
-function ipToUint32(ipStr: string): number | null {
-  const octets = ipStr.trim().split('.').map((n) => parseInt(n, 10));
-  if (octets.length !== 4 || octets.some((n) => Number.isNaN(n) || n < 0 || n > 255)) {
-    return null;
-  }
-  return (((octets[0] << 24) >>> 0) + (octets[1] << 16) + (octets[2] << 8) + octets[3]) >>> 0;
-}
-
-function uint32ToIp(val: number): string {
-  return `${(val >>> 24) & 255}.${(val >>> 16) & 255}.${(val >>> 8) & 255}.${val & 255}`;
-}
-
-function computeSubnetAndDefaultPool(ipv4Cidr?: string): {
-  routerIp: string;
-  subnetCidr: string;
-  poolStart: string;
-  poolEnd: string;
-  firstUsableInt: number;
-  lastUsableInt: number;
-} | null {
-  if (!ipv4Cidr) return null;
-  const parts = ipv4Cidr.trim().split('/');
-  const ipStr = parts[0] || '';
-  const prefix = parts[1] ? parseInt(parts[1], 10) : 24;
-  const ipInt = ipToUint32(ipStr);
-  if (ipInt === null || Number.isNaN(prefix) || prefix < 8 || prefix > 30) {
-    return null;
-  }
-  const mask = prefix === 0 ? 0 : (0xffffffff << (32 - prefix)) >>> 0;
-  const netInt = (ipInt & mask) >>> 0;
-  const bcastInt = (netInt | (~mask >>> 0)) >>> 0;
-  const firstUsableInt = (netInt + 1) >>> 0;
-  const lastUsableInt = (bcastInt - 1) >>> 0;
-
-  const subnetCidr = `${uint32ToIp(netInt)}/${prefix}`;
-  if (prefix <= 24) {
-    const base24 = (ipInt & 0xffffff00) >>> 0;
-    let startInt = (base24 + 100) >>> 0;
-    let endInt = (base24 + 200) >>> 0;
-    if (ipInt >= startInt && ipInt <= endInt) {
-      startInt = (base24 + 10) >>> 0;
-      endInt = (base24 + 99) >>> 0;
-    }
-    return {
-      routerIp: ipStr,
-      subnetCidr,
-      poolStart: uint32ToIp(startInt),
-      poolEnd: uint32ToIp(endInt),
-      firstUsableInt,
-      lastUsableInt,
-    };
-  }
-  // For /25 to /30 subnets, choose the largest contiguous host range that excludes routerIp
-  let startInt = firstUsableInt;
-  let endInt = lastUsableInt;
-  if (ipInt === firstUsableInt && firstUsableInt < lastUsableInt) {
-    startInt = (firstUsableInt + 1) >>> 0;
-  } else if (ipInt === lastUsableInt && lastUsableInt > firstUsableInt) {
-    endInt = (lastUsableInt - 1) >>> 0;
-  } else if (ipInt > firstUsableInt && ipInt < lastUsableInt) {
-    const lowerSpan = ipInt - firstUsableInt;
-    const upperSpan = lastUsableInt - ipInt;
-    if (upperSpan >= lowerSpan) {
-      startInt = (ipInt + 1) >>> 0;
-    } else {
-      endInt = (ipInt - 1) >>> 0;
-    }
-  }
-  return {
-    routerIp: ipStr,
-    subnetCidr,
-    poolStart: uint32ToIp(Math.min(startInt, endInt)),
-    poolEnd: uint32ToIp(Math.max(startInt, endInt)),
-    firstUsableInt,
-    lastUsableInt,
-  };
 }
 
 function isPoolValidForSubnet(
@@ -3129,10 +2418,7 @@ export async function saveInterfaceAssignment(data: {
   // Delegate persistence, interface bring-up, Kea reload, and nftables commit to root axonwalld daemon
   let daemonApplied = false;
   let daemonError: string | null = null;
-  // C10 residual: set when the daemon was never reached at all
-  // (callAgentApi resolves null on socket error/timeout, and the old bare
-  // `catch {}` discarded it). Distinct from an explicit rejection above:
-  // the disk write stands, but nothing may report the change as applied.
+  let daemonTimedOut: string | null = null;
   let daemonUnreachable: string | null = null;
   try {
     const { nftScript, files, reloadServices } = compileNftables(normalizedState);
@@ -3173,50 +2459,85 @@ export async function saveInterfaceAssignment(data: {
       },
     ];
 
-    // C10: confirm with the job id that was actually submitted, not a
-    // literal — the daemon checks confirm job ids against the pending job.
     const ifaceJobId = `iface-${Date.now()}`;
-    const applyResp = await callAgentApi<any>('/v1/apply', 'POST', {
-      job_id: ifaceJobId,
-      bundle_hash: bundleHash,
-      nft_script: nftScript,
-      files: allFiles,
-      reload_services: reloadServices,
-      confirm_timeout_seconds: 120,
-    });
-    if (applyResp?.success) {
-      const confirmResp = await callAgentApi<any>('/v1/confirm', 'POST', {
+    lastPendingJobId = ifaceJobId;
+    const applyRes = await callAgentApiDetailed<any>(
+      '/v1/apply',
+      'POST',
+      {
         job_id: ifaceJobId,
-      });
-      if (confirmResp && !confirmResp.success) {
-        daemonError = confirmResp.message || confirmResp.error || 'Daemon refused to confirm the interface change';
-      } else if (confirmResp) {
+        bundle_hash: bundleHash,
+        nft_script: nftScript,
+        files: allFiles,
+        reload_services: reloadServices,
+        confirm_timeout_seconds: 120,
+      },
+      120_000
+    );
+    if (applyRes.kind === 'ok' && applyRes.data?.success) {
+      const confirmRes = await callAgentApiDetailed<any>(
+        '/v1/confirm',
+        'POST',
+        { job_id: ifaceJobId, jobId: ifaceJobId },
+        60_000
+      );
+      if (confirmRes.kind === 'ok' && confirmRes.data?.success) {
         daemonApplied = true;
+        lastPendingJobId = '';
+      } else if (confirmRes.kind === 'http_error' || (confirmRes.kind === 'ok' && !confirmRes.data?.success)) {
+        daemonError =
+          confirmRes.kind === 'http_error'
+            ? confirmRes.message
+            : confirmRes.data?.message || confirmRes.data?.error || 'Daemon refused to confirm the interface change';
+      } else if (confirmRes.kind === 'timeout') {
+        daemonTimedOut = 'confirm request timed out after 60s; check pending commit-confirm status before retrying.';
       } else {
-        // C10 residual: the confirm call never reached the daemon.
         daemonUnreachable = 'confirm call failed';
       }
-    } else if (applyResp) {
-      // C10: the daemon answered and rejected the change. Do not fall
-      // through to a success return; the caller handles the rollback below.
-      daemonError = applyResp.message || applyResp.error || 'Daemon rejected the interface change';
+    } else if (applyRes.kind === 'timeout') {
+      try {
+        const st = await callAgentApi<any>('/v1/status', 'GET', undefined, 5000);
+        const livePending = st?.pending_job_id || st?.pendingJobId;
+        if (livePending) lastPendingJobId = livePending;
+      } catch {}
+      daemonTimedOut = 'apply request timed out after 120s — configuration may still be committing on axonwalld.';
+    } else if (applyRes.kind === 'http_error' || applyRes.kind === 'ok') {
+      daemonError =
+        applyRes.kind === 'http_error'
+          ? applyRes.message
+          : applyRes.data?.message || applyRes.data?.error || 'Daemon rejected the interface change';
     } else {
-      // C10 residual: callAgentApi resolves null when the daemon socket is
-      // unreachable — the daemon never saw this change.
       daemonUnreachable = 'apply call failed';
     }
   } catch (err: any) {
     daemonUnreachable = err?.message || 'daemon call threw';
   }
 
-  // C10: on an explicit daemon rejection, roll the disk write back and
-  // report failure — never present the disk-only change as applied.
   if (daemonError) {
     restoreDesiredStateSnapshot(diskSnapshot);
-    invalidateDesiredStateCache();
+    invalidateDesiredStateCacheInternal();
+    lastPendingJobId = '';
     return {
       success: false,
       message: `Interface ${cleanName.toUpperCase()} was not applied: ${daemonError}`,
+    };
+  }
+
+  if (daemonTimedOut) {
+    return {
+      success: false,
+      message: `Interface ${cleanName.toUpperCase()} ${daemonTimedOut}`,
+    };
+  }
+
+  const devMode = isDevModeRuntime();
+  if (daemonUnreachable && !devMode) {
+    const restored = restoreDesiredStateSnapshot(diskSnapshot);
+    invalidateDesiredStateCacheInternal();
+    lastPendingJobId = '';
+    return {
+      success: false,
+      message: `Interface ${cleanName.toUpperCase()} was NOT applied: axonwalld is unreachable (${daemonUnreachable})${restored ? '. On-disk configuration was restored.' : '.'}`,
     };
   }
 
@@ -3401,9 +2722,7 @@ export async function deleteInterfaceAssignment(name: string): Promise<{ success
   const { confContent, ifacesContent } = syncNetworkInterfacesFiles(normalizedState);
 
   let daemonError: string | null = null;
-  // C10 residual: set when the daemon was never reached at all (see the
-  // save path above). The removal was written to disk but the daemon —
-  // owner of nftables/Kea — never applied it.
+  let daemonTimedOut: string | null = null;
   let daemonUnreachable: string | null = null;
   try {
     const { nftScript, files, reloadServices } = compileNftables(normalizedState);
@@ -3444,53 +2763,86 @@ export async function deleteInterfaceAssignment(name: string): Promise<{ success
       },
     ];
 
-    // C10: confirm with the job id that was actually submitted, not a
-    // literal — the daemon checks confirm job ids against the pending job.
     const ifaceDelJobId = `iface-del-${Date.now()}`;
-    const applyResp = await callAgentApi<any>('/v1/apply', 'POST', {
-      job_id: ifaceDelJobId,
-      bundle_hash: bundleHash,
-      nft_script: nftScript,
-      files: allFiles,
-      reload_services: reloadServices,
-      confirm_timeout_seconds: 120,
-    });
-    if (applyResp?.success) {
-      const confirmResp = await callAgentApi<any>('/v1/confirm', 'POST', {
+    lastPendingJobId = ifaceDelJobId;
+    const applyRes = await callAgentApiDetailed<any>(
+      '/v1/apply',
+      'POST',
+      {
         job_id: ifaceDelJobId,
-      });
-      if (confirmResp && !confirmResp.success) {
-        daemonError = confirmResp.message || confirmResp.error || 'Daemon refused to confirm the interface removal';
-      } else if (!confirmResp) {
-        // C10 residual: the confirm call never reached the daemon.
+        bundle_hash: bundleHash,
+        nft_script: nftScript,
+        files: allFiles,
+        reload_services: reloadServices,
+        confirm_timeout_seconds: 120,
+      },
+      120_000
+    );
+    if (applyRes.kind === 'ok' && applyRes.data?.success) {
+      const confirmRes = await callAgentApiDetailed<any>(
+        '/v1/confirm',
+        'POST',
+        { job_id: ifaceDelJobId, jobId: ifaceDelJobId },
+        60_000
+      );
+      if (confirmRes.kind === 'ok' && confirmRes.data?.success) {
+        lastPendingJobId = '';
+      } else if (confirmRes.kind === 'http_error' || (confirmRes.kind === 'ok' && !confirmRes.data?.success)) {
+        daemonError =
+          confirmRes.kind === 'http_error'
+            ? confirmRes.message
+            : confirmRes.data?.message || confirmRes.data?.error || 'Daemon refused to confirm the interface removal';
+      } else if (confirmRes.kind === 'timeout') {
+        daemonTimedOut = 'confirm request timed out after 60s; check pending commit-confirm status before retrying.';
+      } else {
         daemonUnreachable = 'confirm call failed';
       }
-    } else if (applyResp) {
-      // C10: the daemon answered and rejected the removal.
-      daemonError = applyResp.message || applyResp.error || 'Daemon rejected the interface removal';
+    } else if (applyRes.kind === 'timeout') {
+      try {
+        const st = await callAgentApi<any>('/v1/status', 'GET', undefined, 5000);
+        const livePending = st?.pending_job_id || st?.pendingJobId;
+        if (livePending) lastPendingJobId = livePending;
+      } catch {}
+      daemonTimedOut = 'apply request timed out after 120s — removal may still be committing on axonwalld.';
+    } else if (applyRes.kind === 'http_error' || applyRes.kind === 'ok') {
+      daemonError =
+        applyRes.kind === 'http_error'
+          ? applyRes.message
+          : applyRes.data?.message || applyRes.data?.error || 'Daemon rejected the interface removal';
     } else {
-      // C10 residual: callAgentApi resolves null when the daemon socket
-      // is unreachable — the daemon never saw this removal.
       daemonUnreachable = 'apply call failed';
     }
   } catch (err: any) {
     daemonUnreachable = err?.message || 'daemon call threw';
   }
 
-  // C10: on an explicit daemon rejection, roll the disk write back and
-  // report failure — never present the disk-only removal as applied.
   if (daemonError) {
     restoreDesiredStateSnapshot(diskSnapshot);
-    invalidateDesiredStateCache();
+    invalidateDesiredStateCacheInternal();
+    lastPendingJobId = '';
     return {
       success: false,
       message: `Interface ${cleanName.toUpperCase()} was not removed: ${daemonError}`,
     };
   }
 
-  // C10 residual: when the daemon was never reached, the removal was
-  // written to disk but never applied by the daemon. Report that
-  // explicitly instead of "removed" success.
+  if (daemonTimedOut) {
+    return {
+      success: false,
+      message: `Interface ${cleanName.toUpperCase()} ${daemonTimedOut}`,
+    };
+  }
+
+  if (daemonUnreachable && !isDevModeRuntime()) {
+    const restored = restoreDesiredStateSnapshot(diskSnapshot);
+    invalidateDesiredStateCacheInternal();
+    lastPendingJobId = '';
+    return {
+      success: false,
+      message: `Interface ${cleanName.toUpperCase()} was NOT removed: axonwalld is unreachable (${daemonUnreachable})${restored ? '. On-disk configuration was restored.' : '.'}`,
+    };
+  }
+
   if (daemonUnreachable) {
     return {
       success: false,
@@ -4594,12 +3946,17 @@ export async function createZbmSnapshot(
   if (!isAdminSession(session)) {
     return { success: false, message: 'Unauthorized: Administrator credentials required' };
   }
-  const daemonResp = await callAgentApi<any>('/v1/system/zbm', 'POST', {
-    action: 'snapshot',
-    beName,
-    label,
-    newBeName,
-  });
+  const daemonResp = await callAgentApiResponse<any>(
+    '/v1/system/zbm',
+    'POST',
+    {
+      action: 'snapshot',
+      beName,
+      label,
+      newBeName,
+    },
+    120_000
+  );
   if (daemonResp && daemonResp.success) {
     return {
       success: true,
@@ -4616,10 +3973,15 @@ export async function deleteZbmSnapshot(snapshot: string): Promise<{ success: bo
   if (!isAdminSession(session)) {
     return { success: false, message: 'Unauthorized: Administrator credentials required' };
   }
-  const daemonResp = await callAgentApi<any>('/v1/system/zbm', 'POST', {
-    action: 'delete-snapshot',
-    snapshot,
-  });
+  const daemonResp = await callAgentApiResponse<any>(
+    '/v1/system/zbm',
+    'POST',
+    {
+      action: 'delete-snapshot',
+      snapshot,
+    },
+    120_000
+  );
   if (daemonResp && daemonResp.success) {
     return { success: true, message: daemonResp.message };
   }
@@ -4631,10 +3993,15 @@ export async function rollbackZbmSnapshot(snapshot: string): Promise<{ success: 
   if (!isAdminSession(session)) {
     return { success: false, message: 'Unauthorized: Administrator credentials required' };
   }
-  const daemonResp = await callAgentApi<any>('/v1/system/zbm', 'POST', {
-    action: 'rollback-snapshot',
-    snapshot,
-  });
+  const daemonResp = await callAgentApiResponse<any>(
+    '/v1/system/zbm',
+    'POST',
+    {
+      action: 'rollback-snapshot',
+      snapshot,
+    },
+    120_000
+  );
   if (daemonResp && daemonResp.success) {
     return { success: true, message: daemonResp.message };
   }
@@ -4649,7 +4016,12 @@ export async function cloneZbmSnapshot(
   if (!isAdminSession(session)) {
     return { success: false, message: 'Unauthorized: Administrator credentials required' };
   }
-  const daemonResp = await callAgentApi<any>('/v1/system/zbm', 'POST', { action: 'clone', snapshot, newBeName });
+  const daemonResp = await callAgentApiResponse<any>(
+    '/v1/system/zbm',
+    'POST',
+    { action: 'clone', snapshot, newBeName },
+    120_000
+  );
   if (daemonResp && daemonResp.success) {
     return { success: true, message: daemonResp.message, dataset: daemonResp.dataset };
   }
@@ -4661,7 +4033,12 @@ export async function activateZbmBootEnvironment(beName: string): Promise<{ succ
   if (!isAdminSession(session)) {
     return { success: false, message: 'Unauthorized: Administrator credentials required' };
   }
-  const daemonResp = await callAgentApi<any>('/v1/system/zbm', 'POST', { action: 'activate', beName });
+  const daemonResp = await callAgentApiResponse<any>(
+    '/v1/system/zbm',
+    'POST',
+    { action: 'activate', beName },
+    120_000
+  );
   if (daemonResp && daemonResp.success) {
     return { success: true, message: daemonResp.message };
   }
@@ -4673,7 +4050,12 @@ export async function deleteZbmBootEnvironment(beName: string): Promise<{ succes
   if (!isAdminSession(session)) {
     return { success: false, message: 'Unauthorized: Administrator credentials required' };
   }
-  const daemonResp = await callAgentApi<any>('/v1/system/zbm', 'POST', { action: 'delete', beName });
+  const daemonResp = await callAgentApiResponse<any>(
+    '/v1/system/zbm',
+    'POST',
+    { action: 'delete', beName },
+    120_000
+  );
   if (daemonResp && daemonResp.success) {
     return { success: true, message: daemonResp.message };
   }
@@ -4700,10 +4082,15 @@ export async function rebootSystemAction(slot?: 'A' | 'B'): Promise<PowerActionR
   const cleanSlot = slot === 'A' || slot === 'B' ? slot : undefined;
 
   // 1. Try privileged daemon API
-  const daemonResp = await callAgentApi<any>('/v1/system/power', 'POST', {
-    action: 'reboot',
-    slot: cleanSlot,
-  });
+  const daemonResp = await callAgentApiResponse<any>(
+    '/v1/system/power',
+    'POST',
+    {
+      action: 'reboot',
+      slot: cleanSlot,
+    },
+    60_000
+  );
   if (daemonResp && daemonResp.success) {
     return {
       success: true,
@@ -4783,9 +4170,14 @@ export async function poweroffSystemAction(): Promise<PowerActionResult> {
   }
 
   // 1. Try privileged daemon API
-  const daemonResp = await callAgentApi<any>('/v1/system/power', 'POST', {
-    action: 'poweroff',
-  });
+  const daemonResp = await callAgentApiResponse<any>(
+    '/v1/system/power',
+    'POST',
+    {
+      action: 'poweroff',
+    },
+    60_000
+  );
   if (daemonResp) {
     return {
       success: Boolean(daemonResp.success),
@@ -4891,11 +4283,34 @@ export async function executeTerminalCommand(command: string): Promise<TerminalE
   }
 
   // Try live execution on axonwalld privileged agent
-  const daemonResp = await callAgentApi<TerminalExecResponse>('/v1/terminal/exec', 'POST', {
-    command: cleanCmd,
-  });
-  if (daemonResp) {
-    return daemonResp;
+  const execRes = await callAgentApiDetailed<TerminalExecResponse>(
+    '/v1/terminal/exec',
+    'POST',
+    {
+      command: cleanCmd,
+    },
+    60_000
+  );
+  if (execRes.kind === 'ok') {
+    return execRes.data;
+  }
+  if (execRes.kind === 'http_error') {
+    return {
+      command: cleanCmd,
+      output: execRes.message || 'Terminal command failed on daemon.',
+      exitCode: 1,
+      latencyMs: 0,
+      success: false,
+    };
+  }
+  if (execRes.kind === 'timeout') {
+    return {
+      command: cleanCmd,
+      output: 'Terminal command timed out after 60s on axonwalld.',
+      exitCode: 124,
+      latencyMs: 60000,
+      success: false,
+    };
   }
 
   return {
@@ -4985,6 +4400,10 @@ export async function getNasDisksInventory(): Promise<{
     };
   }
 
+  if (!isDevModeRuntime()) {
+    throw new Error('Daemon unavailable: could not load disk inventory from axonwalld.');
+  }
+
   let installSpec: any = null;
   try {
     if (fs.existsSync('/var/lib/axonwall/install-zfs.json')) {
@@ -5056,6 +4475,10 @@ export async function getNasPoolsRuntime(): Promise<NasPoolStatus[]> {
     return daemonResp.pools;
   }
 
+  if (!isDevModeRuntime()) {
+    throw new Error('Daemon unavailable: could not load ZFS pool telemetry from axonwalld.');
+  }
+
   const state = await getCurrentDesiredState();
   return (state.nas?.pools ?? []).map((p) => ({
     name: p.name,
@@ -5097,7 +4520,7 @@ export async function createNasSnapshotAction(
     throw new Error('Invalid ZFS snapshot label');
   }
 
-  const daemonResp = await callAgentApi<any>('/v1/nas/snapshots', 'POST', { dataset, label });
+  const daemonResp = await callAgentApiResponse<any>('/v1/nas/snapshots', 'POST', { dataset, label }, 120_000);
   if (daemonResp) {
     return {
       success: Boolean(daemonResp.success),
@@ -5106,9 +4529,6 @@ export async function createNasSnapshotAction(
     };
   }
 
-  // C-B1: the daemon is unreachable, so no snapshot was taken anywhere.
-  // Never invent a snapshot name and report success — an operator about
-  // to upgrade on the strength of that banner would have no safety net.
   return {
     success: false,
     snapshot: '',
@@ -5126,7 +4546,7 @@ export async function scrubNasPoolAction(poolName: string): Promise<{ success: b
     throw new Error('Invalid ZFS pool name');
   }
 
-  const daemonResp = await callAgentApi<any>('/v1/nas/scrub', 'POST', { pool: poolName });
+  const daemonResp = await callAgentApiResponse<any>('/v1/nas/scrub', 'POST', { pool: poolName }, 120_000);
   if (daemonResp) {
     return {
       success: Boolean(daemonResp.success),
@@ -5134,8 +4554,6 @@ export async function scrubNasPoolAction(poolName: string): Promise<{ success: b
     };
   }
 
-  // Daemon unreachable: no scrub ran. Never report success for a scrub
-  // that was never started — silent data-rot is the failure mode here.
   return {
     success: false,
     message: `Daemon unavailable: ZFS pool scrub was not started on '${poolName}'.`,
@@ -5152,10 +4570,15 @@ export async function rollbackNasSnapshotAction(
   if (!/^[a-zA-Z0-9][a-zA-Z0-9_./-]*@[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(snapshot) || snapshot.includes('..')) {
     throw new Error('Invalid ZFS snapshot identifier (expected dataset@label)');
   }
-  const daemonResp = await callAgentApi<any>('/v1/nas/snapshots/rollback', 'POST', {
-    snapshot,
-    destroyNewer: false,
-  });
+  const daemonResp = await callAgentApiResponse<any>(
+    '/v1/nas/snapshots/rollback',
+    'POST',
+    {
+      snapshot,
+      destroyNewer: false,
+    },
+    120_000
+  );
   if (!daemonResp) {
     return {
       success: false,
@@ -5178,9 +4601,11 @@ export async function deleteNasSnapshotAction(
   if (!/^[a-zA-Z0-9][a-zA-Z0-9_./-]*@[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(snapshot) || snapshot.includes('..')) {
     throw new Error('Invalid ZFS snapshot identifier (expected dataset@label)');
   }
-  const daemonResp = await callAgentApi<any>(
+  const daemonResp = await callAgentApiResponse<any>(
     `/v1/nas/snapshots?snapshot=${encodeURIComponent(snapshot)}`,
-    'DELETE'
+    'DELETE',
+    undefined,
+    60_000
   );
   if (!daemonResp) {
     return {
@@ -5204,7 +4629,7 @@ export async function trimNasPoolAction(
   if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(poolName)) {
     throw new Error('Invalid ZFS pool name');
   }
-  const daemonResp = await callAgentApi<any>('/v1/nas/trim', 'POST', { pool: poolName });
+  const daemonResp = await callAgentApiResponse<any>('/v1/nas/trim', 'POST', { pool: poolName }, 120_000);
   if (!daemonResp) {
     return {
       success: false,
@@ -5228,10 +4653,15 @@ export async function checkpointNasPoolAction(
   if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(poolName)) {
     throw new Error('Invalid ZFS pool name');
   }
-  const daemonResp = await callAgentApi<any>('/v1/nas/checkpoint', 'POST', {
-    pool: poolName,
-    discard: Boolean(discard),
-  });
+  const daemonResp = await callAgentApiResponse<any>(
+    '/v1/nas/checkpoint',
+    'POST',
+    {
+      pool: poolName,
+      discard: Boolean(discard),
+    },
+    60_000
+  );
   if (!daemonResp) {
     return {
       success: false,
@@ -5259,11 +4689,16 @@ export async function manageNasDatasetEncryptionAction(
   if (!/^[a-zA-Z0-9][a-zA-Z0-9_./-]*$/.test(dataset) || dataset.includes('..')) {
     throw new Error('Invalid ZFS dataset name');
   }
-  const daemonResp = await callAgentApi<any>('/v1/nas/encryption', 'POST', {
-    dataset,
-    action,
-    keyMaterial,
-  });
+  const daemonResp = await callAgentApiResponse<any>(
+    '/v1/nas/encryption',
+    'POST',
+    {
+      dataset,
+      action,
+      keyMaterial,
+    },
+    60_000
+  );
   if (!daemonResp) {
     return {
       success: false,
@@ -5287,10 +4722,15 @@ export async function runNasSmartTestAction(
   if (!/^\/dev\/[a-zA-Z0-9/_-]+$/.test(device) || device.includes('..')) {
     throw new Error('Invalid block device path');
   }
-  const daemonResp = await callAgentApi<any>('/v1/nas/smart-test', 'POST', {
-    device,
-    testType,
-  });
+  const daemonResp = await callAgentApiResponse<any>(
+    '/v1/nas/smart-test',
+    'POST',
+    {
+      device,
+      testType,
+    },
+    60_000
+  );
   if (!daemonResp) {
     return {
       success: false,
@@ -5317,9 +4757,14 @@ export async function runNasCloudSyncAction(
   if (!/^[a-zA-Z0-9_-]{1,64}$/.test(taskName)) {
     throw new Error('Invalid Cloud Sync task name');
   }
-  const daemonResp = await callAgentApi<any>('/v1/nas/cloud-sync', 'POST', {
-    taskName,
-  });
+  const daemonResp = await callAgentApiResponse<any>(
+    '/v1/nas/cloud-sync',
+    'POST',
+    {
+      taskName,
+    },
+    120_000
+  );
   if (!daemonResp) {
     return {
       success: false,
@@ -5385,10 +4830,15 @@ export async function manageK3sEtcdSnapshotAction(
   if (name && !/^[a-zA-Z0-9_.-]{1,128}$/.test(name)) {
     throw new Error('Invalid etcd snapshot name');
   }
-  const daemonResp = await callAgentApi<any>('/v1/k3s/etcd-snapshots', 'POST', {
-    action,
-    name,
-  });
+  const daemonResp = await callAgentApiResponse<any>(
+    '/v1/k3s/etcd-snapshots',
+    'POST',
+    {
+      action,
+      name,
+    },
+    120_000
+  );
   if (!daemonResp) {
     return {
       success: false,
@@ -5425,6 +4875,10 @@ export async function getK3sRuntimeStatus(): Promise<K3sRuntimeStatus> {
       podsTotal: Number(daemonResp.pods_total ?? daemonResp.podsTotal ?? 0),
       openEbsHealthy: Boolean(daemonResp.openebs_healthy ?? daemonResp.openEbsHealthy),
     };
+  }
+
+  if (!isDevModeRuntime()) {
+    throw new Error('Daemon unavailable: could not load K3s runtime status from axonwalld.');
   }
 
   const state = await getCurrentDesiredState();
@@ -5468,14 +4922,19 @@ export async function triggerK3sHaAutoJoin(): Promise<{ success: boolean; messag
   const syncPort = state.ha?.sqliteSync?.listenPort || state.ha?.peerPort || 9876;
   const authToken = state.ha?.sqliteSync?.authToken || '';
 
-  const daemonResp = await callAgentApi<any>('/v1/k3s/join', 'POST', {
-    peerIp,
-    syncPort,
-    authToken,
-  });
+  const daemonResp = await callAgentApiResponse<any>(
+    '/v1/k3s/join',
+    'POST',
+    {
+      peerIp,
+      syncPort,
+      authToken,
+    },
+    120_000
+  );
   if (daemonResp) {
     if (!daemonResp.success) {
-      throw new Error(daemonResp.message || 'Failed to auto-join K3s cluster');
+      throw new Error(daemonResp.message || daemonResp.error || 'Failed to auto-join K3s cluster');
     }
     return {
       success: Boolean(daemonResp.success),
@@ -5483,9 +4942,16 @@ export async function triggerK3sHaAutoJoin(): Promise<{ success: boolean; messag
     };
   }
 
+  if (!isDevModeRuntime()) {
+    return {
+      success: false,
+      message: 'Daemon unavailable: K3s HA peer auto-join requires live axonwalld.',
+    };
+  }
+
   return {
     success: true,
-    message: 'Fetched K3s join token from HA primary node over mTLS and joined cluster with OpenEBS storage classes.',
+    message: 'Fetched K3s join token from HA primary node over mTLS and joined cluster with OpenEBS storage classes (DEV MODE).',
   };
 }
 
@@ -6334,9 +5800,7 @@ export async function revertMcpLeaseAction(
   const session = await getSession();
   assertActionPermitted(session, 'admin');
 
-  const res = await callAgentApi<any>('/v1/mcp/revert', 'POST', { leaseId, reason });
-  // C-B6: a null response means the daemon never ran the revert — it is
-  // a failure, not a success. The lease is still in the kernel.
+  const res = await callAgentApiResponse<any>('/v1/mcp/revert', 'POST', { leaseId, reason }, 30_000);
   if (!res) {
     return { success: false, error: 'Daemon unavailable — lease was not reverted.' };
   }
@@ -6352,7 +5816,7 @@ export async function emergencyFlushMcpLeasesAction(
   const session = await getSession();
   assertActionPermitted(session, 'admin');
 
-  const res = await callAgentApi<any>('/v1/mcp/flush', 'POST', { reason });
+  const res = await callAgentApiResponse<any>('/v1/mcp/flush', 'POST', { reason }, 30_000);
   // C-B6: a null response means the daemon never ran the flush — the
   // blackholes/shapers/DNAT/DNS sinkholes are all still in the kernel.
   // A daemon-reported failure is a failure too. Never report purged
@@ -6400,6 +5864,18 @@ export async function toggleMcpServerMasterSwitchAction(
   };
 
   try {
+    // When disabling MCP, flush active tactical & XDP leases BEFORE disabling mcp-settings.json
+    // so axonwalld does not reject the flush once disabled.
+    if (!enabled) {
+      await callAgentApi<any>(
+        '/v1/mcp/flush',
+        'POST',
+        { reason: 'Master MCP Server switch disabled by administrator' },
+        30_000
+      ).catch(() => {});
+      await callAgentApi<any>('/v1/ebpf/xdp/block', 'DELETE', { clearAll: true }, 15_000).catch(() => {});
+    }
+
     const serialized = JSON.stringify(payload, null, 2);
     const targets = process.env.AXONWALL_MCP_SETTINGS_PATH
       ? [process.env.AXONWALL_MCP_SETTINGS_PATH]
@@ -6410,13 +5886,6 @@ export async function toggleMcpServerMasterSwitchAction(
         ];
     for (const target of Array.from(new Set(targets))) {
       writeConfigFileSafe(target, serialized, 0o660);
-    }
-
-    // If disabled, automatically flush active kernel leases for safety
-    if (!enabled) {
-      await callAgentApi<any>('/v1/mcp/flush', 'POST', {
-        reason: 'Master MCP Server switch disabled by administrator',
-      }).catch(() => {});
     }
 
     return {
@@ -6509,7 +5978,7 @@ export async function generateRosenpassKeypairAction(
   const session = await getSession();
   assertActionPermitted(session, 'admin');
 
-  const res = await callAgentApi<any>('/v1/vpn/rosenpass/keygen', 'POST', { force: Boolean(force) }, 15000);
+  const res = await callAgentApiResponse<any>('/v1/vpn/rosenpass/keygen', 'POST', { force: Boolean(force) }, 30000);
   if (res && res.success) {
     return {
       success: true,
@@ -6518,8 +5987,20 @@ export async function generateRosenpassKeypairAction(
       sha256: res.sha256 || '',
     };
   }
+  if (res) {
+    return {
+      success: false,
+      error: res.error || res.message || 'Daemon failed to generate Rosenpass PQ keypair.',
+    };
+  }
+  if (!isDevModeRuntime()) {
+    return {
+      success: false,
+      error: 'Daemon unavailable: failed to generate Rosenpass PQ keypair.',
+    };
+  }
 
-  // Fallback deterministic SHA-256 fingerprint when daemon socket is offline in dev preview
+  // Dev preview fallback
   const randomSeed = crypto.randomBytes(64);
   const sha = crypto.createHash('sha256').update(randomSeed).digest('hex');
   return {
@@ -6540,7 +6021,7 @@ export async function exportRosenpassPublicKeyAction(): Promise<{
   const session = await getSession();
   assertActionPermitted(session);
 
-  const res = await callAgentApi<any>('/v1/vpn/rosenpass/pubkey', 'GET', undefined, 10000);
+  const res = await callAgentApiResponse<any>('/v1/vpn/rosenpass/pubkey', 'GET', undefined, 10000);
   if (res && res.success && res.publicKeyBase64) {
     return {
       success: true,
@@ -6576,11 +6057,11 @@ export async function uploadRosenpassPeerPublicKeyAction(
     };
   }
 
-  const res = await callAgentApi<any>(
+  const res = await callAgentApiResponse<any>(
     '/v1/vpn/rosenpass/peer-pubkey',
     'POST',
     { peerName: cleanName, publicKeyBase64 },
-    15000,
+    30000,
   );
   if (res && res.success) {
     return {
@@ -6588,6 +6069,18 @@ export async function uploadRosenpassPeerPublicKeyAction(
       path: res.path,
       sha256: res.sha256,
       sizeBytes: Number(res.sizeBytes || 0),
+    };
+  }
+  if (res) {
+    return {
+      success: false,
+      error: res.error || res.message || 'Daemon refused Rosenpass peer public key.',
+    };
+  }
+  if (!isDevModeRuntime()) {
+    return {
+      success: false,
+      error: 'Daemon unavailable: failed to upload Rosenpass peer public key.',
     };
   }
 
@@ -7027,7 +6520,7 @@ export async function manageBpfTokenProfileAction(input: {
   }
 
   if (input.action === 'delete') {
-    const res = await callAgentApi<any>(`/v1/ebpf/tokens?name=${encodeURIComponent(cleanName)}`, 'DELETE', undefined, 10000);
+    const res = await callAgentApiResponse<any>(`/v1/ebpf/tokens?name=${encodeURIComponent(cleanName)}`, 'DELETE', undefined, 10000);
     if (!res) {
       return { success: false, error: 'Daemon unavailable — cannot unmount bpffs delegation profile.' };
     }
@@ -7037,7 +6530,7 @@ export async function manageBpfTokenProfileAction(input: {
     return { success: true };
   }
 
-  const res = await callAgentApi<any>(
+  const res = await callAgentApiResponse<any>(
     '/v1/ebpf/tokens',
     'POST',
     {
@@ -7071,7 +6564,7 @@ export async function manageXdpFastDropAction(input: {
   }
 
   if (input.action === 'unblock') {
-    const res = await callAgentApi<any>(`/v1/ebpf/xdp/block?ip=${encodeURIComponent(cleanIp)}`, 'DELETE', undefined, 8000);
+    const res = await callAgentApiResponse<any>(`/v1/ebpf/xdp/block?ip=${encodeURIComponent(cleanIp)}`, 'DELETE', undefined, 8000);
     if (!res) {
       return { success: false, error: 'Daemon unavailable — XDP blocklist map was not modified.' };
     }
@@ -7082,7 +6575,7 @@ export async function manageXdpFastDropAction(input: {
   }
 
   const ttl = Math.max(10, Math.min(604800, Number(input.ttlSeconds) || 3600));
-  const res = await callAgentApi<any>('/v1/ebpf/xdp/block', 'POST', { ip: cleanIp, ttlSeconds: ttl }, 8000);
+  const res = await callAgentApiResponse<any>('/v1/ebpf/xdp/block', 'POST', { ip: cleanIp, ttlSeconds: ttl }, 8000);
   if (!res) {
     return { success: false, error: 'Daemon unavailable — XDP blocklist map was not updated.' };
   }
@@ -7114,7 +6607,7 @@ export async function setXdpSynLimitAction(
       error: 'SYN flood rate limit must be 0 (disabled) or between 20 and 10,000,000 PPS.',
     };
   }
-  const res = await callAgentApi<any>('/v1/ebpf/xdp/syn-limit', 'POST', { maxSynPps: val }, 8000);
+  const res = await callAgentApiResponse<any>('/v1/ebpf/xdp/syn-limit', 'POST', { maxSynPps: val }, 8000);
   if (!res) {
     return { success: false, maxSynPps: 0, error: 'Daemon unavailable — XDP SYN rate limit was not updated.' };
   }
@@ -7399,7 +6892,7 @@ export async function updateThreatHarvesterLiveConfigAction(
   await enforceRateLimit(20, 60000, 'threat-harvester-config');
 
   const validated = ThreatHarvesterConfigSchema.parse(cfg);
-  const res = await callAgentApi<{ success?: boolean; status?: ThreatHarvesterStatusSnapshot; error?: string; message?: string }>(
+  const res = await callAgentApiResponse<{ success?: boolean; status?: ThreatHarvesterStatusSnapshot; error?: string; message?: string }>(
     '/v1/security/threat-harvester/config',
     'POST',
     validated,
@@ -7427,7 +6920,7 @@ export async function reviewThreatHarvesterEpisodeAction(input: {
     return { success: false, error: 'Episode ID is required' };
   }
 
-  const res = await callAgentApi<{ success?: boolean; episode?: ThreatEpisode; error?: string; message?: string }>(
+  const res = await callAgentApiResponse<{ success?: boolean; episode?: ThreatEpisode; error?: string; message?: string }>(
     '/v1/security/threat-harvester/episodes/review',
     'POST',
     { id: cleanId, action: input.action },
@@ -7454,7 +6947,7 @@ export async function annotateThreatHarvesterEpisodeAction(
     return { success: false, error: 'Episode ID is required' };
   }
 
-  const res = await callAgentApi<{ success?: boolean; episode?: ThreatEpisode; error?: string; message?: string }>(
+  const res = await callAgentApiResponse<{ success?: boolean; episode?: ThreatEpisode; error?: string; message?: string }>(
     '/v1/security/threat-harvester/episodes/annotate',
     'POST',
     { id: cleanId },
@@ -7480,7 +6973,7 @@ export async function simulateThreatHarvesterEpisodeAction(
   assertActionPermitted(session, 'admin');
   await enforceRateLimit(30, 60000, 'threat-harvester-simulate');
 
-  const res = await callAgentApi<{ success?: boolean; episode?: ThreatEpisode; error?: string; message?: string }>(
+  const res = await callAgentApiResponse<{ success?: boolean; episode?: ThreatEpisode; error?: string; message?: string }>(
     '/v1/security/threat-harvester/simulate',
     'POST',
     { scenario },
@@ -7504,11 +6997,11 @@ export async function shipThreatHarvesterCorpusAction(): Promise<{
   assertActionPermitted(session, 'admin');
   await enforceRateLimit(10, 60000, 'threat-harvester-ship');
 
-  const res = await callAgentApi<{ success?: boolean; objectKey?: string; error?: string; message?: string }>(
+  const res = await callAgentApiResponse<{ success?: boolean; objectKey?: string; error?: string; message?: string }>(
     '/v1/security/threat-harvester/ship',
     'POST',
     {},
-    45000
+    60_000
   );
   if (!res) {
     return { success: false, error: 'axonwalld threat-harvester ship endpoint unreachable' };

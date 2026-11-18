@@ -80,10 +80,11 @@ const hostapdTemplate = `
 interface={{.Radio}}
 driver=nl80211
 ssid={{.SSID}}
-hw_mode=g
+hw_mode={{.HwMode}}
 channel={{.Channel}}
 ieee80211n=1
-wmm_enabled=1
+{{if .Is5GHz}}ieee80211ac=1
+{{end}}wmm_enabled=1
 
 {{if .FastRoaming.Enabled}}
 # 802.11r Fast BSS Transition
@@ -141,15 +142,30 @@ func (e *WiFiEngine) Configure(cfg WiFiConfig) error {
 		return err
 	}
 
-	// Default channel if not specified
+	// Default channel and derived 802.11 band parameters
 	if cfg.Channel == 0 {
 		cfg.Channel = 1
+	}
+	if cfg.FastRoaming.Enabled && strings.TrimSpace(cfg.FastRoaming.MobilityDomain) == "" {
+		cfg.FastRoaming.MobilityDomain = "4f57"
+	}
+	tplData := struct {
+		WiFiConfig
+		HwMode string
+		Is5GHz bool
+	}{
+		WiFiConfig: cfg,
+		HwMode:     "g",
+		Is5GHz:     cfg.Channel > 14,
+	}
+	if tplData.Is5GHz {
+		tplData.HwMode = "a"
 	}
 
 	confPath := filepath.Join(e.ConfigDir, fmt.Sprintf("hostapd-%s.conf", cfg.Radio))
 
 	var buf bytes.Buffer
-	if err := tmpl.Execute(&buf, cfg); err != nil {
+	if err := tmpl.Execute(&buf, tplData); err != nil {
 		return err
 	}
 

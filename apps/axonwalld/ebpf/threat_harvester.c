@@ -707,16 +707,20 @@ int uprobe_harvester_ssl_write(struct harvester_pt_regs *ctx)
 	ev->anomaly_flags = 0;
 	ev->tcp_flags = 0;
 	ev->tcp_wscale = 0;
+	__builtin_memset(ev->pkt_sizes, 0, sizeof(ev->pkt_sizes));
+	__builtin_memset(ev->iat_us, 0, sizeof(ev->iat_us));
 	bpf_get_current_comm(ev->comm, sizeof(ev->comm));
 	ev->sni[0] = '\0';
 
 	if (write_len >= 256) {
-		bpf_probe_read_user(ev->payload, 256, buf_ptr);
-		ev->payload_len = 256;
+		if (bpf_probe_read_user(ev->payload, 256, buf_ptr) == 0) {
+			ev->payload_len = 256;
+		} else {
+			ev->payload_len = 0;
+		}
 	} else {
 		__u32 clen = write_len & 0xFF;
-		if (clen > 0) {
-			bpf_probe_read_user(ev->payload, clen, buf_ptr);
+		if (clen > 0 && bpf_probe_read_user(ev->payload, clen, buf_ptr) == 0) {
 			ev->payload_len = (__u16)clen;
 		} else {
 			ev->payload_len = 0;

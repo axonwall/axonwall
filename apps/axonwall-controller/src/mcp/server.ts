@@ -39,14 +39,12 @@ import { acquireMcpLockFile, desiredStateLockPath } from './lockfile.js';
 export { desiredStateLockPath } from './lockfile.js';
 import { recordMcpAuditEntry, queryMcpAuditEntries } from './audit.js';
 
-const AGENT_SOCKET_PATH = resolveControllerDirs().agentSock;
-const AGENT_TOKEN_PATHS = resolveControllerDirs().agentTokenPaths;
-
 function readAgentToken(): string {
   if (process.env.AXONWALL_AGENT_TOKEN) {
     return process.env.AXONWALL_AGENT_TOKEN.trim();
   }
-  for (const p of AGENT_TOKEN_PATHS) {
+  const tokenPaths = resolveControllerDirs().agentTokenPaths;
+  for (const p of tokenPaths) {
     try {
       if (fs.existsSync(p)) {
         const tok = fs.readFileSync(p, 'utf8').trim();
@@ -96,11 +94,12 @@ export async function callAxonwalldApi<T = any>(
   body?: unknown,
   timeoutMs = 15000
 ): Promise<{ ok: boolean; status: number; data: T }> {
-  if (!fs.existsSync(AGENT_SOCKET_PATH)) {
+  const agentSocketPath = resolveControllerDirs().agentSock;
+  if (!fs.existsSync(agentSocketPath)) {
     return {
       ok: false,
       status: 503,
-      data: { error: `axonwalld socket not available at ${AGENT_SOCKET_PATH}` } as unknown as T,
+      data: { error: `axonwalld socket not available at ${agentSocketPath}` } as unknown as T,
     };
   }
 
@@ -110,7 +109,7 @@ export async function callAxonwalldApi<T = any>(
   return new Promise((resolve) => {
     const req = http.request(
       {
-        socketPath: AGENT_SOCKET_PATH,
+        socketPath: agentSocketPath,
         path: pathUrl,
         method,
         headers: {
@@ -259,7 +258,7 @@ function renderOfflineK3sBpfTokenYaml(params: {
   kind: 'Pod' | 'DaemonSet';
 }): string {
   const masks = resolveBpfTokenPresetMasks(params.preset);
-  const hostPinPath = `/run/axonwall/bpf-tokens/${params.profileId}`;
+  const hostPinPath = `/run/axonwall/bpffs-tokens/${params.profileId}`;
   const podSpec = [
     `hostUsers: false`,
     `automountServiceAccountToken: false`,
@@ -2069,6 +2068,7 @@ export async function handleMcpCallTool(
           daemonRes.data?.error || 'Daemon unavailable: emergency clear-all was not applied; tactical leases are still active'
         );
       }
+      await callAxonwalldApi('DELETE', '/v1/ebpf/xdp/block', { clearAll: true });
       recordMcpAuditEntry({
         keyId: env.key.id,
         keyName: env.key.name,
@@ -2322,8 +2322,15 @@ export async function handleMcpCallTool(
           nftablesRuleset: compiled.nftScript,
           reloadServices: compiled.reloadServices,
           commitConfirmTimeoutSec: req.confirmTimeoutSeconds,
-        });
+        }, Number(process.env.AXONWALL_APPLY_TIMEOUT_MS) || 120_000);
         if (!applyRes.ok) {
+          if (applyRes.status === 504) {
+            return deny(
+              'mcp:firewall:apply',
+              `Daemon apply timed out waiting for response (pending jobId=${applyJobId}); did NOT roll back staged rule on disk—inspect pending job before retrying`,
+              req.audit,
+            );
+          }
           // B2-M4: roll the staged rule back out under the same
           // lock, reloaded fresh — restoring a stale snapshot here
           // would clobber a concurrent writer's rule exactly like
@@ -2560,7 +2567,14 @@ export async function handleMcpCallTool(
       const targetValue = parsedIp.isSingleHost ? parsedIp.address : parsedIp.normalizedCidr;
 
       if (req.action === 'block') {
-        const { ctx } = await buildGuardContext(env.key, env.clientIp);
+        const { ctx, activeLeasesCount } = await buildGuardContext(env.key, env.clientIp);
+        if (activeLeasesCount >= env.key.policyLimits.maxActiveLeases) {
+          return deny(
+            'mcp:ebpf:manage',
+            `Maximum active tactical leases (${env.key.policyLimits.maxActiveLeases}) reached for key '${env.key.name}'`,
+            req.audit,
+          );
+        }
         const targetCheck = validateMcpTarget(targetValue, ctx);
         if (!targetCheck.valid) {
           return deny('mcp:ebpf:manage', targetCheck.reason || 'Target rejected by anti-lockout / blast-radius guard', req.audit);
@@ -2845,7 +2859,7 @@ export async function handleMcpCallTool(
           targetId: req.id,
           pool: poolCheck.normalizedTarget,
           destType: 'local',
-        });
+        }, 120_000);
       } else if (req.action === 'restore') {
         if (!req.backupArchivePath) {
           return deny('mcp:virt:manage', 'backupArchivePath (.vma.zst filename) is required for restore action', req.audit);
@@ -2861,7 +2875,7 @@ export async function handleMcpCallTool(
           targetType: req.workloadType,
           targetId: req.id,
           pool: poolCheck.normalizedTarget,
-        });
+        }, 120_000);
       } else if (req.action === 'snapshot' || req.action === 'rollback') {
         const label = req.snapshotName || (req.action === 'snapshot' ? `mcp-${Date.now()}` : '');
         if (!label) {
@@ -2882,7 +2896,7 @@ export async function handleMcpCallTool(
           newVmid: req.newId,
           newName: req.newName || '',
           linked: req.linkedClone !== false,
-        });
+        }, 120_000);
       } else if (req.action === 'live_migrate') {
         if (req.workloadType !== 'vm' || !req.targetHostIp) {
           return deny('mcp:virt:manage', 'live_migrate requires workloadType="vm" and targetHostIp', req.audit);
@@ -2890,7 +2904,7 @@ export async function handleMcpCallTool(
         daemonRes = await callAxonwalldApi('POST', '/v1/virt/migrate', {
           vmid: req.id,
           targetPeerIp: req.targetHostIp,
-        });
+        }, 120_000);
       } else if (req.action === 'qga_interfaces') {
         daemonRes = await callAxonwalldApi('GET', `/v1/virt/qga?vmid=${encodeURIComponent(String(req.id))}`);
       } else if (req.action === 'export_libvirt_xml') {
@@ -2990,6 +3004,8 @@ export async function handleMcpCallTool(
       }
 
       let compiledConfig = '';
+      let hadPrevBpfToken = false;
+      let prevBpfToken: any = undefined;
       let releaseLock: (() => void) | null = null;
       try {
         try {
@@ -3012,6 +3028,11 @@ export async function handleMcpCallTool(
             `Linux 6.9+ BPF_TOKEN delegation requires an unprivileged LXC container (unprivileged: true with CLONE_NEWUSER), but CT ${req.ctid} ('${ct.hostname}') has unprivileged: false`,
             req.audit,
           );
+        }
+
+        if (ct.bpfToken !== undefined) {
+          hadPrevBpfToken = true;
+          prevBpfToken = structuredClone(ct.bpfToken);
         }
 
         ct.bpfToken = req.enabled
@@ -3053,6 +3074,32 @@ export async function handleMcpCallTool(
             description: `Unprivileged LXC CT ${req.ctid} BPF_TOKEN delegation`,
           })
         : await callAxonwalldApi('DELETE', `/v1/ebpf/tokens?id=${encodeURIComponent(profileId)}`);
+
+      if (!daemonRes.ok && daemonRes.status >= 400 && daemonRes.status < 500) {
+        let rbRelease: (() => void) | null = null;
+        try {
+          rbRelease = acquireMcpLockFile(desiredStateLockPath());
+          const rbState = loadLocalDesiredState();
+          const rbCt = rbState?.virt?.containers?.find((c) => c.ctid === req.ctid);
+          if (rbCt) {
+            if (hadPrevBpfToken) {
+              rbCt.bpfToken = prevBpfToken;
+            } else {
+              delete rbCt.bpfToken;
+            }
+            persistDesiredStateToDisk(rbState!);
+          }
+        } catch {
+          // Best-effort rollback on 4xx rejection
+        } finally {
+          rbRelease?.();
+        }
+        return deny(
+          'mcp:ebpf:manage',
+          daemonRes.data?.error || `Daemon rejected LXC BPF_TOKEN delegation (HTTP ${daemonRes.status}); rolled back staged profile`,
+          req.audit,
+        );
+      }
 
       const auditEntry = recordMcpAuditEntry({
         keyId: env.key.id,
@@ -3328,7 +3375,7 @@ export async function handleMcpCallTool(
           }
           daemonRes = await callAxonwalldApi('POST', '/v1/nas/cloudsync', {
             taskName: req.target.trim(),
-          });
+          }, 120_000);
           break;
         }
       }
@@ -3411,7 +3458,7 @@ export async function handleMcpCallTool(
       const daemonRes = await callAxonwalldApi('POST', '/v1/k3s/etcd-snapshots', {
         action: req.action === 'etcd_snapshot_save' ? 'save' : 'restore',
         name: req.snapshotName || '',
-      });
+      }, 120_000);
       if (!daemonRes.ok) {
         return deny('mcp:k3s:manage', daemonRes.data?.error || 'Daemon rejected K3s etcd snapshot operation', req.audit);
       }

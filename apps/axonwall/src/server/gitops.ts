@@ -12,7 +12,7 @@ import {
   parseDesiredStateFromYamlFiles,
 } from '@axonwall/lib/yaml';
 import { applyDesiredState } from './agent';
-import { callAgentApi } from './agent-client';
+import { callAgentApi, callAgentApiResponse } from './agent-client';
 
 const GITOPS_DIR = process.env.GITOPS_DIR || '/var/lib/axonwall/gitops';
 
@@ -102,7 +102,7 @@ export async function saveEtckeeperConfig(
 ): Promise<{ success: boolean; message: string; config?: EtckeeperConfig }> {
   const session = await getSession();
   assertActionPermitted(session, 'admin');
-  const resp = await callAgentApi<{
+  const resp = await callAgentApiResponse<{
     success?: boolean;
     message?: string;
     error?: string;
@@ -128,12 +128,12 @@ export async function initEtckeeper(): Promise<{
 }> {
   const session = await getSession();
   assertActionPermitted(session, 'admin');
-  const resp = await callAgentApi<{
+  const resp = await callAgentApiResponse<{
     success?: boolean;
     message?: string;
     error?: string;
     status?: EtckeeperStatus;
-  }>('/v1/system/etckeeper/init', 'POST', {});
+  }>('/v1/system/etckeeper/init', 'POST', {}, 60_000);
   if (resp && resp.success) {
     return {
       success: true,
@@ -189,7 +189,7 @@ export async function commitEtckeeper(message: string): Promise<{ success: boole
   const session = await getSession();
   assertActionPermitted(session, 'admin');
   const author = session.username || 'admin';
-  const resp = await callAgentApi<{ success?: boolean; message?: string; error?: string }>(
+  const resp = await callAgentApiResponse<{ success?: boolean; message?: string; error?: string }>(
     '/v1/system/etckeeper/commit',
     'POST',
     { message, author }

@@ -101,11 +101,13 @@ export function compileConntrackd(ha: HighAvailabilityConfig, localIp: string = 
   lines.push('');
 
   if (sync.protocol === 'multicast') {
-    const safeMulticastGroup = (sync.multicastGroup || '225.0.0.50').split(/[\r\n]/)[0].trim().replace(/[^0-9.]/g, '');
+    const safeMulticastGroup = (sync.multicastGroup || '225.0.0.50').split(/[\r\n]/)[0].trim().replace(/[^a-fA-F0-9:.]/g, '');
+    const mcastKey = safeMulticastGroup.includes(':') ? 'IPv6_address' : 'IPv4_address';
+    const ifaceKey = safeLocalIp.includes(':') ? 'IPv6_interface' : 'IPv4_interface';
     lines.push('    Multicast {');
-    lines.push(`        IPv4_address ${safeMulticastGroup}`);
+    lines.push(`        ${mcastKey} ${safeMulticastGroup}`);
     lines.push(`        Group ${safePort}`);
-    lines.push(`        IPv4_interface ${safeLocalIp}`);
+    lines.push(`        ${ifaceKey} ${safeLocalIp}`);
     lines.push(`        Interface ${safeInterface}`);
     lines.push(`        SndSocketBuffer ${bufSize}`);
     lines.push(`        RcvSocketBuffer ${bufSize}`);
@@ -116,9 +118,11 @@ export function compileConntrackd(ha: HighAvailabilityConfig, localIp: string = 
     const effectivePeer = ha.peerIp || ha.peerAddress || '';
     const rawPeer = (sync.peerAddress || effectivePeer || '192.168.1.2').split(/[\r\n]/)[0].trim();
     const safePeerAddress = rawPeer.replace(/[^a-fA-F0-9:.]/g, '');
+    const srcKey = safeLocalIp.includes(':') ? 'IPv6_address' : 'IPv4_address';
+    const dstKey = safePeerAddress.includes(':') ? 'IPv6_Destination_Address' : 'IPv4_Destination_Address';
     lines.push('    UDP {');
-    lines.push(`        IPv4_address ${safeLocalIp}`);
-    lines.push(`        IPv4_Destination_Address ${safePeerAddress}`);
+    lines.push(`        ${srcKey} ${safeLocalIp}`);
+    lines.push(`        ${dstKey} ${safePeerAddress}`);
     lines.push(`        Port ${safePort}`);
     lines.push(`        Interface ${safeInterface}`);
     lines.push(`        SndSocketBuffer ${bufSize}`);
@@ -154,7 +158,7 @@ export function compileConntrackd(ha: HighAvailabilityConfig, localIp: string = 
     for (const ip of sync.filterIgnoreIps) {
       const safeIp = ip.split(/[\r\n]/)[0].trim().replace(/[^a-fA-F0-9:.]/g, '');
       if (safeIp && safeIp !== '127.0.0.1') {
-        lines.push(`            IPv4_address ${safeIp}`);
+        lines.push(`            ${safeIp.includes(':') ? 'IPv6_address' : 'IPv4_address'} ${safeIp}`);
       }
     }
   }
@@ -195,6 +199,7 @@ export function filterHaSyncState(state: DesiredState, sync: HaSyncSections): Pa
     filtered.wireguard = state.wireguard;
     filtered.ipsec = state.ipsec;
     filtered.openvpn = state.openvpn;
+    filtered.rosenpass = state.rosenpass;
   }
 
   if (sync.interfaces) {
@@ -263,6 +268,7 @@ export function compileKeaHaHook(
       probeHost: opts?.probeHost,
       existsFn: opts?.existsFn,
     });
+  const formatUrlHost = (h: string) => (h.includes(':') && !h.startsWith('[') ? `[${h}]` : h);
   return {
     library,
     parameters: {
@@ -277,13 +283,13 @@ export function compileKeaHaHook(
           peers: [
             {
               name: 'axon-primary',
-              url: `http://${isPrimary ? safeLocal : safePeer}:8001/`,
+              url: `http://${formatUrlHost(isPrimary ? safeLocal : safePeer)}:8001/`,
               role: 'primary',
               auto_failover: true,
             },
             {
               name: 'axon-secondary',
-              url: `http://${!isPrimary ? safeLocal : safePeer}:8001/`,
+              url: `http://${formatUrlHost(!isPrimary ? safeLocal : safePeer)}:8001/`,
               role: 'standby',
               auto_failover: true,
             },
@@ -339,7 +345,9 @@ export function compileLitestreamConfig(ha: HighAvailabilityConfig): string {
       }
     } else {
       // Local/peer directory replica
-      const replicaDir = safeDbPath.replace('.sqlite', '.replica');
+      const replicaDir = safeDbPath.endsWith('.sqlite')
+        ? safeDbPath.slice(0, -7) + '.replica'
+        : `${safeDbPath}.replica`;
       lines.push(`      - type: file`);
       lines.push(`        path: ${JSON.stringify(replicaDir)}`);
     }

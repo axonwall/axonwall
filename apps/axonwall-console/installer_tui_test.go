@@ -7,6 +7,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"unicode/utf16"
@@ -822,5 +824,70 @@ func TestSummarizeTargetDiskWarningsFallbackUnsyncedPrimary(t *testing.T) {
 	}
 	if confirmTargetDiskOverwrite(axonDisks, cfg, bufio.NewReader(strings.NewReader("\n")), &out) {
 		t.Fatal("expected single unassigned disk with existing Axonwall install to prompt warning")
+	}
+}
+
+func TestIsDiskBusyOrHeld(t *testing.T) {
+	sysRoot := t.TempDir()
+	// Holder on partition directory /sys/block/nvme0n1/nvme0n1p3/holders/dm-0
+	holderDir := filepath.Join(sysRoot, "nvme0n1", "nvme0n1p3", "holders")
+	if err := os.MkdirAll(holderDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(holderDir, "dm-0"), []byte{}, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if !isDiskBusyOrHeld("/dev/nvme0n1", "nvme0n1", "", "", "", sysRoot) {
+		t.Fatalf("expected disk with held partition to be reported busy")
+	}
+
+	// Empty holders directory -> not busy
+	freeDir := filepath.Join(sysRoot, "sda", "holders")
+	if err := os.MkdirAll(freeDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if isDiskBusyOrHeld("/dev/sda", "sda", "", "Filename\tType\tSize\n", "", sysRoot) {
+		t.Fatalf("expected idle disk without swaps/mounts/holders/zpool to be false")
+	}
+
+	// Active swap or zpool status -P match
+	swaps := "Filename\tType\tSize\n/dev/sda2 partition 1048572 0 -2\n"
+	if !isDiskBusyOrHeld("/dev/sda", "sda", "", swaps, "", sysRoot) {
+		t.Fatalf("expected disk with active swap partition to be reported busy")
+	}
+	zpoolOut := "  pool: tank\n state: ONLINE\nconfig:\n\tNAME        STATE\n\t/dev/sdb1   ONLINE\n"
+	if !isDiskBusyOrHeld("/dev/sdb", "sdb", "", "", zpoolOut, sysRoot) {
+		t.Fatalf("expected disk in active zpool status -P to be reported busy")
+	}
+}
+
+func TestInspectRawDiskHeaderZfsAndUdevDecode(t *testing.T) {
+	zfsBuf := make([]byte, 262144)
+	binary.LittleEndian.PutUint64(zfsBuf[0x20000:0x20008], 0x00bab10c)
+	zfsRes := inspectRawDiskHeader("/dev/nvme1n1", zfsBuf)
+	if zfsRes.WholeFSType != "zfs_member" {
+		t.Fatalf("expected WholeFSType=zfs_member for ZFS uberblock, got %+v", zfsRes)
+	}
+
+	if got := decodeUdevEscapedLabel(`Backup\x20Pool\x2f1`); got != "Backup Pool/1" {
+		t.Fatalf("decodeUdevEscapedLabel ASCII escapes = %q, want %q", got, "Backup Pool/1")
+	}
+	if got := decodeUdevEscapedLabel(`Caf\xc3\xa9`); got != "Café" {
+		t.Fatalf("decodeUdevEscapedLabel UTF-8 escape = %q, want %q", got, "Café")
+	}
+}
+
+func TestComputePartitionLayoutZbmNoLogsStealing(t *testing.T) {
+	cfg := DefaultInstallerConfig()
+	cfg.InstallMode = "zbm"
+	cfg.LogsEnabled = true
+	cfg.LogsGB = 8
+	layout := ComputePartitionLayout(65536, cfg)
+	if layout.LogsMB != 0 {
+		t.Fatalf("expected ZBM layout.LogsMB=0 even with LogsEnabled=true, got %d", layout.LogsMB)
+	}
+	wantZfsMB := 65536 - layout.EfiMB - 16
+	if layout.ZfsMB != wantZfsMB {
+		t.Fatalf("expected ZBM layout.ZfsMB=%d (no logsMB deducted), got %d", wantZfsMB, layout.ZfsMB)
 	}
 }

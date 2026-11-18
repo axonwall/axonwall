@@ -369,6 +369,7 @@ type ThreatHarvesterManager struct {
 	episodes []ThreatEpisode
 
 	stopCh              chan struct{}
+	stopOnce            sync.Once
 	workerOnce          sync.Once
 	backpressureActive  atomic.Bool
 	backpressureCooloff time.Time
@@ -411,6 +412,73 @@ func (m *ThreatHarvesterManager) ensureBackgroundLoops() {
 	m.workerOnce.Do(func() {
 		go m.correlationLoop()
 	})
+}
+
+// Stop halts background harvester loops and detaches any loaded Ring-0 eBPF links.
+func (m *ThreatHarvesterManager) Stop() {
+	m.stopOnce.Do(func() {
+		close(m.stopCh)
+	})
+	m.mu.Lock()
+	m.detachBpfLocked()
+	m.mu.Unlock()
+}
+
+func resolveEvalSymlinksWithTail(target string) (string, error) {
+	clean := filepath.Clean(target)
+	var tail []string
+	cur := clean
+	for {
+		resolved, err := filepath.EvalSymlinks(cur)
+		if err == nil {
+			for i := len(tail) - 1; i >= 0; i-- {
+				resolved = filepath.Join(resolved, tail[i])
+			}
+			return resolved, nil
+		}
+		if !os.IsNotExist(err) {
+			return "", err
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			return clean, nil
+		}
+		tail = append(tail, filepath.Base(cur))
+		cur = parent
+	}
+}
+
+func validateHarvesterSpoolDir(raw string) (string, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		trimmed = defaultHarvesterSpoolDir
+	}
+	if !filepath.IsAbs(trimmed) {
+		return "", fmt.Errorf("harvester spoolDir %q must be an absolute path", trimmed)
+	}
+	for _, seg := range strings.Split(filepath.ToSlash(trimmed), "/") {
+		if seg == ".." {
+			return "", fmt.Errorf("harvester spoolDir %q must not contain '..'", trimmed)
+		}
+	}
+	resolved, err := resolveEvalSymlinksWithTail(trimmed)
+	if err != nil {
+		return "", fmt.Errorf("harvester spoolDir %q resolution failed: %w", trimmed, err)
+	}
+	allowedRoots := []string{"/var/lib/axonwall", "/mnt"}
+	if tmpDir := os.TempDir(); tmpDir != "" {
+		if resolvedTmp, err := resolveEvalSymlinksWithTail(tmpDir); err == nil {
+			allowedRoots = append(allowedRoots, resolvedTmp)
+		} else {
+			allowedRoots = append(allowedRoots, filepath.Clean(tmpDir))
+		}
+	}
+	for _, root := range allowedRoots {
+		if resolved == root || strings.HasPrefix(resolved, root+string(os.PathSeparator)) {
+			return resolved, nil
+		}
+	}
+	return "", fmt.Errorf("harvester spoolDir %q (%s) must reside under /var/lib/axonwall, /mnt, or temp dir", trimmed, resolved)
 }
 
 func (m *ThreatHarvesterManager) indexFilePathLocked() string {
@@ -541,6 +609,11 @@ func (m *ThreatHarvesterManager) ApplyConfig(rawJSON []byte) error {
 		nextCfg = DefaultThreatHarvesterConfig()
 	}
 	nextCfg = normalizeThreatHarvesterConfig(nextCfg)
+	validatedSpool, err := validateHarvesterSpoolDir(nextCfg.SpoolDir)
+	if err != nil {
+		return err
+	}
+	nextCfg.SpoolDir = validatedSpool
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -703,6 +776,7 @@ func (m *ThreatHarvesterManager) syncOrAttachBpfLocked() error {
 
 		rd, err := ringbuf.NewReader(m.objs.HarvesterEvents)
 		if err != nil {
+			m.detachBpfLocked()
 			return fmt.Errorf("ringbuf.NewReader: %w", err)
 		}
 		m.ringReader = rd
@@ -905,10 +979,6 @@ func (m *ThreatHarvesterManager) FlushReadyFlows(forceAll bool) int {
 	cfg := m.cfg
 	m.mu.RUnlock()
 
-	if m.backpressureActive.Load() && time.Now().UTC().After(m.backpressureCooloff) {
-		m.backpressureActive.Store(false)
-	}
-
 	window := time.Duration(cfg.CorrelationWindowSec) * time.Second
 	if window <= 0 {
 		window = 45 * time.Second
@@ -918,6 +988,9 @@ func (m *ThreatHarvesterManager) FlushReadyFlows(forceAll bool) int {
 	var ready []*pendingFlowRecord
 
 	m.pendingMu.Lock()
+	if m.backpressureActive.Load() && now.After(m.backpressureCooloff) {
+		m.backpressureActive.Store(false)
+	}
 	for k, rec := range m.pendingFlows {
 		if forceAll || now.Sub(rec.firstSeen) >= window || now.Sub(rec.lastSeen) >= 15*time.Second {
 			ready = append(ready, rec)
@@ -1243,38 +1316,9 @@ func (m *ThreatHarvesterManager) RecordEpisode(ep ThreatEpisode) error {
 		return err
 	}
 
-	// 1. Write .jsonl.zst SFT record
-	sftRec := episodeToSftExample(ep, nil)
-	sftJSON, err := json.Marshal(sftRec)
-	if err != nil {
+	if err := m.writeEpisodeShardLocked(&ep); err != nil {
 		return err
 	}
-	var zstBuf bytes.Buffer
-	zw, err := zstd.NewWriter(&zstBuf)
-	if err != nil {
-		return err
-	}
-	_, _ = zw.Write(append(sftJSON, '\n'))
-	if err := zw.Close(); err != nil {
-		return err
-	}
-	zstPath := m.episodeZstPathLocked(ep.ID)
-	if err := os.WriteFile(zstPath, zstBuf.Bytes(), 0640); err != nil {
-		return err
-	}
-
-	// 2. Write .parquet feature shard for this episode
-	var pqBuf bytes.Buffer
-	row := episodeToParquetRow(ep, nil)
-	if err := WriteThreatFeatureParquet(&pqBuf, []ThreatParquetRow{row}); err != nil {
-		return err
-	}
-	pqPath := m.episodeParquetPathLocked(ep.ID)
-	if err := os.WriteFile(pqPath, pqBuf.Bytes(), 0640); err != nil {
-		return err
-	}
-
-	ep.SpoolBytes = int64(zstBuf.Len() + pqBuf.Len())
 	m.episodes = append(m.episodes, ep)
 	if len(m.episodes) > maxInMemoryEpisodes {
 		m.evictOldestUnpinnedCountLocked(len(m.episodes) - maxInMemoryEpisodes)
@@ -1373,23 +1417,66 @@ func extractSubnetPrefix(ipStr string) string {
 	return net.IP(v6[:8]).String() + "::/64"
 }
 
+func (m *ThreatHarvesterManager) writeEpisodeShardLocked(ep *ThreatEpisode) error {
+	epDir := filepath.Join(m.cfg.SpoolDir, "episodes")
+	if err := os.MkdirAll(epDir, 0750); err != nil {
+		return err
+	}
+
+	sftRec := episodeToSftExample(*ep, nil)
+	sftJSON, err := json.Marshal(sftRec)
+	if err != nil {
+		return err
+	}
+	var zstBuf bytes.Buffer
+	zw, err := zstd.NewWriter(&zstBuf)
+	if err != nil {
+		return err
+	}
+	_, _ = zw.Write(append(sftJSON, '\n'))
+	if err := zw.Close(); err != nil {
+		return err
+	}
+	if err := os.WriteFile(m.episodeZstPathLocked(ep.ID), zstBuf.Bytes(), 0640); err != nil {
+		return err
+	}
+
+	var pqBuf bytes.Buffer
+	row := episodeToParquetRow(*ep, nil)
+	if err := WriteThreatFeatureParquet(&pqBuf, []ThreatParquetRow{row}); err != nil {
+		return err
+	}
+	if err := os.WriteFile(m.episodeParquetPathLocked(ep.ID), pqBuf.Bytes(), 0640); err != nil {
+		return err
+	}
+
+	ep.SpoolBytes = int64(zstBuf.Len() + pqBuf.Len())
+	return nil
+}
+
 func episodeToSftExample(ep ThreatEpisode, anon *CryptoPanAnonymizer) SftTrainingExample {
 	srcIP := ep.SrcIP
 	dstIP := ep.DstIP
 	sni := ep.SNI
 	dsl := ep.CausalDsl
 	tool := ep.RecommendedMcpTool
+	reasoning := ep.ReasoningTrace
 	if anon != nil {
 		srcIP = anon.AnonymizeIP(srcIP)
 		dstIP = anon.AnonymizeIP(dstIP)
 		if sni != "" {
-			sni = anon.AnonymizeHostname(sni)
+			rawSni := sni
+			sni = anon.AnonymizeHostname(rawSni)
+			dsl = strings.ReplaceAll(dsl, rawSni, sni)
+			tool = strings.ReplaceAll(tool, rawSni, sni)
+			reasoning = strings.ReplaceAll(reasoning, rawSni, sni)
 		}
 		dsl = anon.AnonymizeText(dsl)
 		tool = anon.AnonymizeText(tool)
+		reasoning = anon.AnonymizeText(reasoning)
 	}
 	assistant := fmt.Sprintf("<thinking>\n%s\n</thinking>\n\n<verdict>%s</verdict>\n<mitre>%s</mitre>\n<recommended_mcp_tool>%s</recommended_mcp_tool>",
-		ep.ReasoningTrace, ep.LabelTier, strings.Join(ep.MitreAttack, ","), tool)
+		reasoning, ep.LabelTier, strings.Join(ep.MitreAttack, ","), tool)
 
 	userContent := fmt.Sprintf("Analyze Axonwall Blackbox Telemetry Episode `%s` (%s:%d -> %s:%d, %s):\n\n%s",
 		ep.ID, srcIP, ep.SrcPort, dstIP, ep.DstPort, ep.ProtoName, dsl)
@@ -1497,6 +1584,7 @@ func (m *ThreatHarvesterManager) ReviewEpisode(id, action string) (*ThreatEpisod
 		default:
 			return nil, fmt.Errorf("unsupported review action: %s", action)
 		}
+		_ = m.writeEpisodeShardLocked(&m.episodes[i])
 		_ = m.saveIndexLocked()
 		cp := m.episodes[i]
 		return &cp, nil
@@ -1620,6 +1708,7 @@ func (m *ThreatHarvesterManager) AnnotateEpisodeWithTeacherLLM(ctx context.Conte
 				m.episodes[i].RecommendedMcpTool = llmOut.RecommendedMcpTool
 			}
 			m.episodes[i].OracleSources = appendIfMissing(m.episodes[i].OracleSources, "teacher_llm")
+			_ = m.writeEpisodeShardLocked(&m.episodes[i])
 			_ = m.saveIndexLocked()
 			cp := m.episodes[i]
 			return &cp, nil
@@ -1759,6 +1848,37 @@ func hmacSHA256(key []byte, data string) []byte {
 	return mac.Sum(nil)
 }
 
+func canonicalS3HostHeader(u *url.URL) string {
+	host := u.Host
+	if u.Scheme == "https" && strings.HasSuffix(host, ":443") {
+		return strings.TrimSuffix(host, ":443")
+	}
+	if u.Scheme == "http" && strings.HasSuffix(host, ":80") {
+		return strings.TrimSuffix(host, ":80")
+	}
+	return host
+}
+
+func s3UriEncodePath(rawPath string) string {
+	if rawPath == "" {
+		return "/"
+	}
+	var out strings.Builder
+	for i := 0; i < len(rawPath); i++ {
+		ch := rawPath[i]
+		isUnreserved := (ch >= 'A' && ch <= 'Z') ||
+			(ch >= 'a' && ch <= 'z') ||
+			(ch >= '0' && ch <= '9') ||
+			ch == '-' || ch == '_' || ch == '.' || ch == '~' || ch == '/'
+		if isUnreserved {
+			out.WriteByte(ch)
+		} else {
+			fmt.Fprintf(&out, "%%%02X", ch)
+		}
+	}
+	return out.String()
+}
+
 // ShipCorpusToS3 exports a `.tar.zst` bundle and uploads it to the configured
 // Axonwall Vault / MinIO / S3 bucket using stdlib AWS Signature V4.
 func (m *ThreatHarvesterManager) ShipCorpusToS3(ctx context.Context) (string, error) {
@@ -1818,12 +1938,11 @@ func (m *ThreatHarvesterManager) ShipCorpusToS3(ctx context.Context) (string, er
 	req.Header.Set("X-Amz-Content-Sha256", payloadHash)
 
 	if ship.AccessKey != "" && ship.SecretKey != "" {
-		canonicalURI := baseURL.EscapedPath()
-		if canonicalURI == "" {
-			canonicalURI = "/"
-		}
+		canonicalHost := canonicalS3HostHeader(baseURL)
+		req.Host = canonicalHost
+		canonicalURI := s3UriEncodePath(baseURL.Path)
 		canonicalHeaders := fmt.Sprintf("host:%s\nx-amz-content-sha256:%s\nx-amz-date:%s\n",
-			baseURL.Host, payloadHash, amzDate)
+			canonicalHost, payloadHash, amzDate)
 		signedHeaders := "host;x-amz-content-sha256;x-amz-date"
 		canonicalRequest := fmt.Sprintf("PUT\n%s\n\n%s\n%s\n%s",
 			canonicalURI, canonicalHeaders, signedHeaders, payloadHash)
@@ -1872,6 +1991,10 @@ func (m *ThreatHarvesterManager) ShipCorpusToS3(ctx context.Context) (string, er
 func (m *ThreatHarvesterManager) InjectSimulatedEpisode(scenario string) (*ThreatEpisode, error) {
 	now := time.Now().UTC()
 	var ep ThreatEpisode
+
+	m.mu.RLock()
+	pinGold := m.cfg.PinGoldEpisodes
+	m.mu.RUnlock()
 
 	switch scenario {
 	case "dns_c2_exfil":
@@ -1975,7 +2098,7 @@ func (m *ThreatHarvesterManager) InjectSimulatedEpisode(scenario string) (*Threa
 			TimestampUnixMs:    now.UnixMilli(),
 			LabelTier:          "gold_malicious",
 			ReviewStatus:       "pinned_gold",
-			Pinned:             m.cfg.PinGoldEpisodes,
+			Pinned:             pinGold,
 			VerdictScore:       0.99,
 			OracleSources:      []string{"canary_dark_port", "mcp_dnat_honeypot", "lsm_guard_eperm"},
 			MitreAttack:        []string{"T1190", "T1620", "T1014"},

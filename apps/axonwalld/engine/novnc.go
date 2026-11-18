@@ -166,21 +166,18 @@ func (p *ConsoleProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	// Goroutine 2: WebSocket Client -> Backend (decode WS frames, write to unix socket)
-	go forwardClientFrames(clientBuf, backendConn, safeWriteFrame, errChan)
+	allowTextFrames := targetType == "serial" || targetType == "lxc"
+	go forwardClientFramesWithOpts(clientBuf, backendConn, safeWriteFrame, errChan, allowTextFrames)
 
 	<-errChan
 }
 
-// forwardClientFrames decodes client WebSocket frames and writes the
-// resulting RFB bytes to the backend. It owns the client -> backend
-// direction of the proxy loop (A-L6): fragmented binary messages are
-// reassembled (continuation frames buffered until FIN) and delivered
-// as one write, text frames are rejected instead of being forwarded
-// as if they were RFB bytes, and pong frames are ignored instead of
-// being forwarded to the backend. Pre-fix, every non-control frame —
-// fragment, text, or pong — was written to the backend raw, which
-// corrupts the RFB stream for the session.
+// forwardClientFrames decodes client WebSocket frames for binary VNC/RFB sockets.
 func forwardClientFrames(clientBuf io.Reader, backendConn net.Conn, safeWriteFrame func([]byte, byte) error, errChan chan<- error) {
+	forwardClientFramesWithOpts(clientBuf, backendConn, safeWriteFrame, errChan, false)
+}
+
+func forwardClientFramesWithOpts(clientBuf io.Reader, backendConn net.Conn, safeWriteFrame func([]byte, byte) error, errChan chan<- error, allowText bool) {
 	const maxReassembledMessage = 10 * 1024 * 1024
 	var fragBuf []byte
 	inFragment := false
@@ -200,10 +197,26 @@ func forwardClientFrames(clientBuf io.Reader, backendConn net.Conn, safeWriteFra
 			continue
 		case 0xA: // Pong: ignore, never forward to the backend.
 			continue
-		case 0x1: // Text frame: RFB is binary; forwarding UTF-8
-			// text as RFB bytes would corrupt the session.
-			errChan <- fmt.Errorf("websocket text frame rejected: console transport is binary-only")
-			return
+		case 0x1: // Text frame: allow for xterm.js serial/lxc PTY consoles, reject for binary RFB/VNC.
+			if !allowText {
+				errChan <- fmt.Errorf("websocket text frame rejected: console transport is binary-only")
+				return
+			}
+			if inFragment {
+				errChan <- fmt.Errorf("websocket protocol violation: new text frame while a fragmented message is incomplete")
+				return
+			}
+			if fin {
+				if len(payload) > 0 {
+					if _, err := backendConn.Write(payload); err != nil {
+						errChan <- err
+						return
+					}
+				}
+				continue
+			}
+			fragBuf = append(fragBuf[:0], payload...)
+			inFragment = true
 		case 0x2: // Binary frame: start of a (possibly fragmented) message.
 			if inFragment {
 				errChan <- fmt.Errorf("websocket protocol violation: new binary frame while a fragmented message is incomplete")

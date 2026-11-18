@@ -38,8 +38,11 @@ export default function StorageDisksPage() {
       const res = await getNasDisksInventory();
       setDisks(res.disks || []);
       setInstallSpec(res.installSpec || null);
-    } catch {}
-    setLoading(false);
+    } catch (err: any) {
+      setSmartBanner({ ok: false, text: err?.message || 'Failed to load storage disk inventory' });
+    } finally {
+      setLoading(false);
+    }
   };
 
   useEffect(() => {

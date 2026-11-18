@@ -1612,6 +1612,26 @@ func detectInstalledEdition() string {
 	return "axonwall"
 }
 
+func isAxonwallFirewallMenuAvailable() bool {
+	return detectInstalledEdition() == "axonwall" || isLiveMode()
+}
+
+func isK3sAgentHost() bool {
+	if _, err := os.Stat("/etc/rancher/k3s/agent-mode"); err == nil {
+		return true
+	}
+	for _, envPath := range []string{"/etc/axonwall/.k3s-edition", "/etc/axonwall/k3s-storage.env"} {
+		if data, err := os.ReadFile(envPath); err == nil {
+			s := string(data)
+			if strings.Contains(s, "K3S_ROLE=agent") || strings.Contains(s, "K3S_ROLE='agent'") || strings.Contains(s, `K3S_ROLE="agent"`) {
+				return true
+			}
+		}
+	}
+	return unitExistsAny([]string{"/etc/systemd/system/k3s-agent.service", "/usr/lib/systemd/system/k3s-agent.service"}) &&
+		!unitExistsAny([]string{"/etc/systemd/system/k3s.service", "/usr/lib/systemd/system/k3s.service"})
+}
+
 func authenticateConsole(reader *bufio.Reader) (string, bool) {
 	clearScreen()
 	hostname, osName, _, _, _, _ := getSystemInfo()
@@ -3191,17 +3211,13 @@ func actionRestartServices(reader *bufio.Reader) {
 	case "k3s-storage":
 		fmt.Println("Restarting K3s + OpenZFS Storage Host services...")
 		k3sUnit := "k3s"
-		if data, err := os.ReadFile("/etc/axonwall/.k3s-edition"); err == nil &&
-			(strings.Contains(string(data), "K3S_ROLE=agent") || strings.Contains(string(data), "K3S_ROLE='agent'")) {
-			k3sUnit = "k3s-agent"
-		} else if unitExistsAny([]string{"/etc/systemd/system/k3s-agent.service", "/usr/lib/systemd/system/k3s-agent.service"}) &&
-			!unitExistsAny([]string{"/etc/systemd/system/k3s.service", "/usr/lib/systemd/system/k3s.service"}) {
+		if isK3sAgentHost() {
 			k3sUnit = "k3s-agent"
 		}
-		services = []string{"axonwalld", k3sUnit}
+		services = []string{k3sUnit}
 	case "vault":
 		fmt.Println("Restarting Axonwall Vault S3 Storage services...")
-		services = []string{"axonwalld", "axonwall-vault"}
+		services = []string{"seaweedfs"}
 	default:
 		fmt.Println("Restarting axonwalld, axonwall-ui, and axonwall-controller...")
 		services = []string{"axonwalld", "axonwall-ui", "axonwall-controller", "nftables", "slapd", "sssd"}
@@ -3278,6 +3294,8 @@ func actionEditYamlConfigs(reader *bufio.Reader) {
 		"ha",
 		"storage",
 		"k3s",
+		"virt",
+		"vigilante",
 	}
 	for i, d := range domains {
 		path := fmt.Sprintf("/etc/axonwall/%s.yaml", d)
@@ -3292,7 +3310,7 @@ func actionEditYamlConfigs(reader *bufio.Reader) {
 	fmt.Println("  [D] Run `axonwallctl diff`")
 	fmt.Println("  [A] Run `axonwallctl apply`")
 	fmt.Println("  [Q] Return to Console Menu")
-	fmt.Print("\nSelect file [1-10] to edit or action [V/D/A/Q]: ")
+	fmt.Printf("\nSelect file [1-%d] to edit or action [V/D/A/Q]: ", len(domains))
 
 	choice, _ := reader.ReadString('\n')
 	choice = strings.TrimSpace(choice)
@@ -3471,11 +3489,21 @@ func main() {
 			case "4":
 				actionResetAdminPassword(reader)
 			case "5":
-				actionResetMFA(reader)
+				if isAxonwallFirewallMenuAvailable() {
+					actionResetMFA(reader)
+				} else {
+					fmt.Println("Invalid selection. Press [Enter] to continue...")
+					_, _ = reader.ReadString('\n')
+				}
 			case "6":
 				actionDiagnostics(reader)
 			case "7":
-				actionDisplayQRCode(reader)
+				if isAxonwallFirewallMenuAvailable() {
+					actionDisplayQRCode(reader)
+				} else {
+					fmt.Println("Invalid selection. Press [Enter] to continue...")
+					_, _ = reader.ReadString('\n')
+				}
 			case "8":
 				actionRestartServices(reader)
 			case "9":
@@ -3534,21 +3562,36 @@ func main() {
 			case "S", "STATUS":
 				actionApplianceEditionStatus(reader)
 			case "T", "TUI":
-				clearScreen()
-				cmd := exec.Command("/usr/local/bin/axonwall-tui")
-				cmd.Stdin = os.Stdin
-				cmd.Stdout = os.Stdout
-				cmd.Stderr = os.Stderr
-				_ = cmd.Run()
+				if isAxonwallFirewallMenuAvailable() {
+					clearScreen()
+					cmd := exec.Command("/usr/local/bin/axonwall-tui")
+					cmd.Stdin = os.Stdin
+					cmd.Stdout = os.Stdout
+					cmd.Stderr = os.Stderr
+					_ = cmd.Run()
+				} else {
+					fmt.Println("Invalid selection. Press [Enter] to continue...")
+					_, _ = reader.ReadString('\n')
+				}
 			case "N", "NASTYMAP":
-				clearScreen()
-				cmd := exec.Command("/usr/local/bin/axonwall-tui", "--tab", "nastymap")
-				cmd.Stdin = os.Stdin
-				cmd.Stdout = os.Stdout
-				cmd.Stderr = os.Stderr
-				_ = cmd.Run()
+				if isAxonwallFirewallMenuAvailable() {
+					clearScreen()
+					cmd := exec.Command("/usr/local/bin/axonwall-tui", "--tab", "nastymap")
+					cmd.Stdin = os.Stdin
+					cmd.Stdout = os.Stdout
+					cmd.Stderr = os.Stderr
+					_ = cmd.Run()
+				} else {
+					fmt.Println("Invalid selection. Press [Enter] to continue...")
+					_, _ = reader.ReadString('\n')
+				}
 			case "A", "ANTILOCKOUT", "LOCKOUT":
-				actionManageAntiLockout(reader)
+				if isAxonwallFirewallMenuAvailable() {
+					actionManageAntiLockout(reader)
+				} else {
+					fmt.Println("Invalid selection. Press [Enter] to continue...")
+					_, _ = reader.ReadString('\n')
+				}
 			case "E", "YAML":
 				actionEditYamlConfigs(reader)
 			case "0":

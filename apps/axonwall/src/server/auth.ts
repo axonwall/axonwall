@@ -25,7 +25,7 @@ import {
 } from './dev-paths';
 
 import { SESSION_COOKIE, getJwtSecret } from './auth-constants';
-import { assertActionPermitted } from './auth-guard';
+import { assertActionPermitted, passwordChangeRequiredNow } from './auth-guard';
 import {
   bumpSessionEpoch,
   isSessionRevoked,
@@ -365,10 +365,11 @@ const pendingMfaEnrollments = new Map<string, { secret: string; expiresAt: numbe
 
 export async function generateMfaSetup() {
   const session = await getSession();
-  assertActionPermitted(session, 'admin');
+  assertActionPermitted(session);
   if (session.source !== 'local_admin') {
-    throw new Error('Forbidden: Only the local break-glass administrator can configure local MFA');
+    return { exempt: true as const, secret: '', qrDataUrl: '' };
   }
+  assertActionPermitted(session, 'admin');
 
   const { generateSecret, generateURI } = require('otplib');
   const plugins = totpPlugins();
@@ -448,28 +449,6 @@ export async function verifyMfaSetup(secret: string, token: string) {
  * the daemon behind it) happily served a session that had never
  * changed the default password.
  */
-function passwordChangeRequiredNow(): boolean {
-  try {
-    const markerCandidates = Array.from(
-      new Set([
-        path.join(getStateDir(), '.password_changed'),
-        path.join(getEtcConfigDir(), '.password_changed'),
-        './.password_changed',
-      ])
-    );
-    if (markerCandidates.some((p) => fs.existsSync(p))) {
-      return false;
-    }
-  } catch {}
-
-  // In development/test environments, only enforce if explicit or if using default password
-  if (process.env.NODE_ENV !== 'production' && process.env.FORCE_PASSWORD_CHANGE !== 'true') {
-    return false;
-  }
-
-  return true;
-}
-
 export async function isPasswordChangeRequired(): Promise<boolean> {
   const session = await getSession();
   if (!session || session.source !== 'local_admin') {

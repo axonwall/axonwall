@@ -41,6 +41,7 @@ type DHCPv4Lease struct {
 	IP        net.IP        // e.g. 203.0.113.42
 	Netmask   net.IPMask    // e.g. ffffff00
 	Gateway   string        // e.g. "203.0.113.1"
+	DNS       []string      // Option 6 DNS server IPs
 	ServerIP  net.IP        // DHCP server identifier
 	LeaseTime time.Duration // e.g. 24h
 }
@@ -148,6 +149,10 @@ func ParseDHCPv4Packet(pkt []byte, expectedXID uint32) (msgType byte, lease DHCP
 			if l >= 4 {
 				lease.Gateway = net.IPv4(val[0], val[1], val[2], val[3]).String()
 			}
+		case dhcpOptDNS:
+			for off := 0; off+4 <= l; off += 4 {
+				lease.DNS = append(lease.DNS, net.IPv4(val[off], val[off+1], val[off+2], val[off+3]).String())
+			}
 		case dhcpOptServerID:
 			if l == 4 {
 				lease.ServerIP = net.IPv4(val[0], val[1], val[2], val[3])
@@ -159,6 +164,10 @@ func ParseDHCPv4Packet(pkt []byte, expectedXID uint32) (msgType byte, lease DHCP
 			}
 		}
 		pos += 2 + l
+	}
+
+	if (msgType == dhcpMsgOffer || msgType == dhcpMsgAck) && (yiaddr == nil || yiaddr.IsUnspecified()) {
+		return msgType, lease, fmt.Errorf("DHCP reply returned unspecified yiaddr 0.0.0.0")
 	}
 
 	ones, _ := lease.Netmask.Size()
@@ -197,8 +206,6 @@ func AcquireDHCPv4Lease(dev string, timeout time.Duration) (DHCPv4Lease, error) 
 	if timeout <= 0 {
 		timeout = 3 * time.Second
 	}
-	tv := syscall.NsecToTimeval(timeout.Nanoseconds())
-	_ = syscall.SetsockoptTimeval(fd, syscall.SOL_SOCKET, syscall.SO_RCVTIMEO, &tv)
 
 	if err := syscall.Bind(fd, &syscall.SockaddrInet4{Port: 68}); err != nil {
 		return lease, fmt.Errorf("DHCPv4 bind :68 on %s failed: %w", dev, err)
@@ -209,75 +216,92 @@ func AcquireDHCPv4Lease(dev string, timeout time.Duration) (DHCPv4Lease, error) 
 		Addr: [4]byte{255, 255, 255, 255},
 	}
 
-	// 1. Send DHCPDISCOVER
-	discover := BuildDHCPv4Packet(dhcpMsgDiscover, xid, iface.HardwareAddr, nil, nil)
-	if err := syscall.Sendto(fd, discover, 0, bcastAddr); err != nil {
-		return lease, fmt.Errorf("DHCPDISCOVER send failed: %w", err)
+	const maxAttempts = 3
+	perAttempt := timeout / maxAttempts
+	if perAttempt < 500*time.Millisecond {
+		perAttempt = 500 * time.Millisecond
 	}
 
-	// 2. Wait for DHCPOFFER
+	// 1-2. Send DHCPDISCOVER with exponential backoff and wait for DHCPOFFER
 	buf := make([]byte, 1500)
 	var offer DHCPv4Lease
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		rem := time.Until(deadline)
-		if rem <= 0 {
-			break
+	discover := BuildDHCPv4Packet(dhcpMsgDiscover, xid, iface.HardwareAddr, nil, nil)
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		if err := syscall.Sendto(fd, discover, 0, bcastAddr); err != nil {
+			return lease, fmt.Errorf("DHCPDISCOVER send failed: %w", err)
 		}
-		remTv := syscall.NsecToTimeval(rem.Nanoseconds())
-		_ = syscall.SetsockoptTimeval(fd, syscall.SOL_SOCKET, syscall.SO_RCVTIMEO, &remTv)
-		n, _, recvErr := syscall.Recvfrom(fd, buf, 0)
-		if recvErr != nil {
-			if recvErr == syscall.EINTR {
+		waitDur := perAttempt << attempt
+		if waitDur > timeout {
+			waitDur = timeout
+		}
+		deadline := time.Now().Add(waitDur)
+		for time.Now().Before(deadline) {
+			rem := time.Until(deadline)
+			if rem <= 0 {
+				break
+			}
+			remTv := syscall.NsecToTimeval(rem.Nanoseconds())
+			_ = syscall.SetsockoptTimeval(fd, syscall.SOL_SOCKET, syscall.SO_RCVTIMEO, &remTv)
+			n, _, recvErr := syscall.Recvfrom(fd, buf, 0)
+			if recvErr != nil {
+				if recvErr == syscall.EINTR {
+					continue
+				}
+				break
+			}
+			if n >= 34 && !bytes.Equal(buf[28:34], iface.HardwareAddr[:6]) {
 				continue
 			}
-			break
+			mType, parsed, pErr := ParseDHCPv4Packet(bytes.Clone(buf[:n]), xid)
+			if pErr == nil && mType == dhcpMsgOffer && parsed.IP != nil && !parsed.IP.IsUnspecified() {
+				offer = parsed
+				break
+			}
 		}
-		if n >= 34 && !bytes.Equal(buf[28:34], iface.HardwareAddr[:6]) {
-			continue
-		}
-		mType, parsed, pErr := ParseDHCPv4Packet(bytes.Clone(buf[:n]), xid)
-		if pErr == nil && mType == dhcpMsgOffer {
-			offer = parsed
+		if offer.IP != nil && !offer.IP.IsUnspecified() {
 			break
 		}
 	}
-	if offer.IP == nil {
-		return lease, fmt.Errorf("timed out waiting for DHCPOFFER on %s", dev)
+	if offer.IP == nil || offer.IP.IsUnspecified() {
+		return lease, fmt.Errorf("timed out waiting for valid DHCPOFFER on %s", dev)
 	}
 
-	// 3. Send DHCPREQUEST
+	// 3-4. Send DHCPREQUEST with retry backoff and wait for DHCPACK
 	request := BuildDHCPv4Packet(dhcpMsgRequest, xid, iface.HardwareAddr, offer.IP, offer.ServerIP)
-	if err := syscall.Sendto(fd, request, 0, bcastAddr); err != nil {
-		return lease, fmt.Errorf("DHCPREQUEST send failed: %w", err)
-	}
-
-	// 4. Wait for DHCPACK
-	ackDeadline := time.Now().Add(timeout)
-	for time.Now().Before(ackDeadline) {
-		rem := time.Until(ackDeadline)
-		if rem <= 0 {
-			break
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		if err := syscall.Sendto(fd, request, 0, bcastAddr); err != nil {
+			return lease, fmt.Errorf("DHCPREQUEST send failed: %w", err)
 		}
-		remTv := syscall.NsecToTimeval(rem.Nanoseconds())
-		_ = syscall.SetsockoptTimeval(fd, syscall.SOL_SOCKET, syscall.SO_RCVTIMEO, &remTv)
-		n, _, recvErr := syscall.Recvfrom(fd, buf, 0)
-		if recvErr != nil {
-			if recvErr == syscall.EINTR {
+		waitDur := perAttempt << attempt
+		if waitDur > timeout {
+			waitDur = timeout
+		}
+		ackDeadline := time.Now().Add(waitDur)
+		for time.Now().Before(ackDeadline) {
+			rem := time.Until(ackDeadline)
+			if rem <= 0 {
+				break
+			}
+			remTv := syscall.NsecToTimeval(rem.Nanoseconds())
+			_ = syscall.SetsockoptTimeval(fd, syscall.SOL_SOCKET, syscall.SO_RCVTIMEO, &remTv)
+			n, _, recvErr := syscall.Recvfrom(fd, buf, 0)
+			if recvErr != nil {
+				if recvErr == syscall.EINTR {
+					continue
+				}
+				break
+			}
+			if n >= 34 && !bytes.Equal(buf[28:34], iface.HardwareAddr[:6]) {
 				continue
 			}
-			break
-		}
-		if n >= 34 && !bytes.Equal(buf[28:34], iface.HardwareAddr[:6]) {
-			continue
-		}
-		mType, parsed, pErr := ParseDHCPv4Packet(bytes.Clone(buf[:n]), xid)
-		if pErr == nil {
-			if mType == dhcpMsgAck {
-				return parsed, nil
-			}
-			if mType == dhcpMsgNak {
-				return lease, fmt.Errorf("received DHCPNAK from server on %s", dev)
+			mType, parsed, pErr := ParseDHCPv4Packet(bytes.Clone(buf[:n]), xid)
+			if pErr == nil {
+				if mType == dhcpMsgAck && parsed.IP != nil && !parsed.IP.IsUnspecified() {
+					return parsed, nil
+				}
+				if mType == dhcpMsgNak {
+					return lease, fmt.Errorf("received DHCPNAK from server on %s", dev)
+				}
 			}
 		}
 	}

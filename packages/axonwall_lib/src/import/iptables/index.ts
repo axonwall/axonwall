@@ -80,13 +80,14 @@ export function importIptablesConfig(rulesContent: string): ImportReport {
           dst = parts[i + 2].replace(/^!/, '');
           i += 2;
         } else if (p === '-i' && i + 1 < parts.length) {
-          inIface = parts[++i];
-          detectedIfaces.add(inIface);
+          inIface = parts[++i]!.replace(/\+$/, '');
+          if (inIface) detectedIfaces.add(inIface);
         } else if (p === '-o' && i + 1 < parts.length) {
-          outIface = parts[++i];
-          detectedIfaces.add(outIface);
+          outIface = parts[++i]!.replace(/\+$/, '');
+          if (outIface) detectedIfaces.add(outIface);
         } else if (p === '-p' && i + 1 < parts.length) {
-          proto = parts[++i].toLowerCase();
+          const rawP = parts[++i]!.toLowerCase();
+          proto = rawP === 'all' ? 'any' : rawP;
         } else if ((p === '-s' || p === '--source') && i + 1 < parts.length) {
           if (parts[i + 1] === '!' && i + 2 < parts.length) {
             negatedSrc = true;
@@ -115,10 +116,10 @@ export function importIptablesConfig(rulesContent: string): ImportReport {
               dst = rawVal;
             }
           }
-        } else if ((p === '--sport' || p === '--source-port') && i + 1 < parts.length) {
-          sport = parts[++i].replace(':', '-');
-        } else if ((p === '--dport' || p === '--destination-port') && i + 1 < parts.length) {
-          dport = parts[++i].replace(':', '-');
+        } else if ((p === '--sport' || p === '--source-port' || p === '--sports') && i + 1 < parts.length) {
+          sport = parts[++i]!.replace(/:/g, '-');
+        } else if ((p === '--dport' || p === '--destination-port' || p === '--dports') && i + 1 < parts.length) {
+          dport = parts[++i]!.replace(/:/g, '-');
         } else if (p === '-j' && i + 1 < parts.length) {
           target = parts[++i].toUpperCase();
         } else if (p === '--to-destination' && i + 1 < parts.length) {
@@ -129,6 +130,21 @@ export function importIptablesConfig(rulesContent: string): ImportReport {
           comment = parts[++i].replace(/^["']|["']$/g, '');
         }
       }
+
+      const parseNatEndpoint = (raw: string): { ip: string; port: string } => {
+        const bracketMatch = raw.match(/^\[([^\]]+)\](?::(.+))?$/);
+        if (bracketMatch) {
+          return { ip: bracketMatch[1]!, port: (bracketMatch[2] || '').replace(/:/g, '-') };
+        }
+        const colonCount = (raw.match(/:/g) || []).length;
+        if (colonCount === 1) {
+          const [ip, port] = raw.split(':');
+          return { ip: ip || '', port: (port || '').replace(/:/g, '-') };
+        }
+        return { ip: raw, port: '' };
+      };
+      const validProtos = new Set(['any', 'tcp', 'udp', 'tcp_udp', 'icmp', 'ipv6-icmp', 'esp', 'ah', 'gre']);
+      const normalizedProto = validProtos.has(proto) ? (proto as any) : 'any';
 
       // Check NAT table
       if (currentTable === 'nat') {
@@ -150,11 +166,11 @@ export function importIptablesConfig(rulesContent: string): ImportReport {
           natSort += 10;
         } else if (target === 'DNAT' && toDest) {
           const iface = inIface || 'wan';
-          const [destIp, destP] = toDest.split(':');
+          const { ip: destIp, port: destP } = parseNatEndpoint(toDest);
           nat.push({
             type: 'dnat',
             interface: iface.includes('eth0') ? 'wan' : iface,
-            protocol: (proto as any) || 'tcp',
+            protocol: proto === 'any' ? 'tcp' : normalizedProto,
             source: src,
             sourcePort: sport,
             destination: 'wan_ip',
@@ -169,15 +185,17 @@ export function importIptablesConfig(rulesContent: string): ImportReport {
           natSort += 10;
         } else if (target === 'SNAT' && toSource) {
           const iface = outIface || 'wan';
+          const { ip: srcIp, port: srcP } = parseNatEndpoint(toSource);
           nat.push({
             type: 'snat',
             interface: iface.includes('eth0') ? 'wan' : iface,
-            protocol: (proto as any) || 'any',
+            protocol: normalizedProto,
             source: src,
             sourcePort: sport,
             destination: dst,
             destinationPort: dport,
-            targetIp: toSource,
+            targetIp: srcIp,
+            targetPort: srcP || undefined,
             log: false,
             enabled: true,
             description: comment || `SNAT to ${toSource}`,

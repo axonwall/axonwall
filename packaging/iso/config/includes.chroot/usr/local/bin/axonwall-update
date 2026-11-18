@@ -272,6 +272,9 @@ apply_staged_tree() {
     # timers must not fail the overlay on the unmatched *.timer glob.
     for unit_f in "${pkg_stage}/lib/systemd/system/"*.service "${pkg_stage}/lib/systemd/system/"*.timer; do
       if [ -e "$unit_f" ]; then
+        if [ "$(basename "$unit_f")" = "k3s.service" ] && { [ -f "${dest_root}/etc/axonwall/.vault-edition" ] || [ -f "${dest_root}/etc/axonwall/.k3s-edition" ]; }; then
+          continue
+        fi
         cp -af "$unit_f" "${dest_root}/lib/systemd/system/" 2>/dev/null || _apply_failed=1
       fi
     done
@@ -573,7 +576,7 @@ if [ "$ZBM_MODE" = "1" ]; then
       if ! apply_staged_tree "${PKG_STAGE}" "${ZBM_STAGE_MNT}"; then
         echo "[-] ERROR: Failed to apply firmware payload into ${TARGET_BE_DS} (staged copy failed); the Boot Environment is NOT armed." >&2
         rm -rf "${PKG_STAGE}"
-        umount -l "${ZBM_STAGE_MNT}" 2>/dev/null || true
+        umount "${ZBM_STAGE_MNT}" 2>/dev/null || umount -l "${ZBM_STAGE_MNT}" 2>/dev/null || true
         rmdir "${ZBM_STAGE_MNT}" 2>/dev/null || true
         zfs destroy -r "$TARGET_BE_TMP_DS" 2>/dev/null || true
         exit 1
@@ -622,7 +625,6 @@ if [ "$ZBM_MODE" = "1" ]; then
     fi
     SV_JSON="$(printf '{\n  "slotA": "%s",\n  "slotB": "%s",\n  "updatedAt": "%s"\n}\n' "$CLEAN_VER" "$CURRENT_BE_VER" "$SV_TIMESTAMP")"
     printf '%s' "$SV_JSON" > "${ZBM_STAGE_MNT}/etc/axonwall/slot_versions.json" 2>/dev/null || true
-    printf '%s' "$SV_JSON" > "${ZBM_STAGE_MNT}/var/lib/axonwall/slot_versions.json" 2>/dev/null || true
 
     if [ -d "${ZBM_STAGE_MNT}/boot" ]; then
       LATEST_KERN="$(ls -1t "${ZBM_STAGE_MNT}/boot/vmlinuz-"* 2>/dev/null | head -n1 || true)"
@@ -637,7 +639,10 @@ if [ "$ZBM_MODE" = "1" ]; then
       fi
     fi
 
-    umount -l "${ZBM_STAGE_MNT}" 2>/dev/null || true
+    if ! umount "${ZBM_STAGE_MNT}"; then
+      echo "[-] ERROR: Failed to cleanly unmount ${ZBM_STAGE_MNT}; refusing to rename staged Boot Environment." >&2
+      exit 1
+    fi
     rmdir "${ZBM_STAGE_MNT}" 2>/dev/null || true
 
     if zfs list -H -o name "$TARGET_BE_DS" >/dev/null 2>&1; then
@@ -724,6 +729,7 @@ elif [ -n "$TARGET_DEV" ] && [ -e "$TARGET_DEV" ]; then
   # the grubenv arming after that block is gated on it.
   STAGING_OK=0
   STAGING_RSYNCS_FAILED=0
+  SV_JSON=""
   mount "${TARGET_DEV}" "${STAGE_DIR}" 2>/dev/null || true
 
   # If mounting succeeds, synchronize root filesystem or extract downloaded release package
@@ -871,13 +877,9 @@ elif [ -n "$TARGET_DEV" ] && [ -e "$TARGET_DEV" ]; then
       SV_TIMESTAMP="$(date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || echo "")"
       SV_JSON="$(printf '{\n  "slotA": "%s",\n  "slotB": "%s",\n  "updatedAt": "%s"\n}\n' "$SV_A" "$SV_B" "$SV_TIMESTAMP")"
 
-      # Write to target rootfs
+      # Write to staged target rootfs; live /etc/axonwall and /var/lib/axonwall
+      # slot_versions.json are written only after STAGING_OK and GRUB arming succeed.
       printf '%s' "$SV_JSON" > "${STAGE_DIR}/etc/axonwall/slot_versions.json" 2>/dev/null || true
-
-      # Write to running rootfs and shared data partition
-      mkdir -p /etc/axonwall /var/lib/axonwall 2>/dev/null || true
-      printf '%s' "$SV_JSON" > /etc/axonwall/slot_versions.json 2>/dev/null || true
-      printf '%s' "$SV_JSON" > /var/lib/axonwall/slot_versions.json 2>/dev/null || true
     fi
 
     # Ensure stable kernel & initrd/initramfs symlinks exist on target slot (Debian & Alpine)
@@ -983,6 +985,11 @@ elif [ -n "$TARGET_DEV" ] && [ -e "$TARGET_DEV" ]; then
       exit 1
     fi
   fi
+  if [ -n "$SV_JSON" ]; then
+    mkdir -p /etc/axonwall /var/lib/axonwall 2>/dev/null || true
+    printf '%s' "$SV_JSON" > /etc/axonwall/slot_versions.json 2>/dev/null || true
+    printf '%s' "$SV_JSON" > /var/lib/axonwall/slot_versions.json 2>/dev/null || true
+  fi
 elif [ "$ROLLING_MODE" != "1" ] && ( [ -e "/dev/disk/by-label/axon_root_a" ] || [ -e "/dev/disk/by-label/axon_root_b" ] || grep -qs -E 'slot=[AB]' /proc/cmdline ); then
   echo "[-] ERROR: Appliance is configured for Dual-Root A/B, but target block device for Slot ${TARGET_SLOT} could not be resolved." >&2
   exit 1
@@ -1019,7 +1026,7 @@ else
     rm -rf "${PKG_STAGE}"
 
     # Schedule asynchronous service restart after HTTP response finishes so we do not kill axonwall-ui mid-request
-    if command -v systemctl >/dev/null 2>&1; then
+    if command -v systemctl >/dev/null 2>&1 && [ ! -f /etc/axonwall/.vault-edition ] && [ ! -f /etc/axonwall/.k3s-edition ]; then
       systemctl daemon-reload 2>/dev/null || true
       echo "[+] Scheduling asynchronous reload of Axonwall services..."
       nohup sh -c 'sleep 3 && systemctl try-restart axonwalld.service axonwall-controller.service axonwall-ui.service' >/dev/null 2>&1 &

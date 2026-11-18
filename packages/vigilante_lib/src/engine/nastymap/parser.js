@@ -19,9 +19,10 @@ const xmlParserOptions = {
   ignoreAttributes: false,
   attributeNamePrefix: '@_',
   allowBooleanAttributes: true,
-  parseNodeValue: true,
-  parseAttributeValue: true,
+  parseNodeValue: false,
+  parseAttributeValue: false,
   trimValues: true,
+  processEntities: false,
   isArray: (tagName) => arrayTags.has(tagName.toLowerCase())
 };
 

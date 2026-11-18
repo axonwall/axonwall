@@ -496,7 +496,7 @@ chmod +x config/includes.chroot/usr/share/axonwall/vault/axonwall-vault-provisio
   cp "${SCRIPT_DIR}/../k3s-storage/zfs-operator.yaml" config/includes.chroot/usr/share/axonwall/k3s/zfs-operator.yaml
 elif [[ "${FLAVOR}" == "k3s-storage" ]]; then
   # Fetch K3s binary for Barebones K3s + OpenZFS Storage Host
-  K3S_VERSION="${K3S_VERSION:-v1.31.5+k3s1}"
+  K3S_VERSION="${K3S_VERSION:-v1.32.3+k3s1}"
   K3S_URL_VERSION="${K3S_VERSION//+/%2B}"
   case "${K3S_VERSION}" in
     v1.31.5+k3s1) K3S_SHA256="${K3S_SHA256:-399b87b432ce55013fa81adad572a8e4ecf56e0df97369cf02d4b8a41f039091}" ;;

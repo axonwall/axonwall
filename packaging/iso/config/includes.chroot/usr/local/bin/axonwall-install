@@ -1563,15 +1563,7 @@ if [ "$INSTALL_MODE" = "zbm" ]; then
   fi
 
   ZROOT_CNT=$(echo "$SYS_ZFS_VDEVS" | wc -w | tr -d ' ')
-  ZROOT_TOPO="stripe"
-  if [ "$ZROOT_CNT" -eq 2 ]; then
-    ZROOT_TOPO="mirror"
-  elif [ "$ZROOT_CNT" -ge 3 ]; then
-    case "${ZFS_RAID_TOPOLOGY:-auto}" in
-      stripe|mirror|raidz1|raidz2|raidz3) ZROOT_TOPO="$ZFS_RAID_TOPOLOGY" ;;
-      *) ZROOT_TOPO="raidz1" ;;
-    esac
-  fi
+  ZROOT_TOPO=$(resolve_zfs_topology "${ZFS_RAID_TOPOLOGY:-auto}" "$ZROOT_CNT")
   ZROOT_ARGS=""
   [ "$ZROOT_TOPO" != "stripe" ] && ZROOT_ARGS="$ZROOT_TOPO"
 
@@ -2908,19 +2900,42 @@ to_json_array() {
 resolve_zfs_topology() {
   _req="$1"
   _cnt="$2"
+  case "${_cnt:-0}" in
+    ''|*[!0-9]*) _cnt=1 ;;
+  esac
+  if [ "$_cnt" -le 1 ]; then
+    echo "stripe"
+    return 0
+  fi
   if [ "$_req" = "auto" ] || [ -z "$_req" ]; then
-    if [ "$_cnt" -le 1 ]; then
-      echo "stripe"
-    elif [ "$_cnt" -eq 2 ]; then
+    if [ "$_cnt" -eq 2 ]; then
       echo "mirror"
     elif [ "$_cnt" -le 4 ]; then
       echo "raidz1"
     else
       echo "raidz2"
     fi
-  else
-    echo "$_req"
+    return 0
   fi
+  case "$_req" in
+    stripe) echo "stripe" ;;
+    mirror) echo "mirror" ;;
+    raidz1)
+      if [ "$_cnt" -ge 3 ]; then echo "raidz1"; else echo "mirror"; fi
+      ;;
+    raidz2)
+      if [ "$_cnt" -ge 4 ]; then echo "raidz2"
+      elif [ "$_cnt" -eq 3 ]; then echo "raidz1"
+      else echo "mirror"; fi
+      ;;
+    raidz3)
+      if [ "$_cnt" -ge 5 ]; then echo "raidz3"
+      elif [ "$_cnt" -eq 4 ]; then echo "raidz2"
+      elif [ "$_cnt" -eq 3 ]; then echo "raidz1"
+      else echo "mirror"; fi
+      ;;
+    *) echo "$_req" ;;
+  esac
 }
 
 if [ "$INSTALL_MODE" = "zbm" ]; then

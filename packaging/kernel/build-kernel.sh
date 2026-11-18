@@ -141,8 +141,8 @@ case "${MODE}" in
     ;;
 esac
 
-if ! [[ "${KERNEL_VERSION}" =~ ^6\.[0-9]+\.[0-9]+$ ]]; then
-  echo "[!] Invalid --kernel-version '${KERNEL_VERSION}' (expected 6.x.y)" >&2
+if ! [[ "${KERNEL_VERSION}" =~ ^(6|7)\.[0-9]+\.[0-9]+(-[a-zA-Z0-9._+-]+)?$ ]]; then
+  echo "[!] Invalid --kernel-version '${KERNEL_VERSION}' (expected 6.x.y or 7.x.y)" >&2
   exit 1
 fi
 

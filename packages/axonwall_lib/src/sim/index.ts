@@ -72,13 +72,8 @@ export function simulatePacket(query: PacketTracerQuery, state: DesiredState): S
       .map((i) => i.ipv4Address!.split('/')[0]),
   );
 
-  // 2. Anti-Lockout check (never applies on WAN interfaces)
+  // 2. Anti-Lockout check (matches compileNftables: uses configured antiLockout interfaces, never WAN)
   const antiLockoutIfaces = new Set(normalizeAntiLockoutInterfaces(state.system.antiLockout));
-  for (const iface of state.interfaces) {
-    if (iface.enabled && inferInterfaceRole(iface) === 'lan') {
-      antiLockoutIfaces.add(iface.name);
-    }
-  }
   if (!isWanIngress && state.system.antiLockout?.enabled && antiLockoutIfaces.has(inIface.name)) {
     if (
       query.protocol === 'tcp' &&

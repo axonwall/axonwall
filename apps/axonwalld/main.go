@@ -797,9 +797,38 @@ func mirrorBundleFile(mirrorPath string, mode os.FileMode, content []byte, isSha
 // when this fails — a discarded error left the box reporting host
 // mode while NGFW enforcement was still live.
 func stopNgfwDaemons() error {
-	stopCtx, stopCancel := context.WithTimeout(context.Background(), serviceCommandTimeout)
-	defer stopCancel()
-	return exec.CommandContext(stopCtx, "systemctl", "--no-ask-password", "stop", "kea-dhcp4-server", "suricata", "frr", "conntrackd", "crowdsec-firewall-bouncer").Run()
+	units := []string{"kea-dhcp4-server", "suricata", "frr", "conntrackd", "crowdsec-firewall-bouncer"}
+	if !hasSystemdOrFakeSystemctl() {
+		for _, u := range units {
+			rcUnit := resolveOpenRCServiceName(u)
+			if _, err := os.Stat(filepath.Join("/etc/init.d", rcUnit)); err != nil {
+				continue
+			}
+			if _, err := stopSystemService(u); err != nil {
+				return fmt.Errorf("stop OpenRC NGFW service %s: %w", rcUnit, err)
+			}
+		}
+		return nil
+	}
+
+	sysPath, _ := exec.LookPath("systemctl")
+	cleanSysPath := filepath.Clean(sysPath)
+	isFakeSystemctl := cleanSysPath != "" && cleanSysPath != "/usr/bin/systemctl" && cleanSysPath != "/bin/systemctl"
+
+	for _, u := range units {
+		resolved := resolveDistroServiceUnit(u)
+		if !isFakeSystemctl && !systemdUnitFileExists(resolved) {
+			continue
+		}
+		stopCtx, stopCancel := context.WithTimeout(context.Background(), serviceCommandTimeout)
+		cmd := exec.CommandContext(stopCtx, "systemctl", "--no-ask-password", "stop", resolved)
+		err := cmd.Run()
+		stopCancel()
+		if err != nil {
+			return fmt.Errorf("stop %s: %w", resolved, err)
+		}
+	}
+	return nil
 }
 
 // pendingSubsystemApply is one subsystem apply queued while the
@@ -853,11 +882,17 @@ func runWithTimeout(fn func() error, timeout time.Duration) error {
 }
 
 func (s *AgentServer) ApplyBundle(ctx context.Context, req *pb.ApplyBundleRequest) (*pb.ApplyBundleResponse, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, status.FromContextError(err).Err()
+	}
 	// M1: serialise whole applies. A second ApplyBundle waits here
 	// instead of interleaving with the first across the lock-release
 	// windows below and corrupting its pending-confirm state.
 	s.applyMu.Lock()
 	defer s.applyMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return nil, status.FromContextError(err).Err()
+	}
 
 	s.mu.Lock()
 	s.applyInProgress = true
@@ -2903,6 +2938,7 @@ func main() {
 	log.Printf("[Agent] Agent API token authentication enabled (source: %s)", agentTokenSource)
 
 	grpcServer := grpc.NewServer(
+		grpc.MaxRecvMsgSize(64<<20),
 		grpc.UnaryInterceptor(agentTokenUnaryInterceptor(agentToken)),
 		grpc.StreamInterceptor(agentTokenStreamInterceptor(agentToken)),
 	)
@@ -3077,6 +3113,7 @@ func main() {
 				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 				return
 			}
+			r.Body = http.MaxBytesReader(w, r.Body, 64<<20)
 			bodyBytes, err := io.ReadAll(r.Body)
 			if err != nil {
 				http.Error(w, fmt.Sprintf("failed to read body: %v", err), http.StatusBadRequest)
@@ -3128,7 +3165,12 @@ func main() {
 				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 				return
 			}
-			bodyBytes, _ := io.ReadAll(r.Body)
+			r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
+			bodyBytes, err := io.ReadAll(r.Body)
+			if err != nil {
+				http.Error(w, fmt.Sprintf("failed to read body: %v", err), http.StatusBadRequest)
+				return
+			}
 			var req pb.ConfirmRequest
 			if len(bodyBytes) > 0 {
 				unmarshaler := protojson.UnmarshalOptions{DiscardUnknown: true}
@@ -3149,7 +3191,12 @@ func main() {
 				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 				return
 			}
-			bodyBytes, _ := io.ReadAll(r.Body)
+			r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
+			bodyBytes, err := io.ReadAll(r.Body)
+			if err != nil {
+				http.Error(w, fmt.Sprintf("failed to read body: %v", err), http.StatusBadRequest)
+				return
+			}
 			var req pb.RollbackRequest
 			if len(bodyBytes) > 0 {
 				unmarshaler := protojson.UnmarshalOptions{DiscardUnknown: true}
@@ -5591,6 +5638,7 @@ func main() {
 		haEngine.Stop()
 		sdwanProber.stop()
 		lsmGuardManager.Stop()
+		threatHarvesterManager.Stop()
 		ebpfManager.Stop()
 		etckeeperManager.Close()
 		grpcServer.GracefulStop()

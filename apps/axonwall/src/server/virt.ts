@@ -13,7 +13,7 @@ import {
 } from '@axonwall/lib/schemas';
 import { compileVmProcess, compileLxcContainer } from '@axonwall/lib';
 import { getCurrentDesiredState, applyDesiredState } from './agent';
-import { callAgentApi } from './agent-client';
+import { callAgentApi, callAgentApiResponse } from './agent-client';
 import { getSession } from './auth';
 import { assertActionPermitted } from './auth-guard';
 
@@ -179,7 +179,7 @@ export async function vmPowerAction(
     // D1: the register result used to be discarded, so a failed register
     // was invisible and the power POST booted the daemon's fallback spec.
     // Abort the start when registration fails or the daemon is unreachable.
-    const registerResp = await callAgentApi<{ success: boolean; message?: string }>(
+    const registerResp = await callAgentApiResponse<{ success: boolean; message?: string }>(
       '/v1/virt/vms',
       'POST',
       {
@@ -205,7 +205,8 @@ export async function vmPowerAction(
               }
             : null,
         },
-      }
+      },
+      30_000
     );
     if (!registerResp || registerResp.success === false) {
       return {
@@ -217,10 +218,11 @@ export async function vmPowerAction(
     }
   }
 
-  const daemonResp = await callAgentApi<{ success: boolean; upid?: string; message?: string }>(
+  const daemonResp = await callAgentApiResponse<{ success: boolean; upid?: string; message?: string }>(
     '/v1/virt/vms',
     'POST',
-    { action, vmid, force }
+    { action, vmid, force },
+    60_000
   );
 
   if (daemonResp) {
@@ -300,7 +302,7 @@ export async function saveVmAction(
   // D1: the register result used to be discarded. The config is saved, so
   // the save still succeeds — but a failed registration must be visible,
   // or the next start silently boots the daemon's generic fallback spec.
-  const registerResp = await callAgentApi<{ success: boolean; message?: string }>('/v1/virt/vms', 'POST', {
+  const registerResp = await callAgentApiResponse<{ success: boolean; message?: string }>('/v1/virt/vms', 'POST', {
     action: 'register',
     vmid: vm.vmid,
     spec: {
@@ -354,11 +356,12 @@ export async function deleteVmAction(
   // otherwise the registration (and disk) survive and re-creating the ID
   // resurrects the old VM. Best-effort stop first so a running VM is not
   // left orphaned after its spec is gone.
-  await callAgentApi('/v1/virt/vms', 'POST', { action: 'stop', vmid, force: true });
-  const unregisterResp = await callAgentApi<{ success: boolean; message?: string }>(
+  await callAgentApi('/v1/virt/vms', 'POST', { action: 'stop', vmid, force: true }, 60_000);
+  const unregisterResp = await callAgentApiResponse<{ success: boolean; message?: string }>(
     '/v1/virt/vms',
     'POST',
-    { action: 'unregister', vmid }
+    { action: 'unregister', vmid },
+    30_000
   );
   if (!unregisterResp || unregisterResp.success === false) {
     return {
@@ -447,7 +450,7 @@ export async function containerPowerAction(
       };
     }
     const compiled = compileLxcContainer(ct);
-    const registerResp = await callAgentApi<{ success: boolean; message?: string }>(
+    const registerResp = await callAgentApiResponse<{ success: boolean; message?: string }>(
       '/v1/virt/containers',
       'POST',
       {
@@ -462,7 +465,8 @@ export async function containerPowerAction(
           rootfsPath: compiled.rootfsPath,
           features: ct.features,
         },
-      }
+      },
+      30_000
     );
     if (!registerResp || registerResp.success === false) {
       return {
@@ -475,13 +479,6 @@ export async function containerPowerAction(
   }
 
   if (action === 'reboot' || action === 'reset') {
-    // D19: the old code awaited the stop but discarded its result, so
-    // rebooting a stopped container reported "restarted" when nothing
-    // was running to restart. Check the live status first: a container
-    // that is not running is started (not restarted) and the stop is
-    // skipped. (The daemon runs stop/start as async tasks, so a stop
-    // response cannot report an lxc-stop failure — the live status is
-    // what makes the restarted/started distinction honest.)
     let wasRunning: boolean | null = null;
     const liveResp = await callAgentApi<{ containers: { ctid: number; status: string }[] }>(
       '/v1/virt/containers'
@@ -491,10 +488,11 @@ export async function containerPowerAction(
       wasRunning = live?.status === 'running';
     }
     if (wasRunning === false) {
-      const startResp = await callAgentApi<{ success: boolean; upid?: string; message?: string }>(
+      const startResp = await callAgentApiResponse<{ success: boolean; upid?: string; message?: string }>(
         '/v1/virt/containers',
         'POST',
-        { action: 'start', ctid, force }
+        { action: 'start', ctid, force },
+        60_000
       );
       if (startResp) {
         return {
@@ -508,10 +506,11 @@ export async function containerPowerAction(
         message: `Daemon unavailable: failed to start container ${ctid}.`,
       };
     }
-    const stopResp = await callAgentApi<{ success: boolean; upid?: string; message?: string }>(
+    const stopResp = await callAgentApiResponse<{ success: boolean; upid?: string; message?: string }>(
       '/v1/virt/containers',
       'POST',
-      { action: 'stop', ctid, force: true }
+      { action: 'stop', ctid, force: true },
+      60_000
     );
     // D19: surface a stop failure instead of masking it with the
     // start result.
@@ -527,10 +526,11 @@ export async function containerPowerAction(
         message: stopResp.message || `Failed to stop container ${ctid} for restart.`,
       };
     }
-    const startResp = await callAgentApi<{ success: boolean; upid?: string; message?: string }>(
+    const startResp = await callAgentApiResponse<{ success: boolean; upid?: string; message?: string }>(
       '/v1/virt/containers',
       'POST',
-      { action: 'start', ctid, force }
+      { action: 'start', ctid, force },
+      60_000
     );
     if (startResp) {
       return {
@@ -545,10 +545,11 @@ export async function containerPowerAction(
     };
   }
 
-  const daemonResp = await callAgentApi<{ success: boolean; upid?: string; message?: string }>(
+  const daemonResp = await callAgentApiResponse<{ success: boolean; upid?: string; message?: string }>(
     '/v1/virt/containers',
     'POST',
-    { action, ctid, force }
+    { action, ctid, force },
+    60_000
   );
 
   if (daemonResp) {
@@ -626,7 +627,7 @@ export async function saveContainerAction(
   const compiled = compileLxcContainer(container);
   // D1 (container shape): surface a failed registration instead of
   // discarding it — the config is saved, but the daemon may not know it.
-  const registerResp = await callAgentApi<{ success: boolean; message?: string }>('/v1/virt/containers', 'POST', {
+  const registerResp = await callAgentApiResponse<{ success: boolean; message?: string }>('/v1/virt/containers', 'POST', {
     action: 'register',
     ctid: container.ctid,
     spec: {
@@ -638,7 +639,7 @@ export async function saveContainerAction(
       rootfsPath: compiled.rootfsPath,
       features: container.features,
     },
-  });
+  }, 30_000);
 
   return {
     success: true,
@@ -669,7 +670,7 @@ export async function deleteContainerAction(
   // knows register/start/stop), so the registration and rootfs CANNOT be
   // removed from here — say so explicitly instead of implying a clean
   // delete. Re-creating this CTID will reuse the old rootfs.
-  await callAgentApi('/v1/virt/containers', 'POST', { action: 'stop', ctid, force: true });
+  await callAgentApi('/v1/virt/containers', 'POST', { action: 'stop', ctid, force: true }, 60_000);
 
   const updatedState = {
     ...state,
@@ -754,7 +755,7 @@ export async function bindPciVfioAction(
   assertActionPermitted(session, 'admin');
   validatePciBdf(bdf);
 
-  const daemonResp = await callAgentApi<{ success: boolean; message?: string }>('/v1/virt/pci', 'POST', {
+  const daemonResp = await callAgentApiResponse<{ success: boolean; message?: string }>('/v1/virt/pci', 'POST', {
     action: 'bind',
     bdf,
   });
@@ -779,7 +780,7 @@ export async function unbindPciVfioAction(
   assertActionPermitted(session, 'admin');
   validatePciBdf(bdf);
 
-  const daemonResp = await callAgentApi<{ success: boolean; message?: string }>('/v1/virt/pci', 'POST', {
+  const daemonResp = await callAgentApiResponse<{ success: boolean; message?: string }>('/v1/virt/pci', 'POST', {
     action: 'unbind',
     bdf,
   });
@@ -805,11 +806,6 @@ export async function configureSriovAction(
   assertActionPermitted(session, 'admin');
   validatePciBdf(bdf);
 
-  // A negative count is not a no-op: the daemon writes 0 to sriov_numvfs
-  // (teardown) and then skips re-allocation, destroying every VF while
-  // reporting success. Reject before anything reaches the daemon. The upper
-  // bound is enforced when the inventory knows this device's total; a
-  // missing inventory entry must not block the daemon's own check.
   if (!Number.isInteger(numVfs) || numVfs < 0) {
     throw new Error(`Invalid SR-IOV VF count for ${bdf}: expected an integer >= 0, got ${numVfs}`);
   }
@@ -817,8 +813,6 @@ export async function configureSriovAction(
   try {
     devices = await getPciInventoryAction();
   } catch {
-    // Inventory unavailable (daemon down): the daemon call below fails
-    // closed, and the daemon still enforces its own upper bound.
     devices = [];
   }
   const device = devices.find((d) => d.bdf === bdf);
@@ -828,7 +822,7 @@ export async function configureSriovAction(
     );
   }
 
-  const daemonResp = await callAgentApi<{ success: boolean; message?: string }>('/v1/virt/pci', 'POST', {
+  const daemonResp = await callAgentApiResponse<{ success: boolean; message?: string }>('/v1/virt/pci', 'POST', {
     action: 'sriov',
     bdf,
     numVfs,
@@ -875,10 +869,11 @@ export async function downloadIsoAction(
   validateIsoFilename(filename);
   validateIsoDownloadUrl(url);
 
-  const daemonResp = await callAgentApi<{ success: boolean; upid?: string; message?: string }>(
+  const daemonResp = await callAgentApiResponse<{ success: boolean; upid?: string; message?: string }>(
     '/v1/virt/isos',
     'POST',
-    { url, filename, pool, sha256 }
+    { url, filename, pool, sha256 },
+    120_000
   );
 
   if (!daemonResp) {
@@ -923,10 +918,11 @@ export async function triggerBackupAction(
     validatePoolName(pool);
   }
 
-  const daemonResp = await callAgentApi<{ success: boolean; upid?: string; message?: string }>(
+  const daemonResp = await callAgentApiResponse<{ success: boolean; upid?: string; message?: string }>(
     '/v1/virt/backups',
     'POST',
-    { targetType, targetId, pool: pool || 'tank', destType: destType || 'local-zfs' }
+    { targetType, targetId, pool: pool || 'tank', destType: destType || 'local-zfs' },
+    120_000
   );
 
   if (!daemonResp) {
@@ -956,10 +952,11 @@ export async function restoreBackupAction(
     throw new Error('Invalid backup archive path');
   }
 
-  const daemonResp = await callAgentApi<{ success: boolean; upid?: string; message?: string; error?: string }>(
+  const daemonResp = await callAgentApiResponse<{ success: boolean; upid?: string; message?: string; error?: string }>(
     '/v1/virt/backups',
     'POST',
-    { action: 'restore', archivePath, targetType, targetId, pool: pool || 'tank' }
+    { action: 'restore', archivePath, targetType, targetId, pool: pool || 'tank' },
+    120_000
   );
   if (!daemonResp) {
     return { success: false, message: `Daemon unavailable: backup restore for ${targetType} ${targetId} did not run.` };
@@ -980,10 +977,11 @@ export async function pruneBackupsAction(
   validatePoolName(pool || 'tank');
   const safeKeep = Math.max(1, Math.min(365, Math.floor(Number(keepLast) || 5)));
 
-  const daemonResp = await callAgentApi<{ success: boolean; pruned?: number; message?: string; error?: string }>(
+  const daemonResp = await callAgentApiResponse<{ success: boolean; pruned?: number; message?: string; error?: string }>(
     '/v1/virt/backups',
     'POST',
-    { action: 'prune', pool: pool || 'tank', keepLast: safeKeep }
+    { action: 'prune', pool: pool || 'tank', keepLast: safeKeep },
+    120_000
   );
   if (!daemonResp) {
     return { success: false, message: 'Daemon unavailable: GFS backup retention prune did not run.' };
@@ -1009,10 +1007,11 @@ export async function manageWorkloadSnapshotAction(
   if (!/^[a-zA-Z0-9_.-]{1,64}$/.test((label || '').trim())) {
     throw new Error('Snapshot label must be 1–64 alphanumeric, dash, dot, or underscore characters');
   }
-  const daemonResp = await callAgentApi<{ success: boolean; message?: string; error?: string }>(
+  const daemonResp = await callAgentApiResponse<{ success: boolean; message?: string; error?: string }>(
     '/v1/virt/snapshots',
     'POST',
-    { action, targetType, targetId, label: label.trim() }
+    { action, targetType, targetId, label: label.trim() },
+    120_000
   );
   if (!daemonResp) {
     return {
@@ -1038,10 +1037,11 @@ export async function cloneVmAction(
   if (!cleanName) {
     throw new Error('Clone name is required');
   }
-  const daemonResp = await callAgentApi<{ success: boolean; message?: string; error?: string }>(
+  const daemonResp = await callAgentApiResponse<{ success: boolean; message?: string; error?: string }>(
     '/v1/virt/clone',
     'POST',
-    { sourceVmid, newVmid, newName: cleanName, linked }
+    { sourceVmid, newVmid, newName: cleanName, linked },
+    120_000
   );
   if (!daemonResp) {
     return {
@@ -1065,10 +1065,11 @@ export async function liveMigrateVmAction(
   if (!/^[a-zA-Z0-9.:-]+$/.test(peer)) {
     throw new Error('Invalid target peer IP/hostname');
   }
-  const daemonResp = await callAgentApi<{ success: boolean; upid?: string; message?: string; error?: string }>(
+  const daemonResp = await callAgentApiResponse<{ success: boolean; upid?: string; message?: string; error?: string }>(
     '/v1/virt/migrate',
     'POST',
-    { vmid, targetPeerIp: peer }
+    { vmid, targetPeerIp: peer },
+    120_000
   );
   if (!daemonResp) {
     return {

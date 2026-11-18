@@ -225,7 +225,12 @@ func main() {
 				if err := engine.MergeCloudInitIntoBootConfig(&bootCfg, imdsPayload, "/"); err != nil {
 					slog.Warn("Cloud-Init IMDS merge warning", "source", imdsPayload.Datasource, "error", err)
 				} else {
-					slog.Info("Applied autonomous Cloud-Init IMDS configuration", "source", imdsPayload.Datasource, "id", bootCfg.SatelliteID)
+					slog.Info("Applied autonomous Cloud-Init IMDS configuration", "source", imdsPayload.Datasource, "id", bootCfg.SatelliteID, "hostname", bootCfg.Hostname)
+					if bootCfg.Hostname != "" {
+						_ = syscall.Sethostname([]byte(bootCfg.Hostname))
+					} else if bootCfg.SatelliteID != "" {
+						_ = syscall.Sethostname([]byte(bootCfg.SatelliteID))
+					}
 					for _, iface := range bootCfg.Interfaces {
 						_ = netEngine.ConfigureInterface(iface)
 					}
@@ -590,10 +595,10 @@ func main() {
 						slog.Error("Malformed interfaces sync payload", "error", err)
 						sendAck(env.Type, env.CommandID, err)
 					} else {
-						slog.Info("Applying edge network interface configurations...", "count", len(ifPayload.Interfaces))
+						slog.Info("Applying edge network interface configurations...", "count", len(ifPayload.Interfaces), "haRole", haEngine.Role())
 						var errs []error
 						for _, iface := range ifPayload.Interfaces {
-							if err := netEngine.ConfigureInterface(iface); err != nil {
+							if err := haEngine.ApplySyncedInterface(netEngine, iface); err != nil {
 								slog.Error("Failed to configure edge interface", "device", iface.Device, "error", err)
 								errs = append(errs, err)
 							}

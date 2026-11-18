@@ -43,12 +43,22 @@ export function compileFrr(config?: FrrConfig, interfaces: Interface[] = []): Co
     lines.push(` bgp router-id ${config.bgp.routerId.replace(/[\r\n\s]+/g, '')}`);
     lines.push(' no bgp ebgp-requires-policy');
 
+    const v4Nets: string[] = [];
+    const v6Nets: string[] = [];
     for (const net of config.bgp.networks) {
-      lines.push(` network ${net.replace(/[\r\n\s]+/g, '')}`);
+      const cleanNet = net.replace(/[\r\n\s]+/g, '');
+      if (!cleanNet) continue;
+      if (cleanNet.includes(':')) v6Nets.push(cleanNet);
+      else v4Nets.push(cleanNet);
+    }
+    for (const net of v4Nets) {
+      lines.push(` network ${net}`);
     }
 
+    const v6Neighbors: typeof config.bgp.neighbors = [];
     for (const neighbor of config.bgp.neighbors) {
       const safePeerIp = neighbor.peerIp.replace(/[\r\n\s]+/g, '');
+      const isV6 = safePeerIp.includes(':');
       lines.push(` neighbor ${safePeerIp} remote-as ${neighbor.remoteAs}`);
       if (neighbor.description) {
         const safeDesc = neighbor.description.replace(/[\r\n]+/g, ' ').replace(/"/g, "'").trim();
@@ -62,12 +72,36 @@ export function compileFrr(config?: FrrConfig, interfaces: Interface[] = []): Co
         daemons.bfdd = true;
         lines.push(` neighbor ${safePeerIp} bfd`);
       }
-      if (neighbor.nextHopSelf) {
-        lines.push(` neighbor ${safePeerIp} next-hop-self`);
+      if (!isV6) {
+        if (neighbor.nextHopSelf) {
+          lines.push(` neighbor ${safePeerIp} next-hop-self`);
+        }
+        if (neighbor.softReconfiguration) {
+          lines.push(` neighbor ${safePeerIp} soft-reconfiguration inbound`);
+        }
+      } else {
+        lines.push(` no neighbor ${safePeerIp} activate`);
+        v6Neighbors.push(neighbor);
       }
-      if (neighbor.softReconfiguration) {
-        lines.push(` neighbor ${safePeerIp} soft-reconfiguration inbound`);
+    }
+
+    if (v6Nets.length > 0 || v6Neighbors.length > 0) {
+      lines.push(' !');
+      lines.push(' address-family ipv6 unicast');
+      for (const net of v6Nets) {
+        lines.push(`  network ${net}`);
       }
+      for (const neighbor of v6Neighbors) {
+        const safePeerIp = neighbor.peerIp.replace(/[\r\n\s]+/g, '');
+        lines.push(`  neighbor ${safePeerIp} activate`);
+        if (neighbor.nextHopSelf) {
+          lines.push(`  neighbor ${safePeerIp} next-hop-self`);
+        }
+        if (neighbor.softReconfiguration) {
+          lines.push(`  neighbor ${safePeerIp} soft-reconfiguration inbound`);
+        }
+      }
+      lines.push(' exit-address-family');
     }
     lines.push('!');
   }

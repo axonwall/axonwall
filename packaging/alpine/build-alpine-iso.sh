@@ -593,7 +593,7 @@ elif [[ "${EDITION}" == "axonwall" ]]; then
 fi
 
 if [[ "${EDITION}" == "k3s-storage" ]]; then
-  K3S_VERSION="${K3S_VERSION:-v1.31.5+k3s1}"
+  K3S_VERSION="${K3S_VERSION:-v1.32.3+k3s1}"
   K3S_URL_VERSION="${K3S_VERSION//+/%2B}"
   case "${K3S_VERSION}" in
     v1.31.5+k3s1) K3S_SHA256="${K3S_SHA256:-399b87b432ce55013fa81adad572a8e4ecf56e0df97369cf02d4b8a41f039091}" ;;

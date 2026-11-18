@@ -3,6 +3,8 @@ Description=Axonwall Changeset & Policy Compiler Controller
 Documentation=https://github.com/axonwall/axonwall
 After=network.target axonwalld.service axonwall-firstboot.service
 Wants=axonwalld.service
+ConditionPathExists=!/etc/axonwall/.vault-edition
+ConditionPathExists=!/etc/axonwall/.k3s-edition
 ConditionKernelCommandLine=!axonwall_install=1
 ConditionKernelCommandLine=!axonwall.install=1
 ConditionKernelCommandLine=!axonwall.unattended=1

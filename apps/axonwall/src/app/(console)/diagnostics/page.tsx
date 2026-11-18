@@ -73,6 +73,7 @@ export default function DiagnosticsPage() {
   >('service_os');
   const [useSimulated, setUseSimulated] = useState(false);
   const [isScanning, setIsScanning] = useState(false);
+  const [scanFailed, setScanFailed] = useState(false);
   const [scanStatusMsg, setScanStatusMsg] = useState<string | null>(null);
 
   // CLI Ops Toolkit State
@@ -83,6 +84,7 @@ export default function DiagnosticsPage() {
   const [digRecordType, setDigRecordType] = useState('A');
   const [cliOutput, setCliOutput] = useState<string>('');
   const [cliCommand, setCliCommand] = useState<string>('');
+  const [cliFailed, setCliFailed] = useState(false);
   const [isRunningCli, setIsRunningCli] = useState(false);
 
   // Ping / Port Probe State
@@ -179,6 +181,7 @@ export default function DiagnosticsPage() {
 
   async function handleExecuteNmapScan() {
     setIsScanning(true);
+    setScanFailed(false);
     setScanStatusMsg(`Executing Nmap (${scanProfile}) on ${scanTarget}...`);
     try {
       // Save previous scan as baseline for Diff view
@@ -190,6 +193,7 @@ export default function DiagnosticsPage() {
       });
 
       if (!res.success) {
+        setScanFailed(true);
         setScanStatusMsg(res.error || 'Scan failed');
         return;
       }
@@ -227,6 +231,9 @@ export default function DiagnosticsPage() {
       setScanStatusMsg(
         `Rendered topology for ${scanTarget} via '${res.command}' (${res.durationMs}ms).`
       );
+    } catch (err: any) {
+      setScanFailed(true);
+      setScanStatusMsg(err?.message || 'Scan failed');
     } finally {
       setIsScanning(false);
     }
@@ -236,6 +243,7 @@ export default function DiagnosticsPage() {
     const targetTool = toolOverride || activeCliTool;
     if (toolOverride) setActiveCliTool(toolOverride);
     setIsRunningCli(true);
+    setCliFailed(false);
     try {
       const res = await runCliToolSnapshot(targetTool, {
         iface: selectedIface,
@@ -245,6 +253,12 @@ export default function DiagnosticsPage() {
       });
       setCliCommand(res.command);
       setCliOutput(res.output);
+      if (!res.success) {
+        setCliFailed(true);
+      }
+    } catch (err: any) {
+      setCliFailed(true);
+      setCliOutput(err?.message || 'Failed to collect CLI snapshot');
     } finally {
       setIsRunningCli(false);
     }
@@ -260,6 +274,9 @@ export default function DiagnosticsPage() {
       // to render as green console output indistinguishable from success.
       setProbeFailed(!res.success);
       setProbeOutput(res.output);
+    } catch (err: any) {
+      setProbeFailed(true);
+      setProbeOutput(err?.message || 'Diagnostic probe failed');
     } finally {
       setIsProbing(false);
     }
@@ -438,7 +455,11 @@ export default function DiagnosticsPage() {
             </div>
 
             {scanStatusMsg && (
-              <div className="text-xs font-mono text-emerald-400 bg-slate-950 border border-slate-800/80 rounded-lg px-3 py-2 flex items-center justify-between">
+              <div
+                className={`text-xs font-mono bg-slate-950 border rounded-lg px-3 py-2 flex items-center justify-between ${
+                  scanFailed ? 'text-red-400 border-red-500/40' : 'text-emerald-400 border-slate-800/80'
+                }`}
+              >
                 <span>{scanStatusMsg}</span>
                 <span className="text-slate-500">Active Dataset: {activeScanLabel}</span>
               </div>
@@ -768,11 +789,11 @@ export default function DiagnosticsPage() {
           </div>
 
           {/* Terminal Output Display */}
-          <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 space-y-3">
+          <div className={`bg-slate-900 border rounded-xl p-5 space-y-3 ${cliFailed ? 'border-red-500/40' : 'border-slate-800'}`}>
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2 text-sm font-semibold text-white">
-                <Terminal className="w-4 h-4 text-emerald-400" />
-                <span>CLI Telemetry Output</span>
+                <Terminal className={`w-4 h-4 ${cliFailed ? 'text-red-400' : 'text-emerald-400'}`} />
+                <span>CLI Telemetry Output{cliFailed ? ' — Failed' : ''}</span>
               </div>
               {cliCommand && (
                 <code className="text-xs font-mono text-slate-400 bg-slate-950 px-2.5 py-1 rounded border border-slate-800">
@@ -780,7 +801,11 @@ export default function DiagnosticsPage() {
                 </code>
               )}
             </div>
-            <pre className="bg-slate-950 border border-slate-800/80 rounded-lg p-4 font-mono text-xs text-emerald-400 whitespace-pre-wrap overflow-x-auto max-h-[520px]">
+            <pre
+              className={`bg-slate-950 border border-slate-800/80 rounded-lg p-4 font-mono text-xs whitespace-pre-wrap overflow-x-auto max-h-[520px] ${
+                cliFailed ? 'text-red-400' : 'text-emerald-400'
+              }`}
+            >
               {cliOutput || 'Select a CLI utility above to inspect live appliance telemetry.'}
             </pre>
           </div>

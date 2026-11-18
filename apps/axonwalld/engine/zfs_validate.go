@@ -16,15 +16,18 @@ package engine
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 )
 
 var (
-	zfsNameComponentRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.\-]*$`)
-	zfsWholeDiskRe     = regexp.MustCompile(`^/dev/(sd[a-z]+|vd[a-z]+|nvme[0-9]+n[0-9]+)$`)
-	zfsInstallDevRe    = regexp.MustCompile(`^/dev/(sd[a-z]+[0-9]*|vd[a-z]+[0-9]*|nvme[0-9]+n[0-9]+(p[0-9]+)?|mmcblk[0-9]+(p[0-9]+)?|md[0-9]+)$`)
-	zfsByIDRe          = regexp.MustCompile(`^/dev/disk/by-id/[A-Za-z0-9_.\-]+$`)
+	zfsNameComponentRe  = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.\-]*$`)
+	zfsWholeDiskRe      = regexp.MustCompile(`^/dev/(sd[a-z]+|vd[a-z]+|nvme[0-9]+n[0-9]+|md[0-9]+)$`)
+	zfsInstallDevRe     = regexp.MustCompile(`^/dev/(sd[a-z]+[0-9]*|vd[a-z]+[0-9]*|nvme[0-9]+n[0-9]+(p[0-9]+)?|mmcblk[0-9]+(p[0-9]+)?|md[0-9]+)$`)
+	zfsByIDRe           = regexp.MustCompile(`^/dev/disk/by-id/[A-Za-z0-9_.\-]+$`)
+	zfsByPartlabelZfsRe = regexp.MustCompile(`^/dev/disk/by-partlabel/axon_zfs[A-Za-z0-9_.\-]*$`)
 )
 
 var zfsTopologies = map[string]bool{
@@ -86,12 +89,33 @@ func validZfsDatasetName(full string) bool {
 	return true
 }
 
+func isAxonZfsPartitionDev(dev string) bool {
+	if zfsByPartlabelZfsRe.MatchString(dev) {
+		return true
+	}
+	if !zfsInstallDevRe.MatchString(dev) {
+		return false
+	}
+	base := filepath.Base(dev)
+	ueventPath := filepath.Join("/sys/class/block", base, "uevent")
+	raw, err := os.ReadFile(ueventPath)
+	if err != nil {
+		return false
+	}
+	for _, line := range strings.Split(string(raw), "\n") {
+		if strings.HasPrefix(line, "PARTNAME=axon_zfs") {
+			return true
+		}
+	}
+	return false
+}
+
 func validZfsDevice(dev string) bool {
-	return zfsWholeDiskRe.MatchString(dev) || zfsByIDRe.MatchString(dev)
+	return zfsWholeDiskRe.MatchString(dev) || zfsByIDRe.MatchString(dev) || isAxonZfsPartitionDev(dev)
 }
 
 func validInstallZfsDevice(dev string) bool {
-	return zfsInstallDevRe.MatchString(dev) || zfsByIDRe.MatchString(dev)
+	return zfsInstallDevRe.MatchString(dev) || zfsByIDRe.MatchString(dev) || zfsByPartlabelZfsRe.MatchString(dev)
 }
 
 func ValidateInstallZfsPoolSpec(pool ZfsPoolSpec) error {

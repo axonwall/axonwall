@@ -20,6 +20,37 @@ const HEADSCALE_SOCKET_PATH = process.env.HEADSCALE_SOCKET_PATH || '/run/headsca
 const HEADSCALE_CONFIG_PATH = process.env.HEADSCALE_CONFIG_PATH || '/etc/headscale/config.yaml';
 const HEADSCALE_BIN = process.env.HEADSCALE_BIN || '/usr/sbin/headscale';
 
+export function parseHeadscaleTimestamp(value: unknown): string | undefined {
+  if (value === null || value === undefined) return undefined;
+  if (typeof value === 'string') {
+    const ms = Date.parse(value);
+    return Number.isNaN(ms) ? undefined : new Date(ms).toISOString();
+  }
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    const ms = value > 1e12 ? value : value * 1000;
+    return new Date(ms).toISOString();
+  }
+  if (typeof value === 'object') {
+    const obj = value as Record<string, unknown>;
+    if (typeof obj.seconds === 'number') {
+      return new Date(obj.seconds * 1000).toISOString();
+    }
+    if (typeof obj.seconds === 'string' && obj.seconds !== '') {
+      const s = Number(obj.seconds);
+      if (Number.isFinite(s)) return new Date(s * 1000).toISOString();
+    }
+  }
+  return undefined;
+}
+
+function headscaleTimestamp(record: any, ...keys: string[]): string | undefined {
+  for (const key of keys) {
+    const parsed = parseHeadscaleTimestamp(record?.[key]);
+    if (parsed !== undefined) return parsed;
+  }
+  return undefined;
+}
+
 function getHeadscaleBin(): string {
   if (fs.existsSync(HEADSCALE_BIN)) return HEADSCALE_BIN;
   if (fs.existsSync('/usr/local/bin/headscale')) return '/usr/local/bin/headscale';
@@ -66,7 +97,7 @@ export async function listUsers() {
   return data.map((u: any) => ({
     id: u.id,
     name: u.name,
-    createdAt: u.created_at ? new Date((u.created_at.seconds || 0) * 1000).toISOString() : new Date().toISOString(),
+    createdAt: headscaleTimestamp(u, 'createdAt', 'created_at') ?? new Date().toISOString(),
   }));
 }
 
@@ -76,7 +107,7 @@ export async function createUser(name: string) {
   return {
     id: data?.id,
     name: data?.name || safeName,
-    createdAt: data?.created_at ? new Date((data.created_at.seconds || 0) * 1000).toISOString() : new Date().toISOString(),
+    createdAt: headscaleTimestamp(data, 'createdAt', 'created_at') ?? new Date().toISOString(),
   };
 }
 
@@ -91,7 +122,7 @@ export async function deleteUser(name: string) {
 
 export async function createPreAuthKey(user: string | number, reusable: boolean, ephemeral: boolean, expiration?: string) {
   let userId: string | number = user;
-  if (typeof user === 'string' && isNaN(Number(user))) {
+  if (typeof user === 'string' && !/^\d+$/.test(user.trim())) {
     const safeUserName = assertSafeIdentifier(user, 'User name');
     const users = await listUsers();
     const found = users.find((u: any) => u.name === safeUserName);
@@ -107,12 +138,17 @@ export async function createPreAuthKey(user: string | number, reusable: boolean,
   const args = ['preauthkeys', 'create', '--user', String(safeUserId), '-o', 'json'];
   if (reusable) args.push('--reusable');
   if (ephemeral) args.push('--ephemeral');
-  if (expiration) {
-    const ms = new Date(expiration).getTime() - Date.now();
-    if (ms > 0) {
-      const hours = Math.max(1, Math.round(ms / (1000 * 60 * 60)));
-      args.push('--expiration', `${hours}h`);
+  if (expiration !== undefined && expiration !== '') {
+    const parsedTime = new Date(expiration).getTime();
+    if (Number.isNaN(parsedTime)) {
+      throw new Error('Invalid expiration timestamp');
     }
+    const ms = parsedTime - Date.now();
+    if (ms <= 0) {
+      throw new Error('Expiration timestamp must be in the future');
+    }
+    const hours = Math.max(1, Math.round(ms / (1000 * 60 * 60)));
+    args.push('--expiration', `${hours}h`);
   }
 
   const data = await runHeadscale(args);
@@ -121,21 +157,9 @@ export async function createPreAuthKey(user: string | number, reusable: boolean,
     key: data?.key,
     reusable: data?.reusable,
     ephemeral: data?.ephemeral,
-    expiration: data?.expiration ? new Date((data.expiration.seconds || 0) * 1000).toISOString() : undefined,
+    expiration: headscaleTimestamp(data, 'expiration'),
     user: data?.user || { id: safeUserId, name: String(user) },
   };
-}
-
-function normalizeHeadscaleTimestamp(val: any): string | undefined {
-  if (!val) return undefined;
-  if (typeof val === 'string') {
-    const d = new Date(val);
-    return Number.isNaN(d.getTime()) ? undefined : d.toISOString();
-  }
-  if (typeof val === 'object' && typeof val.seconds === 'number') {
-    return new Date(val.seconds * 1000).toISOString();
-  }
-  return undefined;
 }
 
 export async function listPreAuthKeys(user?: string) {
@@ -147,8 +171,8 @@ export async function listPreAuthKeys(user?: string) {
     reusable: k.reusable,
     ephemeral: k.ephemeral,
     used: k.used,
-    expiration: normalizeHeadscaleTimestamp(k.expiration),
-    createdAt: normalizeHeadscaleTimestamp(k.created_at),
+    expiration: headscaleTimestamp(k, 'expiration'),
+    createdAt: headscaleTimestamp(k, 'createdAt', 'created_at'),
     user: k.user,
   }));
   if (user) {
@@ -160,7 +184,12 @@ export async function listPreAuthKeys(user?: string) {
 
 export async function expirePreAuthKey(user: string, key: string) {
   const safeKey = assertSafeIdentifier(key, 'Preauth key');
-  return runHeadscale(['preauthkeys', 'expire', safeKey]);
+  const args = ['preauthkeys', 'expire', safeKey];
+  if (user && String(user).trim()) {
+    const safeUser = assertSafeIdentifier(user, 'User');
+    args.push('--user', safeUser);
+  }
+  return runHeadscale(args);
 }
 
 // -----------------------------------------------------------------------------
@@ -175,7 +204,7 @@ export async function listMachines(user?: string) {
     name: n.given_name || n.name,
     ipAddresses: n.ip_addresses || [],
     user: n.user,
-    lastSeen: normalizeHeadscaleTimestamp(n.last_seen) || null,
+    lastSeen: headscaleTimestamp(n, 'lastSeen', 'last_seen') ?? null,
     online: n.online ?? false,
     routes: n.approved_routes || [],
   }));

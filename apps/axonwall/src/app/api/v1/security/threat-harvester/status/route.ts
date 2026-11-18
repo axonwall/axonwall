@@ -1,7 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getThreatHarvesterStatus, updateThreatHarvesterLiveConfigAction } from '@/server/agent';
 
-function errStatus(msg: string): number {
+function errStatus(err: any): number {
+  if (err?.name === 'ZodError' || err?.constructor?.name === 'ZodError') return 400;
+  const msg = String(err?.message || '');
   if (msg.includes('Unauthorized')) return 401;
   if (msg.includes('Forbidden')) return 403;
   return 500;
@@ -13,7 +15,7 @@ export async function GET() {
     return NextResponse.json({ status: 'ok', data });
   } catch (err: any) {
     const msg = err?.message || 'Internal server error';
-    return NextResponse.json({ status: 'error', error: msg }, { status: errStatus(msg) });
+    return NextResponse.json({ status: 'error', error: msg }, { status: errStatus(err) });
   }
 }
 
@@ -27,6 +29,6 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ status: 'ok', ...res });
   } catch (err: any) {
     const msg = err?.message || 'Internal server error';
-    return NextResponse.json({ status: 'error', error: msg }, { status: errStatus(msg) });
+    return NextResponse.json({ status: 'error', error: msg }, { status: errStatus(err) });
   }
 }

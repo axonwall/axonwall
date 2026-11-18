@@ -1163,14 +1163,20 @@ async function main() {
   // only until the B2-H2 heartbeat terminates it, so a buffered
   // send into a dead socket no longer counts as notified).
   const sendHaTransition = (sat: SatelliteState, type: 'PROMOTE' | 'DEMOTE', role: 'active' | 'standby', sharedWanMac?: string, lanVip?: string): boolean => {
+    const localState = loadLocalDesiredState();
+    const fleetNode = localState?.fleet?.nodes?.find((n) => n.id === sat.id);
+    const wanDevice = fleetNode?.wanInterface || sat.wanInterface || undefined;
+    const lanDevice = fleetNode?.lanInterface || sat.lanInterface || undefined;
+    const effectiveLanVip = lanVip || localState?.hostedEdge?.lan?.edgeAddress || undefined;
     // The satellite's EdgeHATransitionPayload reads lanVipV4
     // (lanVip is kept for backward compatibility with any
     // consumer that still reads the old field name).
     return sendToSatellite(sat, type, {
       role,
+      ...(wanDevice ? { wanDevice } : {}),
+      ...(lanDevice ? { lanDevice } : {}),
       sharedWanMac,
-      lanVip,
-      lanVipV4: lanVip,
+      ...(effectiveLanVip ? { lanVip: effectiveLanVip, lanVipV4: effectiveLanVip } : {}),
     }) !== null;
   };
 
@@ -2576,7 +2582,7 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
       } else {
         console.warn(`[Fleet Manager] Not re-asserting HA promotion for ${satId}: no LAN VIP recorded or configured`);
       }
-    } else if (activeHaEdgeId && (state.role === 'edge-ngfw' || satId.startsWith('edge-') || satId === 'edge')) {
+    } else if (activeHaEdgeId && state.role === 'edge-ngfw') {
       sendHaTransition(state, 'DEMOTE', 'standby');
     }
 

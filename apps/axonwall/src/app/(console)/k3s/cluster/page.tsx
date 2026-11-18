@@ -23,7 +23,7 @@ export default function K3sClusterPage() {
   const [lbName, setLbName] = useState('bgp-pool-0');
   const [lbCidr, setLbCidr] = useState('192.168.1.240/28');
   const [lbMode, setLbMode] = useState<'bgp' | 'l2-arp' | 'both'>('both');
-  const [msg, setMsg] = useState<string | null>(null);
+  const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [joining, setJoining] = useState(false);
 
   const load = async () => {
@@ -36,7 +36,9 @@ export default function K3sClusterPage() {
       setState(st);
       setStatus(rt);
       setEtcdSnapshots(snaps || []);
-    } catch {}
+    } catch (err: any) {
+      setMsg({ ok: false, text: err?.message || 'Failed to load K3s runtime telemetry' });
+    }
   };
 
   useEffect(() => {
@@ -48,10 +50,10 @@ export default function K3sClusterPage() {
     setMsg(null);
     try {
       const res = await triggerK3sHaAutoJoin();
-      setMsg(res.message);
+      setMsg({ ok: Boolean(res.success), text: res.message });
       await load();
     } catch (err: any) {
-      setMsg(err?.message || 'HA cluster join failed');
+      setMsg({ ok: false, text: err?.message || 'HA cluster join failed' });
     } finally {
       setJoining(false);
     }
@@ -93,11 +95,11 @@ export default function K3sClusterPage() {
     try {
       const res = await applyState(next);
       setState(next);
-      setMsg(`K3s control plane configuration applied (${res.message})`);
+      setMsg({ ok: true, text: `K3s control plane configuration applied (${res.message})` });
+      await load();
     } catch (err: any) {
-      setMsg(err?.message || 'Failed to save K3s configuration.');
+      setMsg({ ok: false, text: err?.message || 'Failed to save K3s configuration.' });
     }
-    await load();
   };
 
   return (
@@ -134,8 +136,14 @@ export default function K3sClusterPage() {
       </div>
 
       {msg && (
-        <div className="p-4 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-xs text-emerald-300">
-          {msg}
+        <div
+          className={`p-4 rounded-xl border text-xs ${
+            msg.ok
+              ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300'
+              : 'bg-rose-500/10 border-rose-500/30 text-rose-300'
+          }`}
+        >
+          {msg.text}
         </div>
       )}
 
@@ -252,10 +260,16 @@ export default function K3sClusterPage() {
             <button
               type="button"
               onClick={async () => {
-                const res = await manageK3sEtcdSnapshotAction('save', snapName.trim());
-                setMsg(res.message);
-                setSnapName('');
-                await load();
+                try {
+                  const res = await manageK3sEtcdSnapshotAction('save', snapName.trim());
+                  setMsg({ ok: res.success, text: res.message });
+                  if (res.success) {
+                    setSnapName('');
+                  }
+                  await load();
+                } catch (err: any) {
+                  setMsg({ ok: false, text: err?.message || 'Failed to save etcd snapshot' });
+                }
               }}
               className="px-3.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-xs font-semibold text-white"
             >
@@ -271,9 +285,13 @@ export default function K3sClusterPage() {
                     type="button"
                     onClick={async () => {
                       if (!confirm(`Trigger K3s --cluster-reset-restore-path recovery from '${s.name}'?`)) return;
-                      const res = await manageK3sEtcdSnapshotAction('restore', s.name);
-                      setMsg(res.message);
-                      await load();
+                      try {
+                        const res = await manageK3sEtcdSnapshotAction('restore', s.name);
+                        setMsg({ ok: res.success, text: res.message });
+                        await load();
+                      } catch (err: any) {
+                        setMsg({ ok: false, text: err?.message || `Failed to restore etcd snapshot '${s.name}'` });
+                      }
                     }}
                     className="text-amber-300 hover:text-amber-200 inline-flex items-center gap-1 font-medium"
                   >
@@ -373,7 +391,10 @@ export default function K3sClusterPage() {
                 },
               ];
               setState(next);
-              setMsg(`Staged ServiceLB pool '${lbName.trim()}' (${lbCidr.trim()}). Click Reconcile K3s Cluster to apply.`);
+              setMsg({
+                ok: true,
+                text: `Staged ServiceLB pool '${lbName.trim()}' (${lbCidr.trim()}). Click Reconcile K3s Cluster to apply.`,
+              });
             }}
             className="px-3.5 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-500 text-xs font-semibold text-white"
           >

@@ -358,6 +358,12 @@ func DiscoverDisks() []DiskDevice {
 	}
 	mountsBytes, _ := os.ReadFile("/proc/mounts")
 	mountsStr := string(mountsBytes)
+	swapsBytes, _ := os.ReadFile("/proc/swaps")
+	swapsStr := string(swapsBytes)
+	var zpoolStatusStr string
+	if zOut, zErr := exec.Command("zpool", "status", "-P").Output(); zErr == nil {
+		zpoolStatusStr = string(zOut)
+	}
 
 	var raw []DiskDevice
 	for _, entry := range entries {
@@ -401,17 +407,7 @@ func DiscoverDisks() []DiskDevice {
 			transport = "eMMC"
 		}
 
-		mounted := false
-		for _, line := range strings.Split(mountsStr, "\n") {
-			fields := strings.Fields(line)
-			if len(fields) > 0 {
-				mDev := fields[0]
-				if mDev == devPath || isPartitionOfDisk(mDev, devPath) {
-					mounted = true
-					break
-				}
-			}
-		}
+		mounted := isDiskBusyOrHeld(devPath, name, mountsStr, swapsStr, zpoolStatusStr, "/sys/block")
 
 		raw = append(raw, DiskDevice{
 			Name:      name,
@@ -564,7 +560,8 @@ func readRawDiskHeader(devPath string) []byte {
 		return nil
 	}
 	defer f.Close()
-	buf := make([]byte, 32768)
+	// Read 256 KiB to cover GPT/MBR/filesystem signatures plus ZFS vdev L0 uberblocks (128..256 KiB).
+	buf := make([]byte, 262144)
 	n, _ := io.ReadFull(f, buf)
 	if n <= 0 {
 		return nil
@@ -609,7 +606,7 @@ func decodeUTF16LELabel(b []byte) string {
 	return strings.TrimSpace(string(utf16.Decode(units)))
 }
 
-// inspectRawDiskHeader extracts partition tables, GPT type GUIDs/labels, MBR entries, and raw whole-disk signatures from up to 32 KiB.
+// inspectRawDiskHeader extracts partition tables, GPT type GUIDs/labels, MBR entries, and raw whole-disk signatures from up to 256 KiB.
 func inspectRawDiskHeader(diskPath string, buf []byte) DiskProbeInput {
 	res := DiskProbeInput{DiskPath: diskPath}
 	if len(buf) == 0 {
@@ -624,6 +621,8 @@ func inspectRawDiskHeader(diskPath string, buf []byte) DiskProbeInput {
 		res.WholeFSType = "ext4"
 	} else if len(buf) >= 520 && string(buf[512:520]) == "LABELONE" {
 		res.WholeFSType = "LVM2_member"
+	} else if hasZfsUberblock(buf) {
+		res.WholeFSType = "zfs_member"
 	}
 
 	// Check GPT header at LBA 1 (byte offset 512)
@@ -778,8 +777,84 @@ func parseBlkidOutput(out string) map[string]map[string]string {
 	return result
 }
 
+func hasZfsUberblock(buf []byte) bool {
+	const zfsUberblockMagic = 0x00bab10c
+	const start = 0x20000 // 128 KiB: ZFS vdev label L0 uberblock array start
+	const end = 0x40000   // 256 KiB: ZFS vdev label L0 uberblock array end
+	for off := start; off+8 <= len(buf) && off < end; off += 1024 {
+		if binary.LittleEndian.Uint64(buf[off:off+8]) == zfsUberblockMagic ||
+			binary.BigEndian.Uint64(buf[off:off+8]) == zfsUberblockMagic {
+			return true
+		}
+	}
+	return false
+}
+
+func isDiskBusyOrHeld(devPath, base, mountsStr, swapsStr, zpoolStatusStr, sysBlockRoot string) bool {
+	for _, line := range strings.Split(mountsStr, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) > 0 && (fields[0] == devPath || isPartitionOfDisk(fields[0], devPath)) {
+			return true
+		}
+	}
+	for _, line := range strings.Split(swapsStr, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) > 0 && strings.HasPrefix(fields[0], "/dev/") && (fields[0] == devPath || isPartitionOfDisk(fields[0], devPath)) {
+			return true
+		}
+	}
+	for _, tok := range strings.Fields(zpoolStatusStr) {
+		if !strings.HasPrefix(tok, "/dev/") {
+			continue
+		}
+		if tok == devPath || isPartitionOfDisk(tok, devPath) {
+			return true
+		}
+		if resolved, err := filepath.EvalSymlinks(tok); err == nil {
+			if resolved == devPath || isPartitionOfDisk(resolved, devPath) {
+				return true
+			}
+		}
+	}
+	if sysBlockRoot == "" {
+		sysBlockRoot = "/sys/block"
+	}
+	if base != "" {
+		if holders, err := os.ReadDir(filepath.Join(sysBlockRoot, base, "holders")); err == nil && len(holders) > 0 {
+			return true
+		}
+		if entries, err := os.ReadDir(filepath.Join(sysBlockRoot, base)); err == nil {
+			for _, se := range entries {
+				pName := se.Name()
+				if !strings.HasPrefix(pName, base) {
+					continue
+				}
+				if holders, err := os.ReadDir(filepath.Join(sysBlockRoot, base, pName, "holders")); err == nil && len(holders) > 0 {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
 func decodeUdevEscapedLabel(s string) string {
-	return strings.ReplaceAll(s, `\x20`, " ")
+	if !strings.Contains(s, `\x`) {
+		return s
+	}
+	var out bytes.Buffer
+	out.Grow(len(s))
+	for i := 0; i < len(s); i++ {
+		if i+3 < len(s) && s[i] == '\\' && s[i+1] == 'x' {
+			if b, err := strconv.ParseUint(s[i+2:i+4], 16, 8); err == nil {
+				out.WriteByte(byte(b))
+				i += 3
+				continue
+			}
+		}
+		out.WriteByte(s[i])
+	}
+	return out.String()
 }
 
 func collectSymlinkLabelMap(dir string) map[string]string {
@@ -1641,10 +1716,7 @@ func ComputePartitionLayout(diskMB int, cfg InstallerConfig) PartitionLayout {
 	if cfg.InstallMode == "zbm" {
 		efiMB := 512
 		logsMB := 0
-		if cfg.LogsEnabled && cfg.LogsGB >= 1 {
-			logsMB = cfg.LogsGB * 1024
-		}
-		remMB := diskMB - efiMB - logsMB - 16
+		remMB := diskMB - efiMB - 16
 		if remMB < 1024 {
 			remMB = 1024
 		}
@@ -2942,7 +3014,7 @@ func RunNextGenInstallerTUI(reader *bufio.Reader) {
 							roleDesc += " (" + cfg.K3sServerURL + ")"
 						}
 					}
-					fmt.Printf("   • %-22s : %s%s | ARC Cap: %d MiB%s\n", "K3s Role & ARC [K]", colorCyan+colorBold, roleDesc, effArc, colorReset)
+					fmt.Printf("   • %-22s : %s%s | ARC Cap: %d MiB%s\n", "K3s Role & ARC [G]", colorCyan+colorBold, roleDesc, effArc, colorReset)
 				}
 				fmt.Printf("   • %-22s : %s\n", "Data Encryption [L]", luksSummary)
 				fmt.Printf("   • %-22s : %s\n\n", "Admin Password  [P]", pwSummary)
@@ -2952,6 +3024,9 @@ func RunNextGenInstallerTUI(reader *bufio.Reader) {
 			var allTargetDisks []string
 			allTargetDisks = append(allTargetDisks, cfg.SystemDisks...)
 			allTargetDisks = append(allTargetDisks, cfg.ZfsExtraDisks...)
+			allTargetDisks = append(allTargetDisks, cfg.ZfsSlogDisks...)
+			allTargetDisks = append(allTargetDisks, cfg.ZfsL2arcDisks...)
+			allTargetDisks = append(allTargetDisks, cfg.ZfsSpareDisks...)
 			fmt.Println("────────────────────────────────────────────────────────────────────────────────")
 			if wLine := renderTargetDiskWarningsLine(disks, cfg); wLine != "" {
 				fmt.Print(wLine)
@@ -2966,7 +3041,7 @@ func RunNextGenInstallerTUI(reader *bufio.Reader) {
 				}
 			}
 			if cfg.Edition == "k3s-storage" {
-				fmt.Printf(" %sControls:%s %s[Enter / I] Express Install%s  [E] Ed  [K] K3s Role  [1-3/↑/↓] Arch  [P] Pass  [L] LUKS2  [C] Custom  %s[V] Logs%s  [Q] CLI\n",
+				fmt.Printf(" %sControls:%s %s[Enter / I] Express Install%s  [E] Ed  [G] K3s Role  [1-3/↑/↓] Arch  [P] Pass  [L] LUKS2  [C] Custom  %s[V] Logs%s  [Q] CLI\n",
 					colorDim, colorReset, colorEmerald+colorBold, colorReset, colorCyan+colorBold, colorReset)
 			} else {
 				fmt.Printf(" %sControls:%s %s[Enter / I] Express Install%s  [E] Ed  [1-3/↑/↓] Arch  [P] Pass  [L] LUKS2  [X] KeepParts  [C] Custom  %s[V] Logs%s  [Q] CLI\n",
@@ -2998,7 +3073,7 @@ func RunNextGenInstallerTUI(reader *bufio.Reader) {
 			case "E":
 				cycleEdition(&cfg)
 				disks, eval = EvaluateHardwareProfile(disks, &cfg)
-			case "K":
+			case "G":
 				if cfg.Edition == "k3s-storage" {
 					if cfg.K3sRole == "agent" {
 						cfg.K3sRole = "server"
@@ -3016,7 +3091,9 @@ func RunNextGenInstallerTUI(reader *bufio.Reader) {
 							}
 						}
 					}
-				} else if archCursor > 0 {
+				}
+			case "K":
+				if archCursor > 0 {
 					archCursor--
 					cfg.InstallMode = archOptions[archCursor].mode
 					normalizeSlotMBForMode(&cfg, recommendedSlotGBForDiskMB(primaryMB), primaryMB)
@@ -3162,10 +3239,14 @@ func RunNextGenInstallerTUI(reader *bufio.Reader) {
 			case "UP", "K":
 				if archCursor > 0 {
 					archCursor--
+					cfg.InstallMode = archOptions[archCursor].mode
+					normalizeSlotMBForMode(&cfg, recommendedSlotGBForDiskMB(primaryMB), primaryMB)
 				}
 			case "DOWN", "J":
 				if archCursor < len(archOptions)-1 {
 					archCursor++
+					cfg.InstallMode = archOptions[archCursor].mode
+					normalizeSlotMBForMode(&cfg, recommendedSlotGBForDiskMB(primaryMB), primaryMB)
 				}
 			case "1", "2", "3":
 				idx, _ := strconv.Atoi(key)

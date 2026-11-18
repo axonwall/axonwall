@@ -49,6 +49,9 @@ func MergeCloudInitIntoBootConfig(base *EdgeBootConfig, payload CloudInitPayload
 	// 1. Parse meta-data (hostname / instance-id)
 	if strings.TrimSpace(payload.MetaData) != "" {
 		metaID, metaHost := ParseCloudInitMetaData(payload.MetaData)
+		if base.Hostname == "" && metaHost != "" {
+			base.Hostname = metaHost
+		}
 		if base.SatelliteID == "" {
 			if metaHost != "" {
 				base.SatelliteID = metaHost
@@ -157,10 +160,11 @@ func ApplyCloudInitUserData(cfg *EdgeBootConfig, raw string, rootDir string) err
 		inInterfacesList    bool
 		inRoutesList        bool
 		inWriteFilesList    bool
-		listSectionIndent   int
-		currentBlockKey     string
-		currentBlockIndent  int
-		currentBlockBuilder strings.Builder
+		listSectionIndent         int
+		currentBlockKey           string
+		currentBlockIndent        int
+		currentBlockContentIndent = -1
+		currentBlockBuilder       strings.Builder
 
 		curIface     *EdgeInterfaceSpec
 		curRoute     *EdgeRouteSpec
@@ -190,6 +194,7 @@ func ApplyCloudInitUserData(cfg *EdgeBootConfig, raw string, rootDir string) err
 			}
 		}
 		currentBlockKey = ""
+		currentBlockContentIndent = -1
 		currentBlockBuilder.Reset()
 	}
 
@@ -223,8 +228,11 @@ func ApplyCloudInitUserData(cfg *EdgeBootConfig, raw string, rootDir string) err
 				continue
 			}
 			if indent > currentBlockIndent {
-				stripLen := currentBlockIndent + 2
-				if stripLen > len(rawLine) {
+				if currentBlockContentIndent < 0 {
+					currentBlockContentIndent = indent
+				}
+				stripLen := currentBlockContentIndent
+				if stripLen > indent {
 					stripLen = indent
 				}
 				currentBlockBuilder.WriteString(rawLine[stripLen:] + "\n")
@@ -334,7 +342,8 @@ func ApplyCloudInitUserData(cfg *EdgeBootConfig, raw string, rootDir string) err
 				if rest != "" {
 					if isBlock := applyWriteFileKV(curWriteFile, rest); isBlock {
 						currentBlockKey = "write_file_content"
-						currentBlockIndent = indent + 2
+						currentBlockIndent = indent
+						currentBlockContentIndent = -1
 					}
 				}
 				continue
@@ -342,6 +351,7 @@ func ApplyCloudInitUserData(cfg *EdgeBootConfig, raw string, rootDir string) err
 				if isBlock := applyWriteFileKV(curWriteFile, trimmedLine); isBlock {
 					currentBlockKey = "write_file_content"
 					currentBlockIndent = indent
+					currentBlockContentIndent = -1
 				}
 				continue
 			}
@@ -364,6 +374,7 @@ func ApplyCloudInitUserData(cfg *EdgeBootConfig, raw string, rootDir string) err
 		if val == "|" || val == "|-" || val == ">" || val == ">-" {
 			currentBlockKey = strings.TrimPrefix(strings.TrimPrefix(key, "axonwall."), "axonwall_")
 			currentBlockIndent = indent
+			currentBlockContentIndent = -1
 			continue
 		}
 
@@ -439,7 +450,8 @@ func ParseCloudInitNetworkConfig(raw string) ([]EdgeInterfaceSpec, []EdgeRouteSp
 			inAddresses   bool
 			inRoutes      bool
 			curRoute      *EdgeRouteSpec
-			FirstStaticIP string
+			firstStaticV4 string
+			firstStaticV6 string
 		)
 		// A-M40 (round 2): "routes:" lists under ethernets were
 		// silently dropped. A pending route is flushed into the
@@ -456,8 +468,11 @@ func ParseCloudInitNetworkConfig(raw string) ([]EdgeInterfaceSpec, []EdgeRouteSp
 		flushDev := func() {
 			flushRoute()
 			if curSpec != nil && curSpec.Device != "" {
-				if curSpec.Address == "" && FirstStaticIP != "" {
-					curSpec.Address = FirstStaticIP
+				if curSpec.Address == "" && firstStaticV4 != "" {
+					curSpec.Address = firstStaticV4
+				}
+				if curSpec.IPv6Address == "" && firstStaticV6 != "" {
+					curSpec.IPv6Address = firstStaticV6
 				}
 				// A-M40 side note: a device with only "dhcp6:
 				// true" used to be dropped entirely. Keep it
@@ -475,7 +490,8 @@ func ParseCloudInitNetworkConfig(raw string) ([]EdgeInterfaceSpec, []EdgeRouteSp
 				}
 			}
 			curSpec = nil
-			FirstStaticIP = ""
+			firstStaticV4 = ""
+			firstStaticV6 = ""
 			inAddresses = false
 		}
 
@@ -524,8 +540,14 @@ func ParseCloudInitNetworkConfig(raw string) ([]EdgeInterfaceSpec, []EdgeRouteSp
 			if inAddresses {
 				if strings.HasPrefix(tl, "-") {
 					addrVal := unquoteYAML(strings.TrimSpace(strings.TrimPrefix(tl, "-")))
-					if _, _, err := net.ParseCIDR(addrVal); err == nil && FirstStaticIP == "" {
-						FirstStaticIP = addrVal
+					if ip, _, err := net.ParseCIDR(addrVal); err == nil {
+						if ip.To4() != nil {
+							if firstStaticV4 == "" {
+								firstStaticV4 = addrVal
+							}
+						} else if firstStaticV6 == "" {
+							firstStaticV6 = addrVal
+						}
 					}
 					continue
 				}
@@ -591,12 +613,18 @@ func ParseCloudInitNetworkConfig(raw string) ([]EdgeInterfaceSpec, []EdgeRouteSp
 						routes = append(routes, EdgeRouteSpec{Destination: "default", Gateway: v, Device: curDev})
 					}
 				case "addresses":
-					// Inline array e.g. addresses: [10.0.0.1/24]
+					// Inline array e.g. addresses: [10.0.0.1/24, 2001:db8::1/64]
 					v = strings.Trim(v, "[]")
 					for _, item := range strings.Split(v, ",") {
 						item = unquoteYAML(strings.TrimSpace(item))
-						if _, _, err := net.ParseCIDR(item); err == nil && FirstStaticIP == "" {
-							FirstStaticIP = item
+						if ip, _, err := net.ParseCIDR(item); err == nil {
+							if ip.To4() != nil {
+								if firstStaticV4 == "" {
+									firstStaticV4 = item
+								}
+							} else if firstStaticV6 == "" {
+								firstStaticV6 = item
+							}
 						}
 					}
 				case "gateway4", "via":

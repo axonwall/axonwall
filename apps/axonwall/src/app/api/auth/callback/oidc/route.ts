@@ -99,7 +99,7 @@ export async function GET(request: NextRequest) {
     const response = NextResponse.redirect(new URL('/lobby', request.url));
     response.cookies.set(SESSION_COOKIE, token, {
       httpOnly: true,
-      secure: process.env.NODE_ENV === 'production',
+      secure: process.env.NODE_ENV === 'production' && process.env.AXONWALL_INSECURE_HTTP !== '1',
       sameSite: 'lax',
       path: '/',
       maxAge: 8 * 3600,

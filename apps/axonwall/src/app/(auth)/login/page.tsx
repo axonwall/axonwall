@@ -1,12 +1,22 @@
 'use client';
 
-import { useActionState } from 'react';
+import { useActionState, useEffect, useState } from 'react';
 import { Shield, Lock, User, AlertCircle, Key, Building2 } from 'lucide-react';
 import { loginAction } from '../../../server/auth';
 import { Logo } from '../../../components/Logo';
 
 export default function LoginPage() {
   const [state, formAction, isPending] = useActionState(loginAction, null);
+  const [queryError, setQueryError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const err = new URLSearchParams(window.location.search).get('error');
+    if (err) {
+      setQueryError(err);
+    }
+  }, []);
+
+  const displayedError = state?.error || queryError;
 
   return (
     <div className="min-h-screen flex items-center justify-center bg-slate-950 p-4">
@@ -28,10 +38,10 @@ export default function LoginPage() {
           <Logo variant="full" size="lg" className="mb-1" />
         </div>
 
-        {state?.error && (
+        {displayedError && (
           <div className="mb-6 p-3 bg-red-500/10 border border-red-500/30 rounded-lg flex items-center gap-2 text-sm text-red-400">
             <AlertCircle className="w-4 h-4 shrink-0" />
-            <span>{state.error}</span>
+            <span>{displayedError}</span>
           </div>
         )}
 

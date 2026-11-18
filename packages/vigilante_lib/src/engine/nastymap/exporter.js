@@ -3,6 +3,16 @@
  * Generates Headless SVG Vector Maps and Standalone HTML Reports.
  */
 
+function escapeXml(unsafe) {
+  if (unsafe === undefined || unsafe === null) return '';
+  return String(unsafe)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 /**
  * Generates an SVG string representation of a TopologyGraph without requiring a DOM.
  * @param {Object} graph TopologyGraph { nodes: [], links: [] }
@@ -12,7 +22,7 @@
 export function generateHeadlessSvg(graph, options = {}) {
   const width = options.width || 1200;
   const height = options.height || 800;
-  const title = options.title || 'Nmap Network Topology Map';
+  const title = escapeXml(options.title || 'Nmap Network Topology Map');
 
   const nodeMap = new Map();
   for (const n of graph.nodes || []) nodeMap.set(n.id, n);
@@ -44,7 +54,7 @@ export function generateHeadlessSvg(graph, options = {}) {
       const midY = (s.y + t.y) / 2;
       const labelColor = link.type === 'lateral-attack-path' ? '#f87171' : '#94a3b8';
       linksSvg += `
-        <text x="${midX}" y="${midY - 4}" fill="${labelColor}" font-size="10" font-family="monospace" font-weight="${link.type === 'lateral-attack-path' ? 'bold' : 'normal'}" text-anchor="middle">${link.label}</text>
+        <text x="${midX}" y="${midY - 4}" fill="${labelColor}" font-size="10" font-family="monospace" font-weight="${link.type === 'lateral-attack-path' ? 'bold' : 'normal'}" text-anchor="middle">${escapeXml(link.label)}</text>
       `;
     }
   }
@@ -55,14 +65,14 @@ export function generateHeadlessSvg(graph, options = {}) {
     const fill = node.color || '#3b82f6';
     const stroke = isScanner ? '#a855f7' : node.riskTier === 'CRITICAL' ? '#ef4444' : node.status === 'up' ? '#22c55e' : '#ef4444';
     const riskBadge = typeof node.riskScore === 'number'
-      ? `<text y="${node.radius + 38}" fill="${node.riskTier === 'CRITICAL' ? '#f87171' : node.riskTier === 'HIGH' ? '#fbbf24' : '#22c55e'}" font-size="9" font-family="monospace" font-weight="bold" text-anchor="middle">RISK: ${node.riskScore}/100 [${node.riskTier || 'CLEAN'}]</text>`
+      ? `<text y="${node.radius + 38}" fill="${node.riskTier === 'CRITICAL' ? '#f87171' : node.riskTier === 'HIGH' ? '#fbbf24' : '#22c55e'}" font-size="9" font-family="monospace" font-weight="bold" text-anchor="middle">RISK: ${node.riskScore}/100 [${escapeXml(node.riskTier || 'CLEAN')}]</text>`
       : '';
 
     nodesSvg += `
       <g transform="translate(${node.x}, ${node.y})">
-        <circle r="${node.radius}" fill="${fill}" stroke="${stroke}" stroke-width="${node.riskTier === 'CRITICAL' ? '3.5' : '2.5'}" />
-        <text y="${node.radius + 14}" fill="#f8fafc" font-size="11" font-family="system-ui, sans-serif" font-weight="600" text-anchor="middle">${node.label}</text>
-        <text y="${node.radius + 26}" fill="#94a3b8" font-size="9" font-family="monospace" text-anchor="middle">${node.ip}</text>
+        <circle r="${node.radius}" fill="${escapeXml(fill)}" stroke="${stroke}" stroke-width="${node.riskTier === 'CRITICAL' ? '3.5' : '2.5'}" />
+        <text y="${node.radius + 14}" fill="#f8fafc" font-size="11" font-family="system-ui, sans-serif" font-weight="600" text-anchor="middle">${escapeXml(node.label)}</text>
+        <text y="${node.radius + 26}" fill="#94a3b8" font-size="9" font-family="monospace" text-anchor="middle">${escapeXml(node.ip)}</text>
         ${riskBadge}
       </g>
     `;
@@ -113,27 +123,27 @@ export function generateHtmlReport(scan, graph) {
         .filter((p) => p.state === 'open')
         .map((p) => {
           const sName = p.service?.product
-            ? ` (${p.service.product}${p.service.version ? ' ' + p.service.version : ''})`
+            ? ` (${escapeXml(p.service.product)}${p.service.version ? ' ' + escapeXml(p.service.version) : ''})`
             : p.service?.name
-              ? ` (${p.service.name})`
+              ? ` (${escapeXml(p.service.name)})`
               : '';
-          return `${p.portid || p.port}/${p.protocol}${sName}`;
+          return `${escapeXml(p.portid || p.port)}/${escapeXml(p.protocol)}${sName}`;
         })
         .join(', ');
 
       const vulnBadge = h.vulnerabilitiesCount && h.vulnerabilitiesCount > 0
-        ? `<span style="color:#ef4444; font-weight:bold;">⚠️ ${h.vulnerabilitiesCount} CVE/Vuln</span>`
+        ? `<span style="color:#ef4444; font-weight:bold;">⚠️ ${Number(h.vulnerabilitiesCount)} CVE/Vuln</span>`
         : '<span style="color:#64748b;">-</span>';
 
       return `
       <tr style="border-bottom: 1px solid #1e293b;">
-        <td style="padding: 10px 14px; font-family: monospace; color: #38bdf8; font-weight: bold;">${h.ipv4 || h.id}</td>
-        <td style="padding: 10px 14px; color: #f8fafc;">${h.primaryHostname || '-'}</td>
+        <td style="padding: 10px 14px; font-family: monospace; color: #38bdf8; font-weight: bold;">${escapeXml(h.ipv4 || h.id)}</td>
+        <td style="padding: 10px 14px; color: #f8fafc;">${escapeXml(h.primaryHostname || '-')}</td>
         <td style="padding: 10px 14px;">${statusBadge}</td>
-        <td style="padding: 10px 14px; color: #94a3b8;">${h.primaryOs || h.osFamily || 'Unknown'}</td>
+        <td style="padding: 10px 14px; color: #94a3b8;">${escapeXml(h.primaryOs || h.osFamily || 'Unknown')}</td>
         <td style="padding: 10px 14px; color: #cbd5e1; font-family: monospace;">${openPorts || '<span style="color:#64748b;">None</span>'}</td>
         <td style="padding: 10px 14px;">${vulnBadge}</td>
-        <td style="padding: 10px 14px; color: #94a3b8;">${h.latencyMs !== undefined ? `${h.latencyMs} ms` : '-'}</td>
+        <td style="padding: 10px 14px; color: #94a3b8;">${h.latencyMs !== undefined ? `${escapeXml(h.latencyMs)} ms` : '-'}</td>
       </tr>
       `;
     })
@@ -247,8 +257,8 @@ export function generateHtmlReport(scan, graph) {
     <div class="header">
       <div>
         <h1 style="margin: 0 0 6px 0; font-size: 26px; color: var(--primary);">🛡️ NastyMap Security Topology Report</h1>
-        <p style="margin: 0; color: var(--muted); font-family: monospace; font-size: 13px;">Command: ${scan.args || scan.target || 'Nmap Network Scan'}</p>
-        <p style="margin: 4px 0 0 0; color: #64748b; font-size: 12px;">Scanned: ${scan.startstr || new Date().toISOString()} · Nmap v${scan.version || '7.x'} · File: ${scan.filename || 'active'}</p>
+        <p style="margin: 0; color: var(--muted); font-family: monospace; font-size: 13px;">Command: ${escapeXml(scan.args || scan.target || 'Nmap Network Scan')}</p>
+        <p style="margin: 4px 0 0 0; color: #64748b; font-size: 12px;">Scanned: ${escapeXml(scan.startstr || new Date().toISOString())} · Nmap v${escapeXml(scan.version || '7.x')} · File: ${escapeXml(scan.filename || 'active')}</p>
       </div>
       <div style="text-align: right;">
         <span style="display:inline-block; padding: 4px 12px; border-radius: 9999px; background: #1e1b4b; color: #a5b4fc; font-size: 12px; font-weight: bold; border: 1px solid #3730a3;">

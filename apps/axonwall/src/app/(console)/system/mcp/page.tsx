@@ -216,54 +216,69 @@ export default function McpControlPlanePage() {
   const handleCreateKey = async (e: React.FormEvent) => {
     e.preventDefault();
     setStatusMsg(null);
-    const res = await createMcpApiKeyAction({
-      name: keyName,
-      agentType,
-      scopes: selectedScopes,
-      allowedSourceCidrs: allowedSourceCidrs
-        .split(',')
-        .map((s) => s.trim())
-        .filter(Boolean),
-      mtlsCertFingerprintSha256: mtlsFingerprint.trim() || undefined,
-      expiresInDays,
-      policyLimits: {
-        maxIpv4PrefixLen: Number(maxIpv4PrefixLen) || 24,
-        maxIpv6PrefixLen: Number(maxIpv6PrefixLen) || 64,
-        maxTtlSeconds: Number(maxTtlSeconds) || 86400,
-        rateLimitPerMinute: Number(rateLimitPerMinute) || 120,
-        allowedRedirectTargets: allowedRedirectTargets
+    try {
+      const res = await createMcpApiKeyAction({
+        name: keyName,
+        agentType,
+        scopes: selectedScopes,
+        allowedSourceCidrs: allowedSourceCidrs
           .split(',')
           .map((s) => s.trim())
           .filter(Boolean),
-      },
-    });
+        mtlsCertFingerprintSha256: mtlsFingerprint.trim() || undefined,
+        expiresInDays,
+        policyLimits: {
+          maxIpv4PrefixLen: Number(maxIpv4PrefixLen) || 24,
+          maxIpv6PrefixLen: Number(maxIpv6PrefixLen) || 64,
+          maxTtlSeconds: Number(maxTtlSeconds) || 86400,
+          rateLimitPerMinute: Number(rateLimitPerMinute) || 120,
+          allowedRedirectTargets: allowedRedirectTargets
+            .split(',')
+            .map((s) => s.trim())
+            .filter(Boolean),
+        },
+      });
 
-    if (!res.success || !res.rawToken) {
-      setStatusMsg({ type: 'error', text: res.error || 'Failed to create MCP API key' });
-      return;
+      if (!res.success || !res.rawToken) {
+        setStatusMsg({ type: 'error', text: res.error || 'Failed to create MCP API key' });
+        return;
+      }
+
+      setCreatedToken({ name: keyName, rawToken: res.rawToken });
+      setShowCreateModal(false);
+      await refreshData();
+    } catch (err: any) {
+      setStatusMsg({ type: 'error', text: err?.message || 'Failed to create MCP API key' });
     }
-
-    setCreatedToken({ name: keyName, rawToken: res.rawToken });
-    setShowCreateModal(false);
-    await refreshData();
   };
 
   const handleRevokeKey = async (id: string, name: string) => {
     if (!confirm(`Revoke MCP API key "${name}" immediately? Active AI agents using this key will lose access.`)) {
       return;
     }
-    const res = await revokeMcpApiKeyAction(id);
-    if (res.success) {
-      setStatusMsg({ type: 'success', text: `Revoked MCP API key "${name}"` });
-      await refreshData();
-    } else {
-      setStatusMsg({ type: 'error', text: res.error || 'Failed to revoke key' });
+    try {
+      const res = await revokeMcpApiKeyAction(id);
+      if (res.success) {
+        setStatusMsg({ type: 'success', text: `Revoked MCP API key "${name}"` });
+        await refreshData();
+      } else {
+        setStatusMsg({ type: 'error', text: res.error || 'Failed to revoke key' });
+      }
+    } catch (err: any) {
+      setStatusMsg({ type: 'error', text: err?.message || 'Failed to revoke key' });
     }
   };
 
   const handleToggleKey = async (id: string, enabled: boolean) => {
-    await toggleMcpApiKeyAction(id, enabled);
-    await refreshData();
+    try {
+      const res = await toggleMcpApiKeyAction(id, enabled);
+      if (!res.success) {
+        setStatusMsg({ type: 'error', text: res.error || 'Failed to toggle MCP key' });
+      }
+      await refreshData();
+    } catch (err: any) {
+      setStatusMsg({ type: 'error', text: err?.message || 'Failed to toggle MCP key' });
+    }
   };
 
   const handleToggleMasterSwitch = async (newEnabled: boolean) => {
@@ -274,28 +289,39 @@ export default function McpControlPlanePage() {
     if (!confirm(confirmPrompt)) {
       return;
     }
-    const res = await toggleMcpServerMasterSwitchAction(newEnabled);
-    if (res.success) {
-      setStatusMsg({
-        type: 'success',
-        text: `MCP Subsystem ${newEnabled ? 'enabled successfully' : 'completely disabled across all transports and kernel engines'}.`,
-      });
-      await refreshData();
-    } else {
+    try {
+      const res = await toggleMcpServerMasterSwitchAction(newEnabled);
+      if (res.success) {
+        setStatusMsg({
+          type: 'success',
+          text: `MCP Subsystem ${newEnabled ? 'enabled successfully' : 'completely disabled across all transports and kernel engines'}.`,
+        });
+        await refreshData();
+      } else {
+        setStatusMsg({
+          type: 'error',
+          text: res.error || `Failed to ${actionText} MCP subsystem`,
+        });
+      }
+    } catch (err: any) {
       setStatusMsg({
         type: 'error',
-        text: res.error || `Failed to ${actionText} MCP subsystem`,
+        text: err?.message || `Failed to ${actionText} MCP subsystem`,
       });
     }
   };
 
   const handleRevertLease = async (leaseId: string) => {
-    const res = await revertMcpLeaseAction(leaseId);
-    if (res.success) {
-      setStatusMsg({ type: 'success', text: `Reverted tactical lease ${leaseId}` });
-      await refreshData();
-    } else {
-      setStatusMsg({ type: 'error', text: res.error || 'Failed to revert lease' });
+    try {
+      const res = await revertMcpLeaseAction(leaseId);
+      if (res.success) {
+        setStatusMsg({ type: 'success', text: `Reverted tactical lease ${leaseId}` });
+        await refreshData();
+      } else {
+        setStatusMsg({ type: 'error', text: res.error || 'Failed to revert lease' });
+      }
+    } catch (err: any) {
+      setStatusMsg({ type: 'error', text: err?.message || 'Failed to revert lease' });
     }
   };
 
@@ -307,19 +333,26 @@ export default function McpControlPlanePage() {
     ) {
       return;
     }
-    const res = await emergencyFlushMcpLeasesAction();
-    // C-B6: a failed flush must show the error, never the success banner
-    // claiming kernel leases were purged.
-    if (res.success) {
-      setStatusMsg({
-        type: 'success',
-        text: `Emergency Panic Flush completed (${res.clearedCount} active AI tactical lease(s) purged from kernel).`,
-      });
-      await refreshData();
-    } else {
+    try {
+      const res = await emergencyFlushMcpLeasesAction();
+      // C-B6: a failed flush must show the error, never the success banner
+      // claiming kernel leases were purged.
+      if (res.success) {
+        setStatusMsg({
+          type: 'success',
+          text: `Emergency Panic Flush completed (${res.clearedCount} active AI tactical lease(s) purged from kernel).`,
+        });
+        await refreshData();
+      } else {
+        setStatusMsg({
+          type: 'error',
+          text: res.error || 'Emergency Panic Flush failed: no leases were purged.',
+        });
+      }
+    } catch (err: any) {
       setStatusMsg({
         type: 'error',
-        text: res.error || 'Emergency Panic Flush failed: no leases were purged.',
+        text: err?.message || 'Emergency Panic Flush failed: no leases were purged.',
       });
     }
   };

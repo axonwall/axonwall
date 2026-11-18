@@ -401,6 +401,15 @@ int BPF_PROG(restrict_bpf_load, int cmd, union bpf_attr *attr, unsigned int size
 
     if (current_exe_has_flag(ALLOW_FLAG_BPF_LOAD, &id))
         return 0;
+${
+  cfg.allowDelegatedBpfTokens
+    ? `
+    if (BPF_CORE_READ(attr, prog_token_fd) > 0) {
+        ${cfg.auditDelegatedBpfTokens ? 'emit_lsm_denial(2, &id, "BPF_TOKEN_DELEGATED");' : ''}
+        return 0;
+    }`
+    : ''
+}
 
     emit_lsm_denial(2, &id, detail);
     return -EPERM;
@@ -443,6 +452,7 @@ export function compileDrgnProgIdrAuditScript(): string {
 
 import json
 import subprocess
+import drgn
 from drgn.helpers.linux.idr import idr_for_each
 
 # 1. Enumerate BPF program IDs visible to standard userspace sys_bpf()
@@ -540,7 +550,7 @@ dmesg 2>/dev/null | grep -iE "bpf_probe_write_user|bpf_override_return|taint" | 
 
 echo -e "\\n=== [2] Inspecting Ftrace / Trampoline Hooks on Critical Syscalls ==="
 if [[ -r /sys/kernel/tracing/enabled_functions ]]; then
-  grep -E "bpf_trampoline|__x64_sys_(getdents|bpf|read|kill| clone)|tcp4_seq_show" /sys/kernel/tracing/enabled_functions || echo "[+] No suspicious ftrace trampolines found."
+  grep -E "bpf_trampoline|__x64_sys_(getdents|bpf|read|kill|clone)|tcp4_seq_show" /sys/kernel/tracing/enabled_functions || echo "[+] No suspicious ftrace trampolines found."
 else
   echo "[i] /sys/kernel/tracing/enabled_functions not readable or debugfs not mounted."
 fi
@@ -647,7 +657,7 @@ export function compileRkhunterConfig(
     throw new Error(`Invalid scheduledScanCron expression: ${cfg.scheduledScanCron}`);
   }
 
-  const pkgMgr = opts?.osFamily === 'arch' ? 'PACMAN' : 'DPKG';
+  const pkgMgr = opts?.osFamily === 'arch' ? 'PACMAN' : opts?.osFamily === 'alpine' ? 'NONE' : 'DPKG';
 
   const rkhunterConfLocal = [
     '# =============================================================================',

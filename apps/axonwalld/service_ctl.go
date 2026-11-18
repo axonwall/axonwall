@@ -70,10 +70,14 @@ var distroServiceAliases = map[string][]string{
 	"rtslib-fb-targetctl":  {"rtslib-fb-targetctl", "target", "tgt"},
 	"target":               {"target", "rtslib-fb-targetctl", "tgt"},
 	"tgt":                  {"tgt", "rtslib-fb-targetctl", "target"},
+	"nut-client":           {"nut-client", "nut-monitor"},
+	"nut-monitor":          {"nut-monitor", "nut-client"},
+	"strongswan":           {"strongswan", "strongswan-starter"},
+	"strongswan-starter":   {"strongswan-starter", "strongswan"},
 }
 
 func isSafeInstanceToken(tok string) bool {
-	if tok == "" || len(tok) > 32 {
+	if tok == "" || len(tok) > 64 {
 		return false
 	}
 	for _, r := range tok {

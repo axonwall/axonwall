@@ -10,8 +10,13 @@ set -u
 
 CONF_DIR="${VAULT_CONF_DIR:-/etc/axonwall}"
 BUCKET="${VAULT_BUCKET:-backups}"
-ENDPOINT="${VAULT_S3_ENDPOINT:-http://127.0.0.1:8333}"
+ENDPOINT="${VAULT_S3_ENDPOINT:-https://127.0.0.1:8333}"
 CACERT="${VAULT_S3_CACERT:-}"
+if [ -z "$CACERT" ] && [ -s "${CONF_DIR}/certs/ca.crt" ]; then
+    CACERT="${CONF_DIR}/certs/ca.crt"
+fi
+S3_HDRS=""
+trap '[ -n "${S3_HDRS:-}" ] && rm -f "$S3_HDRS"' EXIT
 DATA_DIR="${VAULT_DATA_DIR:-/var/lib/axonwall/vault}"
 ADMIN_ENV="$CONF_DIR/vault-admin.env"
 STAMP="$CONF_DIR/vault-provisioned-at"
@@ -65,6 +70,7 @@ $_canon_hash"
     _auth="AWS4-HMAC-SHA256 Credential=$_ak/$_scope, SignedHeaders=$_signed, Signature=$_signature"
     _url="$ENDPOINT$_path"
     [ -n "$_query" ] && _url="$_url?$_query"
+    [ -n "${S3_HDRS:-}" ] && rm -f "$S3_HDRS"
     S3_HDRS="$(mktemp)"
     _curl_hdr_args=""
     while IFS= read -r _line; do

@@ -31,6 +31,7 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -315,36 +316,148 @@ var k3sDeniedManifestKinds = map[string]bool{
 	"rolebinding":        true,
 }
 
+var bpffsTokenHostPathRe = regexp.MustCompile(`^/run/axonwall/bpffs-tokens/[a-z0-9][a-z0-9._-]{1,62}$`)
+
+type manifestWalkCtx struct {
+	inHelmValues     bool
+	isolatedUserNs   bool
+}
+
+func isIsolatedUserNsPodSpec(spec map[string]any) bool {
+	if spec == nil {
+		return false
+	}
+	hostUsers, ok := spec["hostUsers"].(bool)
+	if !ok || hostUsers {
+		return false
+	}
+	for _, hostFlag := range []string{"hostPID", "hostNetwork", "hostIPC"} {
+		if b, ok := spec[hostFlag].(bool); ok && b {
+			return false
+		}
+	}
+	for _, listKey := range []string{"containers", "initContainers", "ephemeralContainers"} {
+		rawList, ok := spec[listKey].([]any)
+		if !ok {
+			continue
+		}
+		for _, item := range rawList {
+			cMap, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			if sc, ok := cMap["securityContext"].(map[string]any); ok {
+				if priv, ok := sc["privileged"].(bool); ok && priv {
+					return false
+				}
+			}
+		}
+	}
+	return true
+}
+
+func isAllowedUserNsBpffsHostPath(val any) bool {
+	hpMap, ok := val.(map[string]any)
+	if !ok {
+		return false
+	}
+	rawPath, ok := hpMap["path"].(string)
+	if !ok {
+		return false
+	}
+	return bpffsTokenHostPathRe.MatchString(strings.TrimSpace(rawPath))
+}
+
+func isAllowedUserNsCapabilities(capMap map[string]any) bool {
+	addVal, hasAdd := capMap["add"]
+	if !hasAdd || addVal == nil {
+		return true
+	}
+	addList, isSlice := addVal.([]any)
+	if !isSlice {
+		return false
+	}
+	if len(addList) == 0 {
+		return true
+	}
+	hasDropAll := false
+	if dropList, ok := capMap["drop"].([]any); ok {
+		for _, d := range dropList {
+			if ds, ok := d.(string); ok && strings.EqualFold(strings.TrimSpace(ds), "ALL") {
+				hasDropAll = true
+				break
+			}
+		}
+	}
+	if !hasDropAll {
+		return false
+	}
+	for _, item := range addList {
+		cStr, ok := item.(string)
+		if !ok {
+			return false
+		}
+		upper := strings.ToUpper(strings.TrimSpace(cStr))
+		if upper != "BPF" && upper != "NET_ADMIN" {
+			return false
+		}
+	}
+	return true
+}
+
 // walkManifest rejects the primitives that turn a manifest into host
 // control, anywhere in the document tree.
 func walkManifest(node any) error {
+	return walkManifestWithCtx(node, manifestWalkCtx{})
+}
+
+func walkManifestWithCtx(node any, ctx manifestWalkCtx) error {
 	switch v := node.(type) {
 	case map[string]any:
+		nextBaseCtx := ctx
+		// Detect isolated UserNS PodSpecs (`hostUsers: false`, no host namespaces, no privileged containers)
+		if isIsolatedUserNsPodSpec(v) {
+			nextBaseCtx.isolatedUserNs = true
+		} else if _, hasContainers := v["containers"]; hasContainers {
+			// Entering another PodSpec resets UserNS inheritance unless itself sets hostUsers: false
+			nextBaseCtx.isolatedUserNs = false
+		}
+
 		for key, val := range v {
+			childCtx := nextBaseCtx
 			switch key {
+			case "valuesObject":
+				childCtx.inHelmValues = true
+			case "values":
+				// Flux HelmRelease spec.values or HelmChart spec.values
+				childCtx.inHelmValues = true
 			case "kind":
-				if kStr, ok := val.(string); ok {
-					kLower := strings.ToLower(strings.TrimSpace(kStr))
-					if kLower == "helmchart" {
-						// Permit ONLY Axonwall-compiled HelmCharts:
-						// 1. Cilium eBPF CNI HelmChart from https://helm.cilium.io/
-						// 2. In-house Vigilante modular SOC HelmCharts from https://charts.vigilante.local
-						specMap, _ := v["spec"].(map[string]any)
-						repo := strings.TrimSpace(fmt.Sprintf("%v", specMap["repo"]))
-						chart := strings.TrimSpace(fmt.Sprintf("%v", specMap["chart"]))
+				if !ctx.inHelmValues {
+					if kStr, ok := val.(string); ok {
+						kLower := strings.ToLower(strings.TrimSpace(kStr))
+						if kLower == "helmchart" {
+							// Permit ONLY Axonwall-compiled HelmCharts:
+							// 1. Cilium eBPF CNI HelmChart from https://helm.cilium.io/
+							// 2. In-house Vigilante modular SOC HelmCharts from https://charts.vigilante.local
+							specMap, _ := v["spec"].(map[string]any)
+							repo := strings.TrimSpace(fmt.Sprintf("%v", specMap["repo"]))
+							chart := strings.TrimSpace(fmt.Sprintf("%v", specMap["chart"]))
 
-						isCilium := repo == "https://helm.cilium.io/" && chart == "cilium"
-						isVigilante := repo == "https://charts.vigilante.local" && chart != ""
+							isCilium := repo == "https://helm.cilium.io/" && chart == "cilium"
+							isVigilante := repo == "https://charts.vigilante.local" && chart != ""
 
-						if !isCilium && !isVigilante {
-							return fmt.Errorf("k3s manifest: untrusted HelmChart (%s / %s) is not permitted in a bundle", repo, chart)
+							if !isCilium && !isVigilante {
+								return fmt.Errorf("k3s manifest: untrusted HelmChart (%s / %s) is not permitted in a bundle", repo, chart)
+							}
+						} else if k3sDeniedManifestKinds[kLower] {
+							return fmt.Errorf("k3s manifest: resource kind %q is not permitted in a bundle", kStr)
 						}
-					} else if k3sDeniedManifestKinds[kLower] {
-						return fmt.Errorf("k3s manifest: resource kind %q is not permitted in a bundle", kStr)
 					}
 				}
 			case "hostPath":
-				return fmt.Errorf("k3s manifest: hostPath volumes are not permitted in a bundle")
+				if !(nextBaseCtx.isolatedUserNs && isAllowedUserNsBpffsHostPath(val)) {
+					return fmt.Errorf("k3s manifest: hostPath volumes are not permitted in a bundle")
+				}
 			case "hostPID", "hostNetwork", "hostIPC":
 				if b, ok := val.(bool); ok && b {
 					return fmt.Errorf("k3s manifest: %s is not permitted in a bundle", key)
@@ -356,7 +469,9 @@ func walkManifest(node any) error {
 			case "capabilities":
 				if capMap, ok := val.(map[string]any); ok {
 					if addVal, hasAdd := capMap["add"]; hasAdd && addVal != nil {
-						if list, isSlice := addVal.([]any); !isSlice || len(list) > 0 {
+						if nextBaseCtx.isolatedUserNs && isAllowedUserNsCapabilities(capMap) {
+							// Permitted strictly under hostUsers: false with drop: ["ALL"] and BPF/NET_ADMIN only
+						} else if list, isSlice := addVal.([]any); !isSlice || len(list) > 0 {
 							return fmt.Errorf("k3s manifest: capabilities.add is not permitted in a bundle")
 						}
 					}
@@ -368,13 +483,13 @@ func walkManifest(node any) error {
 					}
 				}
 			}
-			if err := walkManifest(val); err != nil {
+			if err := walkManifestWithCtx(val, childCtx); err != nil {
 				return err
 			}
 		}
 	case []any:
 		for _, item := range v {
-			if err := walkManifest(item); err != nil {
+			if err := walkManifestWithCtx(item, ctx); err != nil {
 				return err
 			}
 		}

@@ -964,8 +964,20 @@ func (m *NasManager) ApplyConfig(rawJSON []byte) error {
 	// an invalid bundle is neither stored as the live config nor
 	// reported as applied.
 	for _, pool := range bundle.Pools {
-		if err := ValidateZfsPoolSpec(pool); err != nil {
-			return fmt.Errorf("invalid ZFS pool spec %q: %w", pool.Name, err)
+		poolExists := false
+		if pool.Name != "" && validZfsPoolName(pool.Name) {
+			if err := exec.Command("zpool", "list", "-H", "-o", "name", pool.Name).Run(); err == nil {
+				poolExists = true
+			}
+		}
+		if poolExists {
+			if err := ValidateInstallZfsPoolSpec(pool); err != nil {
+				return fmt.Errorf("invalid existing ZFS pool spec %q: %w", pool.Name, err)
+			}
+		} else {
+			if err := ValidateZfsPoolSpec(pool); err != nil {
+				return fmt.Errorf("invalid ZFS pool spec %q: %w", pool.Name, err)
+			}
 		}
 	}
 	for _, ds := range bundle.Datasets {
