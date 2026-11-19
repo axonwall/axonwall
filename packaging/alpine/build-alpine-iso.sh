@@ -634,6 +634,24 @@ else
   fi
 fi
 
+# Bundle statically-linked K9s v0.51.0 binary across axonwall and k3s-storage Alpine editions
+if [[ "${EDITION}" == "axonwall" || "${EDITION}" == "k3s-storage" ]]; then
+  K9S_VERSION="0.51.0"
+  K9S_SHA256="c3752ad51a5a4015a113819c4eeb6e55a4d0e4b8e652494797532f6fc8161dd7"
+  if [[ -f "${REPO_ROOT}/packaging/iso/config/includes.chroot/usr/local/bin/k9s" ]]; then
+    cp "${REPO_ROOT}/packaging/iso/config/includes.chroot/usr/local/bin/k9s" "${OVL}/usr/local/bin/k9s"
+    chmod 0755 "${OVL}/usr/local/bin/k9s"
+  elif [[ ! -f "${OVL}/usr/local/bin/k9s" ]]; then
+    echo "[+] Fetching K9s v${K9S_VERSION} for Alpine overlay..."
+    K9S_TAR="$(mktemp -t k9s-XXXXXX.tar.gz)"
+    curl -fsSL -o "${K9S_TAR}" "https://github.com/derailed/k9s/releases/download/v${K9S_VERSION}/k9s_Linux_amd64.tar.gz"
+    echo "${K9S_SHA256}  ${K9S_TAR}" | sha256sum -c -
+    tar -xzf "${K9S_TAR}" -C "${OVL}/usr/local/bin/" k9s
+    chmod 0755 "${OVL}/usr/local/bin/k9s"
+    rm -f "${K9S_TAR}"
+  fi
+fi
+
 # Fetch ZFSBootMenu v3.1.0 Unified Kernel Image (UKI) for Root-on-ZFS installations
 ZBM_VERSION="3.1.0"
 ZBM_KVER="linux6.12"

@@ -1,14 +1,19 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { Boxes, Plus, Trash2, Globe } from 'lucide-react';
-import { getCurrentDesiredState } from '@/server/agent';
+import Link from 'next/link';
+import { Boxes, Plus, Trash2, Globe, Activity, Terminal, RefreshCw, Network } from 'lucide-react';
+import { getCurrentDesiredState, getK3sClusterPulseAction } from '@/server/agent';
 import { useDesiredStateApply } from '@/lib/use-desired-state-apply';
 import type { DesiredState, K3sWorkloadSpec } from '@axonwall/lib/schemas';
+import { formatAge, type K3sClusterPulse } from '@/components/k3s/types';
 
 export default function K3sWorkloadsPage() {
   const { applyState } = useDesiredStateApply();
   const [state, setState] = useState<DesiredState | null>(null);
+  const [pulse, setPulse] = useState<K3sClusterPulse | null>(null);
+  const [liveTab, setLiveTab] = useState<'workloads' | 'services' | 'ingresses'>('workloads');
+  const [refreshingLive, setRefreshingLive] = useState(false);
   const [name, setName] = useState('minio-s3');
   const [image, setImage] = useState('quay.io/minio/minio:latest');
   const [port, setPort] = useState(9000);
@@ -18,8 +23,20 @@ export default function K3sWorkloadsPage() {
   const [storageClass, setStorageClass] = useState<'axonwall-replicated-ha' | 'axonwall-zfs-local' | 'none'>('axonwall-replicated-ha');
   const [storageSizeGb, setStorageSizeGb] = useState(50);
 
+  const loadLive = async () => {
+    setRefreshingLive(true);
+    try {
+      const p = await getK3sClusterPulseAction();
+      setPulse(p);
+    } catch {
+    } finally {
+      setRefreshingLive(false);
+    }
+  };
+
   useEffect(() => {
     getCurrentDesiredState().then(setState).catch(() => {});
+    loadLive();
   }, []);
 
   const addWorkload = async () => {
@@ -87,15 +104,31 @@ export default function K3sWorkloadsPage() {
 
   return (
     <div className="p-8 max-w-7xl mx-auto space-y-8">
-      <div className="flex items-center gap-3 border-b border-slate-800 pb-6">
-        <div className="w-10 h-10 rounded-xl bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center text-emerald-400">
-          <Boxes className="w-5 h-5" />
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-800 pb-6">
+        <div className="flex items-center gap-3">
+          <div className="w-10 h-10 rounded-xl bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center text-emerald-400">
+            <Boxes className="w-5 h-5" />
+          </div>
+          <div>
+            <h1 className="text-2xl font-bold text-white tracking-tight">K3s Workloads &amp; Converged Ingress</h1>
+            <p className="text-sm text-slate-400">
+              Deploy stateful apps backed by OpenEBS ZFS PVCs with automatic Unbound split-DNS &amp; HAProxy TLS SNI/Host routing.
+            </p>
+          </div>
         </div>
-        <div>
-          <h1 className="text-2xl font-bold text-white tracking-tight">K3s Workloads &amp; Converged Ingress</h1>
-          <p className="text-sm text-slate-400">
-            Deploy stateful apps backed by OpenEBS ZFS PVCs with automatic Unbound split-DNS &amp; HAProxy TLS SNI/Host routing.
-          </p>
+        <div className="flex items-center gap-2.5">
+          <Link
+            href="/k3s/explorer"
+            className="px-3.5 py-2 rounded-lg bg-slate-900 hover:bg-slate-800 border border-emerald-500/40 text-xs font-semibold text-emerald-300 flex items-center gap-1.5 transition"
+          >
+            <Terminal className="w-3.5 h-3.5" /> Open K9s Explorer
+          </Link>
+          <Link
+            href="/k3s/explorer?view=topology"
+            className="px-3.5 py-2 rounded-lg bg-slate-900 hover:bg-slate-800 border border-cyan-500/40 text-xs font-semibold text-cyan-300 flex items-center gap-1.5 transition"
+          >
+            <Network className="w-3.5 h-3.5" /> Ingress Topology
+          </Link>
         </div>
       </div>
 
@@ -198,9 +231,9 @@ export default function K3sWorkloadsPage() {
       </div>
 
       <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 space-y-3">
-        <h3 className="text-sm font-bold text-white">Deployed Workloads</h3>
+        <h3 className="text-sm font-bold text-white">Declarative Config Workloads (/etc/axonwall/k3s.yaml)</h3>
         {(state?.k3s?.workloads ?? []).length === 0 ? (
-          <p className="text-xs text-slate-500">No workloads deployed yet.</p>
+          <p className="text-xs text-slate-500">No declarative workloads configured yet.</p>
         ) : (
           <div className="space-y-2">
             {(state?.k3s?.workloads ?? []).map((w) => (
@@ -223,12 +256,207 @@ export default function K3sWorkloadsPage() {
                   <span className="font-mono text-emerald-400">
                     {w.storageClass} ({w.storageSizeGb}Gi)
                   </span>
+                  <Link
+                    href={`/k3s/explorer?resource=deployments&namespace=${encodeURIComponent(w.namespace || 'default')}&name=${encodeURIComponent(w.name)}`}
+                    className="text-sky-400 hover:underline font-mono text-[11px]"
+                  >
+                    Inspect →
+                  </Link>
                   <button onClick={() => removeWorkload(w.name)} className="text-rose-400 hover:text-rose-300">
                     <Trash2 className="w-3.5 h-3.5" />
                   </button>
                 </div>
               </div>
             ))}
+          </div>
+        )}
+      </div>
+
+      {/* Live Cluster Workloads, Services & Ingresses Inspector */}
+      <div className="bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden">
+        <div className="p-4 border-b border-slate-800 flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-2">
+            <Activity className="w-4 h-4 text-emerald-400" />
+            <h3 className="text-sm font-bold text-white">Live Cluster Inventory</h3>
+            {pulse?.available && (
+              <span className="text-[11px] font-mono text-slate-400">
+                ({pulse.counts.podsRunning}/{pulse.counts.podsTotal} pods running)
+              </span>
+            )}
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="flex items-center bg-slate-950 border border-slate-800 rounded-lg p-0.5 text-xs">
+              {(
+                [
+                  { id: 'workloads', label: `Workloads (${pulse?.workloadsSummary?.length ?? 0})` },
+                  { id: 'services', label: `Services (${pulse?.servicesSummary?.length ?? 0})` },
+                  { id: 'ingresses', label: `Ingresses (${pulse?.ingressesSummary?.length ?? 0})` },
+                ] as const
+              ).map((t) => (
+                <button
+                  key={t.id}
+                  type="button"
+                  onClick={() => setLiveTab(t.id)}
+                  className={`px-3 py-1 rounded-md font-mono text-[11px] transition ${
+                    liveTab === t.id ? 'bg-emerald-600 text-white' : 'text-slate-400 hover:text-white'
+                  }`}
+                >
+                  {t.label}
+                </button>
+              ))}
+            </div>
+            <button
+              type="button"
+              onClick={loadLive}
+              className="p-1.5 rounded-lg bg-slate-950 border border-slate-800 text-slate-300 hover:text-white"
+              title="Refresh Live Inventory"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${refreshingLive ? 'animate-spin' : ''}`} />
+            </button>
+          </div>
+        </div>
+
+        {!pulse?.available ? (
+          <div className="p-6 text-xs font-mono text-slate-400">
+            {pulse?.error || 'Live cluster inventory unavailable until k3s.service answers.'}
+          </div>
+        ) : liveTab === 'workloads' ? (
+          <div className="overflow-x-auto">
+            <table className="w-full text-left border-collapse text-xs font-mono">
+              <thead className="bg-slate-950/70 text-[10px] uppercase text-slate-400 border-b border-slate-800">
+                <tr>
+                  <th className="py-2.5 px-4">Namespace</th>
+                  <th className="py-2.5 px-4">Workload</th>
+                  <th className="py-2.5 px-4">Kind</th>
+                  <th className="py-2.5 px-4">Readiness</th>
+                  <th className="py-2.5 px-4">Images</th>
+                  <th className="py-2.5 px-4">Age</th>
+                  <th className="py-2.5 px-4 text-right">K9s</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-800/60">
+                {pulse.workloadsSummary.map((w) => {
+                  const pct = w.desired > 0 ? Math.min(100, Math.round((w.ready / w.desired) * 100)) : 100;
+                  return (
+                    <tr key={`${w.kind}/${w.namespace}/${w.name}`} className="hover:bg-slate-800/40">
+                      <td className="py-2.5 px-4 text-slate-400">{w.namespace}</td>
+                      <td className="py-2.5 px-4 text-white font-semibold">{w.name}</td>
+                      <td className="py-2.5 px-4 text-sky-300">{w.kind}</td>
+                      <td className="py-2.5 px-4 min-w-[130px]">
+                        <div className="flex items-center gap-2">
+                          <div className="flex-1 h-1.5 bg-slate-800 rounded-full overflow-hidden">
+                            <div
+                              className={`h-full ${pct >= 100 ? 'bg-emerald-500' : 'bg-amber-500'}`}
+                              style={{ width: `${pct}%` }}
+                            />
+                          </div>
+                          <span className={pct >= 100 ? 'text-emerald-300' : 'text-amber-300'}>
+                            {w.ready}/{w.desired}
+                          </span>
+                        </div>
+                      </td>
+                      <td className="py-2.5 px-4 text-slate-400 max-w-xs truncate">
+                        {(w.images || []).join(', ') || '—'}
+                      </td>
+                      <td className="py-2.5 px-4 text-slate-400">{formatAge(w.creationTimestamp)}</td>
+                      <td className="py-2.5 px-4 text-right whitespace-nowrap space-x-2">
+                        <Link
+                          href={`/k3s/explorer?resource=${encodeURIComponent(w.resource)}&namespace=${encodeURIComponent(w.namespace)}&name=${encodeURIComponent(w.name)}`}
+                          className="text-sky-400 hover:underline"
+                        >
+                          Inspect
+                        </Link>
+                        <Link
+                          href={`/k3s/explorer?resource=${encodeURIComponent(w.resource)}&namespace=${encodeURIComponent(w.namespace)}&name=${encodeURIComponent(w.name)}&tab=logs`}
+                          className="text-emerald-400 hover:underline"
+                        >
+                          Logs
+                        </Link>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        ) : liveTab === 'services' ? (
+          <div className="overflow-x-auto">
+            <table className="w-full text-left border-collapse text-xs font-mono">
+              <thead className="bg-slate-950/70 text-[10px] uppercase text-slate-400 border-b border-slate-800">
+                <tr>
+                  <th className="py-2.5 px-4">Namespace</th>
+                  <th className="py-2.5 px-4">Service</th>
+                  <th className="py-2.5 px-4">Type</th>
+                  <th className="py-2.5 px-4">ClusterIP / ExternalIP</th>
+                  <th className="py-2.5 px-4">Ports</th>
+                  <th className="py-2.5 px-4">Endpoints</th>
+                  <th className="py-2.5 px-4 text-right">K9s</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-800/60">
+                {pulse.servicesSummary.map((sv) => (
+                  <tr key={`${sv.namespace}/${sv.name}`} className="hover:bg-slate-800/40">
+                    <td className="py-2.5 px-4 text-slate-400">{sv.namespace}</td>
+                    <td className="py-2.5 px-4 text-white font-semibold">{sv.name}</td>
+                    <td className="py-2.5 px-4 text-sky-300">{sv.type}</td>
+                    <td className="py-2.5 px-4 text-slate-300">
+                      {sv.clusterIP}
+                      {sv.externalIP ? ` • ${sv.externalIP}` : ''}
+                    </td>
+                    <td className="py-2.5 px-4 text-slate-300">{(sv.ports || []).join(', ') || '—'}</td>
+                    <td className={`py-2.5 px-4 ${sv.readyEndpoints > 0 ? 'text-emerald-400' : 'text-amber-300'}`}>
+                      {sv.readyEndpoints} ready
+                    </td>
+                    <td className="py-2.5 px-4 text-right">
+                      <Link
+                        href={`/k3s/explorer?resource=services&namespace=${encodeURIComponent(sv.namespace)}&name=${encodeURIComponent(sv.name)}`}
+                        className="text-sky-400 hover:underline"
+                      >
+                        Inspect →
+                      </Link>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-left border-collapse text-xs font-mono">
+              <thead className="bg-slate-950/70 text-[10px] uppercase text-slate-400 border-b border-slate-800">
+                <tr>
+                  <th className="py-2.5 px-4">Namespace</th>
+                  <th className="py-2.5 px-4">Ingress</th>
+                  <th className="py-2.5 px-4">Class / TLS</th>
+                  <th className="py-2.5 px-4">Hosts</th>
+                  <th className="py-2.5 px-4">Backends</th>
+                  <th className="py-2.5 px-4">Address</th>
+                  <th className="py-2.5 px-4 text-right">K9s</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-800/60">
+                {pulse.ingressesSummary.map((ing) => (
+                  <tr key={`${ing.namespace}/${ing.name}`} className="hover:bg-slate-800/40">
+                    <td className="py-2.5 px-4 text-slate-400">{ing.namespace}</td>
+                    <td className="py-2.5 px-4 text-white font-semibold">{ing.name}</td>
+                    <td className="py-2.5 px-4 text-emerald-300">
+                      {ing.class || 'default'} • {ing.tls ? 'TLS' : 'HTTP'}
+                    </td>
+                    <td className="py-2.5 px-4 text-cyan-300">{(ing.hosts || []).join(', ') || '*'}</td>
+                    <td className="py-2.5 px-4 text-slate-300">{(ing.backends || []).join(', ') || '—'}</td>
+                    <td className="py-2.5 px-4 text-slate-300">{ing.address || 'Pending'}</td>
+                    <td className="py-2.5 px-4 text-right">
+                      <Link
+                        href={`/k3s/explorer?resource=ingresses&namespace=${encodeURIComponent(ing.namespace)}&name=${encodeURIComponent(ing.name)}`}
+                        className="text-sky-400 hover:underline"
+                      >
+                        Inspect →
+                      </Link>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
         )}
       </div>

@@ -442,6 +442,19 @@ if [[ ! -f config/includes.chroot/usr/local/bin/k3s ]]; then
   chmod 0755 config/includes.chroot/usr/local/bin/k3s
 fi
 
+# Fetch K9s v0.51.0 interactive Kubernetes terminal UI
+K9S_VERSION="0.51.0"
+K9S_SHA256="c3752ad51a5a4015a113819c4eeb6e55a4d0e4b8e652494797532f6fc8161dd7"
+if [[ ! -f config/includes.chroot/usr/local/bin/k9s ]]; then
+  echo "[+] Fetching K9s v${K9S_VERSION}..."
+  K9S_TAR="$(mktemp -t k9s-XXXXXX.tar.gz)"
+  curl -fsSL -o "${K9S_TAR}" "https://github.com/derailed/k9s/releases/download/v${K9S_VERSION}/k9s_Linux_amd64.tar.gz"
+  echo "${K9S_SHA256}  ${K9S_TAR}" | sha256sum -c -
+  tar -xzf "${K9S_TAR}" -C config/includes.chroot/usr/local/bin/ k9s
+  chmod 0755 config/includes.chroot/usr/local/bin/k9s
+  rm -f "${K9S_TAR}"
+fi
+
 # Stage Vault Edition payload into /usr/share/axonwall/vault/ so the unified
 # main ISO can install EITHER Axonwall NGFW OR Axonwall Vault Edition.
 mkdir -p config/includes.chroot/usr/share/axonwall/vault
@@ -519,6 +532,17 @@ elif [[ "${FLAVOR}" == "k3s-storage" ]]; then
   fi
   ln -sf k3s config/includes.chroot/usr/local/bin/crictl
   ln -sf k3s config/includes.chroot/usr/local/bin/ctr
+  K9S_VERSION="0.51.0"
+  K9S_SHA256="c3752ad51a5a4015a113819c4eeb6e55a4d0e4b8e652494797532f6fc8161dd7"
+  if [[ ! -f config/includes.chroot/usr/local/bin/k9s ]]; then
+    echo "[+] Fetching K9s v${K9S_VERSION}..."
+    K9S_TAR="$(mktemp -t k9s-XXXXXX.tar.gz)"
+    curl -fsSL -o "${K9S_TAR}" "https://github.com/derailed/k9s/releases/download/v${K9S_VERSION}/k9s_Linux_amd64.tar.gz"
+    echo "${K9S_SHA256}  ${K9S_TAR}" | sha256sum -c -
+    tar -xzf "${K9S_TAR}" -C config/includes.chroot/usr/local/bin/ k9s
+    chmod 0755 config/includes.chroot/usr/local/bin/k9s
+    rm -f "${K9S_TAR}"
+  fi
 else
 # Fetch SeaweedFS binary (Vault Edition storage engine)
 WEED_VERSION="4.48"

@@ -172,6 +172,19 @@ if [[ ! -f "${WORK_DIR}/usr/local/bin/k3s" ]]; then
   chmod 755 "${WORK_DIR}/usr/local/bin/k3s"
 fi
 
+# Fetch K9s v0.51.0 binary if absent (ensures .deb installs & axonwall-update include k9s CLI)
+K9S_VERSION="0.51.0"
+K9S_SHA256="c3752ad51a5a4015a113819c4eeb6e55a4d0e4b8e652494797532f6fc8161dd7"
+if [[ ! -f "${WORK_DIR}/usr/local/bin/k9s" ]]; then
+  echo "[+] Downloading K9s v${K9S_VERSION} binary..."
+  K9S_TAR="$(mktemp -t k9s-XXXXXX.tar.gz)"
+  curl -fsSL -o "${K9S_TAR}" "https://github.com/derailed/k9s/releases/download/v${K9S_VERSION}/k9s_Linux_amd64.tar.gz"
+  echo "${K9S_SHA256}  ${K9S_TAR}" | sha256sum -c -
+  tar -xzf "${K9S_TAR}" -C "${WORK_DIR}/usr/local/bin/" k9s
+  chmod 755 "${WORK_DIR}/usr/local/bin/k9s"
+  rm -f "${K9S_TAR}"
+fi
+
 # 5. Copy System Scripts & Terminal Configs
 CHROOT_SRC="${ROOT_DIR}/packaging/iso/config/includes.chroot"
 for bin_script in \

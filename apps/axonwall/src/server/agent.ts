@@ -58,6 +58,16 @@ import { headers } from 'next/headers';
 const execFileAsync = promisify(execFile);
 
 import { callAgentApi, callAgentApiDetailed, callAgentApiResponse } from './agent-client';
+import type {
+  K3sClusterPulse,
+  K3sAPIResource,
+  K3sNamespaceSummary,
+  K3sResourceListResponse,
+  K3sResourceInspectResponse,
+  K3sLogsResponse,
+  K3sActionRequest,
+  K3sActionResponse,
+} from '@/components/k3s/types';
 import {
   BASELINE_STATE,
   ETC_CONFIG_DIR,
@@ -7066,6 +7076,290 @@ export async function shipThreatHarvesterCorpusAction(): Promise<{
     return { success: false, error: res.error || res.message || 'Failed to ship corpus to S3' };
   }
   return { success: true, objectKey: res.objectKey };
+}
+
+// ============================================================================
+// Kubernetes (K3s) Browser K9s Explorer, Pulse, Topology & Operations Actions
+// ============================================================================
+
+function emptyK3sClusterPulse(error: string): K3sClusterPulse {
+  return {
+    available: false,
+    error,
+    timestamp: new Date().toISOString(),
+    metricsAvailable: false,
+    cniPlugin: 'flannel',
+    k3sVersion: '',
+    counts: {
+      nodesReady: 0,
+      nodesTotal: 0,
+      nodesCordoned: 0,
+      podsRunning: 0,
+      podsPending: 0,
+      podsFailed: 0,
+      podsSucceeded: 0,
+      podsUnknown: 0,
+      podsTotal: 0,
+      totalRestarts: 0,
+      deploymentsReady: 0,
+      deploymentsTotal: 0,
+      statefulSetsReady: 0,
+      statefulSetsTotal: 0,
+      daemonSetsReady: 0,
+      daemonSetsTotal: 0,
+      jobsActive: 0,
+      jobsSucceeded: 0,
+      jobsFailed: 0,
+      cronJobsTotal: 0,
+      servicesTotal: 0,
+      ingressesTotal: 0,
+      pvcsBound: 0,
+      pvcsTotal: 0,
+      pvsTotal: 0,
+      storageClassesTotal: 0,
+      namespacesTotal: 0,
+      configMapsTotal: 0,
+      secretsTotal: 0,
+      networkPoliciesTotal: 0,
+      hpasTotal: 0,
+      crdsTotal: 0,
+      warningEventsCount: 0,
+      normalEventsCount: 0,
+    },
+    podPhaseDistribution: [],
+    namespaceStats: [],
+    nodes: [],
+    storageByClass: [],
+    topRestartingPods: [],
+    topResourcePods: [],
+    recentEvents: [],
+    workloadsSummary: [],
+    servicesSummary: [],
+    ingressesSummary: [],
+    pvcsSummary: [],
+    topology: { nodes: [], edges: [] },
+  };
+}
+
+export async function getK3sClusterPulseAction(): Promise<K3sClusterPulse> {
+  const session = await getSession();
+  assertActionPermitted(session);
+
+  const res = await callAgentApiDetailed<K3sClusterPulse>('/v1/k3s/pulse', 'GET', undefined, 15_000);
+  if (res.kind === 'ok') {
+    return res.data;
+  }
+  if (res.kind === 'http_error') {
+    return emptyK3sClusterPulse(res.message || `Failed to load cluster pulse (HTTP ${res.status})`);
+  }
+  return emptyK3sClusterPulse(
+    res.kind === 'timeout'
+      ? 'Timed out waiting for K3s cluster pulse from axonwalld.'
+      : 'axonwalld daemon unreachable: cannot query live K3s cluster telemetry.'
+  );
+}
+
+export async function getK3sApiResourcesAction(): Promise<K3sAPIResource[]> {
+  const session = await getSession();
+  assertActionPermitted(session);
+
+  const res = await callAgentApiDetailed<{ resources?: K3sAPIResource[]; error?: string }>(
+    '/v1/k3s/api-resources',
+    'GET',
+    undefined,
+    15_000
+  );
+  if (res.kind === 'ok' && Array.isArray(res.data?.resources)) {
+    return res.data.resources;
+  }
+  return [];
+}
+
+export async function getK3sNamespacesAction(): Promise<K3sNamespaceSummary[]> {
+  const session = await getSession();
+  assertActionPermitted(session);
+
+  const res = await callAgentApiDetailed<{ namespaces?: K3sNamespaceSummary[]; error?: string }>(
+    '/v1/k3s/namespaces',
+    'GET',
+    undefined,
+    15_000
+  );
+  if (res.kind === 'ok' && Array.isArray(res.data?.namespaces)) {
+    return res.data.namespaces;
+  }
+  return [];
+}
+
+export async function listK3sResourcesAction(params: {
+  resource: string;
+  namespace?: string;
+  labelSelector?: string;
+}): Promise<K3sResourceListResponse> {
+  const session = await getSession();
+  assertActionPermitted(session);
+
+  const qs = new URLSearchParams();
+  qs.set('resource', (params.resource || 'pods').trim());
+  if (params.namespace) {
+    qs.set('namespace', params.namespace.trim());
+  }
+  if (params.labelSelector) {
+    qs.set('labelSelector', params.labelSelector.trim());
+  }
+
+  const res = await callAgentApiDetailed<K3sResourceListResponse>(
+    `/v1/k3s/resources?${qs.toString()}`,
+    'GET',
+    undefined,
+    15_000
+  );
+  if (res.kind === 'ok') {
+    return res.data;
+  }
+  const errMsg =
+    res.kind === 'http_error'
+      ? res.message
+      : res.kind === 'timeout'
+        ? 'Timed out listing Kubernetes resources.'
+        : 'axonwalld daemon unreachable: could not list Kubernetes resources.';
+  return {
+    resource: params.resource || 'pods',
+    namespace: params.namespace || '_all',
+    namespaced: true,
+    items: [],
+    count: 0,
+    error: errMsg,
+  };
+}
+
+export async function inspectK3sResourceAction(params: {
+  resource: string;
+  name: string;
+  namespace?: string;
+  decodeSecret?: boolean;
+}): Promise<K3sResourceInspectResponse> {
+  const session = await getSession();
+  assertActionPermitted(session);
+  if (params.decodeSecret) {
+    assertActionPermitted(session, 'admin');
+  }
+
+  const qs = new URLSearchParams();
+  qs.set('resource', params.resource.trim());
+  qs.set('name', params.name.trim());
+  if (params.namespace && params.namespace !== '_all') {
+    qs.set('namespace', params.namespace.trim());
+  }
+  if (params.decodeSecret) {
+    qs.set('decode', 'true');
+  }
+
+  const res = await callAgentApiDetailed<K3sResourceInspectResponse>(
+    `/v1/k3s/resource/inspect?${qs.toString()}`,
+    'GET',
+    undefined,
+    15_000
+  );
+  if (res.kind === 'ok') {
+    return res.data;
+  }
+  const errMsg =
+    res.kind === 'http_error'
+      ? res.message
+      : res.kind === 'timeout'
+        ? 'Timed out inspecting Kubernetes resource.'
+        : 'axonwalld daemon unreachable: could not inspect Kubernetes resource.';
+  return {
+    resource: params.resource,
+    kind: '',
+    apiVersion: '',
+    name: params.name,
+    namespace: params.namespace,
+    object: {},
+    yaml: '',
+    describe: '',
+    events: [],
+    related: [],
+    error: errMsg,
+  };
+}
+
+export async function getK3sPodLogsAction(params: {
+  namespace: string;
+  name: string;
+  resource?: string;
+  container?: string;
+  tail?: number;
+  previous?: boolean;
+  timestamps?: boolean;
+  sinceSeconds?: number;
+}): Promise<K3sLogsResponse> {
+  const session = await getSession();
+  assertActionPermitted(session);
+
+  const qs = new URLSearchParams();
+  qs.set('namespace', (params.namespace || 'default').trim());
+  qs.set('name', params.name.trim());
+  if (params.resource) qs.set('resource', params.resource.trim());
+  if (params.container) qs.set('container', params.container.trim());
+  if (params.tail) qs.set('tail', String(params.tail));
+  if (params.previous) qs.set('previous', 'true');
+  if (params.timestamps) qs.set('timestamps', 'true');
+  if (params.sinceSeconds) qs.set('sinceSeconds', String(params.sinceSeconds));
+
+  const res = await callAgentApiDetailed<K3sLogsResponse>(
+    `/v1/k3s/logs?${qs.toString()}`,
+    'GET',
+    undefined,
+    15_000
+  );
+  if (res.kind === 'ok') {
+    return res.data;
+  }
+  const errMsg =
+    res.kind === 'http_error'
+      ? res.message
+      : res.kind === 'timeout'
+        ? 'Timed out fetching pod logs.'
+        : 'axonwalld daemon unreachable: could not fetch pod logs.';
+  return {
+    logs: '',
+    linesCount: 0,
+    truncated: false,
+    container: params.container,
+    previous: Boolean(params.previous),
+    error: errMsg,
+  };
+}
+
+export async function executeK3sAction(payload: K3sActionRequest): Promise<K3sActionResponse> {
+  const session = await getSession();
+  assertActionPermitted(session, 'admin');
+
+  const timeoutMs = payload.action === 'drain' ? 90_000 : 30_000;
+  const res = await callAgentApiDetailed<K3sActionResponse>('/v1/k3s/action', 'POST', payload, timeoutMs);
+  if (res.kind === 'ok') {
+    return res.data;
+  }
+  if (res.kind === 'http_error') {
+    const d = res.data as Partial<K3sActionResponse> | undefined;
+    return {
+      success: false,
+      message: d?.message || res.message,
+      output: d?.output || res.message,
+      exitCode: d?.exitCode ?? 1,
+      latencyMs: d?.latencyMs,
+    };
+  }
+  return {
+    success: false,
+    message:
+      res.kind === 'timeout'
+        ? `Timed out executing Kubernetes action '${payload.action}'.`
+        : `Daemon unavailable: could not execute '${payload.action}'.`,
+    exitCode: 1,
+  };
 }
 
 

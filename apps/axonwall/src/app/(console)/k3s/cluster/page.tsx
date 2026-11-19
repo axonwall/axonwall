@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
+import Link from 'next/link';
 import {
   Cpu,
   ArrowRightLeft,
@@ -12,6 +13,9 @@ import {
   Plus,
   Trash2,
   ShieldAlert,
+  Terminal,
+  Network,
+  Activity,
 } from 'lucide-react';
 import {
   getCurrentDesiredState,
@@ -20,10 +24,12 @@ import {
   getK3sEtcdSnapshotsAction,
   manageK3sEtcdSnapshotAction,
   updateK3sNodeSchedulingAction,
+  getK3sClusterPulseAction,
   type K3sRuntimeStatus,
   type K3sEtcdSnapshotItem,
   type K3sNodeTaintItem,
 } from '@/server/agent';
+import type { K3sClusterPulse } from '@/components/k3s/types';
 import { useDesiredStateApply } from '@/lib/use-desired-state-apply';
 import type { DesiredState } from '@axonwall/lib/schemas';
 
@@ -68,6 +74,7 @@ export default function K3sClusterPage() {
   const { applyState } = useDesiredStateApply();
   const [state, setState] = useState<DesiredState | null>(null);
   const [status, setStatus] = useState<K3sRuntimeStatus | null>(null);
+  const [pulse, setPulse] = useState<K3sClusterPulse | null>(null);
   const [etcdSnapshots, setEtcdSnapshots] = useState<K3sEtcdSnapshotItem[]>([]);
   const [snapName, setSnapName] = useState('');
   const [lbName, setLbName] = useState('bgp-pool-0');
@@ -187,14 +194,16 @@ export default function K3sClusterPage() {
 
   const load = async () => {
     try {
-      const [st, rt, snaps] = await Promise.all([
+      const [st, rt, snaps, pl] = await Promise.all([
         getCurrentDesiredState(),
         getK3sRuntimeStatus(),
         getK3sEtcdSnapshotsAction().catch(() => []),
+        getK3sClusterPulseAction().catch(() => null),
       ]);
       setState(st);
       setStatus(rt);
       setEtcdSnapshots(snaps || []);
+      setPulse(pl);
     } catch (err: any) {
       setMsg({ ok: false, text: err?.message || 'Failed to load K3s runtime telemetry' });
     }
@@ -276,7 +285,21 @@ export default function K3sClusterPage() {
           </div>
         </div>
 
-        <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-center gap-2.5">
+          <Link
+            href="/k3s/explorer"
+            className="px-3.5 py-2 rounded-lg bg-slate-900 hover:bg-slate-800 border border-emerald-500/40 text-xs font-semibold text-emerald-300 flex items-center gap-2 transition"
+          >
+            <Terminal className="w-3.5 h-3.5" />
+            Open K9s Live Explorer
+          </Link>
+          <Link
+            href="/k3s/explorer?view=topology"
+            className="px-3.5 py-2 rounded-lg bg-slate-900 hover:bg-slate-800 border border-cyan-500/40 text-xs font-semibold text-cyan-300 flex items-center gap-2 transition"
+          >
+            <Network className="w-3.5 h-3.5" />
+            Topology Map
+          </Link>
           <button
             onClick={handleAutoJoin}
             disabled={joining}
@@ -334,6 +357,101 @@ export default function K3sClusterPage() {
           </span>
         </div>
       </div>
+
+      {/* Live Cluster Visualization & Resource Inventory Strip */}
+      {pulse?.available && (
+        <div className="p-5 rounded-2xl bg-slate-900 border border-slate-800 space-y-4">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center gap-2">
+              <Activity className="w-4 h-4 text-emerald-400" />
+              <span className="text-sm font-bold text-white">Live Cluster Pulse &amp; Workload Inventory</span>
+              <span className="text-xs font-mono text-slate-400">
+                ({pulse.counts.podsTotal} pods • ↻ {pulse.counts.totalRestarts} restarts)
+              </span>
+            </div>
+            <div className="flex items-center gap-2 text-xs">
+              <Link
+                href="/k3s/explorer?view=pulse"
+                className="px-2.5 py-1 rounded-lg bg-slate-950 border border-slate-800 hover:border-emerald-500/40 text-emerald-300 font-mono"
+              >
+                Full Pulse &amp; Charts →
+              </Link>
+              <Link
+                href="/k3s/explorer?view=topology"
+                className="px-2.5 py-1 rounded-lg bg-slate-950 border border-slate-800 hover:border-cyan-500/40 text-cyan-300 font-mono"
+              >
+                Traffic Topology →
+              </Link>
+            </div>
+          </div>
+
+          {/* Segmented Pod Health Bar */}
+          {pulse.counts.podsTotal > 0 && (
+            <div className="space-y-1.5">
+              <div className="h-2.5 w-full rounded-full bg-slate-950 overflow-hidden flex border border-slate-800">
+                {pulse.counts.podsRunning > 0 && (
+                  <div
+                    className="bg-emerald-500 h-full"
+                    style={{ width: `${(pulse.counts.podsRunning / pulse.counts.podsTotal) * 100}%` }}
+                    title={`Running: ${pulse.counts.podsRunning}`}
+                  />
+                )}
+                {pulse.counts.podsPending > 0 && (
+                  <div
+                    className="bg-amber-500 h-full"
+                    style={{ width: `${(pulse.counts.podsPending / pulse.counts.podsTotal) * 100}%` }}
+                    title={`Pending: ${pulse.counts.podsPending}`}
+                  />
+                )}
+                {pulse.counts.podsFailed + pulse.counts.podsUnknown > 0 && (
+                  <div
+                    className="bg-rose-500 h-full"
+                    style={{
+                      width: `${((pulse.counts.podsFailed + pulse.counts.podsUnknown) / pulse.counts.podsTotal) * 100}%`,
+                    }}
+                    title={`Failed/Unknown: ${pulse.counts.podsFailed + pulse.counts.podsUnknown}`}
+                  />
+                )}
+                {pulse.counts.podsSucceeded > 0 && (
+                  <div
+                    className="bg-sky-500 h-full"
+                    style={{ width: `${(pulse.counts.podsSucceeded / pulse.counts.podsTotal) * 100}%` }}
+                    title={`Succeeded: ${pulse.counts.podsSucceeded}`}
+                  />
+                )}
+              </div>
+              <div className="flex flex-wrap gap-4 text-[11px] font-mono text-slate-400">
+                <span className="text-emerald-400">● Running: {pulse.counts.podsRunning}</span>
+                <span className="text-amber-300">● Pending: {pulse.counts.podsPending}</span>
+                <span className="text-rose-400">● Failed/Unknown: {pulse.counts.podsFailed + pulse.counts.podsUnknown}</span>
+                <span className="text-sky-400">● Succeeded: {pulse.counts.podsSucceeded}</span>
+              </div>
+            </div>
+          )}
+
+          {/* Clickable Resource Inventory Pills */}
+          <div className="flex flex-wrap gap-2">
+            {[
+              { label: 'Deployments', val: `${pulse.counts.deploymentsReady}/${pulse.counts.deploymentsTotal}`, res: 'deployments', cls: 'text-emerald-300' },
+              { label: 'StatefulSets', val: `${pulse.counts.statefulSetsReady}/${pulse.counts.statefulSetsTotal}`, res: 'statefulsets', cls: 'text-sky-300' },
+              { label: 'DaemonSets', val: `${pulse.counts.daemonSetsReady}/${pulse.counts.daemonSetsTotal}`, res: 'daemonsets', cls: 'text-sky-300' },
+              { label: 'Services', val: String(pulse.counts.servicesTotal), res: 'services', cls: 'text-cyan-300' },
+              { label: 'Ingresses', val: String(pulse.counts.ingressesTotal), res: 'ingresses', cls: 'text-cyan-300' },
+              { label: 'PVCs Bound', val: `${pulse.counts.pvcsBound}/${pulse.counts.pvcsTotal}`, res: 'persistentvolumeclaims', cls: 'text-amber-300' },
+              { label: 'Warning Events', val: String(pulse.counts.warningEventsCount), res: 'events', cls: pulse.counts.warningEventsCount > 0 ? 'text-amber-300' : 'text-slate-300' },
+            ].map((pill) => (
+              <Link
+                key={pill.res}
+                href={`/k3s/explorer?resource=${pill.res}`}
+                className="px-3 py-1.5 rounded-lg bg-slate-950 border border-slate-800 hover:border-emerald-500/40 text-xs font-mono transition"
+              >
+                <span className="text-slate-400">{pill.label}: </span>
+                <span className={`font-bold ${pill.cls}`}>{pill.val}</span>
+              </Link>
+            ))}
+          </div>
+        </div>
+      )}
 
       <div className="p-5 rounded-2xl bg-slate-900 border border-slate-800 flex flex-col md:flex-row md:items-center md:justify-between gap-4">
         <div className="space-y-1">
@@ -603,6 +721,7 @@ export default function K3sClusterPage() {
               <th className="py-3.5 px-4">Roles</th>
               <th className="py-3.5 px-4">Taints</th>
               <th className="py-3.5 px-4">Internal IP</th>
+              <th className="py-3.5 px-4">Capacity &amp; Allocation</th>
               <th className="py-3.5 px-4">K3s Version</th>
               <th className="py-3.5 px-4">Status</th>
               <th className="py-3.5 px-4 text-right">Actions</th>
@@ -615,6 +734,15 @@ export default function K3sClusterPage() {
                 .map((r) => r.trim())
                 .filter(Boolean);
               const taints = n.taints ?? [];
+              const np = pulse?.nodes?.find((p) => p.name === n.name);
+              const cpuPct =
+                np && np.cpuAllocatableMillis > 0
+                  ? Math.min(100, Math.round((((np.cpuUsageMillis ?? np.cpuRequestsMillis) || 0) / np.cpuAllocatableMillis) * 100))
+                  : 0;
+              const memPct =
+                np && np.memAllocatableBytes > 0
+                  ? Math.min(100, Math.round((((np.memUsageBytes ?? np.memRequestsBytes) || 0) / np.memAllocatableBytes) * 100))
+                  : 0;
               return (
                 <tr key={n.name} className="hover:bg-slate-800/40">
                   <td className="py-3.5 px-4 font-mono text-white font-semibold">
@@ -664,6 +792,31 @@ export default function K3sClusterPage() {
                     )}
                   </td>
                   <td className="py-3.5 px-4 font-mono text-slate-300">{n.internalIp}</td>
+                  <td className="py-3.5 px-4 min-w-[170px]">
+                    {np ? (
+                      <div className="space-y-1 text-[10px] font-mono text-slate-400">
+                        <div className="flex items-center gap-2">
+                          <span className="w-7">CPU</span>
+                          <div className="flex-1 h-1.5 bg-slate-800 rounded-full overflow-hidden">
+                            <div className="h-full bg-emerald-500" style={{ width: `${cpuPct}%` }} />
+                          </div>
+                          <span className="text-slate-200 w-7 text-right">{cpuPct}%</span>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <span className="w-7">MEM</span>
+                          <div className="flex-1 h-1.5 bg-slate-800 rounded-full overflow-hidden">
+                            <div className="h-full bg-sky-500" style={{ width: `${memPct}%` }} />
+                          </div>
+                          <span className="text-slate-200 w-7 text-right">{memPct}%</span>
+                        </div>
+                        <div className="text-slate-400">
+                          Pods: <span className="text-slate-200">{np.podCount}/{np.podCapacity || '—'}</span>
+                        </div>
+                      </div>
+                    ) : (
+                      <span className="text-slate-500 font-mono">—</span>
+                    )}
+                  </td>
                   <td className="py-3.5 px-4 font-mono text-slate-400">{n.version}</td>
                   <td className="py-3.5 px-4">
                     <span
@@ -674,15 +827,24 @@ export default function K3sClusterPage() {
                       <CheckCircle2 className="w-3.5 h-3.5" /> {n.status}
                     </span>
                   </td>
-                  <td className="py-3.5 px-4 text-right">
-                    <button
-                      type="button"
-                      onClick={() => openNodeModal(n)}
-                      className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 text-xs font-medium transition"
-                    >
-                      <SlidersHorizontal className="w-3.5 h-3.5 text-sky-400" />
-                      Roles &amp; Taints
-                    </button>
+                  <td className="py-3.5 px-4 text-right whitespace-nowrap">
+                    <div className="inline-flex items-center gap-1.5">
+                      <Link
+                        href={`/k3s/explorer?resource=nodes&name=${encodeURIComponent(n.name)}`}
+                        className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-slate-950 hover:bg-slate-800 border border-slate-700 text-emerald-300 text-xs font-medium transition"
+                      >
+                        <Terminal className="w-3.5 h-3.5" />
+                        Inspect
+                      </Link>
+                      <button
+                        type="button"
+                        onClick={() => openNodeModal(n)}
+                        className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 text-xs font-medium transition"
+                      >
+                        <SlidersHorizontal className="w-3.5 h-3.5 text-sky-400" />
+                        Roles &amp; Taints
+                      </button>
+                    </div>
                   </td>
                 </tr>
               );

@@ -192,6 +192,7 @@ export const NAV_SECTIONS: NavSection[] = [
     icon: Cpu,
     capability: 'k3s',
     items: [
+      { name: 'K9s Live Explorer', href: '/k3s/explorer', icon: Terminal, badge: 'K9s' },
       { name: 'Cluster & HA Join', href: '/k3s/cluster', icon: Cpu, badge: 'HA' },
       { name: 'OpenEBS Storage', href: '/k3s/storage', icon: Database },
       { name: 'Workloads & Apps', href: '/k3s/workloads', icon: Boxes },

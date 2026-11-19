@@ -3972,6 +3972,153 @@ func main() {
 				"message": fmt.Sprintf("Auto-joined K3s cluster at %s", net.JoinHostPort(req.PeerIp, "6443")),
 			})
 		})
+		mux.HandleFunc("/v1/k3s/pulse", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			if r.Method != http.MethodGet {
+				w.WriteHeader(http.StatusMethodNotAllowed)
+				_ = json.NewEncoder(w).Encode(map[string]any{"error": "Method not allowed: expected GET"})
+				return
+			}
+			pulse, err := k3sManager.GetClusterPulse(r.Context())
+			if err != nil {
+				w.WriteHeader(http.StatusInternalServerError)
+				_ = json.NewEncoder(w).Encode(map[string]any{"available": false, "error": err.Error()})
+				return
+			}
+			_ = json.NewEncoder(w).Encode(pulse)
+		})
+		mux.HandleFunc("/v1/k3s/api-resources", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			if r.Method != http.MethodGet {
+				w.WriteHeader(http.StatusMethodNotAllowed)
+				_ = json.NewEncoder(w).Encode(map[string]any{"error": "Method not allowed: expected GET"})
+				return
+			}
+			resources, err := k3sManager.ListAPIResources(r.Context())
+			if err != nil {
+				w.WriteHeader(http.StatusBadGateway)
+				_ = json.NewEncoder(w).Encode(map[string]any{"resources": []engine.K3sAPIResource{}, "error": err.Error()})
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"resources": resources})
+		})
+		mux.HandleFunc("/v1/k3s/namespaces", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			if r.Method != http.MethodGet {
+				w.WriteHeader(http.StatusMethodNotAllowed)
+				_ = json.NewEncoder(w).Encode(map[string]any{"error": "Method not allowed: expected GET"})
+				return
+			}
+			namespaces, err := k3sManager.ListNamespaces(r.Context())
+			if err != nil {
+				w.WriteHeader(http.StatusBadGateway)
+				_ = json.NewEncoder(w).Encode(map[string]any{"namespaces": []engine.K3sNamespaceSummary{}, "error": err.Error()})
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"namespaces": namespaces})
+		})
+		mux.HandleFunc("/v1/k3s/resources", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			if r.Method != http.MethodGet {
+				w.WriteHeader(http.StatusMethodNotAllowed)
+				_ = json.NewEncoder(w).Encode(map[string]any{"error": "Method not allowed: expected GET"})
+				return
+			}
+			q := r.URL.Query()
+			res, err := k3sManager.ListResources(r.Context(), q.Get("resource"), q.Get("namespace"), q.Get("labelSelector"))
+			if err != nil {
+				statusCode := http.StatusBadRequest
+				if res != nil && res.Error != "" {
+					statusCode = http.StatusBadGateway
+				}
+				w.WriteHeader(statusCode)
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"resource":  q.Get("resource"),
+					"namespace": q.Get("namespace"),
+					"items":     []engine.K3sResourceItem{},
+					"count":     0,
+					"error":     err.Error(),
+				})
+				return
+			}
+			_ = json.NewEncoder(w).Encode(res)
+		})
+		mux.HandleFunc("/v1/k3s/resource/inspect", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			if r.Method != http.MethodGet {
+				w.WriteHeader(http.StatusMethodNotAllowed)
+				_ = json.NewEncoder(w).Encode(map[string]any{"error": "Method not allowed: expected GET"})
+				return
+			}
+			q := r.URL.Query()
+			decode := q.Get("decode") == "true" || q.Get("decode") == "1"
+			res, err := k3sManager.InspectResource(r.Context(), q.Get("resource"), q.Get("namespace"), q.Get("name"), decode)
+			if err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				_ = json.NewEncoder(w).Encode(map[string]any{"error": err.Error()})
+				return
+			}
+			_ = json.NewEncoder(w).Encode(res)
+		})
+		mux.HandleFunc("/v1/k3s/logs", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			if r.Method != http.MethodGet {
+				w.WriteHeader(http.StatusMethodNotAllowed)
+				_ = json.NewEncoder(w).Encode(map[string]any{"error": "Method not allowed: expected GET"})
+				return
+			}
+			q := r.URL.Query()
+			tail, _ := strconv.Atoi(q.Get("tail"))
+			since, _ := strconv.Atoi(q.Get("sinceSeconds"))
+			logsResp, err := k3sManager.GetPodLogs(r.Context(), engine.K3sLogsRequest{
+				Namespace:    q.Get("namespace"),
+				Name:         q.Get("name"),
+				Resource:     q.Get("resource"),
+				Container:    q.Get("container"),
+				Tail:         tail,
+				Previous:     q.Get("previous") == "true" || q.Get("previous") == "1",
+				Timestamps:   q.Get("timestamps") == "true" || q.Get("timestamps") == "1",
+				SinceSeconds: since,
+			})
+			if err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				_ = json.NewEncoder(w).Encode(map[string]any{"error": err.Error()})
+				return
+			}
+			_ = json.NewEncoder(w).Encode(logsResp)
+		})
+		mux.HandleFunc("/v1/k3s/logs/stream", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodGet {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			k3sManager.StreamPodLogsSSE(w, r)
+		})
+		mux.HandleFunc("/v1/k3s/action", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			if r.Method != http.MethodPost {
+				w.WriteHeader(http.StatusMethodNotAllowed)
+				_ = json.NewEncoder(w).Encode(map[string]any{"success": false, "error": "Method not allowed: expected POST"})
+				return
+			}
+			var req engine.K3sActionRequest
+			dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 2*1024*1024))
+			if err := dec.Decode(&req); err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				_ = json.NewEncoder(w).Encode(map[string]any{"success": false, "error": fmt.Sprintf("Invalid JSON request body: %v", err)})
+				return
+			}
+			resp, err := k3sManager.ExecuteK3sAction(r.Context(), req)
+			if err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				_ = json.NewEncoder(w).Encode(map[string]any{"success": false, "error": err.Error()})
+				return
+			}
+			if !resp.Success {
+				w.WriteHeader(http.StatusBadGateway)
+			}
+			_ = json.NewEncoder(w).Encode(resp)
+		})
 
 		// Virt / Hypervisor APIs
 		mux.HandleFunc("/v1/virt/vms", func(w http.ResponseWriter, r *http.Request) {
