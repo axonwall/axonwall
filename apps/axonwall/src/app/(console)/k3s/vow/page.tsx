@@ -19,9 +19,10 @@ import {
   Boxes,
   KeyRound,
 } from 'lucide-react';
-import { getCurrentDesiredState } from '@/server/agent';
+import { getCurrentDesiredState, getK3sClusterPulseAction } from '@/server/agent';
 import { useDesiredStateApply } from '@/lib/use-desired-state-apply';
 import { VowConfigSchema, type DesiredState, type VowConfig, type VowCdRunner } from '@axonwall/lib/schemas';
+import type { K3sClusterPulse } from '@/components/k3s/types';
 import {
   isPluginEnabled,
   enablePluginWithDependencies,
@@ -55,6 +56,11 @@ export default function VigilantOctoWafflePage() {
   const [state, setState] = useState<DesiredState | null>(null);
   const [saving, setSaving] = useState(false);
   const [banner, setBanner] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+  // R4-C-M1: live K3s cluster pulse (measured liveness). null while the
+  // check is still in flight; a pulse with available:false (or a failed
+  // load) means liveness is UNKNOWN — never "ACTIVE PLATFORM".
+  const [pulse, setPulse] = useState<K3sClusterPulse | null>(null);
+  const [pulseFailed, setPulseFailed] = useState(false);
 
   const [activeTab, setActiveTab] = useState<'catalog' | 'blueprints' | 'manifests' | 'authz'>('catalog');
   const [selectedCategory, setSelectedCategory] = useState<'All' | VowAppCategory>('All');
@@ -64,6 +70,9 @@ export default function VigilantOctoWafflePage() {
     getCurrentDesiredState()
       .then((s) => setState(s))
       .catch(() => {});
+    getK3sClusterPulseAction()
+      .then((p) => setPulse(p))
+      .catch(() => setPulseFailed(true));
   }, []);
 
   const vowConfig: VowConfig = useMemo(() => {
@@ -73,6 +82,19 @@ export default function VigilantOctoWafflePage() {
   const k3sEnabled = useMemo(() => isPluginEnabled('core-k3s', state), [state]);
   const vowEnabled = useMemo(() => isPluginEnabled('vigilant-octo-waffle', state), [state]);
   const depCheck = useMemo(() => arePluginDependenciesMet('vigilant-octo-waffle', state), [state]);
+
+  // R4-C-M1: the badge reflects measured liveness, not the config flag
+  // alone. The flag only says the platform is *configured*; only a live
+  // pulse (available:true) earns ACTIVE PLATFORM.
+  const vowLiveState: 'standby' | 'checking' | 'live' | 'unknown' = !vowEnabled
+    ? 'standby'
+    : pulseFailed
+      ? 'unknown'
+      : pulse === null
+        ? 'checking'
+        : pulse.available
+          ? 'live'
+          : 'unknown';
 
   const { resolvedApps, autoAddedDependencies } = useMemo(
     () => resolveVowAppDependencies(vowConfig.enabledApps ?? []),
@@ -223,18 +245,46 @@ export default function VigilantOctoWafflePage() {
                 Requires: core-k3s
               </span>
               <span
+                title={
+                  vowLiveState === 'live'
+                    ? 'K3s cluster pulse is live — the GitOps platform answered a live health check.'
+                    : vowLiveState === 'unknown'
+                      ? `K3s cluster liveness could not be verified (${pulse?.error || 'no live pulse'}) — the platform may not be running.`
+                      : vowLiveState === 'checking'
+                        ? 'Checking live K3s cluster status…'
+                        : 'Vigilant Octo Waffle is not enabled.'
+                }
                 className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold border ${
-                  vowEnabled
+                  vowLiveState === 'live'
                     ? 'bg-emerald-500/15 border-emerald-500/30 text-emerald-300'
-                    : 'bg-slate-800 border-slate-700 text-slate-400'
+                    : vowLiveState === 'unknown'
+                      ? 'bg-amber-500/15 border-amber-500/30 text-amber-300'
+                      : 'bg-slate-800 border-slate-700 text-slate-400'
                 }`}
               >
-                {vowEnabled ? 'ACTIVE PLATFORM' : 'STANDBY'}
+                {vowLiveState === 'live'
+                  ? 'ACTIVE PLATFORM'
+                  : vowLiveState === 'unknown'
+                    ? 'STATUS UNKNOWN'
+                    : vowLiveState === 'checking'
+                      ? 'CHECKING…'
+                      : 'STANDBY'}
               </span>
             </div>
             <p className="text-xs text-slate-400 mt-0.5">
               Cloud-Native Kubernetes GitOps & App Platform • Dual ArgoCD + FluxCD Engine • 37+ Curated Operators • Local mkcert TLS + Unbound DNS Auto-Zones
             </p>
+            {vowLiveState === 'unknown' && (
+              <p className="text-xs text-amber-300 mt-1">
+                K3s cluster liveness could not be verified
+                {pulse?.error
+                  ? `: ${pulse.error}`
+                  : pulseFailed
+                    ? ': live K3s status check failed'
+                    : ''} — the platform is configured but may
+                not be running.
+              </p>
+            )}
           </div>
         </div>
 

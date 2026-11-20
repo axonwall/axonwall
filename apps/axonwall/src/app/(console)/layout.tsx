@@ -27,6 +27,7 @@ export default async function ConsoleLayout({
           session={session}
           pendingConfirm={status.pendingConfirm}
           confirmDeadlineUnix={status.confirmDeadlineUnix}
+          daemonDown={status.daemonDown}
         />
         <main className="flex-1 p-6 overflow-y-auto">{children}</main>
       </div>
