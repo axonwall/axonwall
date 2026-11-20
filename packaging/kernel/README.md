@@ -24,6 +24,26 @@ Desktop-targeted `linux-hardened` kernels disable unprivileged user namespaces (
   --march x86-64-v3
 ```
 
+## Cross-compiling for arm64
+
+`--arch arm64` on an x86_64 host cross-compiles with
+`CROSS_COMPILE=aarch64-linux-gnu-` (the same pattern as
+`build-edge-uki.sh`). The builder fails fast if the cross toolchain is
+absent — install it first (`apt-get install -y gcc-aarch64-linux-gnu`).
+On a native aarch64 host no cross toolchain is needed.
+
+## `--march native` is refused
+
+`--march native` produces a kernel locked to the build host's CPU, and
+`build-iso.sh` stages any built kernel `.deb` into every ISO — a
+`native` build would ship an image that faults with illegal
+instructions on older or different appliance CPUs. The builder refuses
+`native` outright (R4-D-M3); use a named, auditable baseline instead
+(`x86-64-v3` is the stripped-mode default). As a second line of
+defence, `build-iso.sh` also refuses to stage a kernel `.deb` whose
+`build-manifest.json` records `"march": "native"` (e.g. one built by an
+older builder version).
+
 ## Build Prerequisites (Debian 13 Trixie)
 ```bash
 apt-get update && apt-get install -y \
