@@ -200,6 +200,10 @@ spec:
 }
 
 func TestBugHuntV012_CloneVmMacsBridgesAndTokenBoundary(t *testing.T) {
+	// A-M2 (round 3, merged): CloneVM fails closed without zfs, so
+	// the rewrite assertions below need a working zfs on PATH.
+	// (The fake exits 0 for list/snapshot/send/receive alike.)
+	bughunt3FakeZfs(t, "exit 0\n")
 	virtMgr := newTestVirtManager(t)
 	if err := virtMgr.RegisterVMSpec(CompiledVmSpec{
 		VMID:     100,

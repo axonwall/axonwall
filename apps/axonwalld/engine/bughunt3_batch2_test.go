@@ -49,6 +49,7 @@ func TestBughunt3Batch2_NasApplyLioRestoreFailure(t *testing.T) {
 func TestBughunt3Batch2_NasApplyMinioReloadFailure(t *testing.T) {
 	dir := t.TempDir()
 	bughunt3WriteFakeBin(t, dir, "systemctl", `#!/bin/sh
+if [ "$1" = "--no-ask-password" ]; then shift; fi
 if [ "$1" = "is-active" ]; then exit 0; fi
 if [ "$1" = "reload-or-restart" ]; then echo 'Failed to reload minio.service' >&2; exit 1; fi
 exit 0
@@ -212,6 +213,7 @@ func TestBughunt3Batch2_RestoreEtcdSnapshotStopFailure(t *testing.T) {
 	}
 	bughunt3WriteFakeBin(t, dir, "k3s", "#!/bin/sh\necho 'k3s should not run after a failed stop' >&2\nexit 1\n")
 	bughunt3WriteFakeBin(t, dir, "systemctl", `#!/bin/sh
+if [ "$1" = "--no-ask-password" ]; then shift; fi
 if [ "$1" = "stop" ]; then echo 'Failed to stop k3s.service' >&2; exit 1; fi
 exit 0
 `)
