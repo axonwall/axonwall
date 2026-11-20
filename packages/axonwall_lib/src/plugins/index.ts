@@ -547,6 +547,81 @@ export const BUILTIN_PLUGINS: PluginManifest[] = [
     },
   },
   {
+    // Doom Emacs, sharing the cli-emacs binary — no second copy of
+    // the emacs binary/data tree (no `binaries` entry for emacs here,
+    // by design; bin/emacs-doom execs the sibling cli-emacs plugin's
+    // usr/bin/emacs-nox). `dependencies: ['cli-emacs']` activates
+    // the generic guard (cli-emacs cannot be disabled/uninstalled
+    // while this plugin is enabled) and the DesiredState
+    // auto-enable. `packages` is deliberately OMITTED (like
+    // cli-emacs): nothing is system-installed.
+    // PINS (observed by cloning upstream 2026-11-20):
+    //   doomemacs/core    eab52d2fe5e58303696e129717553ec5bf031bb0 (2026-11-15)
+    //   doomemacs/modules f054be8fcdd2a0446eb8259d76dd4f6f76acc0b7 (2026-11-03)
+    // Doom pins are real: every package carries a :pin and `doom sync`
+    // (run at install time) respects them. DECISIONS: no evil
+    // (operators are emacs-preferring; one-line change to add it); no
+    // +lsp, no vterm, no flycheck (no Node/cmake/checkers on the box);
+    // no -nw forced. Module set: completion corfu+vertico, ui doom
+    // hl-todo, emacs dired electric undo vc, term eshell, tools magit
+    // editorconfig, os tty, lang data emacs-lisp json sh yaml, config
+    // default+bindings+smartparens. UNVERIFIED: non-interactive
+    // `doom sync`, `doom doctor` on Emacs 30.1, magit full clone,
+    // installed size, fd/fdfind — live first launch still mandatory.
+    id: 'cli-emacs-doom',
+    name: 'Doom Emacs for /etc/axonwall',
+    version: '0.1.0',
+    category: 'extension',
+    description:
+      'Doom Emacs for editing /etc/axonwall configuration files, sharing the cli-emacs bundled GNU Emacs 30.1 binary: the Doom core and modules are cloned at pinned commits and packages installed with doom sync at install time. No evil mode (operators are emacs-preferring), no LSP or vterm (no language servers or C toolchain on the box).',
+    author: 'Axonwall Core',
+    dependencies: ['cli-emacs'],
+    systemdUnits: [],
+    privileges: ['system.users', 'system.config.write'],
+    cliBinaries: ['emacs-doom'],
+    binDirs: ['bin'],
+  },
+  {
+    // Spacemacs (develop branch), sharing the cli-emacs binary — no
+    // second copy of the emacs binary/data tree (no `binaries` entry
+    // for emacs here, by design). `dependencies: ['cli-emacs']`
+    // activates the generic guard and the DesiredState auto-enable.
+    // `packages` is deliberately OMITTED: nothing is
+    // system-installed.
+    // PIN (observed by cloning upstream 2026-11-20):
+    //   syl20bnr/spacemacs develop
+    //     1f69b2a854a7a46f709def08412dbd5d6dc073a1 (2026-11-09)
+    // LATEST-AT-INSTALL, NOT PINNED: Spacemacs has no per-package
+    // version pinning (upstream issue #6531). Only the Spacemacs
+    // commit is pinned; first start downloads the latest snapshot of
+    // every layer package from MELPA/GNU ELPA and needs network. Do
+    // not describe this install as pinned. The vendored-elpa-snapshot
+    // follow-up is what would make it reproducible; it is NOT done
+    // on this branch. Install does no first start and no package
+    // install; the pre-seeded dotfile is the attempt at suppressing
+    // the first-start wizard, and whether it fully suppresses it is
+    // UNVERIFIED. DECISIONS: editing style 'emacs, NOT vim; shell
+    // layer uses eshell, NEVER vterm; prettier-js/web-beautify
+    // excluded (need Node). Layer set: helm, auto-completion,
+    // better-defaults, emacs-lisp, git, version-control, shell
+    // (eshell), syntax-checking, yaml, json. No -nw forced. Install
+    // fails closed if ~/.spacemacs exists (it always wins over
+    // SPACEMACSDIR). No explicit upstream "supports Emacs 30.1"
+    // statement — first-start smoke test on the box is mandatory.
+    id: 'cli-emacs-spacemacs',
+    name: 'Spacemacs for /etc/axonwall',
+    version: '0.1.0',
+    category: 'extension',
+    description:
+      'Spacemacs (develop branch) for editing /etc/axonwall configuration files, sharing the cli-emacs bundled GNU Emacs 30.1 binary. The Spacemacs core is cloned at a pinned commit; its packages are downloaded from MELPA/GNU ELPA on first start (latest versions — Spacemacs cannot pin package versions), so a first start needs network. Emacs editing style, not vim.',
+    author: 'Axonwall Core',
+    dependencies: ['cli-emacs'],
+    systemdUnits: [],
+    privileges: ['system.users', 'system.config.write'],
+    cliBinaries: ['emacs-spacemacs'],
+    binDirs: ['bin'],
+  },
+  {
     id: 'cli-diagnostics-nastymap',
     name: 'NastyMap & Live CLI Telemetry Suite',
     version: '1.0.0',

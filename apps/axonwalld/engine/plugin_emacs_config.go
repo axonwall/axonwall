@@ -71,7 +71,24 @@ const emacsBundledBinaryRelPath = "usr/bin/emacs-nox"
 // liblcms2-2) — it must be on LD_LIBRARY_PATH at runtime.
 const emacsBundledLibDirRelPath = "usr/lib/x86_64-linux-gnu"
 
-const emacsLauncherScript = `#!/bin/sh
+// emacsRelocationEnvScript returns the four shell export lines that
+// point a relocated Debian emacs-nox tree at its data and libraries.
+// dirExpr is a shell expression expanding to the cli-emacs plugin
+// dir — "$PLUGIN_DIR" for the cli-emacs launcher itself,
+// "$EMACS_PLUGIN_DIR" for the Doom/Spacemacs launchers, which resolve
+// the shared tree from the sibling cli-emacs plugin dir. It is the
+// single definition of these four exports: the cli-emacs launcher
+// below and both Doom/Spacemacs launchers (plugin_emacs_doom_spacemacs.go)
+// are built from it, so the values cannot drift apart silently.
+func emacsRelocationEnvScript(dirExpr string) string {
+	return fmt.Sprintf(`export EMACSDATA="%[1]s/usr/share/emacs/30.1/etc"
+export EMACSPATH="%[1]s/usr/libexec/emacs/30.1/x86_64-linux-gnu"
+export EMACSLOADPATH="%[1]s/usr/share/emacs/30.1/lisp:%[1]s/usr/share/emacs/site-lisp"
+export LD_LIBRARY_PATH="%[1]s/usr/lib/x86_64-linux-gnu${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+`, dirExpr)
+}
+
+var emacsLauncherScript = `#!/bin/sh
 # cli-emacs launcher — execs the bundled emacs-nox binary with the
 # bundled data tree and libraries. Generated at install time by
 # axonwalld (plugin_emacs_config.go); do not edit by hand.
@@ -85,11 +102,7 @@ if [ ! -x "$BIN" ]; then
   printf 'cli-emacs: bundled binary %s is missing or not executable\n' "$BIN" >&2
   exit 127
 fi
-export EMACSDATA="$PLUGIN_DIR/usr/share/emacs/30.1/etc"
-export EMACSPATH="$PLUGIN_DIR/usr/libexec/emacs/30.1/x86_64-linux-gnu"
-export EMACSLOADPATH="$PLUGIN_DIR/usr/share/emacs/30.1/lisp:$PLUGIN_DIR/usr/share/emacs/site-lisp"
-export LD_LIBRARY_PATH="$PLUGIN_DIR/usr/lib/x86_64-linux-gnu${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-exec "$BIN" --init-directory "$PLUGIN_DIR/config" "$@"
+` + emacsRelocationEnvScript("$PLUGIN_DIR") + `exec "$BIN" --init-directory "$PLUGIN_DIR/config" "$@"
 `
 
 // emacsInitEl is the minimal curated init.el for editing

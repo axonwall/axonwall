@@ -540,6 +540,139 @@ func GetExtensionPluginDefinitions() []PluginDefinition {
 			},
 		},
 		{
+			// Doom Emacs, sharing the cli-emacs binary — no second
+			// copy of the emacs binary/data tree (there is no
+			// Binaries entry for emacs here, by design; the
+			// bin/emacs-doom launcher execs the sibling cli-emacs
+			// plugin's usr/bin/emacs-nox). dependencies:
+			// ["cli-emacs"] activates the generic guard in
+			// enabledDependentsOf: cli-emacs cannot be disabled
+			// or uninstalled while this plugin is enabled. Install
+			// also fails closed without cli-emacs present (see
+			// installDoomEmacs).
+			//
+			// PINS (observed by cloning upstream 2026-11-20; see
+			// plugin_emacs_doom_spacemacs.go):
+			//   doomemacs/core    eab52d2fe5e58303696e129717553ec5bf031bb0 (2026-11-15)
+			//   doomemacs/modules f054be8fcdd2a0446eb8259d76dd4f6f76acc0b7 (2026-11-03)
+			//   bundled emacs     30.1 (the cli-emacs tree; Doom
+			//                       supports 27.1-31.1)
+			// Doom pins are real: every package carries a :pin in
+			// its module's packages.el and `doom sync` (run at
+			// install time) respects them, so the pinned
+			// (core + modules) pair determines the package set.
+			// The modules library ships as a git submodule of core
+			// (sources/doom+); install populates it explicitly
+			// and verifies it landed on the pinned commit.
+			//
+			// DECISIONS: no evil (operators are emacs-preferring;
+			// one-line change to add (evil +everywhere)); no +lsp
+			// and no vterm (no Node/npm or cmake/libtool on the
+			// box); no flycheck (its YAML/JSON checkers need
+			// yamllint/js-yaml/node); no -nw forced (the operator
+			// chooses). Module set: completion corfu+vertico, ui
+			// doom hl-todo, emacs dired electric undo vc, term
+			// eshell, tools magit editorconfig, os tty, lang data
+			// emacs-lisp json sh yaml, config default+bindings+
+			// smartparens. :lang data covers csv-mode only at the
+			// pinned modules commit; TOML/.env/Caddyfile/Lua are
+			// covered by guards in config.el.
+			//
+			// UNVERIFIED (recorded, not claimed): that `doom sync`
+			// runs non-interactively in practice; `doom doctor`
+			// behaviour on Emacs 30.1 at the pinned commit; the
+			// magit full-clone handling and download size; the
+			// installed straight-tree size; the fd/fdfind name
+			// question. A live first launch of emacs-doom on the
+			// box is still mandatory.
+			//
+			// No system packages, no systemd units, no menu entry.
+			// Binaries are deliberately absent (see above);
+			// BinDirs ["bin"] is the launcher dir, added to PATH
+			// for daemon invocations and interactive shells.
+			// Reconfigure does not restore a deleted launcher or
+			// config — only a reinstall does.
+			ID:               "cli-emacs-doom",
+			Name:             "Doom Emacs for /etc/axonwall",
+			Version:          "0.1.0",
+			Category:         "extension",
+			Description:      "Doom Emacs for editing /etc/axonwall configuration files, sharing the cli-emacs bundled GNU Emacs 30.1 binary: the Doom core and modules are cloned at pinned commits and packages installed with doom sync at install time. No evil mode (operators are emacs-preferring), no LSP or vterm (no language servers or C toolchain on the box).",
+			Author:           "Axonwall Core",
+			Dependencies:     []string{"cli-emacs"},
+			Privileges:       []string{"system.users", "system.config.write"},
+			DebianPackages:   []string{},
+			AlpinePackages:   []string{},
+			ArchPackages:     []string{},
+			RequiredBinaries: []string{"emacs-doom"},
+			BinDirs:          []string{"bin"},
+		},
+		{
+			// Spacemacs (develop branch), sharing the cli-emacs
+			// binary — no second copy of the emacs binary/data
+			// tree (no Binaries entry for emacs here, by design;
+			// the bin/emacs-spacemacs launcher execs the sibling
+			// cli-emacs plugin's usr/bin/emacs-nox). dependencies:
+			// ["cli-emacs"] activates the generic guard in
+			// enabledDependentsOf; install also fails closed
+			// without cli-emacs present (see
+			// installSpacemacsEmacs).
+			//
+			// PIN (observed by cloning upstream 2026-11-20; see
+			// plugin_emacs_doom_spacemacs.go):
+			//   syl20bnr/spacemacs develop
+			//     1f69b2a854a7a46f709def08412dbd5d6dc073a1 (2026-11-09)
+			//   bundled emacs 30.1 (Spacemacs requires 28.2+ with
+			//     no stated upper bound; there is NO explicit
+			//     upstream "supports Emacs 30.1" statement — a
+			//     first-start smoke test on the box is mandatory).
+			//
+			// LATEST-AT-INSTALL, NOT PINNED: Spacemacs has no
+			// per-package version pinning (upstream issue #6531).
+			// Only the Spacemacs commit is pinned; first start
+			// downloads the latest snapshot of every layer package
+			// from MELPA/GNU ELPA and needs network. Do not
+			// describe this install as pinned. The
+			// vendored-elpa-snapshot follow-up (ship a built elpa/
+			// tree with sha256s) is what would make it
+			// reproducible; it is NOT done on this branch.
+			// Install does NOT attempt a first start or a package
+			// install; the pre-seeded dotfile is the attempt at
+			// suppressing the first-start wizard, and whether it
+			// fully suppresses it is UNVERIFIED.
+			//
+			// DECISIONS: editing style 'emacs, NOT vim (operators
+			// are emacs-preferring; 'vim would pull the evil
+			// stack); distribution 'spacemacs (default;
+			// 'spacemacs-base is an unverified slimming option);
+			// shell layer uses eshell, NEVER vterm (needs
+			// cmake/libtool); prettier-js/web-beautify excluded
+			// (need Node). Layer set: helm, auto-completion,
+			// better-defaults, emacs-lisp, git, version-control,
+			// shell (eshell), syntax-checking, yaml, json. No
+			// -nw forced (the operator chooses). Install fails
+			// closed if ~/.spacemacs exists (it always wins over
+			// SPACEMACSDIR).
+			//
+			// No system packages, no systemd units, no menu entry.
+			// Binaries are deliberately absent (see above);
+			// BinDirs ["bin"] is the launcher dir. Reconfigure
+			// does not restore a deleted launcher or dotfile —
+			// only a reinstall does.
+			ID:               "cli-emacs-spacemacs",
+			Name:             "Spacemacs for /etc/axonwall",
+			Version:          "0.1.0",
+			Category:         "extension",
+			Description:      "Spacemacs (develop branch) for editing /etc/axonwall configuration files, sharing the cli-emacs bundled GNU Emacs 30.1 binary. The Spacemacs core is cloned at a pinned commit; its packages are downloaded from MELPA/GNU ELPA on first start (latest versions — Spacemacs cannot pin package versions), so a first start needs network. Emacs editing style, not vim.",
+			Author:           "Axonwall Core",
+			Dependencies:     []string{"cli-emacs"},
+			Privileges:       []string{"system.users", "system.config.write"},
+			DebianPackages:   []string{},
+			AlpinePackages:   []string{},
+			ArchPackages:     []string{},
+			RequiredBinaries: []string{"emacs-spacemacs"},
+			BinDirs:          []string{"bin"},
+		},
+		{
 			ID:               "cli-diagnostics-nastymap",
 			Name:             "NastyMap & Live CLI Telemetry Suite",
 			Version:          "1.0.0",
@@ -2368,6 +2501,34 @@ func (pm *PluginManager) InstallPlugin(pluginID string) PluginActionResponse {
 		}
 		if err := pm.provisionEmacsPluginFiles(); err != nil {
 			return failEmacsInstall(err)
+		}
+	}
+
+	// Doom / Spacemacs post-install: each shares the cli-emacs
+	// binary, so each fails closed without cli-emacs present, then
+	// clones its distribution at the pinned commit and writes its
+	// launcher + config. Doom additionally runs `doom sync`;
+	// Spacemacs does no package install and no first start (its
+	// packages are latest-at-install — see
+	// plugin_emacs_doom_spacemacs.go). On failure the plugin is NOT
+	// recorded installed and the helpers remove their partial
+	// artifacts; the failure message names the cause.
+	if pluginID == "cli-emacs-doom" {
+		if err := pm.installDoomEmacs(); err != nil {
+			return PluginActionResponse{
+				Success: false,
+				Message: fmt.Sprintf("Doom Emacs install failed for plugin %s: %v", pluginID, err),
+				Output:  output.String(),
+			}
+		}
+	}
+	if pluginID == "cli-emacs-spacemacs" {
+		if err := pm.installSpacemacsEmacs(); err != nil {
+			return PluginActionResponse{
+				Success: false,
+				Message: fmt.Sprintf("Spacemacs install failed for plugin %s: %v", pluginID, err),
+				Output:  output.String(),
+			}
 		}
 	}
 
