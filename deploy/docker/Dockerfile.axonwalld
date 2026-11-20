@@ -1,5 +1,5 @@
 # Multi-stage build for axonwalld (Privileged Go Daemon)
-FROM golang:1.27-bookworm@sha256:5cf287a799e6b94384bad13d16b14904c531f51ba65792237e122ce42b392f61 AS builder
+FROM golang:1.27-bookworm@sha256:4fa7c968ba93f1635670522dbb01a2c78150443e1385746924566079f36570ea AS builder
 
 WORKDIR /src
 COPY apps/axonwalld/go.mod apps/axonwalld/go.sum* ./
@@ -8,7 +8,7 @@ RUN go mod download
 COPY apps/axonwalld ./
 RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /bin/axonwalld .
 
-FROM debian:13-slim@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f
+FROM debian:13-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     nftables \
