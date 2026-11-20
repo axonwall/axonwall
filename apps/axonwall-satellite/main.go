@@ -85,6 +85,12 @@ type SyncRoutesPayload struct {
 type BlockTargetPayload struct {
 	Target string `json:"target"`
 	IsMac  bool   `json:"isMac"`
+	// B-H1 (round 3): lease TTL in seconds, carried from the hub
+	// (MCP blackhole ttlSeconds or /fleet/block ttlSeconds). 0 or
+	// absent means no expiry (explicit permanent block, as before).
+	// Old satellites ignore the unknown field; old hubs never send
+	// it, so both directions stay compatible.
+	TtlSeconds int `json:"ttlSeconds,omitempty"`
 }
 
 type TelemetryReportPayload struct {
@@ -289,6 +295,11 @@ func main() {
 			_ = engine.SetForwarding("", false)
 		} else {
 			nftEngine.Confirm()
+			// B-H1 (round 3): a full ruleset Apply replaces the
+			// table, so it also wipes any fleet-block set elements.
+			// Re-insert the persisted TTL-bounded blocks (and
+			// re-arm their expiry timers) after every Apply.
+			nftEngine.RestoreFleetBlocks()
 			if err := engine.SetForwarding("", true); err != nil {
 				slog.Warn("Failed to enable IP forwarding", "error", err)
 			}
@@ -549,6 +560,13 @@ func main() {
 								slog.Error("Failed to enable IP forwarding after nftables apply", "error", err)
 								sendAck(env.Type, env.CommandID, fmt.Errorf("nftables ruleset applied but IP forwarding could not be enabled: %w", err))
 							} else {
+								// B-H1 (round 3): a full ruleset
+								// Apply replaces the table and wipes
+								// fleet-block set elements, so
+								// re-insert the persisted TTL-bounded
+								// blocks (and re-arm their timers)
+								// after the new ruleset lands.
+								nftEngine.RestoreFleetBlocks()
 								slog.Info("nftables ruleset applied successfully")
 								sendAck(env.Type, env.CommandID, nil)
 							}
@@ -684,9 +702,32 @@ func main() {
 					} else if bp.Target == "" {
 						sendAck(env.Type, env.CommandID, errors.New("empty block target"))
 					} else {
-						slog.Info("Received AI Copilot block request...", "target", bp.Target)
-						if err := nftEngine.BlockTarget(bp.Target, bp.IsMac); err != nil {
+						slog.Info("Received AI Copilot block request...", "target", bp.Target, "ttlSeconds", bp.TtlSeconds)
+						if err := nftEngine.BlockTarget(bp.Target, bp.IsMac, bp.TtlSeconds); err != nil {
 							slog.Error("Failed to apply micro-segmentation block", "error", err)
+							sendAck(env.Type, env.CommandID, err)
+						} else {
+							sendAck(env.Type, env.CommandID, nil)
+						}
+					}
+
+				case "UNBLOCK_TARGET":
+					// B-H1 (round 3): the unblock half of
+					// BLOCK_TARGET. The hub sends it when a blackhole
+					// lease is reverted or all leases are flushed
+					// (or an operator calls /fleet/unblock), so a
+					// block whose hub lease is gone does not live on
+					// in the fleet forever.
+					var bp BlockTargetPayload
+					if err := json.Unmarshal(env.Payload, &bp); err != nil {
+						slog.Error("Malformed unblock target payload", "error", err)
+						sendAck(env.Type, env.CommandID, err)
+					} else if bp.Target == "" {
+						sendAck(env.Type, env.CommandID, errors.New("empty unblock target"))
+					} else {
+						slog.Info("Received AI Copilot unblock request...", "target", bp.Target)
+						if err := nftEngine.UnblockTarget(bp.Target, bp.IsMac); err != nil {
+							slog.Error("Failed to remove micro-segmentation block", "error", err)
 							sendAck(env.Type, env.CommandID, err)
 						} else {
 							sendAck(env.Type, env.CommandID, nil)

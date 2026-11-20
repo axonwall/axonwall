@@ -150,8 +150,18 @@ export default function EtckeeperPage() {
       ]);
       setStatus(st);
       setHistory(hist);
-      if (st?.config) {
-        populateConfigForm(st.config);
+      if (st) {
+        if (st.config) {
+          populateConfigForm(st.config);
+        }
+      } else {
+        // C-M5: a null status means the daemon did not answer — the repo
+        // state is unknown, not "Not Installed" with zero modified files
+        // and no commits.
+        setActionMessage({
+          type: 'error',
+          text: 'Daemon unavailable: etckeeper status could not be loaded — repository state, modified files and commit history are unknown.',
+        });
       }
     } catch (err: any) {
       setActionMessage({
@@ -249,6 +259,16 @@ export default function EtckeeperPage() {
   };
 
   const handleQuickIgnoreFile = async (filePath: string) => {
+    // C-M6: never save form defaults over the real etckeeper.conf. The
+    // quick-ignore action persists the whole form, so it is only live once
+    // the daemon's config has actually loaded.
+    if (!status?.config) {
+      setActionMessage({
+        type: 'error',
+        text: 'Etckeeper configuration has not loaded from the daemon — refusing to save form defaults over /etc/etckeeper/etckeeper.conf. Refresh status and retry.',
+      });
+      return;
+    }
     const existing = ignorePatternsText
       .split('\n')
       .map((s) => s.trim())
@@ -286,6 +306,16 @@ export default function EtckeeperPage() {
 
   const handleSaveConfig = async (e: React.FormEvent) => {
     e.preventDefault();
+    // C-M6: the form starts with defaults (apt/dpkg, daily autocommit).
+    // Saving before the daemon's real config has loaded would persist
+    // those defaults over /etc/etckeeper/etckeeper.conf.
+    if (!status?.config) {
+      setActionMessage({
+        type: 'error',
+        text: 'Etckeeper configuration has not loaded from the daemon — refusing to save form defaults over /etc/etckeeper/etckeeper.conf. Refresh status and retry.',
+      });
+      return;
+    }
     setIsSavingConfig(true);
     setActionMessage(null);
     try {
@@ -417,7 +447,9 @@ export default function EtckeeperPage() {
             <GitBranch className="w-4 h-4 text-emerald-400" />
           </div>
           <div className="text-lg font-bold text-white flex items-center gap-2">
-            {status?.installed ? (
+            {status === null ? (
+              <span className="text-slate-400">Unknown</span>
+            ) : status?.installed ? (
               status.initialized ? (
                 <span className="text-emerald-400">Active ({status.vcs || 'git'})</span>
               ) : (
@@ -428,7 +460,13 @@ export default function EtckeeperPage() {
             )}
           </div>
           <div className="text-xs text-slate-400 font-mono">
-            Tracked: <span className="text-cyan-400">{status?.trackedPath || '/etc'}</span> ({status?.totalCommits ?? history.length} commits)
+            {status === null ? (
+              'Tracked: Unknown — daemon unreachable'
+            ) : (
+              <>
+                Tracked: <span className="text-cyan-400">{status?.trackedPath || '/etc'}</span> ({status?.totalCommits ?? history.length} commits)
+              </>
+            )}
           </div>
         </div>
 
@@ -438,7 +476,9 @@ export default function EtckeeperPage() {
             <FileDiff className="w-4 h-4 text-cyan-400" />
           </div>
           <div className="text-lg font-bold">
-            {status?.clean ? (
+            {status === null ? (
+              <span className="text-slate-400">Unknown</span>
+            ) : status?.clean ? (
               <span className="text-emerald-400 flex items-center gap-1.5">
                 <CheckCircle2 className="w-4 h-4" />
                 <span>Clean (Committed)</span>
@@ -451,8 +491,12 @@ export default function EtckeeperPage() {
             )}
           </div>
           <div className="text-xs text-slate-400 flex items-center justify-between">
-            <span>Bundle Autocommit: {status?.config?.autoCommitOnApply !== false ? 'Enabled' : 'Disabled'}</span>
-            {!status?.clean && (
+            <span>
+              {status === null
+                ? 'Bundle Autocommit: Unknown'
+                : `Bundle Autocommit: ${status?.config?.autoCommitOnApply !== false ? 'Enabled' : 'Disabled'}`}
+            </span>
+            {status !== null && !status?.clean && (
               <button
                 type="button"
                 onClick={handleToggleWorkingTreeDiff}
@@ -470,14 +514,20 @@ export default function EtckeeperPage() {
             <Clock className="w-4 h-4 text-indigo-400" />
           </div>
           <div className="text-lg font-bold">
-            {status?.timerActive ? (
+            {status === null ? (
+              <span className="text-slate-400">Unknown</span>
+            ) : status?.timerActive ? (
               <span className="text-emerald-400">etckeeper.timer Active</span>
             ) : (
               <span className="text-slate-400">Timer Inactive</span>
             )}
           </div>
           <div className="text-xs text-slate-400 truncate" title={status?.nextTimerRun || ''}>
-            {status?.nextTimerRun ? `Next: ${status.nextTimerRun}` : 'Daily autocommit schedule'}
+            {status === null
+              ? 'Timer state unknown — daemon unreachable'
+              : status?.nextTimerRun
+                ? `Next: ${status.nextTimerRun}`
+                : 'Daily autocommit schedule'}
           </div>
         </div>
 
@@ -487,10 +537,12 @@ export default function EtckeeperPage() {
             <GitCommit className="w-4 h-4 text-purple-400" />
           </div>
           <div className="text-lg font-bold font-mono text-purple-400">
-            {status?.lastCommitHash ? status.lastCommitHash.slice(0, 8) : 'None'}
+            {status === null ? <span className="text-slate-400">Unknown</span> : status?.lastCommitHash ? status.lastCommitHash.slice(0, 8) : 'None'}
           </div>
           <div className="text-xs text-slate-400 truncate" title={status?.lastCommitMsg || ''}>
-            {status?.lastCommitMsg || 'No commits recorded yet'}
+            {status === null
+              ? 'Commit history unknown — daemon unreachable'
+              : status?.lastCommitMsg || 'No commits recorded yet'}
           </div>
         </div>
       </div>
@@ -553,7 +605,10 @@ export default function EtckeeperPage() {
           </form>
 
           {/* Uncommitted Working Tree Changes Card */}
-          {(!status?.clean || modifiedFiles.length > 0 || workingTreeDiff !== null) && (
+          {/* C-M5: hidden while the status is unknown — with a null status
+              this card rendered "Uncommitted Changes in /etc (0)" as if the
+              tree had been inspected. */}
+          {status !== null && (!status?.clean || modifiedFiles.length > 0 || workingTreeDiff !== null) && (
             <div className="bg-slate-900 border border-amber-500/30 rounded-xl p-5 space-y-4">
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                 <div>
@@ -610,7 +665,7 @@ export default function EtckeeperPage() {
                       <button
                         type="button"
                         onClick={() => handleQuickIgnoreFile(file.path)}
-                        disabled={isSavingConfig}
+                        disabled={isSavingConfig || !status?.config}
                         title="Add to /etc/.gitignore and untrack from git"
                         className="text-[11px] text-slate-400 hover:text-amber-300 flex items-center gap-1 shrink-0 ml-2 cursor-pointer"
                       >
@@ -775,7 +830,7 @@ export default function EtckeeperPage() {
               </div>
               <button
                 type="submit"
-                disabled={isSavingConfig}
+                disabled={isSavingConfig || !status?.config}
                 className="px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold flex items-center gap-1.5 transition cursor-pointer disabled:opacity-50"
               >
                 <Save className="w-3.5 h-3.5" />

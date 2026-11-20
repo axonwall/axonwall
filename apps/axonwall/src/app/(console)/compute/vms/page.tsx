@@ -38,8 +38,13 @@ import {
   type IsoItem,
 } from '@/server/virt';
 import type { VirtualMachine, VmDiskBus } from '@axonwall/lib/schemas';
+import { useDesiredStateApply } from '@/lib/use-desired-state-apply';
 
 export default function VirtualMachinesPage() {
+  // C-M8: the save/delete actions take the fingerprint this page loaded
+  // with, so a concurrent save in another tab cannot be silently
+  // reverted by this page's apply.
+  const { getFingerprint } = useDesiredStateApply();
   const [vms, setVms] = useState<VMStatusItem[]>([]);
   const [isos, setIsos] = useState<IsoItem[]>([]);
   const [loading, setLoading] = useState(true);
@@ -203,7 +208,8 @@ export default function VirtualMachinesPage() {
     if (!confirm(`Are you sure you want to delete VM ${targetVmid}? This cannot be undone.`)) return;
     setStatusBanner(null);
     try {
-      const res = await deleteVmAction(targetVmid);
+      const fingerprint = getFingerprint();
+      const res = await deleteVmAction(targetVmid, fingerprint ? { expectedFingerprint: fingerprint } : undefined);
       setStatusBanner({ type: res.success ? 'success' : 'error', message: res.message });
       if (res.success) {
         await loadData();
@@ -295,7 +301,8 @@ export default function VirtualMachinesPage() {
     };
 
     try {
-      const res = await saveVmAction(newVm);
+      const fingerprint = getFingerprint();
+      const res = await saveVmAction(newVm, fingerprint ? { expectedFingerprint: fingerprint } : undefined);
       if (!res.success) {
         setStatusBanner({ type: 'error', message: res.message });
         return;

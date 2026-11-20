@@ -42,6 +42,19 @@ fi
 
 # Identify Primary WAN, LAN, OPT1 & OPT2 NICs (same detection as firstboot)
 IFACES="$(ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | cut -d@ -f1 | grep -vE '^(lo|wg.*|tailscale.*|tun.*|tap.*|sit.*|ip6tnl.*|gre.*|gretap.*|erspan.*|ip_vti.*|ip6_vti.*|ip6gre.*|docker.*|veth.*|br-.*|virbr.*|dummy.*|bond.*|pimreg)$' | head -n 4 || true)"
+# D-M6: exclude interfaces enslaved to a master (bond slaves, bridge
+# ports). This generator runs before firstboot and its interfaces.conf is
+# authoritative, so a slave picked here as WAN/LAN would survive
+# firstboot's own filter. Only the master carries an address.
+# NOTE: keep the list newline-separated — the role picks below consume it
+# with `sed -n 'Np'`, which would take a space-joined list as one NIC.
+_ifaces_filtered=""
+for _iface in $IFACES; do
+  [ -e "/sys/class/net/${_iface}/master" ] && continue
+  _ifaces_filtered="${_ifaces_filtered:+$_ifaces_filtered
+}$_iface"
+done
+IFACES="$_ifaces_filtered"
 WAN_IF="$(echo "$IFACES" | sed -n '1p')"
 LAN_IF="$(echo "$IFACES" | sed -n '2p')"
 OPT1_IF="$(echo "$IFACES" | sed -n '3p')"
@@ -145,12 +158,16 @@ cidr_to_netmask() {
   printf '%s' "$_mask"
 }
 
-# append_stanza IFACE MODE CIDR GATEWAY: print one ifupdown stanza to
-# stdout. Static mode needs a parseable dotted-quad address; anything
+# append_stanza IFACE MODE CIDR GATEWAY [NOGW]: print one ifupdown stanza
+# to stdout. Static mode needs a parseable dotted-quad address; anything
 # else (dhcp mode, or an unusable static address) degrades to a DHCP
 # stanza rather than writing a stanza networking cannot bring up.
+# NOGW=1 (non-WAN DHCP stanzas) adds a post-up guard deleting any default
+# route the lease installs: D-M5 — udhcpc, ifupdown's client here, has no
+# nogateway flag, and without the guard a multi-NIC host gets one default
+# route per NIC with a nondeterministic winner.
 append_stanza() {
-  _iface="$1"; _mode="$2"; _cidr="$3"; _gw="$4"
+  _iface="$1"; _mode="$2"; _cidr="$3"; _gw="$4"; _nogw="${5:-0}"
   if [ "$_mode" = "static" ]; then
     _addr="${_cidr%%/*}"
     case "$_cidr" in */*) _prefix="${_cidr##*/}" ;; *) _prefix=24 ;; esac
@@ -170,7 +187,11 @@ append_stanza() {
       return 0
     fi
   fi
-  printf 'auto %s\niface %s inet dhcp\n\n' "$_iface" "$_iface"
+  printf 'auto %s\niface %s inet dhcp\n' "$_iface" "$_iface"
+  if [ "$_nogw" = "1" ]; then
+    printf '    post-up ip route del default dev %s || true\n' "$_iface"
+  fi
+  printf '\n'
 }
 
 if [ ! -s "$IFACES_FILE" ]; then
@@ -182,15 +203,15 @@ if [ ! -s "$IFACES_FILE" ]; then
     append_stanza "$WAN_IF" "$WAN_MODE" "${WAN_IPV4_ADDRESS:-}" "${WAN_IPV4_GATEWAY:-}"
     if [ -n "$LAN_IF" ]; then
       printf '# LAN Interface\n'
-      append_stanza "$LAN_IF" "$LAN_MODE" "$LAN_IPV4_ADDRESS" ""
+      append_stanza "$LAN_IF" "$LAN_MODE" "$LAN_IPV4_ADDRESS" "" 1
     fi
     if [ -n "$OPT1_IF" ]; then
       printf '# OPT1 Interface\n'
-      append_stanza "$OPT1_IF" "$OPT1_MODE" "${OPT1_IPV4_ADDRESS:-}" ""
+      append_stanza "$OPT1_IF" "$OPT1_MODE" "${OPT1_IPV4_ADDRESS:-}" "" 1
     fi
     if [ -n "$OPT2_IF" ]; then
       printf '# OPT2 Interface\n'
-      append_stanza "$OPT2_IF" "$OPT2_MODE" "${OPT2_IPV4_ADDRESS:-}" ""
+      append_stanza "$OPT2_IF" "$OPT2_MODE" "${OPT2_IPV4_ADDRESS:-}" "" 1
     fi
   } > "$IFACES_FILE" || exit 0
 

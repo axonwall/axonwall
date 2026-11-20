@@ -109,7 +109,11 @@ export async function listUsers() {
   return data.map((u: any) => ({
     id: u.id,
     name: u.name,
-    createdAt: headscaleTimestamp(u, 'createdAt', 'created_at') ?? new Date().toISOString(),
+    // B-L5: a missing/unparsable timestamp used to fall back to
+    // "now", so a user created months ago showed up as just created.
+    // Leave it undefined instead of inventing a creation time (cf.
+    // listPreAuthKeys, which already does this).
+    createdAt: headscaleTimestamp(u, 'createdAt', 'created_at'),
   }));
 }
 
@@ -119,7 +123,8 @@ export async function createUser(name: string) {
   return {
     id: data?.id,
     name: data?.name || safeName,
-    createdAt: headscaleTimestamp(data, 'createdAt', 'created_at') ?? new Date().toISOString(),
+    // B-L5: as in listUsers — no invented creation time.
+    createdAt: headscaleTimestamp(data, 'createdAt', 'created_at'),
   };
 }
 
@@ -159,8 +164,12 @@ export async function createPreAuthKey(user: string | number, reusable: boolean,
     if (ms <= 0) {
       throw new Error('Expiration timestamp must be in the future');
     }
-    const hours = Math.max(1, Math.round(ms / (1000 * 60 * 60)));
-    args.push('--expiration', `${hours}h`);
+    // B-L8: the expiry used to be rounded to whole hours (89 minutes
+    // became 1h — 29 minutes early; 30 minutes became 1h — 30 late).
+    // Headscale parses Go durations, so pass exact seconds (rounded
+    // up so the key never expires before the requested timestamp).
+    const seconds = Math.ceil(ms / 1000);
+    args.push('--expiration', `${seconds}s`);
   }
 
   const data = await runHeadscale(args);

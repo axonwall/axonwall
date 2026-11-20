@@ -97,7 +97,9 @@ export async function listUsers() {
   return data.map((u: any) => ({
     id: u.id,
     name: u.name,
-    createdAt: headscaleTimestamp(u, 'createdAt', 'created_at') ?? new Date().toISOString(),
+    // B-L5: no fabricated "now" — when the timestamp is missing or
+    // unparsable the creation time is unknown, not the moment of listing.
+    createdAt: headscaleTimestamp(u, 'createdAt', 'created_at'),
   }));
 }
 
@@ -107,7 +109,8 @@ export async function createUser(name: string) {
   return {
     id: data?.id,
     name: data?.name || safeName,
-    createdAt: headscaleTimestamp(data, 'createdAt', 'created_at') ?? new Date().toISOString(),
+    // B-L5: no fabricated "now" — see listUsers above.
+    createdAt: headscaleTimestamp(data, 'createdAt', 'created_at'),
   };
 }
 

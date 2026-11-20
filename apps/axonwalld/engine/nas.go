@@ -625,7 +625,10 @@ func (m *NasManager) ListPools() []ZfsPoolStatus {
 		frag, _ := strconv.Atoi(strings.TrimSuffix(fields[4], "%"))
 		capPct, _ := strconv.Atoi(strings.TrimSuffix(fields[5], "%"))
 
-		topo := "mirror"
+		// A-L5: an unknown pool used to be displayed as "mirror"
+		// regardless of its real topology. Report it as unknown
+		// instead of inventing a value.
+		topo := "unknown"
 		var disks []string
 		for _, cp := range cfgPools {
 			if cp.Name == fields[0] {
@@ -814,14 +817,29 @@ func (m *NasManager) DatasetKeyAction(dataset, action, keyMaterial string) error
 		if out, err := cmd.CombinedOutput(); err != nil {
 			return fmt.Errorf("zfs load-key failed: %s (%w)", strings.TrimSpace(string(out)), err)
 		}
-		_ = exec.Command("zfs", "mount", cleanDs).Run()
+		// A-M7: the follow-up mount used to be discarded (`_ =`), so
+		// an unlock reported success while the dataset stayed
+		// unmounted and its shares pointed at an empty mountpoint.
+		// A mount that reports "already mounted" is not a failure:
+		// the dataset is accessible, which is what unlock promises.
+		if out, err := exec.Command("zfs", "mount", cleanDs).CombinedOutput(); err != nil {
+			if !strings.Contains(string(out), "already mounted") {
+				return fmt.Errorf("zfs load-key succeeded but zfs mount %s failed: %s (%w)", cleanDs, strings.TrimSpace(string(out)), err)
+			}
+		}
 		return nil
 	case "change-key":
 		if len(strings.TrimSpace(keyMaterial)) < 8 {
 			return fmt.Errorf("keyMaterial must be at least 8 characters for change-key")
 		}
 		cmd := exec.Command("zfs", "change-key", "-o", "keylocation=prompt", "-o", "keyformat=passphrase", cleanDs)
-		cmd.Stdin = strings.NewReader(strings.TrimSpace(keyMaterial) + "\n")
+		// A-M10: `zfs change-key -o keylocation=prompt -o
+		// keyformat=passphrase` prompts for the new passphrase TWICE
+		// ("Enter new passphrase" / "Re-enter new passphrase"; the
+		// existing key must already be loaded, so there is no
+		// current-passphrase prompt). Supplying one line starved the
+		// second prompt at EOF and the action could never succeed.
+		cmd.Stdin = strings.NewReader(strings.TrimSpace(keyMaterial) + "\n" + strings.TrimSpace(keyMaterial) + "\n")
 		if out, err := cmd.CombinedOutput(); err != nil {
 			return fmt.Errorf("zfs change-key failed: %s (%w)", strings.TrimSpace(string(out)), err)
 		}
@@ -878,6 +896,16 @@ func (m *NasManager) RunCloudSyncTask(taskName string) (string, error) {
 	if !validZfsPath(found.Dataset, true) {
 		return "", fmt.Errorf("invalid dataset path in cloud sync task %q", cleanName)
 	}
+	// A-M8: Direction used to be unvalidated — only the exact string
+	// "pull" selected pull and *anything else* ("", "Push",
+	// "download", a typo) fell into the push branch and ran
+	// `rclone sync <local> <remote>`, which deletes remote files
+	// that are not local. Validate up front, before rclone runs:
+	// only the two documented directions are accepted.
+	direction := strings.ToLower(strings.TrimSpace(found.Direction))
+	if direction != "push" && direction != "pull" {
+		return "", fmt.Errorf("cloud sync task %q has invalid direction %q (expected \"push\" or \"pull\")", cleanName, found.Direction)
+	}
 	localPath := filepath.Clean("/mnt/" + found.Dataset)
 	if !underMnt(localPath) {
 		return "", fmt.Errorf("cloud sync local path %q is outside /mnt", localPath)
@@ -899,7 +927,7 @@ func (m *NasManager) RunCloudSyncTask(taskName string) (string, error) {
 		remoteTarget = fmt.Sprintf(":s3:%s/%s", bucket, prefix)
 	}
 	args := []string{"sync"}
-	if found.Direction == "pull" {
+	if direction == "pull" {
 		args = append(args, remoteTarget, localPath)
 	} else {
 		args = append(args, localPath, remoteTarget)
@@ -923,7 +951,7 @@ func (m *NasManager) RunCloudSyncTask(taskName string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("rclone cloud sync %s failed: %s (%w)", cleanName, strings.TrimSpace(string(out)), err)
 	}
-	return fmt.Sprintf("Cloud sync task %s (%s) completed", cleanName, found.Direction), nil
+	return fmt.Sprintf("Cloud sync task %s (%s) completed", cleanName, direction), nil
 }
 
 func (m *NasManager) ScrubPool(poolName string) error {
@@ -1082,27 +1110,57 @@ func (m *NasManager) ApplyConfig(rawJSON []byte) error {
 	}
 
 	// 4. Write & reconcile LIO kernel iSCSI target configuration if configured and targetctl is installed
+	// A-M5: the saveconfig write, the targetctl restore, and the MinIO
+	// reload below used to be swallowed (`_ =` / `if err == nil`) while
+	// the bundle was stored as live config and the apply reported
+	// success. Every failure now fails the apply, matching the A-M16
+	// treatment of the pool/dataset/SMB/NFS steps.
 	if bundle.LioSaveconfigJson != "" {
-		_ = os.MkdirAll("/etc/rtslib-fb-target", 0750)
-		if err := os.WriteFile("/etc/rtslib-fb-target/saveconfig.json", []byte(bundle.LioSaveconfigJson), 0600); err == nil {
-			if targetctl, lookErr := exec.LookPath("targetctl"); lookErr == nil {
-				_ = exec.Command(targetctl, "restore", "/etc/rtslib-fb-target/saveconfig.json").Run()
-			}
+		if err := os.MkdirAll("/etc/rtslib-fb-target", 0750); err != nil {
+			return fmt.Errorf("failed to create /etc/rtslib-fb-target: %w", err)
+		}
+		if err := os.WriteFile("/etc/rtslib-fb-target/saveconfig.json", []byte(bundle.LioSaveconfigJson), 0600); err != nil {
+			return fmt.Errorf("failed to write /etc/rtslib-fb-target/saveconfig.json: %w", err)
+		}
+		targetctl, lookErr := exec.LookPath("targetctl")
+		if lookErr != nil {
+			return fmt.Errorf("cannot restore LIO iSCSI target configuration: targetctl is not installed on this system")
+		}
+		if out, err := exec.Command(targetctl, "restore", "/etc/rtslib-fb-target/saveconfig.json").CombinedOutput(); err != nil {
+			return fmt.Errorf("targetctl restore failed: %s (%w)", strings.TrimSpace(string(out)), err)
 		}
 	}
 
 	// 5. Write & reload S3 MinIO gateway environment if configured and minio unit is installed
 	if bundle.S3EnvConf != "" {
-		_ = os.MkdirAll("/etc/default", 0755)
-		wroteMinio := os.WriteFile("/etc/default/minio", []byte(bundle.S3EnvConf), 0600) == nil
+		// A-M5 (round 3): every failure in this step fails the
+		// apply — the bundle is stored as live config below, so a
+		// swallowed write/reload would report success while disk
+		// state diverges. Main's Arch path (a648c351) is kept:
+		// /etc/minio/minio.conf is written when /etc/minio exists
+		// or the OS family is Arch. Its failures fail the apply
+		// too (judgment call — main made it best-effort, but a
+		// silently skipped Arch config is the A-M5 failure mode
+		// on Arch). Main's --no-ask-password flag is kept on the
+		// reload.
+		if err := os.MkdirAll("/etc/default", 0755); err != nil {
+			return fmt.Errorf("failed to create /etc/default: %w", err)
+		}
+		if err := os.WriteFile("/etc/default/minio", []byte(bundle.S3EnvConf), 0600); err != nil {
+			return fmt.Errorf("failed to write /etc/default/minio: %w", err)
+		}
 		if info, err := os.Stat("/etc/minio"); (err == nil && info.IsDir()) || DetectOSFamily() == "arch" {
-			_ = os.MkdirAll("/etc/minio", 0755)
-			if err := os.WriteFile("/etc/minio/minio.conf", []byte(bundle.S3EnvConf), 0600); err == nil {
-				wroteMinio = true
+			if err := os.MkdirAll("/etc/minio", 0755); err != nil {
+				return fmt.Errorf("failed to create /etc/minio: %w", err)
+			}
+			if err := os.WriteFile("/etc/minio/minio.conf", []byte(bundle.S3EnvConf), 0600); err != nil {
+				return fmt.Errorf("failed to write /etc/minio/minio.conf: %w", err)
 			}
 		}
-		if wroteMinio && isSystemdServiceActive("minio") {
-			_ = exec.Command("systemctl", "--no-ask-password", "reload-or-restart", "minio").Run()
+		if isSystemdServiceActive("minio") {
+			if out, err := exec.Command("systemctl", "--no-ask-password", "reload-or-restart", "minio").CombinedOutput(); err != nil {
+				return fmt.Errorf("failed to reload-or-restart minio: %s (%w)", strings.TrimSpace(string(out)), err)
+			}
 		}
 	}
 

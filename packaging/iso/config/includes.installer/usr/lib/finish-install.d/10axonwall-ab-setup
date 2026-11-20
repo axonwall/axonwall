@@ -52,11 +52,30 @@ fi
 if [ -f /var/lib/partman/axonwall-k3s.token ]; then
   K3S_JOIN_TOKEN="$(cat /var/lib/partman/axonwall-k3s.token 2>/dev/null || true)"
 fi
-if [ -f /target/etc/axonwall/.k3s-edition ]; then
-  INSTALL_EDITION="k3s-storage"
-elif [ -f /target/etc/axonwall/.vault-edition ]; then
-  INSTALL_EDITION="vault"
-fi
+# D-M9 (marker): the canonical edition file is read first, then the
+# legacy markers — same order as axonwall-update. A non-empty value
+# that is not a known edition fails the install loudly. INSTALL_EDITION
+# is final after this block (nothing below reassigns it); the file is
+# written here so every d-i install carries it.
+_target_edition="$(tr -d ' \t\r\n' < /target/etc/axonwall/edition 2>/dev/null || true)"
+case "$_target_edition" in
+  axonwall|vault|k3s-storage)
+    INSTALL_EDITION="$_target_edition"
+    ;;
+  "")
+    if [ -f /target/etc/axonwall/.k3s-edition ]; then
+      INSTALL_EDITION="k3s-storage"
+    elif [ -f /target/etc/axonwall/.vault-edition ]; then
+      INSTALL_EDITION="vault"
+    fi
+    ;;
+  *)
+    echo "[!] ERROR: /target/etc/axonwall/edition contains '${_target_edition}' (expected axonwall, vault, or k3s-storage); refusing to install with a corrupt edition record." >&2
+    exit 1
+    ;;
+esac
+mkdir -p /target/etc/axonwall
+printf '%s\n' "${INSTALL_EDITION}" > /target/etc/axonwall/edition
 
 if [ "$PARTITION_MODE" = "rolling" ]; then
   INSTALL_MODE="rolling"
@@ -686,14 +705,29 @@ if [ "$INSTALL_MODE" = "ab" ] && [ -b "$ROOT_B_DEV" ]; then
         --exclude=/dev/* \
         --exclude=/run/* \
         --exclude=/tmp/* \
+        --exclude=/etc/machine-id \
+        --exclude=/etc/ssh/ssh_host_* \
+        --exclude=/var/lib/dbus/machine-id \
+        --exclude=/var/lib/cloud/data \
+        --exclude=/var/lib/cloud/instance \
+        --exclude=/var/lib/cloud/instances \
         /target/ "$STAGE_B/" 2>/dev/null; then
         SYNC_OK=1
       fi
     else
-      if tar -C /target --exclude='./dev/*' --exclude='./proc/*' --exclude='./sys/*' --exclude='./tmp/*' --exclude='./run/*' --exclude='./mnt/*' --exclude='./media/*' --exclude='./lost+found' --exclude='./var/lib/axonwall/*' --exclude='./boot/efi/*' -cf - . | tar -C "$STAGE_B" -xf -; then
+      if tar -C /target --exclude='./dev/*' --exclude='./proc/*' --exclude='./sys/*' --exclude='./tmp/*' --exclude='./run/*' --exclude='./mnt/*' --exclude='./media/*' --exclude='./lost+found' --exclude='./var/lib/axonwall/*' --exclude='./boot/efi/*' --exclude='./etc/machine-id' --exclude='./etc/ssh/ssh_host_*' --exclude='./var/lib/dbus/machine-id' --exclude='./var/lib/cloud/data' --exclude='./var/lib/cloud/instance' --exclude='./var/lib/cloud/instances' -cf - . | tar -C "$STAGE_B" -xf -; then
         SYNC_OK=1
       fi
     fi
+    # D-M1: sanitize machine identity on the standby copy, exactly as
+    # the firstboot clone does, so slot B generates its own machine-id,
+    # SSH host keys and cloud-init state on its first boot. (At install
+    # time these are usually still empty/absent, so this is normally a
+    # no-op safety net.) The cloud-init *seed* is copied separately
+    # below and is deliberately not removed here.
+    : > "$STAGE_B/etc/machine-id" 2>/dev/null || true
+    rm -f "$STAGE_B/var/lib/dbus/machine-id" "$STAGE_B"/etc/ssh/ssh_host_* 2>/dev/null || true
+    rm -rf "$STAGE_B/var/lib/cloud/data" "$STAGE_B/var/lib/cloud/instance" "$STAGE_B/var/lib/cloud/instances" 2>/dev/null || true
 
     # Configure Slot B's /etc/fstab for independent booting
     if [ -f "$STAGE_B/etc/fstab" ]; then
@@ -865,12 +899,16 @@ if [ "$SYSTEM_RAID_MODE" = "mirror" ] && [ -n "$SYSTEM_RAID_DISKS" ]; then
     sleep 1
 
     # Clone EFI System Partition & install redundant GRUB bootloader on secondary disk
+    # D-M12: a failed secondary-disk install used to be swallowed, silently
+    # losing boot redundancy (the box still boots from disk 1 until disk 1
+    # fails). Fail the install loudly instead -- this hook runs under
+    # `set -e`, so a failure aborts here with the error visible.
     SEC_EFI=$(part_dev "$sec_disk" 2)
     if [ -b "$EFI_DEV" ] && [ -b "$SEC_EFI" ]; then
-      dd if="$EFI_DEV" of="$SEC_EFI" bs=1M conv=fsync 2>/dev/null || true
+      dd if="$EFI_DEV" of="$SEC_EFI" bs=1M conv=fsync
     fi
-    in-target grub-install --target=i386-pc "$sec_disk" 2>/dev/null || true
-    in-target grub-install --target=x86_64-efi --efi-directory=/boot/efi --removable --no-nvram 2>/dev/null || true
+    in-target grub-install --target=i386-pc "$sec_disk"
+    in-target grub-install --target=x86_64-efi --efi-directory=/boot/efi --removable --no-nvram
 
     # Replicate Slot A & Slot B onto secondary disk or assemble mdadm mirror
     SEC_ROOT_A=""
@@ -1340,7 +1378,12 @@ GRUB_COLOR_HIGHLIGHT="light-green/dark-gray"
 CFG_EOF
 
   # 10. Refresh GRUB configuration
-  in-target update-grub 2>/dev/null || true
+  # D-H3: if update-grub itself fails, the target keeps the stock grub.cfg
+  # d-i generated before 40_axonwall_ab was installed -- exactly the
+  # outcome the section-7 guard exists to prevent. Fail the install
+  # loudly (hook runs under `set -e`) instead of swallowing the failure
+  # and printing success with no A/B slot logic.
+  in-target update-grub
 fi
 
 # 10. Clean up sensitive installer state files & persist installation log into target

@@ -256,6 +256,22 @@ cmd_apply() {
   local src_uki="/usr/lib/zfsbootmenu/vmlinuz.efi"
   [ -f "$src_uki" ] || src_uki="$ESP_UKI"
 
+  # E-L4 (round-3): preserve the previous known-good UKI and BIOS
+  # kernel/initrd BEFORE re-theming, so an interrupted apply still
+  # leaves a bootable fallback on this ESP. The old code overwrote
+  # VMLINUZ-BACKUP.EFI with the NEW UKI after a successful apply, so
+  # the "backup" was identical to the primary — and the syslinux
+  # zbm_backup entry booted the same files as zbm.
+  if [ -f "$ESP_UKI" ]; then
+    cp -f "$ESP_UKI" "${ESP_ZBM_DIR}/VMLINUZ-BACKUP.EFI" 2>/dev/null || true
+  fi
+  if [ -f "${ESP_ZBM_DIR}/vmlinuz-bootmenu" ]; then
+    cp -f "${ESP_ZBM_DIR}/vmlinuz-bootmenu" "${ESP_ZBM_DIR}/vmlinuz-bootmenu.bak" 2>/dev/null || true
+  fi
+  if [ -f "${ESP_ZBM_DIR}/initramfs-bootmenu.img" ]; then
+    cp -f "${ESP_ZBM_DIR}/initramfs-bootmenu.img" "${ESP_ZBM_DIR}/initramfs-bootmenu.img.bak" 2>/dev/null || true
+  fi
+
   if [ -f "$src_uki" ] && [ -x /usr/lib/axonwall/theme-zbm-uki.py ]; then
     python3 /usr/lib/axonwall/theme-zbm-uki.py "$src_uki" \
       -o "$ESP_UKI" \
@@ -263,8 +279,16 @@ cmd_apply() {
       -f "$font_arg" \
       --extract-linux "${ESP_ZBM_DIR}/vmlinuz-bootmenu" \
       --extract-initrd "${ESP_ZBM_DIR}/initramfs-bootmenu.img"
-    cp -f "$ESP_UKI" "${ESP_ZBM_DIR}/VMLINUZ-BACKUP.EFI"
     cp -f "$ESP_UKI" "${ESP_MOUNT}/EFI/BOOT/BOOTX64.EFI"
+  fi
+
+  # The syslinux backup entry boots the preserved pair above when one
+  # exists; otherwise it falls back to the (only) current pair.
+  local backup_linux="/EFI/ZBM/vmlinuz-bootmenu"
+  local backup_initrd="/EFI/ZBM/initramfs-bootmenu.img"
+  if [ -f "${ESP_ZBM_DIR}/vmlinuz-bootmenu.bak" ] && [ -f "${ESP_ZBM_DIR}/initramfs-bootmenu.img.bak" ]; then
+    backup_linux="/EFI/ZBM/vmlinuz-bootmenu.bak"
+    backup_initrd="/EFI/ZBM/initramfs-bootmenu.img.bak"
   fi
 
   local extra_font=""
@@ -283,8 +307,8 @@ LABEL zbm
   APPEND zfsbootmenu quiet loglevel=3 net.ifnames=0 zbm.timeout=5 zbm.autosize=1${extra_font} zbm.hookroot=LABEL=AXON_EFI//EFI/ZBM/hooks console=ttyS0,9600 console=tty1
 
 LABEL zbm_backup
-  LINUX /EFI/ZBM/vmlinuz-bootmenu
-  INITRD /EFI/ZBM/initramfs-bootmenu.img
+  LINUX ${backup_linux}
+  INITRD ${backup_initrd}
   APPEND zfsbootmenu zbm.force_import=1 loglevel=3 net.ifnames=0 zbm.timeout=5 zbm.autosize=1${extra_font} zbm.hookroot=LABEL=AXON_EFI//EFI/ZBM/hooks console=ttyS0,9600 console=tty1
 ZBM_SYSLINUX_EOF
   cp -f "$ESP_SYSLINUX" "${ESP_MOUNT}/syslinux.cfg" 2>/dev/null || true
@@ -341,9 +365,14 @@ cmd_zbm_kcl() {
     cur_kcl="${cur_kcl} ${a}"
   done
 
+  # E-L4 (round-3): preserve the previous known-good UKI BEFORE
+  # re-theming (see cmd_apply); the old code overwrote the backup with
+  # the new UKI after a successful apply, so it was never a fallback.
+  if [ -f "$target_efi" ] && [ "$target_efi" = "$ESP_UKI" ]; then
+    cp -f "$ESP_UKI" "${ESP_ZBM_DIR}/VMLINUZ-BACKUP.EFI" 2>/dev/null || true
+  fi
   python3 /usr/lib/axonwall/theme-zbm-uki.py "$target_efi" -o "$target_efi" -s "$ZBM_SPLASH" -c "$cur_kcl"
   if [ "$target_efi" = "$ESP_UKI" ]; then
-    cp -f "$ESP_UKI" "${ESP_ZBM_DIR}/VMLINUZ-BACKUP.EFI" 2>/dev/null || true
     cp -f "$ESP_UKI" "${ESP_MOUNT}/EFI/BOOT/BOOTX64.EFI" 2>/dev/null || true
     sync_secondary_esps
   fi

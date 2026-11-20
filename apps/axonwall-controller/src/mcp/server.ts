@@ -3,6 +3,7 @@ import * as http from 'node:http';
 import * as path from 'node:path';
 import { resolveControllerDirs } from '../dev-paths.js';
 import * as crypto from 'node:crypto';
+import { fileURLToPath } from 'node:url';
 import {
   McpBlackholeRequestSchema,
   McpShapeRequestSchema,
@@ -29,7 +30,7 @@ import {
   type McpGuardContext,
   type McpScope,
 } from '@axonwall/lib/mcp';
-import { DesiredStateSchema, type DesiredState } from '@axonwall/lib/schemas';
+import { DesiredStateSchema, type BpfTokenDelegationSpec, type DesiredState } from '@axonwall/lib/schemas';
 import { importFirewallConfig, mergeFirewallConfigs } from '@axonwall/lib/import';
 import { compileNftables } from '@axonwall/lib/compile/nft';
 import { compileLxcContainer } from '@axonwall/lib/compile/virt';
@@ -67,6 +68,33 @@ function readAgentToken(): string {
 // random suffix.
 export function newMcpApplyJobId(): string {
   return `mcp_apply_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
+}
+
+// B-L3: the initialize handshake used to report a hardcoded '0.11.64',
+// three releases behind the running code. Read the controller's own
+// package.json at runtime instead — `../package.json` from the bundled
+// dist/ output, `../../package.json` when run from src/mcp/. Returns
+// 'unknown' when neither resolves; it never invents a version.
+export function resolveMcpServerVersion(): string {
+  try {
+    const moduleDir = path.dirname(fileURLToPath(import.meta.url));
+    for (const candidate of [
+      path.join(moduleDir, '..', 'package.json'),
+      path.join(moduleDir, '..', '..', 'package.json'),
+    ]) {
+      try {
+        const parsed = JSON.parse(fs.readFileSync(candidate, 'utf8')) as { version?: unknown };
+        if (typeof parsed.version === 'string' && parsed.version.trim()) {
+          return parsed.version.trim();
+        }
+      } catch {
+        // Try the next candidate.
+      }
+    }
+  } catch {
+    // Fall through to 'unknown' below.
+  }
+  return 'unknown';
 }
 
 // B2-M4: insert a proposed rule into a DesiredState, preserving
@@ -180,7 +208,19 @@ function loadLocalDesiredState(): DesiredState | null {
   return null;
 }
 
-function persistDesiredStateToDisk(targetState: DesiredState): void {
+// B-M4: returns true only when the state actually landed on disk.
+// It used to swallow every write error (`catch {}`) and return void,
+// so callers reported staged/saved success while disk held the old
+// state — and an MCP propose could apply a rule to the kernel from the
+// in-memory state while disk never recorded it. Contract: success
+// requires at least one state.json copy to land (the loadable source
+// of truth — loadLocalDesiredState reads /etc first, then /var/lib,
+// so one surviving copy is enough for reload, which is also what
+// keeps this usable in dev where /etc/axonwall is not writable) AND
+// every YAML mirror write attempted (dirs that already exist) to
+// succeed. The custom-state path has a single target, so any failure
+// there is a failure. Callers must fail closed on false.
+function persistDesiredStateToDisk(targetState: DesiredState): boolean {
   const dirs = resolveControllerDirs();
   const customState = process.env.AXONWALL_STATE_JSON_PATH || process.env.AXONWALL_STATE_FILE;
   if (customState) {
@@ -192,19 +232,23 @@ function persistDesiredStateToDisk(targetState: DesiredState): void {
       for (const [fn, content] of Object.entries(yamlFiles)) {
         fs.writeFileSync(path.join(customDir, fn), content, { mode: 0o660 });
       }
+      return true;
     } catch {
-      // ignore custom override errors
+      // A failed custom-state write must not report staged success.
+      return false;
     }
-    return;
   }
+  let stateJsonLanded = false;
   for (const statePath of Array.from(new Set([path.join(dirs.etcDir, 'state.json'), dirs.stateFile]))) {
     try {
       fs.mkdirSync(path.dirname(statePath), { recursive: true, mode: 0o770 });
       fs.writeFileSync(statePath, JSON.stringify(targetState, null, 2), { mode: 0o600 });
+      stateJsonLanded = true;
     } catch {
       // Fallback if target directory not writable
     }
   }
+  if (!stateJsonLanded) return false;
   try {
     const yamlFiles = serializeDesiredStateToYamlFiles(targetState);
     for (const dir of Array.from(new Set([dirs.etcDir, dirs.persistYamlDir]))) {
@@ -214,7 +258,10 @@ function persistDesiredStateToDisk(targetState: DesiredState): void {
         }
       }
     }
-  } catch {}
+  } catch {
+    return false;
+  }
+  return true;
 }
 
 function resolveBpfTokenPresetMasks(preset: string): {
@@ -1109,7 +1156,18 @@ export const MCP_TOOLS_CATALOG = [
 export interface McpExecutionEnvironment {
   key: McpApiKey;
   clientIp: string;
-  onFleetBroadcastBlock?: (ip: string, reason: string, durationMinutes: number) => number;
+  // B-H1 (round 3): the broadcast callback takes the lease TTL in
+  // SECONDS (not minutes — the old durationMinutes rounded a 10 s
+  // lease up to a 60 s satellite block). The satellite applies the
+  // same TTL as its own block expiry, so hub and fleet blocks end
+  // together instead of the satellite block living forever.
+  onFleetBroadcastBlock?: (ip: string, reason: string, ttlSeconds: number) => number;
+  // B-H1 (round 3): unblock path for the fleet. Called when a
+  // blackhole lease is reverted or all leases are flushed, so the
+  // hub-side revert/clear reaches the satellites that received the
+  // block. Absent over stdio (no satellite sockets in that
+  // process), in which case fleet unblocking is unavailable.
+  onFleetBroadcastUnblock?: (ip: string, reason: string) => number;
 }
 
 function getAllowedScopesForResourceUri(uri: string): McpScope[] {
@@ -1317,6 +1375,17 @@ export async function handleMcpReadResource(
         callAxonwalldApi('GET', '/v1/virt/pci'),
         callAxonwalldApi('GET', '/v1/virt/telemetry'),
       ]);
+      // B-L6: daemonDown used to be set only when ALL THREE core
+      // sources failed, so a single failing source collapsed to an
+      // empty list presented as fact ("no VMs"). Report partial
+      // failures per source; daemonDown keeps its total-failure
+      // meaning for existing consumers.
+      const failedSources: string[] = [
+        ...(!vmsRes.ok ? ['vms'] : []),
+        ...(!ctsRes.ok ? ['containers'] : []),
+        ...(!pciRes.ok ? ['pciDevices'] : []),
+        ...(!telRes.ok ? ['telemetry'] : []),
+      ];
       const anyDown = !vmsRes.ok && !ctsRes.ok && !telRes.ok;
       payload = {
         vms: vmsRes.ok ? vmsRes.data?.vms ?? [] : [],
@@ -1325,6 +1394,9 @@ export async function handleMcpReadResource(
         ebpfTelemetry: telRes.ok ? telRes.data : null,
         ...(anyDown
           ? { daemonDown: true, error: vmsRes.data?.error || 'axonwalld unreachable' }
+          : {}),
+        ...(failedSources.length > 0 && !anyDown
+          ? { partialDaemonFailure: true, failedSources, error: 'One or more virt sources failed; the empty lists below are unknown, not empty' }
           : {}),
       };
       break;
@@ -1642,6 +1714,22 @@ export async function handleMcpCallTool(
       if (req.propagateToFleet) {
         const fleetErr = requireScope('mcp:fleet:broadcast', req.audit);
         if (fleetErr) return fleetErr;
+        // B-M3 (round 3): the stdio server runs in a different
+        // process from the satellite sockets, so it has no
+        // onFleetBroadcastBlock and propagation is impossible — but
+        // the old code created the hub lease and returned
+        // success:true with fleetPropagatedSatellites: 0, so a SOAR
+        // agent believed the fleet was blocked. Deny BEFORE the
+        // daemon call (no local lease is created) and say plainly
+        // that the caller must use the HTTP MCP endpoint for fleet
+        // propagation, or retry hub-only.
+        if (!env.onFleetBroadcastBlock) {
+          return deny(
+            'mcp:fleet:broadcast',
+            'Fleet propagation is unavailable over this transport: the stdio MCP server runs in a separate process from the satellite sockets and cannot broadcast blocks. No block was created. Reconnect over the HTTP MCP endpoint to propagate a block to the fleet, or retry with propagateToFleet: false for a hub-only block.',
+            req.audit,
+          );
+        }
       }
 
       const { ctx, activeLeasesCount } = await buildGuardContext(env.key, env.clientIp);
@@ -1679,10 +1767,13 @@ export async function handleMcpCallTool(
 
       let fleetPropagatedCount = 0;
       if (req.propagateToFleet && env.onFleetBroadcastBlock && targetCheck.normalizedTarget) {
+        // B-H1 (round 3): pass the bounded TTL in seconds, not
+        // minutes — the satellite expires its block on the same
+        // lease boundary as the hub instead of blocking forever.
         fleetPropagatedCount = env.onFleetBroadcastBlock(
           targetCheck.normalizedTarget,
           req.audit.reason,
-          Math.ceil(boundedTtl / 60)
+          boundedTtl
         );
       }
 
@@ -2004,9 +2095,11 @@ export async function handleMcpCallTool(
         return deny('mcp:traffic:*', 'leaseId is required');
       }
 
-      const leasesRes = await callAxonwalldApi<{ leases?: Array<{ id?: string; kind?: string }> }>('GET', '/v1/mcp/leases');
-      if (leasesRes.ok && Array.isArray(leasesRes.data?.leases)) {
-        const targetLease = leasesRes.data.leases.find((l) => l.id === leaseId);
+      const leasesRes = await callAxonwalldApi<{ leases?: Array<{ id?: string; kind?: string; normalizedTarget?: string }> }>('GET', '/v1/mcp/leases');
+      const targetLease = leasesRes.ok && Array.isArray(leasesRes.data?.leases)
+        ? leasesRes.data.leases.find((l) => l.id === leaseId)
+        : undefined;
+      if (targetLease) {
         if (targetLease?.kind && !hasMcpScope(env.key, 'mcp:firewall:write')) {
           const requiredForKind =
             targetLease.kind === 'blackhole'
@@ -2027,6 +2120,19 @@ export async function handleMcpCallTool(
         return deny('mcp:traffic:*', daemonRes.data?.error || `Failed to revert lease '${leaseId}'`);
       }
 
+      // B-H1 (round 3): a reverted blackhole lease must also be
+      // lifted from every satellite it was propagated to — the old
+      // code only called the hub daemon, so a reverted block lived
+      // on in the fleet forever. The lease's normalizedTarget is
+      // the bare target the satellites blocked (TargetSummary is a
+      // human sentence, not a target). When there is no fleet
+      // transport (stdio) the count stays 0 and the response says
+      // so; the hub lease is still reverted.
+      let fleetUnblockedSatellites = 0;
+      if (targetLease?.kind === 'blackhole' && targetLease.normalizedTarget && env.onFleetBroadcastUnblock) {
+        fleetUnblockedSatellites = env.onFleetBroadcastUnblock(targetLease.normalizedTarget, reason);
+      }
+
       recordMcpAuditEntry({
         keyId: env.key.id,
         keyName: env.key.name,
@@ -2035,7 +2141,7 @@ export async function handleMcpCallTool(
         toolName,
         requiredScope: 'mcp:traffic:*',
         decision: 'allowed',
-        paramsSummary: { leaseId, reason },
+        paramsSummary: { leaseId, reason, fleetUnblockedSatellites },
         leaseId,
       });
 
@@ -2044,7 +2150,10 @@ export async function handleMcpCallTool(
           {
             type: 'text',
             text: JSON.stringify(
-              daemonRes.data,
+              {
+                ...(daemonRes.data && typeof daemonRes.data === 'object' ? daemonRes.data : {}),
+                fleetUnblockedSatellites,
+              },
               null,
               2
             ),
@@ -2059,6 +2168,15 @@ export async function handleMcpCallTool(
       }
 
       const reason = typeof args.reason === 'string' ? args.reason.trim() : 'Emergency flush via MCP';
+      // B-H1 (round 3): snapshot the blackhole targets BEFORE the
+      // flush — after it the daemon no longer lists them, and the
+      // fleet unblock below needs the targets. A failed snapshot
+      // does not block the flush itself, but it is logged: without
+      // it the fleet blocks cannot be lifted from here.
+      const leasesBeforeFlush = await callAxonwalldApi<{ leases?: Array<{ id?: string; kind?: string; normalizedTarget?: string }> }>('GET', '/v1/mcp/leases');
+      if (!leasesBeforeFlush.ok) {
+        console.error('[MCP] Could not list leases before emergency clear-all; fleet blackhole blocks may survive the flush');
+      }
       const daemonRes = await callAxonwalldApi('POST', '/v1/mcp/flush', {});
       // B-H5: a daemon failure here must deny, not report success with
       // clearedCount 0 while every tactical lease is still active.
@@ -2068,7 +2186,24 @@ export async function handleMcpCallTool(
           daemonRes.data?.error || 'Daemon unavailable: emergency clear-all was not applied; tactical leases are still active'
         );
       }
+      // Main (fc576368, A-H3): the flush cleared the hub leases but
+      // left the kernel XDP blocks in place — clear them too, or the
+      // emergency clear leaves the data plane still blocking.
       await callAxonwalldApi('DELETE', '/v1/ebpf/xdp/block', { clearAll: true });
+      // B-H1 (round 3): the flush cleared the hub leases; lift the
+      // matching blocks from the fleet too, or every propagated
+      // blackhole outlives the emergency clear. Only blackhole
+      // leases propagate to the fleet, so only their targets are
+      // unblocked. The count is reported, not assumed.
+      let fleetUnblockedSatellites = 0;
+      if (env.onFleetBroadcastUnblock && leasesBeforeFlush.ok && Array.isArray(leasesBeforeFlush.data?.leases)) {
+        const seenTargets = new Set<string>();
+        for (const lease of leasesBeforeFlush.data.leases) {
+          if (lease.kind !== 'blackhole' || !lease.normalizedTarget || seenTargets.has(lease.normalizedTarget)) continue;
+          seenTargets.add(lease.normalizedTarget);
+          fleetUnblockedSatellites += env.onFleetBroadcastUnblock(lease.normalizedTarget, reason);
+        }
+      }
       recordMcpAuditEntry({
         keyId: env.key.id,
         keyName: env.key.name,
@@ -2088,6 +2223,7 @@ export async function handleMcpCallTool(
               {
                 success: true,
                 clearedCount: daemonRes.data?.clearedCount ?? 0,
+                fleetUnblockedSatellites,
                 reason,
               },
               null,
@@ -2292,7 +2428,14 @@ export async function handleMcpCallTool(
           return deny('mcp:firewall:write', 'DesiredState file (/etc/axonwall/state.json) not found on appliance', req.audit);
         }
         insertMcpRuleIntoState(fresh, req.rule);
-        persistDesiredStateToDisk(fresh);
+        // B-M4: fail closed when the rule cannot be persisted — applying
+        // it to the kernel below while disk never recorded it would
+        // leave kernel and disk diverged with a success report.
+        // (Shared persistDesiredStateToDisk now returns boolean per
+        // the B-M4 contract; main deleted the local closure.)
+        if (!persistDesiredStateToDisk(fresh)) {
+          return deny('mcp:firewall:write', 'Could not persist the proposed rule to disk (DesiredState write failed); nothing was staged or applied', req.audit);
+        }
         liveState = fresh;
       } finally {
         releaseStateLock?.();
@@ -2789,7 +2932,18 @@ export async function handleMcpCallTool(
         paramsSummary: { includeBackups, includePci },
       });
 
+      // B-L6: as in the axonwall://virt/workloads resource above, a
+      // single failing source used to collapse to an empty list with
+      // no flag. Report partial failures per source; daemonDown keeps
+      // its total-failure meaning.
       const daemonDown = !vmsRes.ok && !ctsRes.ok && !telRes.ok;
+      const failedSources: string[] = [
+        ...(!vmsRes.ok ? ['vms'] : []),
+        ...(!ctsRes.ok ? ['containers'] : []),
+        ...(!telRes.ok ? ['telemetry'] : []),
+        ...(includePci && !pciRes.ok ? ['pciDevices'] : []),
+        ...(includeBackups && !backupsRes.ok ? ['backups'] : []),
+      ];
       return {
         content: [
           {
@@ -2802,6 +2956,9 @@ export async function handleMcpCallTool(
                 ...(includePci ? { pciDevices: pciRes.ok ? pciRes.data?.devices ?? [] : [] } : {}),
                 ...(includeBackups ? { backups: backupsRes.ok ? backupsRes.data?.backups ?? [] : [] } : {}),
                 ...(daemonDown ? { daemonDown: true, error: vmsRes.data?.error || 'axonwalld unreachable' } : {}),
+                ...(failedSources.length > 0 && !daemonDown
+                  ? { partialDaemonFailure: true, failedSources, error: 'One or more virt sources failed; the empty lists above are unknown, not empty' }
+                  : {}),
               },
               null,
               2,
@@ -2841,7 +2998,11 @@ export async function handleMcpCallTool(
         }
       }
 
-      const safetyCheck = validateVirtWorkloadSafety(workloadName, req.action, localState?.hostedEdge?.enabled);
+      // B-M5: pass the workload id as well as the name — the guard
+      // matches the compiled hosted-edge VM identity (vmid 100, id
+      // 'edge') so a renamed edge VM is still recognised, and refuses
+      // outright when the name could not be resolved at all.
+      const safetyCheck = validateVirtWorkloadSafety(workloadName, req.action, localState?.hostedEdge?.enabled, req.id);
       if (!safetyCheck.valid) {
         return deny('mcp:virt:manage', safetyCheck.reason || 'Virtualization action blocked by anti-lockout guard', req.audit);
       }
@@ -3004,8 +3165,13 @@ export async function handleMcpCallTool(
       }
 
       let compiledConfig = '';
+      // B-H5 (round 3, both sides): hoisted so the daemon-failure
+      // branch below can restore the previous delegation. Main's
+      // hadPrevBpfToken flag + the branch's typed declaration:
+      // the flag distinguishes "no previous delegation" (delete the
+      // key on rollback) from "previous delegation present".
       let hadPrevBpfToken = false;
-      let prevBpfToken: any = undefined;
+      let prevBpfToken: BpfTokenDelegationSpec | undefined;
       let releaseLock: (() => void) | null = null;
       try {
         try {
@@ -3030,6 +3196,14 @@ export async function handleMcpCallTool(
           );
         }
 
+        // B-H5 (round 3): remember the previous delegation so a
+        // failed daemon sync below can roll the DesiredState change
+        // back out. The old code persisted first and reported
+        // success either way, so DesiredState claimed a delegation
+        // the kernel never got (enable) — or claimed it revoked
+        // while the profile was still live (disable). Deep-cloned
+        // (main) so later mutation of ct cannot corrupt the saved
+        // copy; hadPrevBpfToken records whether one existed at all.
         if (ct.bpfToken !== undefined) {
           hadPrevBpfToken = true;
           prevBpfToken = structuredClone(ct.bpfToken);
@@ -3053,7 +3227,12 @@ export async function handleMcpCallTool(
 
         const compiled = compileLxcContainer(ct);
         compiledConfig = compiled.lxcConfig;
-        persistDesiredStateToDisk(fresh);
+        // B-M4: fail closed when the delegation cannot be persisted —
+        // the daemon sync below must not run for a delegation disk
+        // never recorded, and success must not be reported for it.
+        if (!persistDesiredStateToDisk(fresh)) {
+          return deny('mcp:virt:manage', 'Could not persist the BPF_TOKEN delegation to disk (DesiredState write failed); nothing was staged or synced', req.audit);
+        }
       } finally {
         releaseLock?.();
       }
@@ -3075,28 +3254,49 @@ export async function handleMcpCallTool(
           })
         : await callAxonwalldApi('DELETE', `/v1/ebpf/tokens?id=${encodeURIComponent(profileId)}`);
 
-      if (!daemonRes.ok && daemonRes.status >= 400 && daemonRes.status < 500) {
-        let rbRelease: (() => void) | null = null;
+      // B-H5 (round 3): the daemon sync is the point of this tool —
+      // DesiredState alone grants nothing. When the daemon rejects
+      // the profile (or is down), roll the DesiredState change back
+      // out under the lock and deny, mirroring the sibling
+      // mcp_manage_bpf_token_profile. The old code returned
+      // success:true with daemonProfileSync 'staged_offline' and an
+      // audit decision of 'allowed' either way.
+      // Trigger is the branch's `!daemonRes.ok` (any failure),
+      // NOT main's 4xx-only check: a daemon-down failure must also
+      // roll back and deny, or the 'staged_offline' success report
+      // survives for exactly the case the guard exists for. Restore
+      // uses main's hadPrevBpfToken distinction (delete the key when
+      // there was no previous delegation).
+      if (!daemonRes.ok) {
+        let releaseRollbackLock: (() => void) | null = null;
         try {
-          rbRelease = acquireMcpLockFile(desiredStateLockPath());
-          const rbState = loadLocalDesiredState();
-          const rbCt = rbState?.virt?.containers?.find((c) => c.ctid === req.ctid);
-          if (rbCt) {
-            if (hadPrevBpfToken) {
-              rbCt.bpfToken = prevBpfToken;
-            } else {
-              delete rbCt.bpfToken;
-            }
-            persistDesiredStateToDisk(rbState!);
+          try {
+            releaseRollbackLock = acquireMcpLockFile(desiredStateLockPath());
+          } catch {
+            console.error('[MCP] Could not lock DesiredState to roll back a BPF_TOKEN delegation whose daemon sync failed; DesiredState still claims the change');
+            releaseRollbackLock = null;
           }
-        } catch {
-          // Best-effort rollback on 4xx rejection
+          if (releaseRollbackLock) {
+            const rollbackState = loadLocalDesiredState();
+            if (rollbackState) {
+              const rollbackCt = rollbackState.virt?.containers?.find((c) => c.ctid === req.ctid);
+              if (rollbackCt) {
+                if (hadPrevBpfToken) {
+                  rollbackCt.bpfToken = prevBpfToken;
+                } else {
+                  delete rollbackCt.bpfToken;
+                }
+                persistDesiredStateToDisk(rollbackState);
+              }
+            }
+          }
         } finally {
-          rbRelease?.();
+          releaseRollbackLock?.();
         }
         return deny(
           'mcp:ebpf:manage',
-          daemonRes.data?.error || `Daemon rejected LXC BPF_TOKEN delegation (HTTP ${daemonRes.status}); rolled back staged profile`,
+          daemonRes.data?.error ||
+            `Daemon ${req.enabled ? 'rejected' : 'failed to delete'} the BPF_TOKEN profile for CT ${req.ctid}; DesiredState change rolled back`,
           req.audit,
         );
       }
@@ -3128,7 +3328,10 @@ export async function handleMcpCallTool(
                 enabled: req.enabled,
                 preset: req.preset,
                 stagedInDesiredState: true,
-                daemonProfileSync: daemonRes.ok ? 'synced' : 'staged_offline',
+                // B-H5 (round 3): 'staged_offline' is gone — a failed
+                // daemon sync denies above, so reaching here means
+                // the profile is synced.
+                daemonProfileSync: 'synced',
                 compiledBpfDirectives: bpfLines,
                 auditEntryHash: auditEntry.recorded ? auditEntry.entryHash : null,
               },
@@ -3552,7 +3755,11 @@ export async function handleMcpCallTool(
           }
           const active = loadLocalDesiredState();
           const nextState = active ? mergeFirewallConfigs(active, report.state) : report.state;
-          persistDesiredStateToDisk(nextState);
+          // B-M4: fail closed when the import cannot be persisted —
+          // staging must not be reported for a merge disk never recorded.
+          if (!persistDesiredStateToDisk(nextState)) {
+            return deny('mcp:firewall:write', 'Could not persist the imported configuration to disk (DesiredState write failed); nothing was staged', req.audit);
+          }
           staged = true;
         } finally {
           releaseLock?.();
@@ -3666,7 +3873,7 @@ export async function processMcpJsonRpcMessage(
             protocolVersion: '2024-11-05',
             serverInfo: {
               name: 'axonwall-firewall-mcp',
-              version: '0.11.64',
+              version: resolveMcpServerVersion(),
             },
             capabilities: {
               resources: { listChanged: false },

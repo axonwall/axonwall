@@ -16,6 +16,9 @@ export default function StorageDisksPage() {
   const [disks, setDisks] = useState<NasDiskItem[]>([]);
   const [installSpec, setInstallSpec] = useState<any>(null);
   const [loading, setLoading] = useState(true);
+  // C-M9: true when the daemon did not answer — the inventory is unknown,
+  // not empty.
+  const [daemonDown, setDaemonDown] = useState(false);
   const [smartBanner, setSmartBanner] = useState<{ ok: boolean; text: string } | null>(null);
   const [runningDevice, setRunningDevice] = useState<string | null>(null);
 
@@ -38,6 +41,7 @@ export default function StorageDisksPage() {
       const res = await getNasDisksInventory();
       setDisks(res.disks || []);
       setInstallSpec(res.installSpec || null);
+      setDaemonDown(Boolean(res.daemonDown));
     } catch (err: any) {
       setSmartBanner({ ok: false, text: err?.message || 'Failed to load storage disk inventory' });
     } finally {
@@ -94,6 +98,13 @@ export default function StorageDisksPage() {
             {smartBanner.text}
           </span>
           <button onClick={() => setSmartBanner(null)}>✕</button>
+        </div>
+      )}
+
+      {daemonDown && (
+        <div className="p-4 rounded-xl bg-amber-500/10 border border-amber-500/30 text-xs text-amber-300">
+          Daemon unreachable — disk inventory is unknown. No disks are shown because none were observed, not
+          because the box has none.
         </div>
       )}
 
@@ -169,14 +180,25 @@ export default function StorageDisksPage() {
                 <td className="py-3.5 px-4 font-mono text-slate-300">
                   <span className="inline-flex items-center gap-1">
                     <Thermometer className="w-3.5 h-3.5 text-amber-400" />
-                    {d.temperatureC || 35}°C
+                    {d.temperatureC != null ? `${d.temperatureC}°C` : '—'}
                   </span>
                 </td>
                 <td className="py-3.5 px-4">
                   <div className="flex flex-wrap items-center gap-2">
-                    <span className="inline-flex items-center gap-1 text-emerald-400 font-semibold">
-                      <CheckCircle2 className="w-3.5 h-3.5" /> PASSED
-                    </span>
+                    {/* C-M10: render the measured SMART result — a failing
+                        disk used to show PASSED, and a missing temperature
+                        used to read 35 °C. */}
+                    {d.smartPassed === true ? (
+                      <span className="inline-flex items-center gap-1 text-emerald-400 font-semibold">
+                        <CheckCircle2 className="w-3.5 h-3.5" /> PASSED
+                      </span>
+                    ) : d.smartPassed === false ? (
+                      <span className="inline-flex items-center gap-1 text-rose-400 font-semibold">
+                        <AlertCircle className="w-3.5 h-3.5" /> FAILED
+                      </span>
+                    ) : (
+                      <span className="inline-flex items-center gap-1 text-slate-400 font-semibold">Unknown</span>
+                    )}
                     <button
                       type="button"
                       disabled={runningDevice !== null}

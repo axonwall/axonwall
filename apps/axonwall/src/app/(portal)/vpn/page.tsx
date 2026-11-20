@@ -3,8 +3,13 @@
 import React, { useState } from 'react';
 import { generateWireGuardProfile } from '@/server/wg';
 import { generateMfaSetup, verifyMfaSetup } from '@/server/auth';
+import { useDesiredStateApply } from '@/lib/use-desired-state-apply';
 
 export default function VPNPortal() {
+  // C-M8: profile generation registers the peer in desired state — pass
+  // the fingerprint this page loaded with so a concurrent save cannot be
+  // silently reverted.
+  const { getFingerprint } = useDesiredStateApply();
   const [profile, setProfile] = useState<any>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -61,7 +66,10 @@ export default function VPNPortal() {
     setLoading(true);
     setError('');
     try {
-      const res = await generateWireGuardProfile();
+      const fingerprint = getFingerprint();
+      const res = await generateWireGuardProfile(
+        fingerprint ? { expectedFingerprint: fingerprint } : undefined
+      );
       setProfile(res);
     } catch (err: any) {
       setError(err.message);

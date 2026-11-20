@@ -21,7 +21,7 @@ import {
   enablePluginWithDependencies,
   disablePluginWithDependents,
 } from '@axonwall/lib';
-import { getMcpServerStatus, resolveMcpSettingsPath } from '@axonwall/lib/mcp';
+import { getMcpServerStatus, resolveMcpSettingsPath, validateVirtWorkloadSafety } from '@axonwall/lib/mcp';
 import { acquireMcpLockFile, desiredStateLockPath } from './mcp/lockfile.js';
 import { readAgentToken, resolveControllerDirs } from './dev-paths.js';
 import type { DesiredState } from '@axonwall/lib/schemas';
@@ -283,12 +283,20 @@ export function saveStateToDisk(state: DesiredState): { daemonFiles: Record<stri
     for (const [fn, content] of Object.entries(serialized)) {
       daemonFiles[path.join(ETC_CONFIG_DIR, fn)] = content;
     }
+    // B-M4: the save used to return non-null even when every write
+    // failed (each `catch {}` swallowed the error), so callers
+    // reported saved success for a save that never landed. Track
+    // whether any write landed; a save that lands nothing returns
+    // null — the same "nothing was written" signal as a lock failure
+    // — and callers that check for null now cover both cases.
+    let anyWriteSucceeded = false;
     for (const dir of [VAR_ETC_CONFIG_DIR, ETC_CONFIG_DIR]) {
       try {
         fs.mkdirSync(dir, { recursive: true, mode: 0o775 });
         for (const [fn, content] of Object.entries(serialized)) {
           const filePath = path.join(dir, fn);
           fs.writeFileSync(filePath, content, { encoding: 'utf-8', mode: 0o660 });
+          anyWriteSucceeded = true;
           try {
             fs.chmodSync(filePath, 0o660);
           } catch {}
@@ -305,11 +313,13 @@ export function saveStateToDisk(state: DesiredState): { daemonFiles: Record<stri
       try {
         fs.mkdirSync(path.dirname(jsonTarget), { recursive: true, mode: 0o775 });
         fs.writeFileSync(jsonTarget, serializedJson, { encoding: 'utf-8', mode: 0o660 });
+        anyWriteSucceeded = true;
         try {
           fs.chmodSync(jsonTarget, 0o660);
         } catch {}
       } catch {}
     }
+    if (!anyWriteSucceeded) return null;
     return { daemonFiles, snapshot };
   } finally {
     release?.();
@@ -545,11 +555,15 @@ export function AxonwallTuiApp({
     if (parts && !parts.error) {
       setPartitionStatus(parts);
     }
-    setMcpStatus({
+    setMcpStatus((prev) => ({
       masterEnabled: localMcp.enabled,
       disabledReason: localMcp.disabledReason,
-      leases: Array.isArray(mcpLeases?.leases) ? mcpLeases.leases : [],
-    });
+      // B-L4: keep the previous lease list when the fetch failed —
+      // the old code collapsed a failed fetch to [], so during a
+      // daemon outage the TUI showed zero active tactical leases
+      // while the kernel may still have been enforcing them.
+      leases: Array.isArray(mcpLeases?.leases) ? mcpLeases.leases : prev.leases ?? [],
+    }));
     if (plg?.plugins && Array.isArray(plg.plugins)) {
       const map: Record<string, any> = {};
       for (const p of plg.plugins) {
@@ -619,8 +633,10 @@ export function AxonwallTuiApp({
     // lock — another save or MCP propose holds it — so nothing was
     // written. Do not call the daemon (there is nothing new to
     // apply) and say so plainly instead of claiming a save.
+    // B-M4: saveStateToDisk also returns null when every write
+    // failed, so this covers a failed save as well as a lock failure.
     if (!saved) {
-      setStatusMessage('✖ Could not lock DesiredState — another save or MCP propose is in progress; nothing was written. Try again.');
+      setStatusMessage('✖ Could not save DesiredState — the lock could not be taken or no write landed (another save or MCP propose may be in progress, or the disk write failed); nothing was written. Try again.');
       return;
     }
     const diskSnapshot = saved.snapshot;
@@ -649,7 +665,10 @@ export function AxonwallTuiApp({
       })),
     ];
 
-    const jobId = `tui-${Date.now()}`;
+    // B-L1: a bare Date.now() jobId collides when two applies land in
+    // the same millisecond against the daemon's single pending slot
+    // (the MCP side already carries a random suffix for this reason).
+    const jobId = `tui-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
     setLastJobId(jobId);
     const resp = await callDaemon(
       '/v1/apply',
@@ -806,15 +825,31 @@ export function AxonwallTuiApp({
       }
     }
 
-    if (!saveStateToDisk(next)) {
-      setStatusMessage('✖ Could not lock DesiredState — another save is in progress; plugin toggle was not saved. Try again.');
+    // B-M6: the save result and the daemon action result were both
+    // discarded and the toggle was announced unconditionally — the
+    // UI showed the plugin flipped while disk still held the old
+    // state and the daemon never toggled anything. Save first: a
+    // null return (lock held or no write landed) leaves the UI
+    // untouched and never calls the daemon.
+    const saved = saveStateToDisk(next);
+    if (!saved) {
+      setStatusMessage(`✖ Could not save plugin toggle for '${pluginId}' — DesiredState lock held or disk write failed; nothing changed. Try again.`);
+      await refreshAll();
       return;
     }
     setState(next);
-    await callDaemon('/v1/system/plugins/action', 'POST', {
+    const pluginRes = await callDaemon('/v1/system/plugins/action', 'POST', {
       pluginId,
       action: nextEnabled ? 'enable' : 'disable',
     });
+    // A 2xx daemon payload carries no `success` field, so only an
+    // explicit failure (success === false or an error) counts as a
+    // failed toggle; the disk state is already saved either way.
+    if (!pluginRes || pluginRes.success === false || pluginRes.error) {
+      setStatusMessage(`✖ Plugin '${pluginId}' toggle failed on the daemon: ${pluginRes?.error || pluginRes?.message || 'daemon unreachable'} — disk state saved; press [a] to apply.`);
+      await refreshAll();
+      return;
+    }
     setStatusMessage(
       `Toggled plugin '${pluginId}' -> ${nextEnabled ? 'ENABLED' : 'DISABLED'}${depNotice}. Press [a] to apply.`
     );
@@ -1348,8 +1383,19 @@ export function AxonwallTuiApp({
       }
       if (input === 'f') {
         setStatusMessage('Flushing all active MCP tactical leases...');
-        callDaemon('/v1/mcp/flush', 'POST', { reason: 'TUI operator flush' }).then(() => {
-          setStatusMessage('✔ All active MCP leases flushed and revoked.');
+        // B-H2 (round 3): the old handler printed success without
+        // ever looking at the daemon's answer — callDaemon resolves
+        // {success:false} on daemon-down/timeout/refusal, and the
+        // operator was told every blackhole/shaper/redirect/DNS
+        // sinkhole was revoked while all of them were still
+        // enforced. Check res.success (and report the cleared
+        // count) before claiming anything.
+        callDaemon('/v1/mcp/flush', 'POST', { reason: 'TUI operator flush' }).then((res) => {
+          setStatusMessage(
+            res?.success
+              ? `✔ All active MCP leases flushed and revoked (${res?.clearedCount ?? 0} cleared).`
+              : `✖ MCP flush failed (${res?.errorKind || 'daemon-error'}): ${res?.message || res?.error || 'leases NOT flushed — tactical leases are still active'}.`,
+          );
           refreshAll();
         });
         return;
@@ -1423,6 +1469,17 @@ export function AxonwallTuiApp({
         const vm = liveVms[cursorIdx % liveVms.length]!;
         if (input === 's' || input === 'x' || input === 'b') {
           const action = input === 's' ? 'start' : input === 'x' ? 'stop' : 'reset';
+          // B-M5: the compute-tab stop posted straight to the daemon
+          // with no anti-lockout guard (the MCP tool is the only
+          // caller that had one). Refuse a guarded stop here — the
+          // daemon has no backstop either — before anything is posted.
+          if (action === 'stop') {
+            const safetyCheck = validateVirtWorkloadSafety(vm.name, 'stop', state.hostedEdge?.enabled, vm.vmid);
+            if (!safetyCheck.valid) {
+              setStatusMessage(`✖ ${safetyCheck.reason || 'Virtualization action blocked by anti-lockout guard'}`);
+              return;
+            }
+          }
           setStatusMessage(`Executing '${action}' on KVM VM #${vm.vmid} (${vm.name})...`);
           callDaemon('/v1/virt/vms', 'POST', { action, vmid: vm.vmid }).then((res) => {
             setStatusMessage(res?.success ? `✔ VM #${vm.vmid} ${action} initiated.` : `✖ VM ${action} failed: ${res?.message}`);
@@ -1447,8 +1504,17 @@ export function AxonwallTuiApp({
         if (input === 'h') {
           setStatusMessage('Running Host Malware, Rootkit & Ghost-in-the-Ring Kernel Audit...');
           callDaemon('/v1/security/rootkit/scan', 'POST', {}, 30000).then((res) => {
-            if (res && !res.error) setRootkitStatus(res);
-            setStatusMessage('✔ Rootkit & Kernel Integrity Audit complete.');
+            // B-M7: the ✔ message was unconditional — on daemon-down
+            // callDaemon resolves {success: false, error} and the
+            // status was correctly not updated, but the message still
+            // claimed the audit was complete. Claim completion only
+            // when the scan actually ran.
+            if (res && !res.error) {
+              setRootkitStatus(res);
+              setStatusMessage('✔ Rootkit & Kernel Integrity Audit complete.');
+            } else {
+              setStatusMessage(`✖ Rootkit & Kernel Integrity Audit did not run: ${res?.error || res?.message || 'daemon unreachable'}.`);
+            }
             refreshAll();
           });
           return;
@@ -1485,8 +1551,27 @@ export function AxonwallTuiApp({
       const bes = partitionStatus?.bootEnvironments || [];
       if (input === 'h') {
         setStatusMessage('Running partition & ZBM boot health verification...');
+        // B-H3 (round 3): /v1/system/health/verify returns a
+        // PartitionStatus, which has NO `success` field — only
+        // `healthVerified`, `bootCount`, and `checks[]`. The old
+        // `res?.success !== false` test was therefore always true
+        // and printed "verified and bootcount cleared" even when
+        // every check failed and the bootcount commit failed. The
+        // daemon sets healthVerified only after all checks pass AND
+        // the bootcount=0 commit lands on disk, so it is the only
+        // honest signal; name the failed checks otherwise.
         callDaemon('/v1/system/health/verify', 'POST', {}, 15000).then((res) => {
-          setStatusMessage(res?.success !== false ? '✔ System boot health verified and bootcount cleared!' : `✖ Health check: ${res?.message}`);
+          if (res?.success === false) {
+            setStatusMessage(`✖ Health check failed (${res?.errorKind || 'daemon-error'}): ${res?.message || res?.error || 'daemon did not answer'} — boot health unknown, bootcount NOT cleared.`);
+          } else if (res?.healthVerified === true) {
+            setStatusMessage('✔ System boot health verified and bootcount cleared!');
+          } else {
+            const failed = Array.isArray(res?.checks)
+              ? res.checks.filter((c: any) => c?.status === 'FAIL').map((c: any) => c?.name || 'unnamed check')
+              : [];
+            const detail = failed.length > 0 ? `failed checks: ${failed.join(', ')}` : 'verification did not pass';
+            setStatusMessage(`✖ Boot health verification FAILED (${detail}); bootcount NOT cleared (bootCount ${res?.bootCount ?? '?'}). Do not trust this slot.`);
+          }
           refreshAll();
         });
         return;

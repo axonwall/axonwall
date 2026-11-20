@@ -1,9 +1,92 @@
 #!/bin/sh
 set -e
 
+# D-M9: this postinst serves all three editions (axonwall, vault,
+# k3s-storage). The NGFW-only blocks (service users, LDAP/headscale
+# state, NGFW secrets, NGFW units) are gated on the installed edition
+# so installing a flavor package never creates NGFW identity/state.
+# Detection mirrors axonwall-update, in the same order: (1) the
+# canonical /etc/axonwall/edition file, (2) the legacy markers,
+# (3) the kernel cmdline, (4) the NGFW daemon binary as positive
+# evidence on a legacy box with no signal at all — and only then.
+# A box with no signal and no NGFW payload fails closed. Note the
+# package's own edition file is already unpacked when postinst runs,
+# so a flavor install detects its own edition.
+AXONWALL_EDITION="axonwall"
+_EDITION_FROM_FILE=0
+if [ -f /etc/axonwall/edition ]; then
+  _file_edition="$(tr -d ' \t\r\n' < /etc/axonwall/edition 2>/dev/null || true)"
+  if [ -n "$_file_edition" ]; then
+    case "$_file_edition" in
+      axonwall|vault|k3s-storage)
+        AXONWALL_EDITION="$_file_edition"
+        _EDITION_FROM_FILE=1
+        ;;
+      *)
+        echo "Error: /etc/axonwall/edition contains '${_file_edition}' (expected axonwall, vault, or k3s-storage); fix the file and re-run dpkg --configure." >&2
+        exit 1
+        ;;
+    esac
+    _contradiction=0
+    if [ "$AXONWALL_EDITION" = "vault" ] && [ -f /etc/axonwall/.k3s-edition ]; then _contradiction=1; fi
+    if [ "$AXONWALL_EDITION" = "k3s-storage" ] && [ -f /etc/axonwall/.vault-edition ]; then _contradiction=1; fi
+    if [ "$AXONWALL_EDITION" = "axonwall" ] && [ -f /etc/axonwall/.vault-edition ]; then _contradiction=1; fi
+    if [ "$AXONWALL_EDITION" = "axonwall" ] && [ -f /etc/axonwall/.k3s-edition ]; then _contradiction=1; fi
+    if [ "$_contradiction" = "1" ]; then
+      echo "Error: /etc/axonwall/edition says '${AXONWALL_EDITION}' but a legacy edition marker disagrees; the installed edition is ambiguous. Remove the wrong marker and re-run dpkg --configure." >&2
+      exit 1
+    fi
+  fi
+fi
+# No (usable) edition file: fall back to the legacy signals, in the
+# same order as axonwall-update. An empty/whitespace-only file counts
+# as no signal and reaches this chain (the flag above stays 0) — it
+# must NOT silently default to axonwall.
+if [ "$_EDITION_FROM_FILE" = "0" ]; then
+  if [ -f /etc/axonwall/.vault-edition ] && [ -f /etc/axonwall/.k3s-edition ]; then
+    echo "Error: both /etc/axonwall/.vault-edition and /etc/axonwall/.k3s-edition exist; the installed edition is ambiguous. Remove the wrong marker and re-run dpkg --configure." >&2
+    exit 1
+  elif [ -f /etc/axonwall/.vault-edition ]; then
+    AXONWALL_EDITION="vault"
+  elif [ -f /etc/axonwall/.k3s-edition ]; then
+    AXONWALL_EDITION="k3s-storage"
+  elif grep -qsE '(^|[[:space:]])(axonwall_edition=vault|axonwall\.edition=vault)($|[[:space:]])' /proc/cmdline 2>/dev/null; then
+    AXONWALL_EDITION="vault"
+  elif grep -qsE '(^|[[:space:]])(axonwall_edition=k3s-storage|axonwall\.edition=k3s-storage)($|[[:space:]])' /proc/cmdline 2>/dev/null; then
+    AXONWALL_EDITION="k3s-storage"
+  elif grep -qsE '(^|[[:space:]])(axonwall_edition=axonwall|axonwall\.edition=axonwall)($|[[:space:]])' /proc/cmdline 2>/dev/null; then
+    AXONWALL_EDITION="axonwall"
+  elif grep -qsE '(^|[[:space:]])(axonwall_edition|axonwall\.edition)=[^[:space:]]+' /proc/cmdline 2>/dev/null; then
+    _cmdline_edition="$(grep -oE '(axonwall_edition|axonwall\.edition)=[^[:space:]]+' /proc/cmdline 2>/dev/null | tail -n 1 | sed -E 's/^[^=]+=//')"
+    echo "Error: unknown edition '${_cmdline_edition}' in kernel cmdline (expected axonwall, vault, or k3s-storage); refusing to guess. Fix the cmdline/markers and re-run dpkg --configure." >&2
+    exit 1
+  elif [ -x /usr/sbin/axonwalld ]; then
+    echo "Warning: no edition signal found (no /etc/axonwall/edition, no legacy marker, no axonwall.edition kernel cmdline), but the NGFW daemon is present, so assuming axonwall. Create /etc/axonwall/edition containing the edition name to record it explicitly." >&2
+    AXONWALL_EDITION="axonwall"
+  else
+    echo "Error: cannot determine the installed edition: no /etc/axonwall/edition, no legacy marker (.vault-edition/.k3s-edition), no axonwall.edition kernel cmdline, and no NGFW payload (/usr/sbin/axonwalld absent). Create /etc/axonwall/edition containing one of axonwall, vault, k3s-storage and re-run dpkg --configure." >&2
+    exit 1
+  fi
+fi
+# D-M9 (marker): ensure the canonical edition file exists with the
+# detected edition. The .deb ships it in its payload, so this is a
+# no-op on a normal install; it self-heals the file if it was deleted
+# and postinst runs on reconfigure (dpkg --configure does not unpack).
+printf '%s\n' "${AXONWALL_EDITION}" > /etc/axonwall/edition
+
 case "$1" in
     configure)
-        # 1. Create axonwall system user and group if not already present
+        # 1. Create system users and groups.
+        # D-M9: axonwall-api is the shared group — the vault's
+        # axonwall-vault user is a member via its sysusers file, and
+        # /etc/axonwall is group-owned by it in every edition — so it
+        # is created for all editions. The NGFW service identities
+        # are axonwall-only; the vault identity is vault-only.
+        if ! getent group axonwall-api >/dev/null 2>&1; then
+            groupadd --system axonwall-api
+        fi
+        if [ "${AXONWALL_EDITION}" = "axonwall" ]; then
+        # Create axonwall system user and group if not already present
         if ! getent group axonwall >/dev/null 2>&1; then
             groupadd --system axonwall
         fi
@@ -17,9 +100,6 @@ case "$1" in
         # user so a compromise of one Node service no longer yields the other
         # service's secrets. axonwall-api is the shared group for the daemon
         # sockets, the agent token and state traversal -- nothing else.
-        if ! getent group axonwall-api >/dev/null 2>&1; then
-            groupadd --system axonwall-api
-        fi
         if ! getent group axonwall-controller >/dev/null 2>&1; then
             groupadd --system axonwall-controller
         fi
@@ -44,28 +124,50 @@ case "$1" in
                 --no-create-home --shell /usr/sbin/nologin \
                 --comment "Axonwall Headscale Service User" axonwall-headscale
         fi
+        elif [ "${AXONWALL_EDITION}" = "vault" ]; then
+        # Vault service identity (packaging/vault/axonwall-vault.sysusers):
+        # SeaweedFS runs as axonwall-vault, a member of axonwall-api.
+        if ! getent group axonwall-vault >/dev/null 2>&1; then
+            groupadd --system axonwall-vault
+        fi
+        if ! getent passwd axonwall-vault >/dev/null 2>&1; then
+            useradd --system --gid axonwall-vault --home-dir /var/lib/axonwall/vault \
+                --no-create-home --shell /usr/sbin/nologin \
+                --comment "Axonwall Vault Service User" axonwall-vault
+        fi
+        usermod -a -G axonwall-api axonwall-vault 2>/dev/null || true
+        fi
 
         # 2. Ensure directories exist with strict permissions
-        mkdir -p /var/lib/axonwall /var/log/axonwall /var/cache/axonwall-ui /run/axonwall /etc/axonwall/certs /opt/axonwall
+        # D-M9: the shared directories are created for all editions.
+        # The NGFW-only trees (LDAP, Headscale, /opt/axonwall, the
+        # daemon/controller state dirs, the secrets dirs) are created
+        # for the axonwall edition only; the vault data dir only for
+        # vault. A flavor install must not conjure NGFW state dirs.
+        mkdir -p /var/lib/axonwall /var/log/axonwall /run/axonwall /etc/axonwall/certs
+        chown root:axonwall-api /var/lib/axonwall /etc/axonwall
+        chmod 3775 /var/lib/axonwall
+        chmod 1770 /etc/axonwall 2>/dev/null || true
+        chown root:axonwall-api /var/log/axonwall
+        chmod 1770 /var/log/axonwall
+        if [ "${AXONWALL_EDITION}" = "axonwall" ]; then
+        mkdir -p /var/cache/axonwall-ui /opt/axonwall
         mkdir -p /var/lib/axonwall/headscale /var/lib/axonwall/bundles /var/lib/axonwall/etc-axonwall /var/lib/axonwall/gitops /var/lib/axonwall/captures /var/lib/axonwall/backups /run/headscale
         mkdir -p /var/lib/axonwall/home /var/lib/axonwall/ldap/config /var/lib/axonwall/ldap/data /var/lib/axonwall/ldap/accesslog /var/lib/axonwall/ldap/backups
         mkdir -p /var/lib/axonwall/secrets/ldap /var/lib/axonwall/secrets/ha-pki
 
-        chown root:axonwall-api /var/lib/axonwall /etc/axonwall
         chown -R root:root /opt/axonwall
         chmod -R go-w /opt/axonwall 2>/dev/null || true
         chown -R axonwall:axonwall /var/cache/axonwall-ui
         chmod 0750 /var/cache/axonwall-ui
         chown -R axonwall:axonwall-api /var/lib/axonwall/bundles /var/lib/axonwall/etc-axonwall /var/lib/axonwall/gitops /var/lib/axonwall/captures /var/lib/axonwall/backups
-        chmod 3775 /var/lib/axonwall /var/lib/axonwall/etc-axonwall /var/lib/axonwall/gitops /var/lib/axonwall/captures /var/lib/axonwall/backups 2>/dev/null || true
-        chmod 1770 /etc/axonwall 2>/dev/null || true
+        chmod 3775 /var/lib/axonwall/etc-axonwall /var/lib/axonwall/gitops /var/lib/axonwall/captures /var/lib/axonwall/backups 2>/dev/null || true
         for f in /var/lib/axonwall/state.json /var/lib/axonwall/slot_versions.json /var/lib/axonwall/session-epoch /var/lib/axonwall/revoked-jtis /var/lib/axonwall/.password_changed /var/lib/axonwall/mcp-keys.json /var/lib/axonwall/mcp-settings.json /var/lib/axonwall/mcp-audit.jsonl; do
             if [ -e "$f" ]; then
                 chown axonwall:axonwall-api "$f" 2>/dev/null || true
                 chmod 0660 "$f" 2>/dev/null || true
             fi
         done
-        chown root:axonwall-api /var/log/axonwall
         chown -R axonwall-headscale:axonwall-headscale /var/lib/axonwall/headscale
         chown axonwall-headscale:axonwall-api /run/headscale
         # Headscale's config can carry the OIDC client secret: group
@@ -77,9 +179,7 @@ case "$1" in
             chmod 0640 /etc/headscale/config.yaml 2>/dev/null || true
         fi
         chown root:root /var/lib/axonwall/home
-        chmod 3775 /var/lib/axonwall
         chmod 0755 /var/lib/axonwall/home
-        chmod 1770 /var/log/axonwall
         chmod 0755 /opt/axonwall
         chmod 770 /var/lib/axonwall/headscale /run/headscale
         chmod 0700 /var/lib/axonwall/secrets /var/lib/axonwall/secrets/ldap /var/lib/axonwall/secrets/ha-pki
@@ -88,6 +188,11 @@ case "$1" in
         if getent passwd openldap >/dev/null 2>&1; then
             chown -R openldap:openldap /var/lib/axonwall/ldap
             chmod 0750 /var/lib/axonwall/ldap /var/lib/axonwall/ldap/config /var/lib/axonwall/ldap/data /var/lib/axonwall/ldap/accesslog /var/lib/axonwall/ldap/backups
+        fi
+        elif [ "${AXONWALL_EDITION}" = "vault" ]; then
+        mkdir -p /var/lib/axonwall/vault
+        chown axonwall-vault:axonwall-vault /var/lib/axonwall/vault
+        chmod 0750 /var/lib/axonwall/vault
         fi
 
         if getent group openldap >/dev/null 2>&1 && [ -d /var/lib/axonwall/secrets/ha-pki ]; then
@@ -165,6 +270,10 @@ case "$1" in
                 echo "Error: hub certificate pair missing but an appliance CA exists; refusing to mint a non-chaining certificate. Fix the PKI and re-run dpkg --configure." >&2
                 exit 1
             fi
+            # D-L4: a failed generation used to be swallowed (`|| true`)
+            # and dpkg reported success with no hub pair. Fail the
+            # configure step loudly instead, so the operator fixes it
+            # and re-runs dpkg --configure.
             if command -v openssl >/dev/null 2>&1; then
                 SAN="DNS:$(hostname 2>/dev/null || echo axonwall),DNS:axonwall.local,DNS:localhost,IP:127.0.0.1"
                 openssl req -x509 -newkey rsa:2048 -nodes \
@@ -172,26 +281,43 @@ case "$1" in
                     -out /etc/axonwall/certs/hub.crt \
                     -days 3650 \
                     -subj "/O=Axonwall/OU=Appliance/CN=$(hostname 2>/dev/null || echo axonwall)" \
-                    -addext "subjectAltName=${SAN}" >/dev/null 2>&1 || true
+                    -addext "subjectAltName=${SAN}" || { echo "Error: TLS certificate generation failed; fix the PKI and re-run dpkg --configure." >&2; exit 1; }
+            else
+                echo "Error: openssl is required to generate the hub TLS certificate pair but is not installed; fix the install and re-run dpkg --configure." >&2
+                exit 1
             fi
         fi
 
         if [ -f /etc/axonwall/certs/hub.key ]; then
-            if [ -f /etc/axonwall/.vault-edition ]; then
-                # Vault Edition runs SeaweedFS S3 under the axonwall-vault group,
-                # which must read hub.key without exposing it to other services.
-                chown root:axonwall-vault /etc/axonwall/certs/hub.key 2>/dev/null || true
-                chmod 0640 /etc/axonwall/certs/hub.key 2>/dev/null || true
-                chown root:root /etc/axonwall/certs/hub.crt 2>/dev/null || true
-                chmod 0644 /etc/axonwall/certs/hub.crt 2>/dev/null || true
-            else
-                # The controller is the only reader of the hub key (audit B-12).
+            # D-M9: the hub key reader is edition-dependent. On axonwall
+            # the controller is the only reader (audit B-12). On vault
+            # the S3 endpoint (SeaweedFS, running as axonwall-vault)
+            # serves the same hub leaf, so the key is root:axonwall-vault
+            # 0640, matching the vault tmpfiles entry. On k3s-storage
+            # no service identity reads it at install time.
+            # (Main's fc576368 sets the same vault ownership via the
+            # legacy marker; this keeps the single D-M9 detection
+            # source and covers k3s-storage explicitly instead of
+            # relying on a chown to a nonexistent user failing
+            # silently.)
+            if [ "${AXONWALL_EDITION}" = "axonwall" ]; then
                 chown axonwall-controller:axonwall-controller /etc/axonwall/certs/hub.key /etc/axonwall/certs/hub.crt 2>/dev/null || true
                 chmod 0600 /etc/axonwall/certs/hub.key 2>/dev/null || true
-                chmod 0644 /etc/axonwall/certs/hub.crt 2>/dev/null || true
+            elif [ "${AXONWALL_EDITION}" = "vault" ]; then
+                chown root:axonwall-vault /etc/axonwall/certs/hub.key 2>/dev/null || true
+                chmod 0640 /etc/axonwall/certs/hub.key 2>/dev/null || true
+            else
+                chown root:root /etc/axonwall/certs/hub.key 2>/dev/null || true
+                chmod 0600 /etc/axonwall/certs/hub.key 2>/dev/null || true
             fi
+            chmod 0644 /etc/axonwall/certs/hub.crt 2>/dev/null || true
         fi
 
+        # D-M9: NGFW secrets (axonwall.env JWT/ZTP/admin password,
+        # controller.env, agent.token) are axonwall-only. A flavor
+        # install never generates them; the vault's S3 credentials are
+        # provisioned by axonwall-vault-provision at first boot.
+        if [ "${AXONWALL_EDITION}" = "axonwall" ]; then
         # 4. Generate default environment secrets if absent
         if [ ! -s /etc/axonwall/axonwall.env ]; then
             JWT_SECRET="$(openssl rand -hex 32 2>/dev/null || od -An -tx1 -N32 /dev/urandom | tr -d ' \n')"
@@ -246,6 +372,7 @@ ENV_EOF
             chown root:axonwall-api /etc/axonwall/agent.token 2>/dev/null || true
             chmod 0640 /etc/axonwall/agent.token 2>/dev/null || true
         fi
+        fi # AXONWALL_EDITION == axonwall: end of NGFW secrets
 
         # 5. Initialize etckeeper if installed
         if command -v etckeeper >/dev/null 2>&1; then
@@ -337,10 +464,19 @@ ENV_EOF
         fi
 
         # 5c. Sync any regular systemd unit files in /etc/systemd/system/ so ISO-placed copies do not shadow updated /lib/systemd/system/ units
-        for unit in axonwalld.service axonwall-controller.service axonwall-ui.service axonwall-console.service headscale.service k3s.service; do
-            if [ "$unit" = "k3s.service" ] && { [ -f /etc/axonwall/.vault-edition ] || [ -f /etc/axonwall/.k3s-edition ]; }; then
-                continue
-            fi
+        # D-M9: the sync list is the edition's own unit set; syncing the
+        # NGFW list on a flavor box would resurrect units the flavor
+        # deliberately does not ship.
+        # (Main's fc576368 instead skips k3s.service when either flavor
+        # marker exists; that is subsumed here — k3s.service is absent
+        # from the vault list, and on k3s-storage it is the flavor's
+        # own unit, which must be synced, not skipped.)
+        case "${AXONWALL_EDITION}" in
+            vault) UNITS="axonwall-console.service seaweedfs.service axonwall-vault-firstboot.service axonwall-vault-provision.service" ;;
+            k3s-storage) UNITS="axonwall-console.service k3s.service k3s-agent.service axonwall-k3s-firstboot.service axonwall-k3s-verify.service" ;;
+            *) UNITS="axonwalld.service axonwall-controller.service axonwall-ui.service axonwall-console.service headscale.service k3s.service" ;;
+        esac
+        for unit in ${UNITS}; do
             if [ -f "/etc/systemd/system/${unit}" ] && [ ! -L "/etc/systemd/system/${unit}" ] && [ -f "/lib/systemd/system/${unit}" ]; then
                 cp "/lib/systemd/system/${unit}" "/etc/systemd/system/${unit}" 2>/dev/null || true
             fi
@@ -354,17 +490,31 @@ ENV_EOF
             fi
         fi
 
-        # 6. Reload systemd daemon and enable services if systemd is running (preserve edition isolation)
+        # 6. Reload systemd daemon and enable services if systemd is running
+        # D-M9: enable/restart only the edition's own units (ssh,
+        # chrony, sysstat stay shared). k3s is enabled but not
+        # restarted on either edition that ships it, matching the
+        # pre-existing NGFW behaviour for k3s.service.
+        # (Main's fc576368 enables only ssh on k3s-storage and restarts
+        # nothing on either flavor; the D-M9 lists below are kept —
+        # they enable each flavor's own units and restart the shared
+        # services, matching the pre-existing NGFW behaviour.)
         if [ -d /run/systemd/system ]; then
             systemctl daemon-reload || true
-            if [ -f /etc/axonwall/.vault-edition ]; then
-                systemctl enable seaweedfs.service axonwall-vault-firstboot.service axonwall-vault-provision.service ssh.service || true
-            elif [ -f /etc/axonwall/.k3s-edition ]; then
-                systemctl enable ssh.service || true
-            else
-                systemctl enable axonwalld.service axonwall-controller.service axonwall-ui.service headscale.service k3s.service axonwall-console.service axonwall-hub-cert-renew.timer ssh.service chrony.service sysstat.service || true
-                systemctl restart --no-block axonwalld.service axonwall-controller.service axonwall-ui.service headscale.service ssh.service chrony.service sysstat.service || true
-            fi
+            case "${AXONWALL_EDITION}" in
+                vault)
+                    systemctl enable seaweedfs.service axonwall-vault-firstboot.service axonwall-vault-provision.service axonwall-console.service axonwall-hub-cert-renew.timer ssh.service chrony.service sysstat.service || true
+                    systemctl restart --no-block seaweedfs.service axonwall-console.service ssh.service chrony.service sysstat.service || true
+                    ;;
+                k3s-storage)
+                    systemctl enable k3s.service k3s-agent.service axonwall-k3s-firstboot.service axonwall-k3s-verify.service axonwall-console.service axonwall-hub-cert-renew.timer ssh.service chrony.service sysstat.service || true
+                    systemctl restart --no-block axonwall-console.service ssh.service chrony.service sysstat.service || true
+                    ;;
+                *)
+                    systemctl enable axonwalld.service axonwall-controller.service axonwall-ui.service headscale.service k3s.service axonwall-console.service axonwall-hub-cert-renew.timer ssh.service chrony.service sysstat.service || true
+                    systemctl restart --no-block axonwalld.service axonwall-controller.service axonwall-ui.service headscale.service ssh.service chrony.service sysstat.service || true
+                    ;;
+            esac
         fi
         ;;
     abort-upgrade|abort-remove|abort-deconfigure)

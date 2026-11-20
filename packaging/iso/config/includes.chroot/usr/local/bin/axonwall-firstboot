@@ -15,6 +15,15 @@ if command -v plymouth >/dev/null 2>&1 && plymouth --ping 2>/dev/null; then
   plymouth display-message --text="Provisioning Axonwall Security Appliance..." 2>/dev/null || true
 fi
 
+# D-M9 (marker): this IS the axonwall firstboot, so its edition is known
+# by construction. Stamp the canonical edition file (creating it if the
+# installer/builder didn't, correcting it if it disagrees) and log it.
+_edition_now="$(tr -d ' \t\r\n' < /etc/axonwall/edition 2>/dev/null || true)"
+if [[ "$_edition_now" != "axonwall" ]]; then
+  printf '%s\n' "axonwall" > /etc/axonwall/edition
+  echo "[Axonwall Firstboot] edition file set to 'axonwall' (was '${_edition_now:-<missing>}')"
+fi
+
 # Suppress kernel printk and systemd console status broadcasts so background
 # provisioning on Live media or firstboot never corrupts the TUI on /dev/tty1.
 dmesg -n 1 2>/dev/null || true
@@ -56,6 +65,12 @@ sysctl --system || true
 # (refuse to clone B onto itself, and refuse when the booted slot cannot
 # be determined); the standby slot must be empty (never clobber a slot
 # that already holds an OS); rsync must be present.
+# D-M2: the pending marker is left in place so the next firstboot run
+# retries -- but ONLY for transient failures (unknown booted slot,
+# missing standby device, rsync/mount failure). A booted-from-B refusal
+# is not transient: the clone can only ever run A->B, so keeping the
+# marker would re-run full firstboot on every B boot forever. That
+# branch consumes the pending marker itself, below.
 if [[ -f /etc/axonwall/.ab-clone-pending ]]; then
   (
     set +e
@@ -79,6 +94,15 @@ if [[ -f /etc/axonwall/.ab-clone-pending ]]; then
     fi
     if [[ "$_ab_boot_label" == "axon_root_b" ]]; then
       echo "[Axonwall Firstboot] WARNING: booted from standby slot B; refusing to clone B onto itself. Standby slot A will be populated by the next update." >&2
+      # D-M2: this refusal is permanent for this boot direction -- the
+      # clone can only ever run A->B -- so keeping the pending marker
+      # would re-run full firstboot on *every* B boot forever (the
+      # firstboot service is gated on the .firstboot marker, which the
+      # tail of this script keeps while the pending marker exists),
+      # with the clone never able to complete. Consume the pending
+      # marker here: slot B is populated by definition (it is the
+      # running root), and slot A will be populated by the next update.
+      rm -f /etc/axonwall/.ab-clone-pending
     elif [[ "$_ab_boot_label" != "axon_root_a" ]]; then
       echo "[Axonwall Firstboot] WARNING: could not determine the booted root slot (label='${_ab_boot_label:-<none>}'); skipping standby population rather than risk cloning the wrong direction." >&2
     else
@@ -217,6 +241,17 @@ fi
 
 # 2. Identify physical NICs (excluding loopback and virtual/tunnel netdevs)
 INTERFACES=($(ip -o link show | awk -F': ' '{print $2}' | cut -d@ -f1 | grep -vE '^(lo|wg.*|tailscale.*|tun.*|tap.*|sit.*|ip6tnl.*|gre.*|gretap.*|erspan.*|ip_vti.*|ip6_vti.*|ip6gre.*|docker.*|veth.*|br-.*|virbr.*|dummy.*|bond.*|pimreg)$' || true))
+
+# D-M6: exclude interfaces enslaved to a master (bond slaves, bridge
+# ports). The name filter above drops the bond master itself, but a bond
+# slave (eth0 enslaved to bond0) still passed and was picked as WAN/LAN
+# while the master got no address. Only the master carries an address.
+_INTERFACES_FILTERED=()
+for _iface in "${INTERFACES[@]}"; do
+  [ -e "/sys/class/net/${_iface}/master" ] && continue
+  _INTERFACES_FILTERED+=("$_iface")
+done
+INTERFACES=("${_INTERFACES_FILTERED[@]}")
 
 PRECONFIGURED_IFACES=0
 if [[ -f /var/lib/axonwall/etc-axonwall/.interfaces_configured && -s /var/lib/axonwall/etc-axonwall/interfaces.conf ]]; then
@@ -527,12 +562,16 @@ if [[ ! -s /etc/axonwall/certs/hub.crt || ! -s /etc/axonwall/certs/hub.key ]]; t
   echo "[Axonwall Firstboot] Generating appliance TLS certificate..."
   SAN="DNS:$(hostname),DNS:axonwall.local,DNS:localhost,IP:127.0.0.1"
   for ip in $(hostname -I 2>/dev/null || true); do SAN="${SAN},IP:${ip}"; done
+  # D-L4: a failed generation used to be swallowed (`|| true`) and the
+  # firstboot marker consumed anyway, leaving the box with no hub pair
+  # and no retry. Fail loudly instead; the marker survives and the
+  # next boot retries, exactly like the k3s firstboot (`|| die`).
   openssl req -x509 -newkey rsa:2048 -nodes \
     -keyout /etc/axonwall/certs/hub.key \
     -out /etc/axonwall/certs/hub.crt \
     -days 3650 \
     -subj "/O=Axonwall/OU=Appliance/CN=$(hostname)" \
-    -addext "subjectAltName=${SAN}" || true
+    -addext "subjectAltName=${SAN}" || { echo "[Axonwall Firstboot] ERROR: TLS certificate generation failed; keeping the firstboot marker so the next boot retries." >&2; exit 1; }
 fi
 # Always fix ownership: the controller (its own user since B-12) reads the key
 chown root:axonwall-api /etc/axonwall /etc/axonwall/certs 2>/dev/null || true
@@ -882,6 +921,10 @@ echo "==========================================================================
 # with no consumer until the next update populated B. Keeping the
 # marker makes the next boot re-run firstboot (its steps are written
 # to be re-runnable; see step 6) and retry the clone.
+# D-M2: a pending marker that survives to this point is a transient
+# failure (unknown booted slot, missing standby device, rsync/mount
+# failure). A booted-from-B refusal already consumed it in step 1.1,
+# so this keep-marker path no longer fires forever on B boots.
 if [[ -f /etc/axonwall/.ab-clone-pending ]]; then
   echo "[Axonwall Firstboot] WARNING: standby slot clone is still pending; keeping the firstboot marker so the next boot retries the clone." >&2
 else

@@ -456,6 +456,9 @@ else
   echo "axonwall" > "${OVL}/etc/hostname"
   touch "${OVL}/etc/axonwall/.firstboot"
 fi
+# D-M9 (marker): the canonical edition file for the live installer
+# environment. EDITION is validated to axonwall|k3s-storage above.
+printf '%s\n' "${EDITION}" > "${OVL}/etc/axonwall/edition"
 
 printf "%s\n" "${CORE_PKGS[@]}" > "${OVL}/etc/apk/world"
 
@@ -542,6 +545,26 @@ else
 fi
 
 cp "${REPO_ROOT}/packaging/iso/config/includes.chroot/usr/local/bin/axonwall-update" "${OVL}/usr/local/bin/"
+# E-M3 (round-3): ship the release-signing trust anchor so an Alpine
+# box's first .deb update verifies the detached signature instead of
+# falling back to SHA-256 + TLS only. Debian installs get the anchor
+# from the ISO chroot and .deb-maintained systems from the package;
+# Alpine got neither, so the signature the release workflow produces
+# was never checked on the update most likely to carry a waited-for
+# fix. Mirror the keyring directory too (E-M2).
+if [[ -f "${REPO_ROOT}/packaging/iso/config/includes.chroot/etc/axonwall/release-signing.pub" ]]; then
+  mkdir -p "${OVL}/etc/axonwall"
+  cp "${REPO_ROOT}/packaging/iso/config/includes.chroot/etc/axonwall/release-signing.pub" "${OVL}/etc/axonwall/release-signing.pub"
+  chmod 644 "${OVL}/etc/axonwall/release-signing.pub"
+fi
+if [[ -d "${REPO_ROOT}/packaging/iso/config/includes.chroot/etc/axonwall/release-signing.d" ]]; then
+  mkdir -p "${OVL}/etc/axonwall/release-signing.d"
+  for _keyring_pub in "${REPO_ROOT}"/packaging/iso/config/includes.chroot/etc/axonwall/release-signing.d/*.pub; do
+    [[ -f "$_keyring_pub" ]] || continue
+    cp "$_keyring_pub" "${OVL}/etc/axonwall/release-signing.d/"
+    chmod 644 "${OVL}/etc/axonwall/release-signing.d/$(basename "$_keyring_pub")"
+  done
+fi
 if [[ -f "${REPO_ROOT}/packaging/iso/config/includes.chroot/usr/local/bin/axonwall-config" ]]; then
   cp "${REPO_ROOT}/packaging/iso/config/includes.chroot/usr/local/bin/axonwall-config" "${OVL}/usr/local/bin/"
 fi
@@ -551,7 +574,14 @@ fi
 chmod +x "${OVL}/usr/local/bin/axonwall"*
 
 # Version stamp
-VERSION="$(cat "${REPO_ROOT}/VERSION" 2>/dev/null | tr -d '[:space:]' || echo "0.2.2")"
+VERSION="$(cat "${REPO_ROOT}/VERSION" 2>/dev/null | tr -d '[:space:]' || true)"
+if [ -z "$VERSION" ]; then
+  VERSION="$(grep -m1 '"version"' "${REPO_ROOT}/package.json" 2>/dev/null | sed -E 's/.*"version": *"([^"]+)".*/\1/' || true)"
+fi
+if [ -z "$VERSION" ]; then
+  echo "[-] ERROR: cannot determine release version (VERSION file and package.json both missing or unreadable); refusing to stamp a hardcoded fallback version." >&2
+  exit 1
+fi
 echo "${VERSION}" > "${OVL}/etc/axonwall/version"
 
 # Copy compiled Go daemons (axonwalld, axonwall-console, axonwall-satellite)
@@ -787,7 +817,7 @@ if [[ "${EDITION}" == "k3s-storage" ]]; then
   for svc in axonwall-network-setup modules sysctl hostname bootmisc syslog networking zfs-import zfs-mount; do
     ln -sf "/etc/init.d/${svc}" "${OVL}/etc/runlevels/boot/${svc}"
   done
-  for svc in chronyd crond sshd nftables axonwall-firstboot k3s k3s-agent local; do
+  for svc in chronyd crond sshd nftables axonwall-firstboot k3s k3s-agent axonwall-k3s-verify local; do
     ln -sf "/etc/init.d/${svc}" "${OVL}/etc/runlevels/default/${svc}"
   done
 else

@@ -219,6 +219,12 @@ elif [[ "${FLAVOR}" == "k3s-storage" ]]; then
   cp "${SCRIPT_DIR}/../k3s-storage/preseed-k3s-storage-binary.cfg" config/includes.binary/preseed.cfg
 fi
 
+# D-M9 (marker): the canonical edition file for the live installer
+# environment (and, via this chroot, for the cloud image and every
+# install the TUI/d-i paths perform from this ISO). FLAVOR is the
+# builder's edition axis, validated to axonwall|vault|k3s-storage.
+printf '%s\n' "${FLAVOR}" > config/includes.chroot/etc/axonwall/edition
+
 # Ensure firstboot marker directory and service enable symlink exist
 mkdir -p config/includes.chroot/etc/axonwall/
 if [[ "${FLAVOR}" == "axonwall" ]]; then
@@ -341,7 +347,11 @@ fi
 
 chmod +x config/includes.chroot/usr/local/bin/axonwall-import || true
 
-VERSION=$(node -p "require('${SCRIPT_DIR}/../../package.json').version" 2>/dev/null || grep -m1 '"version"' "${SCRIPT_DIR}/../../package.json" 2>/dev/null | sed -E 's/.*"version": *"([^"]+)".*/\1/' || echo "0.9.2")
+VERSION=$(node -p "require('${SCRIPT_DIR}/../../package.json').version" 2>/dev/null || grep -m1 '"version"' "${SCRIPT_DIR}/../../package.json" 2>/dev/null | sed -E 's/.*"version": *"([^"]+)".*/\1/' || true)
+if [ -z "$VERSION" ]; then
+  echo "[-] ERROR: cannot determine release version (package.json missing or unreadable); refusing to stamp a hardcoded fallback version." >&2
+  exit 1
+fi
 echo "${VERSION}" > config/includes.chroot/etc/axonwall/version
 
 # Copy compiled daemon binaries if present
