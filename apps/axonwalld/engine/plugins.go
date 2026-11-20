@@ -72,12 +72,50 @@ type PluginManager struct {
 	dirMgr       *DirectoryManager
 	installedMap map[string]string // pluginID -> installedAt
 	disabledMap  map[string]bool   // pluginID -> explicitly disabled
+	// R4-A-M4: the live ThreatHarvesterManager, wired by the daemon
+	// at startup. The ebpf-threat-harvester plugin toggle drives the
+	// harvester through this (enable starts it, disable stops it) so
+	// the toggle can never report success while nothing runs. Nil
+	// when the daemon has not wired one (unit tests, tooling) — the
+	// toggle then fails closed instead of claiming success.
+	harvester *ThreatHarvesterManager
 }
 
 func (pm *PluginManager) SetDirectoryManager(dm *DirectoryManager) {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 	pm.dirMgr = dm
+}
+
+// SetThreatHarvesterManager wires the live harvester manager so the
+// ebpf-threat-harvester plugin toggle can start/stop it (R4-A-M4).
+func (pm *PluginManager) SetThreatHarvesterManager(thm *ThreatHarvesterManager) {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	pm.harvester = thm
+}
+
+// harvesterManager returns the wired harvester manager, if any.
+func (pm *PluginManager) harvesterManager() *ThreatHarvesterManager {
+	pm.mu.RLock()
+	defer pm.mu.RUnlock()
+	return pm.harvester
+}
+
+// setHarvesterEnabled starts or stops the harvester for the
+// ebpf-threat-harvester plugin toggle (R4-A-M4). It fails closed when
+// no manager is wired — the toggle must not report success while
+// nothing runs — and returns the attach error when enabling fails.
+func (pm *PluginManager) setHarvesterEnabled(enabled bool) error {
+	thm := pm.harvesterManager()
+	if thm == nil {
+		verb := "disable"
+		if enabled {
+			verb = "enable"
+		}
+		return fmt.Errorf("threat harvester manager is not wired to the plugin manager; cannot %s the ebpf-threat-harvester plugin", verb)
+	}
+	return thm.SetEnabled(enabled)
 }
 
 func GetCoreVigilanteLDAPSpec() PluginLDAPSpec {
@@ -720,6 +758,17 @@ func (pm *PluginManager) DisablePlugin(pluginID string) PluginActionResponse {
 		}
 	}
 
+	// R4-A-M4: disabling the harvester plugin stops the harvester —
+	// the toggle must actually stop collection, not just flip state.
+	// (SetEnabled(false) detaches the eBPF hooks and cannot fail
+	// meaningfully; a wiring error is logged, not fatal, because the
+	// plugin is being turned off.)
+	if pluginID == "ebpf-threat-harvester" {
+		if err := pm.setHarvesterEnabled(false); err != nil {
+			log.Printf("[PluginManager] Warning: disabling ebpf-threat-harvester did not stop the harvester: %v", err)
+		}
+	}
+
 	pm.mu.Lock()
 	pm.disabledMap[pluginID] = true
 	pm.saveState()
@@ -1000,6 +1049,21 @@ func (pm *PluginManager) InstallPlugin(pluginID string) PluginActionResponse {
 	}
 	if pluginID == "ebpf-threat-harvester" {
 		_ = os.MkdirAll("/var/lib/axonwall/threat-corpus", 0750)
+		// R4-A-M4: installing the plugin must actually start the
+		// harvester — installing and reporting success while nothing
+		// runs is the same lie as the enable toggle. On failure the
+		// plugin is left uninstalled (and recorded disabled, like
+		// the A-M33 unit-failure path) instead of enabled-but-dead.
+		if err := pm.setHarvesterEnabled(true); err != nil {
+			pm.mu.Lock()
+			pm.disabledMap[pluginID] = true
+			pm.saveState()
+			pm.mu.Unlock()
+			return PluginActionResponse{
+				Success: false,
+				Message: fmt.Sprintf("Failed to start the threat harvester for plugin %s: %v", pluginID, err),
+			}
+		}
 	}
 
 	pm.mu.Lock()
@@ -1236,6 +1300,20 @@ func (pm *PluginManager) ReconfigurePlugin(pluginID string) PluginActionResponse
 	}
 	if pluginID == "ebpf-threat-harvester" {
 		_ = os.MkdirAll("/var/lib/axonwall/threat-corpus", 0750)
+		// R4-A-M4: enabling the plugin must actually start the
+		// harvester (EnablePlugin funnels through here). On failure
+		// the plugin stays recorded disabled instead of reporting
+		// success while nothing runs.
+		if err := pm.setHarvesterEnabled(true); err != nil {
+			pm.mu.Lock()
+			pm.disabledMap[pluginID] = true
+			pm.saveState()
+			pm.mu.Unlock()
+			return PluginActionResponse{
+				Success: false,
+				Message: fmt.Sprintf("Failed to start the threat harvester for plugin %s: %v", pluginID, err),
+			}
+		}
 		pm.mu.Lock()
 		delete(pm.disabledMap, pluginID)
 		if pm.installedMap[pluginID] == "" {

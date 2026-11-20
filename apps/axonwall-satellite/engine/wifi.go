@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"text/template"
 	"time"
@@ -84,6 +85,7 @@ hw_mode={{.HwMode}}
 channel={{.Channel}}
 ieee80211n=1
 {{if .Is5GHz}}ieee80211ac=1
+{{end}}{{if .Is6GHz}}ieee80211ax=1
 {{end}}wmm_enabled=1
 
 {{if .FastRoaming.Enabled}}
@@ -122,6 +124,52 @@ ieee80211w=2
 {{end}}
 `
 
+// wifiBandForChannel classifies a WiFi channel into its band and
+// validates it against the legal channel sets. R4-A-L5: the old code
+// classified every channel > 14 as 5 GHz and never validated the
+// channel at all, so a 6 GHz channel (e.g. 37) was configured as a
+// 5 GHz channel and an out-of-range channel (e.g. 200) was written
+// into hostapd.conf unchecked.
+//
+// Band overlap: 6 GHz channels 1, 5, 9, 13 overlap the 2.4 GHz set
+// 1-14, and 149/153/157/161/165 exist in both the 5 GHz and 6 GHz
+// sets. From a channel number alone the only deterministic reading
+// is priority 2.4 GHz > 5 GHz > 6 GHz; selecting an overlapping
+// channel explicitly for 6 GHz needs a Band field on WiFiConfig,
+// which is not part of this fix.
+func wifiBandForChannel(ch int) (band string, err error) {
+	if ch >= 1 && ch <= 14 {
+		return "2.4GHz", nil
+	}
+	if valid5GHzChannel[ch] {
+		return "5GHz", nil
+	}
+	if ch >= 1 && ch <= 233 && (ch-1)%4 == 0 {
+		return "6GHz", nil
+	}
+	return "", fmt.Errorf("invalid WiFi channel %d: legal channels are 2.4 GHz 1-14, 5 GHz %v, and 6 GHz 1-233 step 4 (1, 5, 9, ...)", ch, sorted5GHzChannels())
+}
+
+// valid5GHzChannel is the legal UNII channel set (20 MHz base
+// channels, including the DFS and U-NII-3 ranges).
+var valid5GHzChannel = map[int]bool{
+	32: true, 34: true, 36: true, 38: true, 40: true, 42: true,
+	44: true, 46: true, 48: true, 52: true, 56: true, 60: true,
+	64: true, 100: true, 104: true, 108: true, 112: true, 116: true,
+	120: true, 124: true, 128: true, 132: true, 136: true, 140: true,
+	144: true, 149: true, 153: true, 157: true, 161: true, 165: true,
+	169: true, 173: true, 177: true,
+}
+
+func sorted5GHzChannels() []int {
+	out := make([]int, 0, len(valid5GHzChannel))
+	for ch := range valid5GHzChannel {
+		out = append(out, ch)
+	}
+	sort.Ints(out)
+	return out
+}
+
 // Configure provisions the SSID on the given radio
 func (e *WiFiEngine) Configure(cfg WiFiConfig) error {
 	if !validRadioRegex.MatchString(cfg.Radio) || strings.Contains(cfg.Radio, "..") || strings.HasPrefix(cfg.Radio, "-") {
@@ -137,11 +185,6 @@ func (e *WiFiEngine) Configure(cfg WiFiConfig) error {
 		return e.Teardown(cfg.Radio)
 	}
 
-	tmpl, err := template.New("hostapd").Parse(hostapdTemplate)
-	if err != nil {
-		return err
-	}
-
 	// Default channel and derived 802.11 band parameters
 	if cfg.Channel == 0 {
 		cfg.Channel = 1
@@ -149,23 +192,19 @@ func (e *WiFiEngine) Configure(cfg WiFiConfig) error {
 	if cfg.FastRoaming.Enabled && strings.TrimSpace(cfg.FastRoaming.MobilityDomain) == "" {
 		cfg.FastRoaming.MobilityDomain = "4f57"
 	}
-	tplData := struct {
-		WiFiConfig
-		HwMode string
-		Is5GHz bool
-	}{
-		WiFiConfig: cfg,
-		HwMode:     "g",
-		Is5GHz:     cfg.Channel > 14,
-	}
-	if tplData.Is5GHz {
-		tplData.HwMode = "a"
+
+	// R4-A-L5: validate the channel and classify the band from the
+	// channel number — a 6 GHz channel is not a 5 GHz channel, and
+	// an out-of-range channel must not reach hostapd.conf.
+	band, err := wifiBandForChannel(cfg.Channel)
+	if err != nil {
+		return err
 	}
 
 	confPath := filepath.Join(e.ConfigDir, fmt.Sprintf("hostapd-%s.conf", cfg.Radio))
 
-	var buf bytes.Buffer
-	if err := tmpl.Execute(&buf, tplData); err != nil {
+	buf, err := renderHostapdConfig(cfg, band)
+	if err != nil {
 		return err
 	}
 
@@ -198,6 +237,36 @@ func (e *WiFiEngine) Configure(cfg WiFiConfig) error {
 	}
 
 	return nil
+}
+
+// renderHostapdConfig renders the hostapd.conf body for cfg on the
+// given band ("2.4GHz", "5GHz", "6GHz"). Extracted from Configure so
+// the band classification and template output are unit-testable
+// without running systemctl/hostapd.
+func renderHostapdConfig(cfg WiFiConfig, band string) (bytes.Buffer, error) {
+	var buf bytes.Buffer
+	tmpl, err := template.New("hostapd").Parse(hostapdTemplate)
+	if err != nil {
+		return buf, err
+	}
+	tplData := struct {
+		WiFiConfig
+		HwMode string
+		Is5GHz bool
+		Is6GHz bool
+	}{
+		WiFiConfig: cfg,
+		HwMode:     "g",
+		Is5GHz:     band == "5GHz",
+		Is6GHz:     band == "6GHz",
+	}
+	if band == "5GHz" || band == "6GHz" {
+		tplData.HwMode = "a"
+	}
+	if err := tmpl.Execute(&buf, tplData); err != nil {
+		return buf, err
+	}
+	return buf, nil
 }
 
 // hostapdPattern matches the exact argv this code starts hostapd with

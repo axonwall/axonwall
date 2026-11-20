@@ -284,3 +284,49 @@ func TestBugHuntV012StandbySyncFencingVlanWifiDhcp(t *testing.T) {
 		t.Fatalf("unexpected 5GHz hostapd config:\n%s", confStr)
 	}
 }
+
+// R4-A-L3: with an unknown LAN device (node never went through a
+// Promote/Demote transition, lastLanDev == ""), a non-LAN interface
+// must NOT be treated as LAN — the old `lanDev == "" || dev ==
+// lanDev` stripped the VIP from every non-WAN interface. And a
+// dropped lan-vip interface must surface as an error from
+// ApplySyncedInterface, not nil, so the hub's SYNC ack cannot claim
+// success for an interface that was never applied.
+func TestBugHuntV012StandbyFencingUnknownLanDev(t *testing.T) {
+	ha := NewEdgeHAEngine("hosted", "standby")
+	ha.mu.Lock()
+	ha.lastWanDev = ""
+	ha.lastLanDev = ""
+	ha.lastVipV4 = "10.10.0.1/24"
+	ha.lastVipV6 = "fd00:10::1/64"
+	ha.mu.Unlock()
+
+	// A non-LAN interface carrying the VIP address keeps it: it is
+	// not the LAN device, and only an explicit device match (or the
+	// lan-vip name) marks an interface as LAN.
+	mgmtSpec, mgmtApply := ha.PrepareSyncedInterface(EdgeInterfaceSpec{
+		Name: "mgmt", Device: "eth2", Address: "10.10.0.1/24", Enabled: true,
+	})
+	if !mgmtApply || mgmtSpec.Address != "10.10.0.1/24" {
+		t.Fatalf("unknown lanDev must not strip a non-LAN interface's address, got apply=%v spec=%+v", mgmtApply, mgmtSpec)
+	}
+
+	// The lan-vip name itself is the backstop: Promote creates the
+	// VIP interfaces as lan-vip4/lan-vip6, so a lan-vip-named
+	// interface is fenced even when the device name differs.
+	vipSpec, vipApply := ha.PrepareSyncedInterface(EdgeInterfaceSpec{
+		Name: "lan-vip4", Device: "eth9", Address: "10.10.0.1/24", Enabled: true,
+	})
+	if vipApply || vipSpec.Address != "" {
+		t.Fatalf("lan-vip-named interface on an unknown device must be stripped and skipped, got apply=%v spec=%+v", vipApply, vipSpec)
+	}
+
+	// The dropped interface is an error, not silent success (the
+	// net engine is never reached on the skip path, so nil is safe
+	// here).
+	if err := ha.ApplySyncedInterface(nil, EdgeInterfaceSpec{
+		Name: "lan-vip4", Device: "eth9", Address: "10.10.0.1/24", Enabled: true,
+	}); err == nil {
+		t.Fatal("ApplySyncedInterface must return an error for a fencing-dropped lan-vip interface, got nil")
+	}
+}

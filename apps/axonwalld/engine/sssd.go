@@ -2,6 +2,7 @@ package engine
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"strings"
@@ -10,7 +11,7 @@ import (
 // BuildSSSDConfig generates /etc/sssd/sssd.conf connecting to the local OpenLDAP
 // daemon (and optional HA peer failover URI) with RFC 2307 schema, SSH public
 // key support, and authenticated SSSD bind credentials when LDAPReplPassFile exists.
-func BuildSSSDConfig(baseDN string, peerLDAPURI string) string {
+func BuildSSSDConfig(baseDN string, peerLDAPURI string) (string, error) {
 	bindDN := ""
 	bindPassword := ""
 	if data, err := os.ReadFile(LDAPReplPassFile); err == nil {
@@ -22,8 +23,26 @@ func BuildSSSDConfig(baseDN string, peerLDAPURI string) string {
 	return BuildSSSDConfigWithBind(baseDN, peerLDAPURI, bindDN, bindPassword)
 }
 
+// sssdAllowUnverifiedPeerTLS is the explicit operator opt-in for the
+// otherwise-refused peer-without-CA case (R4-A-M2): a lab peer reached
+// over unverified TLS. It is off by default and must be set deliberately;
+// nothing in the normal config path enables it.
+func sssdAllowUnverifiedPeerTLS() bool {
+	return strings.TrimSpace(os.Getenv("AXONWALL_SSSD_ALLOW_UNVERIFIED_PEER_TLS")) == "1"
+}
+
 // BuildSSSDConfigWithBind generates /etc/sssd/sssd.conf with explicit optional bind credentials.
-func BuildSSSDConfigWithBind(baseDN, peerLDAPURI, bindDN, bindPassword string) string {
+//
+// R4-A-M2: when a peer LDAP URI is configured and no CA certificate
+// exists, the old code emitted `ldap_tls_reqcert = never` while the
+// config still carried the derived bind password — the password then
+// crossed the sync network to an unverified peer (MITM-able despite
+// the ldaps:// scheme). That config is now refused: fail closed
+// instead of silently emitting it. The loopback-only case (no peer
+// URI) is unaffected — the password never leaves the box — and a
+// deliberate lab opt-in (AXONWALL_SSSD_ALLOW_UNVERIFIED_PEER_TLS=1)
+// restores the old behavior with a loud log line.
+func BuildSSSDConfigWithBind(baseDN, peerLDAPURI, bindDN, bindPassword string) (string, error) {
 	ldapURI := "ldap://127.0.0.1:389"
 	caCertPath := ""
 	if _, err := os.Stat("/etc/axonwall/pki/ca.crt"); err == nil {
@@ -45,9 +64,16 @@ func BuildSSSDConfigWithBind(baseDN, peerLDAPURI, bindDN, bindPassword string) s
 			tlsBlock = fmt.Sprintf(`ldap_id_use_start_tls = False
 ldap_tls_reqcert = demand
 ldap_tls_cacert = %s`, caCertPath)
-		} else {
+		} else if sssdAllowUnverifiedPeerTLS() {
+			// Explicit operator opt-in only (see above): the
+			// peer connection is unverified TLS and the bind
+			// password is exposed to anyone on the sync segment
+			// who can MITM it. Never the default.
+			log.Printf("[SSSD] WARNING: peer LDAP URI %s configured without a CA certificate; AXONWALL_SSSD_ALLOW_UNVERIFIED_PEER_TLS=1 set, emitting unverified-TLS config (bind password exposed to MITM on the sync network)", peerLDAPURI)
 			tlsBlock = `ldap_id_use_start_tls = False
 ldap_tls_reqcert = never`
+		} else {
+			return "", fmt.Errorf("refusing to emit SSSD config: peer LDAP URI %s is configured but no CA certificate exists (/etc/axonwall/pki/ca.crt or %s); the bind password would cross the sync network over unverified TLS — enroll HA PKI first, or set AXONWALL_SSSD_ALLOW_UNVERIFIED_PEER_TLS=1 explicitly for a lab peer", peerLDAPURI, HAPKICACertPath)
 		}
 	} else if caCertPath != "" {
 		tlsBlock = fmt.Sprintf(`ldap_id_use_start_tls = False
@@ -93,7 +119,7 @@ ldap_user_ssh_public_key = sshPublicKey
 cache_credentials = True
 enumerate = False
 entry_cache_timeout = 30
-`, ldapURI, baseDN, baseDN, baseDN, bindBlock, tlsBlock)
+`, ldapURI, baseDN, baseDN, baseDN, bindBlock, tlsBlock), nil
 }
 
 // hasSSSD returns true if the SSSD daemon binary is installed on the host OS (Debian/glibc).
@@ -221,7 +247,10 @@ Cmnd_Alias AXONWALL_OP_CMDS = /usr/local/bin/axonwall-tui --readonly, /usr/local
 	if err := os.MkdirAll("/etc/sssd", 0700); err != nil {
 		return err
 	}
-	confContent := BuildSSSDConfig(baseDN, peerLDAPURI)
+	confContent, err := BuildSSSDConfig(baseDN, peerLDAPURI)
+	if err != nil {
+		return err
+	}
 	existing, _ := os.ReadFile("/etc/sssd/sssd.conf")
 	if string(existing) != confContent {
 		if err := os.WriteFile("/etc/sssd/sssd.conf", []byte(confContent), 0600); err != nil {

@@ -3054,6 +3054,9 @@ func main() {
 
 	threatHarvesterManager := engine.NewThreatHarvesterManager(ebpfManager, lsmGuardManager, vigilanteManager, mcpTrafficManager)
 	agentServer.SetThreatHarvesterManager(threatHarvesterManager)
+	// R4-A-M4: wire the harvester into the plugin manager so the
+	// ebpf-threat-harvester toggle actually starts/stops it.
+	pluginManager.SetThreatHarvesterManager(threatHarvesterManager)
 	go func() {
 		for _, cand := range []string{
 			filepath.Join(etcDir, "managed", "threat_harvester_config.json"),
@@ -3064,6 +3067,17 @@ func main() {
 					log.Printf("[Agent] Startup Threat Harvester config warning (%s): %v", cand, err)
 				}
 				break
+			}
+		}
+		// R4-A-M4: if the plugin was left enabled (e.g. from a prior
+		// boot), the harvester must be running — force-enable it
+		// after the config load. A failure is logged, not fatal:
+		// the plugin toggle reports the true state via
+		// SnapshotStatus (BpfLoadError) and the next enable attempt
+		// fails closed instead of claiming success.
+		if pluginManager.IsPluginEnabled("ebpf-threat-harvester") {
+			if err := threatHarvesterManager.SetEnabled(true); err != nil {
+				log.Printf("[Agent] Warning: ebpf-threat-harvester plugin is enabled but the harvester failed to start: %v", err)
 			}
 		}
 	}()

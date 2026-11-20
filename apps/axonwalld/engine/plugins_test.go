@@ -152,3 +152,45 @@ func TestPluginManager_NonBlockingListDuringAction(t *testing.T) {
 	pm.actionMu.Unlock()
 }
 
+
+// R4-A-M4: the ebpf-threat-harvester toggle must actually start the
+// harvester — it used to only MkdirAll + flip state, reporting
+// enabled while nothing ran. Without a wired harvester manager, and
+// when the harvester cannot start (dev mode without BPF), the toggle
+// fails closed and the plugin stays disabled.
+func TestPluginManager_HarvesterToggleWired(t *testing.T) {
+	t.Setenv("AXONWALL_RUNTIME_MODE", "dev")
+	tmpDir := t.TempDir()
+	pm := NewPluginManager(tmpDir)
+
+	resp := pm.ReconfigurePlugin("ebpf-threat-harvester")
+	if resp.Success {
+		t.Fatalf("ReconfigurePlugin without a wired harvester must fail closed, got success: %+v", resp)
+	}
+	if pm.IsPluginEnabled("ebpf-threat-harvester") {
+		t.Fatalf("plugin must not be enabled after a failed reconfigure")
+	}
+
+	mgr := NewThreatHarvesterManager(nil, nil, nil, nil)
+	cfg := DefaultThreatHarvesterConfig()
+	cfg.SpoolDir = t.TempDir()
+	if err := mgr.UpdateConfig(cfg); err != nil {
+		t.Fatalf("UpdateConfig failed: %v", err)
+	}
+	pm.SetThreatHarvesterManager(mgr)
+	resp = pm.ReconfigurePlugin("ebpf-threat-harvester")
+	if resp.Success {
+		t.Fatalf("ReconfigurePlugin in dev mode without BPF must fail honestly, got success: %+v", resp)
+	}
+	if pm.IsPluginEnabled("ebpf-threat-harvester") {
+		t.Fatalf("plugin must not be enabled when the harvester cannot start")
+	}
+
+	resp = pm.DisablePlugin("ebpf-threat-harvester")
+	if !resp.Success {
+		t.Fatalf("DisablePlugin should succeed, got: %+v", resp)
+	}
+	if pm.IsPluginEnabled("ebpf-threat-harvester") {
+		t.Fatalf("plugin must be disabled after DisablePlugin")
+	}
+}

@@ -58,10 +58,13 @@ func TestBuildNodeSchedulingMergePatch_EdgePresetAndSystemTaintPreserved(t *test
 	if val, exists := parsed.Metadata.Labels["node-role.kubernetes.io/storage"]; !exists || val != nil {
 		t.Errorf("expected storage label nulled out, got exists=%v val=%#v", exists, val)
 	}
-	if len(parsed.Spec.Taints) != 2 {
-		t.Fatalf("expected 2 taints (1 system + 1 CriticalAddonsOnly), got %#v", parsed.Spec.Taints)
+	// R4-A-L2: the merge preserves existing custom taints — the old
+	// replace semantics dropped `custom/old` here, so the patch
+	// carried only 2 taints (1 system + 1 CriticalAddonsOnly).
+	if len(parsed.Spec.Taints) != 3 {
+		t.Fatalf("expected 3 taints (1 system + 1 preserved custom/old + 1 CriticalAddonsOnly), got %#v", parsed.Spec.Taints)
 	}
-	if parsed.Spec.Taints[0].Key != "node.kubernetes.io/unreachable" || parsed.Spec.Taints[1].Key != "CriticalAddonsOnly" || parsed.Spec.Taints[1].Effect != "NoExecute" {
+	if parsed.Spec.Taints[0].Key != "node.kubernetes.io/unreachable" || parsed.Spec.Taints[1].Key != "custom/old" || parsed.Spec.Taints[2].Key != "CriticalAddonsOnly" || parsed.Spec.Taints[2].Effect != "NoExecute" {
 		t.Errorf("unexpected taints slice: %#v", parsed.Spec.Taints)
 	}
 	if parsed.Spec.Unschedulable == nil || *parsed.Spec.Unschedulable != false {
@@ -199,8 +202,11 @@ func TestMergePeerReplicaPreservingLocalIdentity(t *testing.T) {
 	if wan["ipv4Address"] != "148.135.193.203/27" {
 		t.Errorf("expected wan ipv4 148.135.193.203/27, got %v", wan["ipv4Address"])
 	}
-	if _, hasV6 := wan["ipv6Address"]; hasV6 {
-		t.Errorf("expected replica ipv6Address removed when absent locally, still present: %v", wan["ipv6Address"])
+	// R4-A-L4: a preserved key the local interface lacks is KEPT
+	// from the replica (the peer's gateway/ipv6), not deleted — the
+	// old code deleted it, which could drop the shared gateway.
+	if wan["ipv6Address"] != "2001:db8::2/64" {
+		t.Errorf("expected replica ipv6Address kept when absent locally, got %v", wan["ipv6Address"])
 	}
 	if lan["ipv4Address"] != "10.80.0.203/24" || ka["ipv4Address"] != "10.0.99.203/24" {
 		t.Errorf("expected local lan/keepalivenet IPs, got lan=%v ka=%v", lan["ipv4Address"], ka["ipv4Address"])
@@ -216,5 +222,112 @@ func TestMergePeerReplicaPreservingLocalIdentity(t *testing.T) {
 	}
 	if merged["firewall"].(map[string]any)["rules"].([]any)[0] != "updated-from-master" {
 		t.Errorf("expected shared firewall section from replica")
+	}
+}
+
+// R4-A-L2: removeTaints deletes by exact key+effect+value, req.Taints
+// upserts by key+effect (request wins on a value change), and custom
+// taints not mentioned anywhere are preserved.
+func TestBuildNodeSchedulingMergePatch_RemoveAndUpsertTaints(t *testing.T) {
+	existing := []K3sNodeTaint{
+		{Key: "custom/keep", Value: "1", Effect: "NoSchedule"},
+		{Key: "custom/drop", Value: "x", Effect: "NoSchedule"},
+		{Key: "custom/change", Value: "old", Effect: "NoExecute"},
+		{Key: "custom/same-key-diff-effect", Value: "v", Effect: "NoSchedule"},
+	}
+	req := K3sNodeUpdateRequest{
+		NodeName: "klaxon",
+		Roles:    []string{"worker"},
+		Taints: []K3sNodeTaint{
+			{Key: "custom/change", Value: "new", Effect: "NoExecute"},
+			{Key: "custom/added", Value: "y", Effect: "PreferNoSchedule"},
+		},
+		RemoveTaints: []K3sNodeTaint{
+			{Key: "custom/drop", Value: "x", Effect: "NoSchedule"},
+			// Wrong value: must NOT delete custom/keep.
+			{Key: "custom/keep", Value: "not-1", Effect: "NoSchedule"},
+		},
+	}
+	patchBytes, err := buildNodeSchedulingMergePatch(nil, existing, req)
+	if err != nil {
+		t.Fatalf("buildNodeSchedulingMergePatch returned error: %v", err)
+	}
+	var parsed struct {
+		Spec struct {
+			Taints []K3sNodeTaint `json:"taints"`
+		} `json:"spec"`
+	}
+	if err := json.Unmarshal(patchBytes, &parsed); err != nil {
+		t.Fatalf("unmarshal patch failed: %v", err)
+	}
+	want := map[string]string{
+		"custom/keep|NoSchedule":                 "1",
+		"custom/change|NoExecute":                "new",
+		"custom/same-key-diff-effect|NoSchedule": "v",
+		"custom/added|PreferNoSchedule":          "y",
+	}
+	if len(parsed.Spec.Taints) != len(want) {
+		t.Fatalf("expected %d taints, got %#v", len(want), parsed.Spec.Taints)
+	}
+	for _, tc := range parsed.Spec.Taints {
+		key := tc.Key + "|" + tc.Effect
+		v, ok := want[key]
+		if !ok {
+			t.Errorf("unexpected taint in patch: %#v", tc)
+			continue
+		}
+		if tc.Value != v {
+			t.Errorf("taint %s: expected value %q, got %q", key, v, tc.Value)
+		}
+	}
+}
+
+// R4-A-L4: a replica interface with no local match (renamed NIC /
+// extra interface) is dropped when the local node has interfaces of
+// its own, and kept only as a bootstrap config when it has none.
+func TestMergePeerReplicaUnmatchedInterfaceDropped(t *testing.T) {
+	localJSON := []byte(`{
+  "system": {"hostname": "saxon"},
+  "interfaces": [
+    {"name": "wan", "device": "eth1", "ipv4Address": "148.135.193.203/27", "gateway": "148.135.193.193"}
+  ]
+}`)
+	replicaJSON := []byte(`{
+  "system": {"hostname": "klaxon"},
+  "interfaces": [
+    {"name": "wan", "device": "eth1", "ipv4Address": "148.135.193.202/27", "gateway": "148.135.193.193"},
+    {"name": "lan", "device": "enp3s0", "ipv4Address": "10.80.0.202/24", "macAddress": "aa:bb:cc:dd:ee:ff"},
+    {"name": "ghost", "device": "eth9", "ipv4Address": "192.0.2.1/24"}
+  ]
+}`)
+
+	mergedBytes, err := mergePeerReplicaPreservingLocalIdentity(localJSON, replicaJSON)
+	if err != nil {
+		t.Fatalf("merge failed: %v", err)
+	}
+	var merged map[string]any
+	if err := json.Unmarshal(mergedBytes, &merged); err != nil {
+		t.Fatalf("unmarshal merged failed: %v", err)
+	}
+	ifaces := merged["interfaces"].([]any)
+	if len(ifaces) != 1 {
+		t.Fatalf("expected only the matched wan interface to survive, got %d: %v", len(ifaces), ifaces)
+	}
+	wan := ifaces[0].(map[string]any)
+	if wan["ipv4Address"] != "148.135.193.203/27" {
+		t.Errorf("expected local wan IP preserved, got %v", wan["ipv4Address"])
+	}
+
+	// Bootstrap case: no local interfaces at all — the replica
+	// stands as the initial config.
+	mergedBytes, err = mergePeerReplicaPreservingLocalIdentity([]byte(`{"system": {"hostname": "fresh"}}`), replicaJSON)
+	if err != nil {
+		t.Fatalf("bootstrap merge failed: %v", err)
+	}
+	if err := json.Unmarshal(mergedBytes, &merged); err != nil {
+		t.Fatalf("unmarshal bootstrap merged failed: %v", err)
+	}
+	if len(merged["interfaces"].([]any)) != 3 {
+		t.Fatalf("bootstrap merge should keep all 3 replica interfaces, got %v", merged["interfaces"])
 	}
 }
