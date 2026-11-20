@@ -423,7 +423,7 @@ def normalize_zbm_cmdline(raw_cmd: str, font: str | None = None) -> str:
             tokens.append(req)
 
     # Critical: console=tty1 MUST come AFTER console=ttyS0 so ZFSBootMenu sets control_term=/dev/tty1
-    tokens.append("console=ttyS0,115200")
+    tokens.append("console=ttyS0,9600")
     tokens.append("console=tty1")
     return " ".join(tokens)
 

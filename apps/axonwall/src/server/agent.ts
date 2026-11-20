@@ -196,7 +196,7 @@ export async function getAgentStatus(): Promise<AgentStatus> {
   if (daemonStatus) {
     return {
       nodeId: daemonStatus.node_id || daemonStatus.nodeId || `axonwall-${os.hostname()}`,
-      version: daemonStatus.version || '0.12.3',
+      version: daemonStatus.version || '0.12.4',
       uptimeSeconds: Number(daemonStatus.uptime_seconds || daemonStatus.uptimeSeconds || os.uptime()),
       activeBundleHash: daemonStatus.active_bundle_hash || daemonStatus.activeBundleHash || 'hash-active',
       pendingConfirm: Boolean(daemonStatus.pending_confirm ?? daemonStatus.pendingConfirm),
@@ -238,7 +238,7 @@ export async function getAgentStatus(): Promise<AgentStatus> {
 
   return {
     nodeId: `axonwall-${os.hostname()}`,
-    version: '0.12.3',
+    version: '0.12.4',
     uptimeSeconds: Math.floor(os.uptime()),
     activeBundleHash: mockActiveRuleset ? 'hash-active-ruleset' : 'hash-initial-default',
     pendingConfirm: mockPendingConfirm,
@@ -3089,7 +3089,7 @@ function getCurrentInstalledVersion(): string {
       }
     } catch {}
   }
-  return '0.12.3';
+  return '0.12.4';
 }
 
 function compareSemver(v1: string, v2: string): number {
@@ -3819,7 +3819,7 @@ export async function applySystemFirmwareUpdate(targetSlot: 'A' | 'B'): Promise<
 
     const currentVersion = getCurrentInstalledVersion();
     const release = await getReleaseInfo(true);
-    const targetVersion = (release.latestVersion || '0.12.3').replace(/[^0-9a-zA-Z._-]/g, '');
+    const targetVersion = (release.latestVersion || '0.12.4').replace(/[^0-9a-zA-Z._-]/g, '');
 
     // 1. Delegate privileged firmware update to root daemon (axonwalld) first
     const daemonResp = await callAgentApi<any>(

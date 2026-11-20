@@ -1683,9 +1683,9 @@ resolve_zfs_topology() {
 
   zpool set "bootfs=${INIT_BE}" zroot
   if [ "$OS_FAMILY" = "alpine" ]; then
-    ZBM_CMDLINE="ro rootfstype=zfs modules=sd-mod,usb-storage,virtio_blk,nvme,zfs quiet console=tty0 console=ttyS0,115200"
+    ZBM_CMDLINE="ro rootfstype=zfs modules=sd-mod,usb-storage,virtio_blk,nvme,zfs quiet console=tty0 console=ttyS0,9600"
   else
-    ZBM_CMDLINE="ro quiet splash plymouth.ignore-serial-consoles lsm=landlock,lockdown,yama,integrity,apparmor,bpf console=ttyS0,115200 console=tty0"
+    ZBM_CMDLINE="ro quiet splash plymouth.ignore-serial-consoles lsm=landlock,lockdown,yama,integrity,apparmor,bpf console=ttyS0,9600 console=tty0"
   fi
   zfs set "org.zfsbootmenu:commandline=${ZBM_CMDLINE}" zroot/ROOT
   zfs set "org.axonwall:active_be=${INIT_BE}" zroot/ROOT
@@ -2546,6 +2546,7 @@ if [ "$INSTALL_MODE" = "zbm" ]; then
     /mnt/slot_a/boot/efi/EFI/ZBM/initramfs-bootmenu.img
 
   cat << 'ZBM_SYSLINUX_EOF' > /mnt/slot_a/boot/efi/EFI/ZBM/syslinux.cfg
+SERIAL 0 9600
 DEFAULT zbm
 PROMPT 0
 TIMEOUT 5
@@ -2553,12 +2554,12 @@ TIMEOUT 5
 LABEL zbm
   LINUX /EFI/ZBM/vmlinuz-bootmenu
   INITRD /EFI/ZBM/initramfs-bootmenu.img
-  APPEND zfsbootmenu quiet loglevel=3 net.ifnames=0 zbm.timeout=5 zbm.autosize=1 zbm.hookroot=LABEL=AXON_EFI//EFI/ZBM/hooks console=ttyS0,115200 console=tty1
+  APPEND zfsbootmenu quiet loglevel=3 net.ifnames=0 zbm.timeout=5 zbm.autosize=1 zbm.hookroot=LABEL=AXON_EFI//EFI/ZBM/hooks console=ttyS0,9600 console=tty1
 
 LABEL zbm_backup
   LINUX /EFI/ZBM/vmlinuz-bootmenu
   INITRD /EFI/ZBM/initramfs-bootmenu.img
-  APPEND zfsbootmenu zbm.force_import=1 loglevel=3 net.ifnames=0 zbm.timeout=5 zbm.autosize=1 zbm.hookroot=LABEL=AXON_EFI//EFI/ZBM/hooks console=ttyS0,115200 console=tty1
+  APPEND zfsbootmenu zbm.force_import=1 loglevel=3 net.ifnames=0 zbm.timeout=5 zbm.autosize=1 zbm.hookroot=LABEL=AXON_EFI//EFI/ZBM/hooks console=ttyS0,9600 console=tty1
 ZBM_SYSLINUX_EOF
   cp -f /mnt/slot_a/boot/efi/EFI/ZBM/syslinux.cfg /mnt/slot_a/boot/efi/syslinux.cfg 2>/dev/null || true
 
@@ -2771,10 +2772,10 @@ THEME_EOF
 
   if [ "$OS_FAMILY" = "alpine" ]; then
     EXTRA_KARGS="modules=sd-mod,usb-storage,ext4,xfs,virtio_blk,nvme,raid1,md-mod"
-    CONSOLE_KARGS="quiet console=tty0 console=ttyS0,115200"
+    CONSOLE_KARGS="quiet console=tty0 console=ttyS0,9600"
   else
     EXTRA_KARGS=""
-    CONSOLE_KARGS="quiet splash plymouth.ignore-serial-consoles lsm=landlock,lockdown,yama,integrity,apparmor,bpf console=ttyS0,115200 console=tty0"
+    CONSOLE_KARGS="quiet splash plymouth.ignore-serial-consoles lsm=landlock,lockdown,yama,integrity,apparmor,bpf console=ttyS0,9600 console=tty0"
   fi
 
   cat << GRUB_EOF > /mnt/slot_a/boot/grub/grub.cfg
@@ -2810,6 +2811,7 @@ fi
 insmod gfxterm
 insmod png
 insmod gfxmenu
+insmod serial
 
 if [ -f /boot/grub/themes/axonwall/theme.txt ]; then
   set theme=/boot/grub/themes/axonwall/theme.txt
@@ -2825,7 +2827,12 @@ fi
 
 set color_normal=light-gray/black
 set color_highlight=light-green/dark-gray
-terminal_output gfxterm
+if serial --unit=0 --speed=9600 --word=8 --parity=no --stop=1; then
+  terminal_input console serial
+  terminal_output gfxterm serial
+else
+  terminal_output gfxterm
+fi
 
 if [ -s \$prefix/grubenv ]; then
   load_env
