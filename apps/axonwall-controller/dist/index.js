@@ -42462,6 +42462,9 @@ function resolveOvmfFirmwarePure(options = {}) {
 }
 
 // ../../packages/axonwall_lib/dist/compile/virt/index.js
+var HOSTED_EDGE_VM_ID = "edge";
+var HOSTED_EDGE_VMID = 100;
+var HOSTED_EDGE_VM_NAME = "axonwall-edge-ngfw";
 function sanitizeIdentifier2(v) {
   return v.replace(/[^a-zA-Z0-9_.-]/g, "_");
 }
@@ -45182,7 +45185,7 @@ function resolveControllerDirs() {
 // src/index.ts
 import * as os from "node:os";
 import * as child_process from "node:child_process";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath as fileURLToPath2 } from "node:url";
 
 // src/headscale.ts
 import { execFile } from "child_process";
@@ -54570,19 +54573,20 @@ function validateBpfTokenDelegationInput(input2) {
   }
   return { valid: true };
 }
-function validateVirtWorkloadSafety(workloadName, action, hostedEdgeEnabled) {
+function validateVirtWorkloadSafety(workloadName, action, hostedEdgeEnabled, workloadId) {
   const destructiveActions = /* @__PURE__ */ new Set(["stop", "pause", "reboot", "restore", "rollback", "live_migrate"]);
   if (!destructiveActions.has(action)) {
     return { valid: true };
   }
   const lower = (workloadName || "").trim().toLowerCase();
-  if (hostedEdgeEnabled && !lower) {
+  if (!lower) {
     return {
       valid: false,
-      reason: `Anti-lockout guard: refusing to ${action} an unidentified workload while Hosted Edge is enabled`
+      reason: `Anti-lockout guard: refusing to ${action} a virtualization workload whose name could not be resolved (not in local state and the daemon list lookup failed); refusing blind rather than risking the Hosted Edge gateway VM`
     };
   }
-  if (lower === "edge" || lower.startsWith("edge-") || lower.includes("axonwall-edge") || hostedEdgeEnabled && lower.includes("ngfw")) {
+  const idMatchesHostedEdge = hostedEdgeEnabled === true && (workloadId === HOSTED_EDGE_VMID || typeof workloadId === "string" && workloadId.trim().toLowerCase() === HOSTED_EDGE_VM_ID);
+  if (lower === "edge" || lower.startsWith("edge-") || lower.includes("axonwall-edge") || lower === HOSTED_EDGE_VM_NAME || hostedEdgeEnabled && lower.includes("ngfw") || idMatchesHostedEdge) {
     return {
       valid: false,
       reason: `Anti-lockout guard: refusing to ${action} Hosted Edge / gateway VM '${workloadName}' because it carries appliance WAN/LAN transit`
@@ -55333,7 +55337,11 @@ async function listUsers() {
   return data.map((u) => ({
     id: u.id,
     name: u.name,
-    createdAt: headscaleTimestamp(u, "createdAt", "created_at") ?? (/* @__PURE__ */ new Date()).toISOString()
+    // B-L5: a missing/unparsable timestamp used to fall back to
+    // "now", so a user created months ago showed up as just created.
+    // Leave it undefined instead of inventing a creation time (cf.
+    // listPreAuthKeys, which already does this).
+    createdAt: headscaleTimestamp(u, "createdAt", "created_at")
   }));
 }
 async function createUser(name) {
@@ -55342,7 +55350,8 @@ async function createUser(name) {
   return {
     id: data?.id,
     name: data?.name || safeName,
-    createdAt: headscaleTimestamp(data, "createdAt", "created_at") ?? (/* @__PURE__ */ new Date()).toISOString()
+    // B-L5: as in listUsers — no invented creation time.
+    createdAt: headscaleTimestamp(data, "createdAt", "created_at")
   };
 }
 async function createPreAuthKey(user, reusable, ephemeral, expiration) {
@@ -55371,8 +55380,8 @@ async function createPreAuthKey(user, reusable, ephemeral, expiration) {
     if (ms <= 0) {
       throw new Error("Expiration timestamp must be in the future");
     }
-    const hours = Math.max(1, Math.round(ms / (1e3 * 60 * 60)));
-    args.push("--expiration", `${hours}h`);
+    const seconds = Math.ceil(ms / 1e3);
+    args.push("--expiration", `${seconds}s`);
   }
   const data = await runHeadscale(args);
   return {
@@ -55610,7 +55619,13 @@ function readLastUsedSidecar(keysPath) {
   return {};
 }
 function writeLastUsedSidecar(keysPath, keyId, entry) {
+  let release = null;
   try {
+    try {
+      release = acquireMcpLockFile(`${keysPath}.lastused.json.lock`, 2e3);
+    } catch {
+      return;
+    }
     const sidecarPath = `${keysPath}.lastused.json`;
     const all = readLastUsedSidecar(keysPath);
     all[keyId] = entry;
@@ -55619,6 +55634,8 @@ function writeLastUsedSidecar(keysPath, keyId, entry) {
     fs5.writeFileSync(tmpPath, JSON.stringify(all, null, 2), { mode: 432 });
     fs5.renameSync(tmpPath, sidecarPath);
   } catch {
+  } finally {
+    release?.();
   }
 }
 function withMcpKeysLock(fn) {
@@ -55831,6 +55848,7 @@ import * as fs7 from "node:fs";
 import * as http from "node:http";
 import * as path6 from "node:path";
 import * as crypto5 from "node:crypto";
+import { fileURLToPath } from "node:url";
 
 // src/mcp/audit.ts
 import * as crypto4 from "node:crypto";
@@ -56035,6 +56053,25 @@ function readAgentToken() {
 function newMcpApplyJobId() {
   return `mcp_apply_${Date.now()}_${crypto5.randomBytes(4).toString("hex")}`;
 }
+function resolveMcpServerVersion() {
+  try {
+    const moduleDir = path6.dirname(fileURLToPath(import.meta.url));
+    for (const candidate of [
+      path6.join(moduleDir, "..", "package.json"),
+      path6.join(moduleDir, "..", "..", "package.json")
+    ]) {
+      try {
+        const parsed = JSON.parse(fs7.readFileSync(candidate, "utf8"));
+        if (typeof parsed.version === "string" && parsed.version.trim()) {
+          return parsed.version.trim();
+        }
+      } catch {
+      }
+    }
+  } catch {
+  }
+  return "unknown";
+}
 function insertMcpRuleIntoState(targetState, rule) {
   const isBlockOrReject = rule.action === "block" || rule.action === "reject";
   if (isBlockOrReject) {
@@ -56139,17 +56176,21 @@ function persistDesiredStateToDisk(targetState) {
       for (const [fn, content] of Object.entries(yamlFiles)) {
         fs7.writeFileSync(path6.join(customDir, fn), content, { mode: 432 });
       }
+      return true;
     } catch {
+      return false;
     }
-    return;
   }
+  let stateJsonLanded = false;
   for (const statePath of Array.from(/* @__PURE__ */ new Set([path6.join(dirs.etcDir, "state.json"), dirs.stateFile]))) {
     try {
       fs7.mkdirSync(path6.dirname(statePath), { recursive: true, mode: 504 });
       fs7.writeFileSync(statePath, JSON.stringify(targetState, null, 2), { mode: 384 });
+      stateJsonLanded = true;
     } catch {
     }
   }
+  if (!stateJsonLanded) return false;
   try {
     const yamlFiles = serializeDesiredStateToYamlFiles(targetState);
     for (const dir of Array.from(/* @__PURE__ */ new Set([dirs.etcDir, dirs.persistYamlDir]))) {
@@ -56160,7 +56201,9 @@ function persistDesiredStateToDisk(targetState) {
       }
     }
   } catch {
+    return false;
   }
+  return true;
 }
 function resolveBpfTokenPresetMasks(preset) {
   switch (preset) {
@@ -57149,13 +57192,20 @@ async function handleMcpReadResource(uri, env) {
         callAxonwalldApi("GET", "/v1/virt/pci"),
         callAxonwalldApi("GET", "/v1/virt/telemetry")
       ]);
+      const failedSources = [
+        ...!vmsRes.ok ? ["vms"] : [],
+        ...!ctsRes.ok ? ["containers"] : [],
+        ...!pciRes.ok ? ["pciDevices"] : [],
+        ...!telRes.ok ? ["telemetry"] : []
+      ];
       const anyDown = !vmsRes.ok && !ctsRes.ok && !telRes.ok;
       payload = {
         vms: vmsRes.ok ? vmsRes.data?.vms ?? [] : [],
         containers: ctsRes.ok ? ctsRes.data?.containers ?? [] : [],
         pciDevices: pciRes.ok ? pciRes.data?.devices ?? [] : [],
         ebpfTelemetry: telRes.ok ? telRes.data : null,
-        ...anyDown ? { daemonDown: true, error: vmsRes.data?.error || "axonwalld unreachable" } : {}
+        ...anyDown ? { daemonDown: true, error: vmsRes.data?.error || "axonwalld unreachable" } : {},
+        ...failedSources.length > 0 && !anyDown ? { partialDaemonFailure: true, failedSources, error: "One or more virt sources failed; the empty lists below are unknown, not empty" } : {}
       };
       break;
     }
@@ -57422,6 +57472,13 @@ async function handleMcpCallTool(toolName, rawArgs, env) {
       if (req.propagateToFleet) {
         const fleetErr = requireScope("mcp:fleet:broadcast", req.audit);
         if (fleetErr) return fleetErr;
+        if (!env.onFleetBroadcastBlock) {
+          return deny(
+            "mcp:fleet:broadcast",
+            "Fleet propagation is unavailable over this transport: the stdio MCP server runs in a separate process from the satellite sockets and cannot broadcast blocks. No block was created. Reconnect over the HTTP MCP endpoint to propagate a block to the fleet, or retry with propagateToFleet: false for a hub-only block.",
+            req.audit
+          );
+        }
       }
       const { ctx, activeLeasesCount } = await buildGuardContext(env.key, env.clientIp);
       if (activeLeasesCount >= env.key.policyLimits.maxActiveLeases) {
@@ -57455,7 +57512,7 @@ async function handleMcpCallTool(toolName, rawArgs, env) {
         fleetPropagatedCount = env.onFleetBroadcastBlock(
           targetCheck.normalizedTarget,
           req.audit.reason,
-          Math.ceil(boundedTtl / 60)
+          boundedTtl
         );
       }
       const auditEntry = recordMcpAuditEntry({
@@ -57728,8 +57785,8 @@ async function handleMcpCallTool(toolName, rawArgs, env) {
         return deny("mcp:traffic:*", "leaseId is required");
       }
       const leasesRes = await callAxonwalldApi("GET", "/v1/mcp/leases");
-      if (leasesRes.ok && Array.isArray(leasesRes.data?.leases)) {
-        const targetLease = leasesRes.data.leases.find((l) => l.id === leaseId);
+      const targetLease = leasesRes.ok && Array.isArray(leasesRes.data?.leases) ? leasesRes.data.leases.find((l) => l.id === leaseId) : void 0;
+      if (targetLease) {
         if (targetLease?.kind && !hasMcpScope(env.key, "mcp:firewall:write")) {
           const requiredForKind = targetLease.kind === "blackhole" ? "mcp:traffic:blackhole" : targetLease.kind === "shape" ? "mcp:traffic:shape" : targetLease.kind === "redirect" || targetLease.kind === "dns_sinkhole" ? "mcp:traffic:redirect" : null;
           if (requiredForKind && !hasMcpScope(env.key, requiredForKind)) {
@@ -57741,6 +57798,10 @@ async function handleMcpCallTool(toolName, rawArgs, env) {
       if (!daemonRes.ok) {
         return deny("mcp:traffic:*", daemonRes.data?.error || `Failed to revert lease '${leaseId}'`);
       }
+      let fleetUnblockedSatellites = 0;
+      if (targetLease?.kind === "blackhole" && targetLease.normalizedTarget && env.onFleetBroadcastUnblock) {
+        fleetUnblockedSatellites = env.onFleetBroadcastUnblock(targetLease.normalizedTarget, reason);
+      }
       recordMcpAuditEntry({
         keyId: env.key.id,
         keyName: env.key.name,
@@ -57749,7 +57810,7 @@ async function handleMcpCallTool(toolName, rawArgs, env) {
         toolName,
         requiredScope: "mcp:traffic:*",
         decision: "allowed",
-        paramsSummary: { leaseId, reason },
+        paramsSummary: { leaseId, reason, fleetUnblockedSatellites },
         leaseId
       });
       return {
@@ -57757,7 +57818,10 @@ async function handleMcpCallTool(toolName, rawArgs, env) {
           {
             type: "text",
             text: JSON.stringify(
-              daemonRes.data,
+              {
+                ...daemonRes.data && typeof daemonRes.data === "object" ? daemonRes.data : {},
+                fleetUnblockedSatellites
+              },
               null,
               2
             )
@@ -57770,6 +57834,10 @@ async function handleMcpCallTool(toolName, rawArgs, env) {
         return deny("mcp:firewall:apply", "Authorization denied: 'mcp_emergency_clear_all' requires scope 'mcp:firewall:apply'");
       }
       const reason = typeof args.reason === "string" ? args.reason.trim() : "Emergency flush via MCP";
+      const leasesBeforeFlush = await callAxonwalldApi("GET", "/v1/mcp/leases");
+      if (!leasesBeforeFlush.ok) {
+        console.error("[MCP] Could not list leases before emergency clear-all; fleet blackhole blocks may survive the flush");
+      }
       const daemonRes = await callAxonwalldApi("POST", "/v1/mcp/flush", {});
       if (!daemonRes.ok) {
         return deny(
@@ -57778,6 +57846,15 @@ async function handleMcpCallTool(toolName, rawArgs, env) {
         );
       }
       await callAxonwalldApi("DELETE", "/v1/ebpf/xdp/block", { clearAll: true });
+      let fleetUnblockedSatellites = 0;
+      if (env.onFleetBroadcastUnblock && leasesBeforeFlush.ok && Array.isArray(leasesBeforeFlush.data?.leases)) {
+        const seenTargets = /* @__PURE__ */ new Set();
+        for (const lease of leasesBeforeFlush.data.leases) {
+          if (lease.kind !== "blackhole" || !lease.normalizedTarget || seenTargets.has(lease.normalizedTarget)) continue;
+          seenTargets.add(lease.normalizedTarget);
+          fleetUnblockedSatellites += env.onFleetBroadcastUnblock(lease.normalizedTarget, reason);
+        }
+      }
       recordMcpAuditEntry({
         keyId: env.key.id,
         keyName: env.key.name,
@@ -57796,6 +57873,7 @@ async function handleMcpCallTool(toolName, rawArgs, env) {
               {
                 success: true,
                 clearedCount: daemonRes.data?.clearedCount ?? 0,
+                fleetUnblockedSatellites,
                 reason
               },
               null,
@@ -57969,7 +58047,9 @@ async function handleMcpCallTool(toolName, rawArgs, env) {
           return deny("mcp:firewall:write", "DesiredState file (/etc/axonwall/state.json) not found on appliance", req.audit);
         }
         insertMcpRuleIntoState(fresh, req.rule);
-        persistDesiredStateToDisk(fresh);
+        if (!persistDesiredStateToDisk(fresh)) {
+          return deny("mcp:firewall:write", "Could not persist the proposed rule to disk (DesiredState write failed); nothing was staged or applied", req.audit);
+        }
         liveState = fresh;
       } finally {
         releaseStateLock?.();
@@ -58408,6 +58488,13 @@ async function handleMcpCallTool(toolName, rawArgs, env) {
         paramsSummary: { includeBackups, includePci }
       });
       const daemonDown = !vmsRes.ok && !ctsRes.ok && !telRes.ok;
+      const failedSources = [
+        ...!vmsRes.ok ? ["vms"] : [],
+        ...!ctsRes.ok ? ["containers"] : [],
+        ...!telRes.ok ? ["telemetry"] : [],
+        ...includePci && !pciRes.ok ? ["pciDevices"] : [],
+        ...includeBackups && !backupsRes.ok ? ["backups"] : []
+      ];
       return {
         content: [
           {
@@ -58419,7 +58506,8 @@ async function handleMcpCallTool(toolName, rawArgs, env) {
                 ebpfTelemetry: telRes.ok ? telRes.data : null,
                 ...includePci ? { pciDevices: pciRes.ok ? pciRes.data?.devices ?? [] : [] } : {},
                 ...includeBackups ? { backups: backupsRes.ok ? backupsRes.data?.backups ?? [] : [] } : {},
-                ...daemonDown ? { daemonDown: true, error: vmsRes.data?.error || "axonwalld unreachable" } : {}
+                ...daemonDown ? { daemonDown: true, error: vmsRes.data?.error || "axonwalld unreachable" } : {},
+                ...failedSources.length > 0 && !daemonDown ? { partialDaemonFailure: true, failedSources, error: "One or more virt sources failed; the empty lists above are unknown, not empty" } : {}
               },
               null,
               2
@@ -58455,7 +58543,7 @@ async function handleMcpCallTool(toolName, rawArgs, env) {
           }
         }
       }
-      const safetyCheck = validateVirtWorkloadSafety(workloadName, req.action, localState?.hostedEdge?.enabled);
+      const safetyCheck = validateVirtWorkloadSafety(workloadName, req.action, localState?.hostedEdge?.enabled, req.id);
       if (!safetyCheck.valid) {
         return deny("mcp:virt:manage", safetyCheck.reason || "Virtualization action blocked by anti-lockout guard", req.audit);
       }
@@ -58611,7 +58699,7 @@ async function handleMcpCallTool(toolName, rawArgs, env) {
       }
       let compiledConfig = "";
       let hadPrevBpfToken = false;
-      let prevBpfToken = void 0;
+      let prevBpfToken;
       let releaseLock = null;
       try {
         try {
@@ -58654,7 +58742,9 @@ async function handleMcpCallTool(toolName, rawArgs, env) {
         };
         const compiled = compileLxcContainer(ct);
         compiledConfig = compiled.lxcConfig;
-        persistDesiredStateToDisk(fresh);
+        if (!persistDesiredStateToDisk(fresh)) {
+          return deny("mcp:virt:manage", "Could not persist the BPF_TOKEN delegation to disk (DesiredState write failed); nothing was staged or synced", req.audit);
+        }
       } finally {
         releaseLock?.();
       }
@@ -58672,27 +58762,35 @@ async function handleMcpCallTool(toolName, rawArgs, env) {
         auditViaBpfLsm: true,
         description: `Unprivileged LXC CT ${req.ctid} BPF_TOKEN delegation`
       }) : await callAxonwalldApi("DELETE", `/v1/ebpf/tokens?id=${encodeURIComponent(profileId)}`);
-      if (!daemonRes.ok && daemonRes.status >= 400 && daemonRes.status < 500) {
-        let rbRelease = null;
+      if (!daemonRes.ok) {
+        let releaseRollbackLock = null;
         try {
-          rbRelease = acquireMcpLockFile(desiredStateLockPath());
-          const rbState = loadLocalDesiredState();
-          const rbCt = rbState?.virt?.containers?.find((c) => c.ctid === req.ctid);
-          if (rbCt) {
-            if (hadPrevBpfToken) {
-              rbCt.bpfToken = prevBpfToken;
-            } else {
-              delete rbCt.bpfToken;
-            }
-            persistDesiredStateToDisk(rbState);
+          try {
+            releaseRollbackLock = acquireMcpLockFile(desiredStateLockPath());
+          } catch {
+            console.error("[MCP] Could not lock DesiredState to roll back a BPF_TOKEN delegation whose daemon sync failed; DesiredState still claims the change");
+            releaseRollbackLock = null;
           }
-        } catch {
+          if (releaseRollbackLock) {
+            const rollbackState = loadLocalDesiredState();
+            if (rollbackState) {
+              const rollbackCt = rollbackState.virt?.containers?.find((c) => c.ctid === req.ctid);
+              if (rollbackCt) {
+                if (hadPrevBpfToken) {
+                  rollbackCt.bpfToken = prevBpfToken;
+                } else {
+                  delete rollbackCt.bpfToken;
+                }
+                persistDesiredStateToDisk(rollbackState);
+              }
+            }
+          }
         } finally {
-          rbRelease?.();
+          releaseRollbackLock?.();
         }
         return deny(
           "mcp:ebpf:manage",
-          daemonRes.data?.error || `Daemon rejected LXC BPF_TOKEN delegation (HTTP ${daemonRes.status}); rolled back staged profile`,
+          daemonRes.data?.error || `Daemon ${req.enabled ? "rejected" : "failed to delete"} the BPF_TOKEN profile for CT ${req.ctid}; DesiredState change rolled back`,
           req.audit
         );
       }
@@ -58719,7 +58817,10 @@ async function handleMcpCallTool(toolName, rawArgs, env) {
                 enabled: req.enabled,
                 preset: req.preset,
                 stagedInDesiredState: true,
-                daemonProfileSync: daemonRes.ok ? "synced" : "staged_offline",
+                // B-H5 (round 3): 'staged_offline' is gone — a failed
+                // daemon sync denies above, so reaching here means
+                // the profile is synced.
+                daemonProfileSync: "synced",
                 compiledBpfDirectives: bpfLines,
                 auditEntryHash: auditEntry.recorded ? auditEntry.entryHash : null
               },
@@ -59094,7 +59195,9 @@ async function handleMcpCallTool(toolName, rawArgs, env) {
           }
           const active = loadLocalDesiredState();
           const nextState = active ? mergeFirewallConfigs(active, report.state) : report.state;
-          persistDesiredStateToDisk(nextState);
+          if (!persistDesiredStateToDisk(nextState)) {
+            return deny("mcp:firewall:write", "Could not persist the imported configuration to disk (DesiredState write failed); nothing was staged", req.audit);
+          }
           staged = true;
         } finally {
           releaseLock?.();
@@ -59174,7 +59277,7 @@ async function processMcpJsonRpcMessage(msg, env) {
             protocolVersion: "2024-11-05",
             serverInfo: {
               name: "axonwall-firewall-mcp",
-              version: "0.11.64"
+              version: resolveMcpServerVersion()
             },
             capabilities: {
               resources: { listChanged: false },
@@ -59283,33 +59386,54 @@ function assertNotOperatorCaWithoutKey(caPath, caKeyPath) {
   }
 }
 var HUB_CERT_SAN = "DNS:localhost,DNS:axonwall.local,IP:127.0.0.1";
+function certKeyPairMatches(certPath, keyPath) {
+  try {
+    const cert = new crypto6.X509Certificate(fs8.readFileSync(certPath));
+    const key = crypto6.createPrivateKey(fs8.readFileSync(keyPath));
+    const certPub = cert.publicKey.export({ type: "spki", format: "der" });
+    const keyPub = crypto6.createPublicKey(key).export({ type: "spki", format: "der" });
+    return Buffer.compare(certPub, keyPub) === 0;
+  } catch {
+    return null;
+  }
+}
 function generateSelfSignedCert(targetKeyPath, targetCertPath, days) {
-  child_process.execFileSync(
-    "openssl",
-    [
-      "req",
-      "-x509",
-      "-newkey",
-      "rsa:2048",
-      "-nodes",
-      "-keyout",
-      targetKeyPath,
-      "-out",
-      targetCertPath,
-      "-days",
-      days,
-      "-subj",
-      "/O=Axonwall/OU=Appliance/CN=axonwall",
-      "-addext",
-      `subjectAltName=${HUB_CERT_SAN}`
-    ],
-    { timeout: 15e3, stdio: "ignore" }
-  );
+  const tmpKeyPath = `${targetKeyPath}.tmp-${process.pid}`;
+  try {
+    child_process.execFileSync(
+      "openssl",
+      [
+        "req",
+        "-x509",
+        "-newkey",
+        "rsa:2048",
+        "-nodes",
+        "-keyout",
+        tmpKeyPath,
+        "-out",
+        targetCertPath,
+        "-days",
+        days,
+        "-subj",
+        "/O=Axonwall/OU=Appliance/CN=axonwall",
+        "-addext",
+        `subjectAltName=${HUB_CERT_SAN}`
+      ],
+      { timeout: 15e3, stdio: "ignore" }
+    );
+    fs8.renameSync(tmpKeyPath, targetKeyPath);
+  } finally {
+    try {
+      fs8.unlinkSync(tmpKeyPath);
+    } catch {
+    }
+  }
 }
 function generateSignedOrSelfSignedCert(targetKeyPath, targetCertPath, days, caPath, caKeyPath) {
   if (fs8.existsSync(caPath) && fs8.existsSync(caKeyPath)) {
     const csrPath = `${targetCertPath}.csr`;
     const extPath = `${targetCertPath}.ext`;
+    const tmpKeyPath = `${targetKeyPath}.tmp-${process.pid}`;
     try {
       child_process.execFileSync(
         "openssl",
@@ -59319,7 +59443,7 @@ function generateSignedOrSelfSignedCert(targetKeyPath, targetCertPath, days, caP
           "rsa:2048",
           "-nodes",
           "-keyout",
-          targetKeyPath,
+          tmpKeyPath,
           "-out",
           csrPath,
           "-subj",
@@ -59358,6 +59482,7 @@ subjectAltName=${HUB_CERT_SAN}
         ],
         { timeout: 15e3, stdio: "ignore" }
       );
+      fs8.renameSync(tmpKeyPath, targetKeyPath);
     } finally {
       try {
         fs8.unlinkSync(csrPath);
@@ -59365,6 +59490,10 @@ subjectAltName=${HUB_CERT_SAN}
       }
       try {
         fs8.unlinkSync(extPath);
+      } catch {
+      }
+      try {
+        fs8.unlinkSync(tmpKeyPath);
       } catch {
       }
     }
@@ -59434,6 +59563,8 @@ function ensureControllerTls(certPath = resolveControllerDirs().certPath, keyPat
         const ca2 = fs8.existsSync(caPath) ? fs8.readFileSync(caPath) : void 0;
         if (ca2 && leafChainsToCa(certPath, caPath) === false) {
           console.warn("[Axonwall Controller] Existing hub certificate does not chain to the on-disk CA; ignoring it so it can be re-provisioned instead of served.");
+        } else if (certKeyPairMatches(certPath, keyPath) !== true) {
+          console.warn("[Axonwall Controller] Existing hub certificate and key do not match (or could not be parsed); ignoring the pair so it can be re-provisioned instead of served.");
         } else {
           return { cert, key, ca: ca2 };
         }
@@ -59455,6 +59586,8 @@ function ensureControllerTls(certPath = resolveControllerDirs().certPath, keyPat
           const ca2 = fs8.existsSync(caPath) ? fs8.readFileSync(caPath) : void 0;
           if (ca2 && leafChainsToCa(certPath, caPath) === false) {
             console.warn("[Axonwall Controller] Rotated hub certificate does not chain to the on-disk CA; ignoring it so it can be re-provisioned instead of served.");
+          } else if (certKeyPairMatches(certPath, keyPath) !== true) {
+            console.warn("[Axonwall Controller] Rotated hub certificate and key do not match; ignoring the pair so it can be re-provisioned instead of served.");
           } else {
             return { cert, key, ca: ca2 };
           }
@@ -59480,8 +59613,10 @@ function ensureControllerTls(certPath = resolveControllerDirs().certPath, keyPat
         fs8.chmodSync(certPath, 420);
       } catch {
       }
-      if (cert.length > 0 && key.length > 0) {
+      if (cert.length > 0 && key.length > 0 && certKeyPairMatches(certPath, keyPath) === true) {
         minted = { cert, key };
+      } else if (cert.length > 0 && key.length > 0) {
+        console.warn("[Axonwall Controller] Freshly minted hub certificate and key do not match; ignoring the pair so the emergency fallback is used instead of serving it.");
       }
     }
   } catch (err) {
@@ -59593,6 +59728,50 @@ function validateHaTransition(payload, fleetLanVip) {
     sharedWanMac,
     lanVip
   };
+}
+function validateFleetBlockTarget(payload) {
+  const rawTarget = typeof payload?.target === "string" ? payload.target.trim() : "";
+  const isMac = Boolean(payload?.isMac);
+  if (!rawTarget) {
+    return { ok: false, status: 400, error: "Missing target" };
+  }
+  let target = rawTarget;
+  if (isMac) {
+    const macRegex = /^([0-9a-fA-F]{2}[:-]){5}([0-9a-fA-F]{2})$/;
+    if (!macRegex.test(rawTarget)) {
+      return { ok: false, status: 400, error: "Invalid MAC address target" };
+    }
+    target = rawTarget.toLowerCase().replace(/-/g, ":");
+  } else {
+    const slashParts = rawTarget.split("/");
+    if (slashParts.length > 2) {
+      return { ok: false, status: 400, error: "Invalid IP address or CIDR target" };
+    }
+    const ipPart = slashParts[0] || "";
+    const prefixStr = slashParts[1];
+    const ipFamily = net.isIP(ipPart);
+    if (ipFamily !== 4 && ipFamily !== 6) {
+      return { ok: false, status: 400, error: "Invalid IP address or CIDR target" };
+    }
+    if (prefixStr !== void 0) {
+      if (!/^\d{1,3}$/.test(prefixStr)) {
+        return { ok: false, status: 400, error: "Invalid CIDR prefix length" };
+      }
+      const prefixNum = Number(prefixStr);
+      const maxPrefix = ipFamily === 4 ? 32 : 128;
+      if (prefixNum < 0 || prefixNum > maxPrefix) {
+        return { ok: false, status: 400, error: "Invalid CIDR prefix length" };
+      }
+    }
+  }
+  return { ok: true, target, isMac };
+}
+function parseFleetBlockTtl(payload) {
+  const raw = payload?.ttlSeconds;
+  if (raw === void 0 || raw === null || raw === "") return 0;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0) return 0;
+  return Math.min(Math.floor(n), 604800);
 }
 function loadPersistedHaState() {
   const paths = process.env.AXONWALL_HA_STATE_PATH ? [process.env.AXONWALL_HA_STATE_PATH] : resolveControllerDirs().haStatePaths;
@@ -59945,7 +60124,7 @@ async function main() {
     return null;
   }
   function syncSatelliteDesiredState(sat, desiredState) {
-    if (!sat.ws || sat.ws.readyState !== import_websocket.default.OPEN) return;
+    if (!sat.ws || sat.ws.readyState !== import_websocket.default.OPEN) return false;
     const localState = desiredState !== void 0 && desiredState !== null ? desiredState : loadLocalDesiredState2();
     const fleetNode = localState?.fleet?.nodes?.find((n) => n.id === sat.id);
     const hostedEdge = localState?.hostedEdge;
@@ -59971,10 +60150,10 @@ async function main() {
       ]
     };
     const { nftScript } = compileSatelliteNftables(mergedNode);
-    sendToSatellite(sat, "SYNC_NFTABLES", { script: nftScript });
+    const nftSent = sendToSatellite(sat, "SYNC_NFTABLES", { script: nftScript }) !== null;
     if (isEdge && localState === null) {
       console.warn(`[fleet] No DesiredState on disk for satellite ${sat.id}; skipping SYNC_INTERFACES/SYNC_ROUTES (nftables sync still sent)`);
-      return;
+      return nftSent;
     }
     if (isEdge) {
       const wanDev = resolvedWanInterface;
@@ -60028,6 +60207,7 @@ async function main() {
         persistSyncedRoutes(persistedSyncedRoutes);
       }
     }
+    return nftSent;
   }
   const prometheusRegistry = new import_prom_client.default.Registry();
   import_prom_client.default.collectDefaultMetrics({ register: prometheusRegistry });
@@ -60168,54 +60348,63 @@ async function main() {
         if (aborted2) return;
         try {
           const payload = JSON.parse(body);
-          const rawTarget = typeof payload.target === "string" ? payload.target.trim() : "";
-          const isMac = Boolean(payload.isMac);
-          if (!rawTarget) {
-            res.writeHead(400, { "Content-Type": "application/json" });
-            return res.end(JSON.stringify({ error: "Missing target" }));
+          const validation = validateFleetBlockTarget(payload);
+          if (!validation.ok) {
+            res.writeHead(validation.status, { "Content-Type": "application/json" });
+            return res.end(JSON.stringify({ error: validation.error }));
           }
-          let target = rawTarget;
-          if (isMac) {
-            const macRegex = /^([0-9a-fA-F]{2}[:-]){5}([0-9a-fA-F]{2})$/;
-            if (!macRegex.test(rawTarget)) {
-              res.writeHead(400, { "Content-Type": "application/json" });
-              return res.end(JSON.stringify({ error: "Invalid MAC address target" }));
-            }
-            target = rawTarget.toLowerCase().replace(/-/g, ":");
-          } else {
-            const slashParts = rawTarget.split("/");
-            if (slashParts.length > 2) {
-              res.writeHead(400, { "Content-Type": "application/json" });
-              return res.end(JSON.stringify({ error: "Invalid IP address or CIDR target" }));
-            }
-            const ipPart = slashParts[0] || "";
-            const prefixStr = slashParts[1];
-            const ipFamily = net.isIP(ipPart);
-            if (ipFamily !== 4 && ipFamily !== 6) {
-              res.writeHead(400, { "Content-Type": "application/json" });
-              return res.end(JSON.stringify({ error: "Invalid IP address or CIDR target" }));
-            }
-            if (prefixStr !== void 0) {
-              if (!/^\d{1,3}$/.test(prefixStr)) {
-                res.writeHead(400, { "Content-Type": "application/json" });
-                return res.end(JSON.stringify({ error: "Invalid CIDR prefix length" }));
-              }
-              const prefixNum = Number(prefixStr);
-              const maxPrefix = ipFamily === 4 ? 32 : 128;
-              if (prefixNum < 0 || prefixNum > maxPrefix) {
-                res.writeHead(400, { "Content-Type": "application/json" });
-                return res.end(JSON.stringify({ error: "Invalid CIDR prefix length" }));
-              }
-            }
-          }
-          console.log(`[Fleet Manager] AI Copilot requested global block for: ${target} (isMac: ${isMac})`);
+          const { target, isMac } = validation;
+          const ttlSeconds = parseFleetBlockTtl(payload);
+          console.log(`[Fleet Manager] AI Copilot requested global block for: ${target} (isMac: ${isMac}, ttlSeconds: ${ttlSeconds})`);
           let count = 0;
           for (const sat of activeSatellites.values()) {
-            if (sat.ws && sat.ws.readyState === import_websocket.default.OPEN) {
-              sat.ws.send(JSON.stringify({
-                type: "BLOCK_TARGET",
-                payload: { target, isMac }
-              }));
+            if (sendToSatellite(sat, "BLOCK_TARGET", { target, isMac, ttlSeconds }) !== null) {
+              count++;
+            }
+          }
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({
+            success: true,
+            notifiedSatellites: count,
+            ttlSeconds,
+            ...ttlSeconds > 0 ? { expiresAt: new Date(Date.now() + ttlSeconds * 1e3).toISOString() } : {}
+          }));
+        } catch (err) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Invalid JSON" }));
+        }
+      });
+      return;
+    }
+    if (pathname === "/api/v1/fleet/unblock" && req.method === "POST") {
+      if (!verifyFleetAuth(req, res)) return;
+      let body = "";
+      let aborted2 = false;
+      req.on("data", (chunk) => {
+        if (aborted2) return;
+        body += chunk.toString();
+        if (body.length > 65536) {
+          aborted2 = true;
+          res.writeHead(413, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Payload too large" }));
+          req.destroy();
+          return;
+        }
+      });
+      req.on("end", () => {
+        if (aborted2) return;
+        try {
+          const payload = JSON.parse(body);
+          const validation = validateFleetBlockTarget(payload);
+          if (!validation.ok) {
+            res.writeHead(validation.status, { "Content-Type": "application/json" });
+            return res.end(JSON.stringify({ error: validation.error }));
+          }
+          const { target, isMac } = validation;
+          console.log(`[Fleet Manager] AI Copilot requested global unblock for: ${target} (isMac: ${isMac})`);
+          let count = 0;
+          for (const sat of activeSatellites.values()) {
+            if (sendToSatellite(sat, "UNBLOCK_TARGET", { target, isMac }) !== null) {
               count++;
             }
           }
@@ -60338,8 +60527,7 @@ async function main() {
         }
         let synced = 0;
         for (const sat of activeSatellites.values()) {
-          if (sat.ws && sat.ws.readyState === import_websocket.default.OPEN) {
-            syncSatelliteDesiredState(sat, desired);
+          if (syncSatelliteDesiredState(sat, desired)) {
             synced++;
           }
         }
@@ -60427,10 +60615,26 @@ data: /api/v1/mcp
             const rpcResp = await processMcpJsonRpcMessage(rpcPayload, {
               key: authenticatedKey,
               clientIp,
-              onFleetBroadcastBlock: (targetIp) => {
+              // B-H1 (round 3): carry the lease TTL (seconds) into
+              // the BLOCK_TARGET envelope so the satellite expires
+              // its block with the hub lease instead of forever.
+              // The old callback dropped the third argument entirely.
+              onFleetBroadcastBlock: (targetIp, _reason, ttlSeconds) => {
                 let notified = 0;
                 for (const sat of activeSatellites.values()) {
-                  if (sendToSatellite(sat, "BLOCK_TARGET", { target: targetIp, isMac: false }) !== null) {
+                  if (sendToSatellite(sat, "BLOCK_TARGET", { target: targetIp, isMac: false, ttlSeconds }) !== null) {
+                    notified++;
+                  }
+                }
+                return notified;
+              },
+              // B-H1 (round 3): the unblock half — mcp_revert_lease
+              // and mcp_emergency_clear_all call this so a reverted
+              // or flushed hub lease is lifted from the fleet too.
+              onFleetBroadcastUnblock: (targetIp) => {
+                let notified = 0;
+                for (const sat of activeSatellites.values()) {
+                  if (sendToSatellite(sat, "UNBLOCK_TARGET", { target: targetIp, isMac: false }) !== null) {
                     notified++;
                   }
                 }
@@ -60724,16 +60928,13 @@ ${headerLines.join("\r\n")}\r
           keepAliveSec: 25
         };
       });
-      sat.ws.send(JSON.stringify({
-        type: "SYNC_WIREGUARD",
-        payload: {
-          interfaceName: "wg-axon0",
-          tunnelIp: sat.tunnelIp,
-          listenPort: 51820,
-          privateKey: sat.wgPrivateKey,
-          peers
-        }
-      }));
+      sendToSatellite(sat, "SYNC_WIREGUARD", {
+        interfaceName: "wg-axon0",
+        tunnelIp: sat.tunnelIp,
+        listenPort: 51820,
+        privateKey: sat.wgPrivateKey,
+        peers
+      });
     }
   }
   const meshPruneTimer = setInterval(() => {
@@ -61038,7 +61239,6 @@ ${headerLines.join("\r\n")}\r
       } else {
         console.warn(`[Fleet Manager] Not re-asserting HA promotion for ${satId}: no LAN VIP recorded or configured`);
       }
-    } else if (activeHaEdgeId && state.role === "edge-ngfw") {
       sendHaTransition(state, "DEMOTE", "standby");
     }
     broadcastMeshTopology();
@@ -61050,7 +61250,7 @@ ${headerLines.join("\r\n")}\r
 var isDirectExecution = () => {
   if (process.env.NODE_ENV === "test") return false;
   try {
-    return !!process.argv[1] && fileURLToPath(import.meta.url) === path7.resolve(process.argv[1]);
+    return !!process.argv[1] && fileURLToPath2(import.meta.url) === path7.resolve(process.argv[1]);
   } catch {
     return false;
   }
@@ -61073,6 +61273,7 @@ export {
   authenticateMcpToken,
   buildArtifactBundle,
   buildSatelliteCommandEnvelope,
+  certKeyPairMatches,
   computeRoutesToDelete,
   createHttpRedirectServer,
   createMcpApiKeyRecord,
@@ -61092,6 +61293,7 @@ export {
   loadPersistedSyncedRoutes,
   newMcpApplyJobId,
   normalizeMacAddress,
+  parseFleetBlockTtl,
   parseFleetSyncBody,
   persistHaState,
   persistSyncedRoutes,
@@ -61104,6 +61306,7 @@ export {
   secureTokenEquals,
   shouldPruneDisconnectedSatellite,
   shouldRefuseFleetSync,
+  validateFleetBlockTarget,
   validateHaTransition,
   verifyFreshLeafOrThrow,
   verifyMcpAuditChain

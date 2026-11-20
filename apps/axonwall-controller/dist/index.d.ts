@@ -27,6 +27,7 @@ export interface ControllerTlsConfig {
     ca?: Buffer | string;
     isFallback?: boolean;
 }
+export declare function certKeyPairMatches(certPath: string, keyPath: string): boolean | null;
 export declare function verifyFreshLeafOrThrow(certPath: string, caPath: string): void;
 export declare function ensureControllerTls(certPath?: string, keyPath?: string, caPath?: string, caKeyPath?: string): ControllerTlsConfig | null;
 export { authenticateMcpToken, createMcpApiKeyRecord, listMcpApiKeys, revokeMcpApiKeyRecord, processMcpJsonRpcMessage, MCP_RESOURCES_CATALOG, MCP_TOOLS_CATALOG, newMcpApplyJobId, insertMcpRuleIntoState, desiredStateLockPath, acquireMcpLockFile, recordMcpAuditEntry, verifyMcpAuditChain, queryMcpAuditEntries, isMcpServerEnabled, getMcpServerStatus, };
@@ -63,6 +64,17 @@ export declare function parseFleetSyncBody(body: string): FleetSyncBodyValidatio
 export declare function shouldRefuseFleetSync(desired: DesiredState | undefined, diskState: DesiredState | null): boolean;
 export declare function secureTokenEquals(presented: unknown, expected: unknown): boolean;
 export declare function validateHaTransition(payload: HaTransitionRequest, fleetLanVip?: string): HaTransitionValidation;
+export type FleetBlockTargetValidation = {
+    ok: true;
+    target: string;
+    isMac: boolean;
+} | {
+    ok: false;
+    status: 400;
+    error: string;
+};
+export declare function validateFleetBlockTarget(payload: any): FleetBlockTargetValidation;
+export declare function parseFleetBlockTtl(payload: any): number;
 export interface PersistedHaState {
     activeHaEdgeId: string | null;
     sharedWanMac?: string;
