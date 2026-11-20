@@ -1,5 +1,6 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 export interface ControllerDirs {
   devMode: boolean;
@@ -20,7 +21,32 @@ export interface ControllerDirs {
   desiredStateCandidates: string[];
 }
 
-export function findWorkspaceRoot(): string | null {
+// R4-B-L5: dev-mode path resolution must not depend on the process
+// working directory. The anchor is this module's own file: walk up
+// from it looking for pnpm-workspace.yaml. The cwd walk stays only
+// as a fallback (e.g. a test harness loading the module from a
+// copied location). When the two disagree, the module anchor wins
+// and a loud warning names both roots, so two controller processes
+// started from different directories never silently use different
+// state roots, keys, and locks. Warned once per process.
+let warnedWorkspaceRootMismatch = false;
+let warnedSystemAgentSocket = false;
+
+function findWorkspaceRootFromModule(): string | null {
+  let cur = path.dirname(fileURLToPath(import.meta.url));
+  for (;;) {
+    if (fs.existsSync(path.join(cur, 'pnpm-workspace.yaml'))) {
+      return cur;
+    }
+    const parent = path.dirname(cur);
+    if (parent === cur) {
+      return null;
+    }
+    cur = parent;
+  }
+}
+
+function findWorkspaceRootFromCwd(): string | null {
   let cur = process.cwd();
   for (;;) {
     if (fs.existsSync(path.join(cur, 'pnpm-workspace.yaml'))) {
@@ -32,6 +58,19 @@ export function findWorkspaceRoot(): string | null {
     }
     cur = parent;
   }
+}
+
+export function findWorkspaceRoot(): string | null {
+  const fromModule = findWorkspaceRootFromModule();
+  const fromCwd = findWorkspaceRootFromCwd();
+  if (fromModule && fromCwd && fromModule !== fromCwd && !warnedWorkspaceRootMismatch) {
+    warnedWorkspaceRootMismatch = true;
+    console.warn(
+      `[Dev Paths] Working directory resolves to a different workspace root (${fromCwd}) than this module's own location (${fromModule}). ` +
+        `Using the module-anchored root so every controller process shares one dev state root regardless of where it was started.`
+    );
+  }
+  return fromModule ?? fromCwd;
 }
 
 export function resolveDevRootDir(): string {
@@ -108,6 +147,17 @@ function resolveAgentSocket(runDir: string, devMode: boolean): string {
     try {
       if (fs.existsSync(systemSock)) {
         fs.accessSync(systemSock, fs.constants.R_OK | fs.constants.W_OK);
+        // R4-B-L5 sharp edge: a dev controller silently driving the
+        // live production daemon through the system socket (with dev
+        // DesiredState) is deliberate convenience, but it must not
+        // happen without the operator knowing. Warn loudly, once.
+        if (!warnedSystemAgentSocket) {
+          warnedSystemAgentSocket = true;
+          console.warn(
+            `[Dev Paths] No dev daemon socket at ${primarySock}; falling back to the SYSTEM daemon socket ${systemSock}. ` +
+              `This dev controller will talk to the live production daemon — intended only when the dev daemon is deliberately not running.`
+          );
+        }
         return systemSock;
       }
     } catch {}

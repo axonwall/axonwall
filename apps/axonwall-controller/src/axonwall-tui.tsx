@@ -21,7 +21,7 @@ import {
   enablePluginWithDependencies,
   disablePluginWithDependents,
 } from '@axonwall/lib';
-import { getMcpServerStatus, resolveMcpSettingsPath } from '@axonwall/lib/mcp';
+import { getMcpServerStatus, saveMcpSettings } from '@axonwall/lib/mcp';
 import { acquireMcpLockFile, desiredStateLockPath } from './mcp/lockfile.js';
 import { readAgentToken, resolveControllerDirs } from './dev-paths.js';
 import type { DesiredState } from '@axonwall/lib/schemas';
@@ -542,8 +542,27 @@ export function AxonwallTuiApp({
       callDaemon('/v1/system/partitions', 'GET'),
     ]);
     if (st && !st.error) setDaemonStatus(st);
+    // R4-B-L3: a failed partition/rootkit fetch used to leave the
+    // last-known verdicts on screen as if they were current, with no
+    // staleness marker — the operator read a passing boot-health or
+    // rootkit verdict from a dead daemon. On error, clear to an
+    // explicit UNKNOWN/stale state carrying the last successful
+    // check time, so the stale verdicts are never presented as
+    // current. (Choice recorded: clearing to UNKNOWN, not keeping
+    // prev — the finding demands the stale verdicts not be
+    // presented as current; keeping prev was round-3 B-L4's choice
+    // for MCP leases, a different tradeoff for a different field.)
     if (parts && !parts.error) {
-      setPartitionStatus(parts);
+      setPartitionStatus({ ...parts, lastUpdated: new Date().toISOString() });
+    } else {
+      setPartitionStatus((prev: any) => ({
+        installMode: prev?.installMode || detectLocalInstallMode(),
+        bootEnvironments: [],
+        checks: [],
+        stale: true,
+        staleSince: prev?.lastUpdated || null,
+        error: parts?.errorKind || parts?.error || 'partition status unavailable (daemon unreachable)',
+      }));
     }
     setMcpStatus({
       masterEnabled: localMcp.enabled,
@@ -578,7 +597,18 @@ export function AxonwallTuiApp({
       if (Array.isArray(vmsRes?.vms)) setLiveVms(vmsRes.vms);
       if (Array.isArray(ctsRes?.containers)) setLiveContainers(ctsRes.containers);
       if (Array.isArray(soarRes?.blockedIPs)) setSoarBlockedIps(soarRes.blockedIPs);
-      if (rkRes && !rkRes.error) setRootkitStatus(rkRes);
+      // R4-B-L3: same stale-verdict rule as partition status above.
+      if (rkRes && !rkRes.error) {
+        setRootkitStatus({ ...rkRes, lastUpdated: new Date().toISOString() });
+      } else {
+        setRootkitStatus((prev: any) => ({
+          stale: true,
+          staleSince: prev?.lastUpdated || null,
+          error: rkRes?.errorKind || rkRes?.error || 'rootkit status unavailable (daemon unreachable)',
+          summary: `UNKNOWN (stale) — last rootkit check failed (${rkRes?.errorKind || rkRes?.error || 'daemon unreachable'}); no current verdict`,
+          scanners: [],
+        }));
+      }
     } else if (activeTab === 'cli_ops') {
       const [usrRes, dirRes, etcRes, hwRes] = await Promise.all([
         callDaemon('/v1/system/users', 'GET'),
@@ -1752,47 +1782,66 @@ export function AxonwallTuiApp({
                   disabledBy: 'tui',
                 }),
           };
-          const serialized = JSON.stringify(settingsObj, null, 2);
-          if (!nextEnabled) {
-            callDaemon('/v1/mcp/flush', 'POST', {})
-              .catch(() => {})
-              .finally(() => {
-                callDaemon('/v1/ebpf/xdp/block', 'DELETE', { clearAll: true }).catch(() => {});
-                for (const p of Array.from(
-                  new Set([
-                    resolveMcpSettingsPath(),
-                    path.join(CONTROLLER_DIRS.varDir, 'mcp-settings.json'),
-                    path.join(VAR_ETC_CONFIG_DIR, 'mcp-settings.json'),
-                    path.join(ETC_CONFIG_DIR, 'mcp-settings.json'),
-                  ])
-                )) {
-                  try {
-                    fs.mkdirSync(path.dirname(p), { recursive: true, mode: 0o775 });
-                    fs.writeFileSync(p, serialized, { mode: 0o660 });
-                  } catch {}
+          // R4-B-H1: the disable used to be fire-and-forget — the
+          // flush and the XDP clear-all were .catch(() => {}), all
+          // four settings writes were silent catch {}, and the UI
+          // unconditionally showed 0 leases + DISABLED. Await and
+          // check every step; only flip the UI when all of them
+          // succeeded AND a re-read confirms the new state. On any
+          // failure keep the previous state, name the failed step,
+          // and never claim MCP is disabled. The enable direction
+          // had the same shape (silent writes, unconditional flip),
+          // so it goes through the same checked path.
+          setStatusMessage(
+            `MCP Server Master Switch -> ${nextEnabled ? 'ENABLING' : 'DISABLING'} (flushing leases, clearing XDP blocks, writing settings)...`
+          );
+          void (async () => {
+            const failures: string[] = [];
+            if (!nextEnabled) {
+              // Flush BEFORE writing the disable, so the daemon does
+              // not reject the flush once disabled (same order as
+              // the web console's toggleMcpServerMasterSwitchAction).
+              const flushRes = await callDaemon('/v1/mcp/flush', 'POST', {});
+              if (!flushRes || flushRes.error || flushRes.success === false) {
+                failures.push(
+                  `lease flush failed (${flushRes?.errorKind || 'daemon-error'}: ${flushRes?.message || flushRes?.error || 'daemon unreachable'})`
+                );
+              } else {
+                const xdpRes = await callDaemon('/v1/ebpf/xdp/block', 'DELETE', { clearAll: true });
+                if (!xdpRes || xdpRes.error || xdpRes.success === false) {
+                  failures.push(
+                    `XDP fast-drop clear-all failed (${xdpRes?.errorKind || 'daemon-error'}: ${xdpRes?.message || xdpRes?.error || 'daemon unreachable'})`
+                  );
                 }
-              });
-          } else {
-            for (const p of Array.from(
-              new Set([
-                resolveMcpSettingsPath(),
-                path.join(CONTROLLER_DIRS.varDir, 'mcp-settings.json'),
-                path.join(VAR_ETC_CONFIG_DIR, 'mcp-settings.json'),
-                path.join(ETC_CONFIG_DIR, 'mcp-settings.json'),
-              ])
-            )) {
-              try {
-                fs.mkdirSync(path.dirname(p), { recursive: true, mode: 0o775 });
-                fs.writeFileSync(p, serialized, { mode: 0o660 });
-              } catch {}
+              }
             }
-          }
-          setMcpStatus({
-            masterEnabled: nextEnabled,
-            disabledReason: nextEnabled ? undefined : 'Disabled via Axonwall TUI',
-            leases: nextEnabled ? mcpStatus.leases : [],
-          });
-          setStatusMessage(`Toggled MCP Server Master Switch -> ${nextEnabled ? 'ENABLED' : 'DISABLED'}.`);
+            if (failures.length === 0) {
+              const saved = saveMcpSettings(settingsObj);
+              if (!saved.ok) {
+                failures.push(`settings write failed (${saved.error})`);
+              }
+            }
+            if (failures.length === 0) {
+              const verify = getMcpServerStatus();
+              if (verify.enabled !== nextEnabled) {
+                failures.push(
+                  `verification failed: settings now report MCP ${verify.enabled ? 'ENABLED' : 'DISABLED'} (expected ${nextEnabled ? 'ENABLED' : 'DISABLED'})${verify.disabledReason ? ` — ${verify.disabledReason}` : ''}`
+                );
+              }
+            }
+            if (failures.length > 0) {
+              setStatusMessage(
+                `✖ MCP ${nextEnabled ? 'enable' : 'disable'} FAILED — ${failures.join('; ')}. Previous state kept: MCP is still ${mcpStatus.masterEnabled ? 'ENABLED' : 'DISABLED'} with ${mcpStatus.leases?.length || 0} leases shown; tactical leases and XDP blocks may still be enforced.`
+              );
+              return;
+            }
+            setMcpStatus({
+              masterEnabled: nextEnabled,
+              disabledReason: nextEnabled ? undefined : 'Disabled via Axonwall TUI',
+              leases: nextEnabled ? mcpStatus.leases : [],
+            });
+            setStatusMessage(`Toggled MCP Server Master Switch -> ${nextEnabled ? 'ENABLED' : 'DISABLED'}.`);
+          })();
           return;
         }
         const next = structuredClone(state);
@@ -2629,6 +2678,11 @@ export function AxonwallTuiApp({
                   {partitionStatus?.healthVerified ? 'VERIFIED (bootcount=0)' : `PENDING (${partitionStatus?.bootCount || 0}/${partitionStatus?.bootLimit || 3})`}
                 </Text>
               </Text>
+              {partitionStatus?.stale && (
+                <Text color="yellow" wrap="truncate-end">
+                  Partition status STALE — last successful check {partitionStatus?.staleSince || 'unknown'}; {partitionStatus?.error || 'daemon unreachable'}. Boot verdicts above are not current.
+                </Text>
+              )}
               {updSubView === 'be' && (
                 <Box flexDirection="column" marginTop={1}>
                   <Text bold color="white">
