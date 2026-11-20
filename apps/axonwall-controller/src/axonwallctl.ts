@@ -23,10 +23,11 @@ import {
   enablePluginWithDependencies,
   disablePluginWithDependents,
 } from '@axonwall/lib/plugins';
-import { getMcpServerStatus, resolveMcpSettingsPath } from '@axonwall/lib/mcp';
+import { getMcpServerStatus, saveMcpSettings, type SaveMcpSettingsResult } from '@axonwall/lib/mcp';
 import { importFirewallConfig, mergeFirewallConfigs, type FirewallVendor } from '@axonwall/lib/import';
 import { isValidDevice } from '@axonwall/lib/util';
 import { acquireMcpLockFile, desiredStateLockPath } from './mcp/lockfile.js';
+import { writeCanonicalConfig } from './atomic-config.js';
 import {
   parseCloudInitYaml,
   parseCloudInitNetworkConfig,
@@ -783,27 +784,51 @@ async function cmdApply(autoConfirm = true) {
     // Persist normalized YAML files + state.json
     serializedJson = JSON.stringify(state, null, 2);
 
+    // R4-B-M1: state.json has ONE canonical path (STATE_JSON_PATH,
+    // <varDir>/state.json). It is written first, atomically, and a
+    // failed canonical write fails the apply closed (exit 1, nothing
+    // applied) instead of silently continuing with a stale disk
+    // state. Mirrors (persistYamlDir, etcDir) are written best-effort
+    // after it; a failed mirror write is logged loudly.
+    // (process.exit skips the finally below, as with a failed
+    // validation — the lockfile is left behind with a dead pid and
+    // the next acquirer breaks it immediately.)
+    try {
+      writeCanonicalConfig({
+        canonicalPath: STATE_JSON_PATH,
+        mirrorPaths: [path.join(PERSIST_YAML_DIR, 'state.json'), path.join(ETC_DIR, 'state.json')],
+        serialized: serializedJson,
+        mode: 0o660,
+        label: 'state.json',
+      });
+    } catch (err: any) {
+      console.error(`${cRed}[✗] Could not persist DesiredState to ${STATE_JSON_PATH} (${err?.message || err}); nothing was applied — fix the state path and retry the apply.${cReset}`);
+      process.exit(1);
+    }
+
+    // Persist normalized YAML files (mirrors of the apply payload:
+    // the daemon apply below carries these files, so a failed disk
+    // write does not block the apply — but it must be visible, not
+    // a silent catch {}).
     for (const dir of [ETC_DIR, PERSIST_YAML_DIR]) {
       try {
         fs.mkdirSync(path.join(dir, 'conf.d'), { recursive: true, mode: 0o775 });
         for (const [filename, content] of Object.entries(yamlFiles)) {
           const target = path.join(dir, filename);
-          fs.writeFileSync(target, content, { mode: 0o660 });
-          try { fs.chmodSync(target, 0o660); } catch {}
+          try {
+            fs.writeFileSync(target, content, { mode: 0o660 });
+            try { fs.chmodSync(target, 0o660); } catch {}
+          } catch (writeErr: any) {
+            console.warn(`${cYellow}[!] Warning: could not write ${target} (${writeErr?.message || writeErr}); the daemon apply still carries this file, but the on-disk copy is stale.${cReset}`);
+          }
         }
         const ciOverride = path.join(dir, 'conf.d', '99-cloudinit.yaml');
         if (fs.existsSync(ciOverride)) {
           fs.rmSync(ciOverride, { force: true });
         }
-      } catch {}
-    }
-
-    for (const jsonTarget of [STATE_JSON_PATH, path.join(PERSIST_YAML_DIR, 'state.json'), path.join(ETC_DIR, 'state.json')]) {
-      try {
-        fs.mkdirSync(path.dirname(jsonTarget), { recursive: true, mode: 0o775 });
-        fs.writeFileSync(jsonTarget, serializedJson, { mode: 0o660 });
-        try { fs.chmodSync(jsonTarget, 0o660); } catch {}
-      } catch {}
+      } catch (dirErr: any) {
+        console.warn(`${cYellow}[!] Warning: could not persist YAML files to ${dir} (${dirErr?.message || dirErr}); the daemon apply still carries them, but the on-disk copies are stale.${cReset}`);
+      }
     }
     fixSharedConfigOwnership();
   } finally {
@@ -2400,6 +2425,80 @@ async function cmdZbm(args: string[]) {
   }
 }
 
+// R4-B-M4: axonwallctl used to invoke the updater with no
+// --version whenever --version was not given (bare `update`,
+// `update --slot B`, `update --apt --slot B`, `update --image`),
+// leaving the updater's empty-version arm reachable — the exact
+// hole the round-3 D-L1 fix deliberately left open because this
+// caller passed no version. The CLI now ALWAYS passes a version,
+// mirroring the daemon's own convention in
+// watchdog.ApplyFirmwareUpdate (empty version defaults to the
+// installed version, then --version is always passed).
+//
+// Resolution order: explicit --version, then the daemon's
+// /v1/status version, then /etc/axonwall/version. When none of
+// those yields a version, the update fails closed with
+// "--version is required" instead of invoking the updater
+// version-less.
+//
+// Design choice (documented): pass the CURRENT installed version,
+// not the --resync-standby flag the round-3 SUMMARY floated. The
+// flag does not exist in the updater (adding it is updater-script
+// work, batch B5's area); passing an unimplemented flag would be
+// silently ignored or rejected, while the installed version makes
+// the updater's behavior deterministic and fail-closed in every
+// mode (ZBM refuses a same-version re-update loudly via its E11
+// guard; A/B re-stages the standby from the current release under
+// its E1 completeness gate; rolling re-runs its apt step and
+// re-stamps the version). A bare `update --apt` (no --slot, no
+// --version, no --image) still returns after the package upgrade
+// without touching the updater at all — apt-only means apt-only;
+// the report's "apt-only falls through to the version-less call"
+// holds only when combined with --slot/--image, which are now
+// covered by resolution below.
+function resolveUpdateTargetVersion(
+  explicitVersion?: string,
+  statusVersion?: string,
+  fileVersion?: string
+): string {
+  const clean = (v: string | undefined): string => {
+    if (!v) return '';
+    const stripped = v.trim().replace(/^v/, '');
+    if (!stripped) return '';
+    // Same charset the daemon enforces before invoking the updater.
+    if (!/^[0-9A-Za-z._-]+$/.test(stripped)) return '';
+    return stripped;
+  };
+  const resolved = clean(explicitVersion) || clean(statusVersion) || clean(fileVersion);
+  if (!resolved) {
+    throw new Error(
+      'No update version could be resolved: pass --version <ver>, or make the installed version discoverable (daemon /v1/status or /etc/axonwall/version). Refusing to invoke the updater with no version.'
+    );
+  }
+  return resolved;
+}
+
+function resolveInstalledVersionFromFile(): string {
+  for (const candidate of Array.from(new Set([path.join(ETC_DIR, 'version'), '/etc/axonwall/version']))) {
+    try {
+      if (!fs.existsSync(candidate)) continue;
+      const firstLine = fs.readFileSync(candidate, 'utf8').split('\n')[0]!.trim();
+      if (firstLine) return firstLine;
+    } catch {}
+  }
+  return '';
+}
+
+async function readDaemonVersion(): Promise<string> {
+  try {
+    const status = await sendAgentSocketRequest<any>('/v1/status', 'GET', undefined, 5000);
+    const v = typeof status?.version === 'string' ? status.version.trim() : '';
+    return v;
+  } catch {
+    return '';
+  }
+}
+
 async function cmdUpdate(args: string[]) {
   let targetVersion = '';
   let targetSlot: 'A' | 'B' | undefined;
@@ -2501,6 +2600,24 @@ async function cmdUpdate(args: string[]) {
   }
 
   const updaterPaths = ['/usr/local/bin/axonwall-update', '/usr/sbin/axonwall-update'];
+  // R4-B-M4: resolve the version BEFORE any updater invocation and
+  // fail closed when it cannot be resolved — the updater is never
+  // called without --version from this CLI again. The daemon and
+  // the version file are consulted only when no explicit --version
+  // was given, so an explicit version never stalls on a down daemon.
+  let resolvedVersion: string;
+  try {
+    resolvedVersion = targetVersion
+      ? resolveUpdateTargetVersion(targetVersion)
+      : resolveUpdateTargetVersion(
+          undefined,
+          (await readDaemonVersion()) || undefined,
+          resolveInstalledVersionFromFile() || undefined
+        );
+  } catch (err: any) {
+    console.error(`${cRed}[✗] ${err?.message || err}${cReset}`);
+    process.exit(1);
+  }
   for (const up of updaterPaths) {
     if (fs.existsSync(up)) {
       const cliArgs: string[] = [];
@@ -2511,9 +2628,7 @@ async function cmdUpdate(args: string[]) {
       } else if (targetSlot) {
         cliArgs.push('--slot', targetSlot);
       }
-      if (targetVersion) {
-        cliArgs.push('--version', targetVersion);
-      }
+      cliArgs.push('--version', resolvedVersion);
       const res = spawnSync(up, cliArgs, { stdio: 'inherit' });
       if (res.status !== 0) {
         process.exit(res.status || 1);
@@ -2529,7 +2644,7 @@ async function cmdUpdate(args: string[]) {
       'POST',
       {
         slot: targetSlot || 'B',
-        version: targetVersion || undefined,
+        version: resolvedVersion,
       },
       300000
     );
@@ -2545,7 +2660,15 @@ async function cmdUpdate(args: string[]) {
   }
 }
 
-function persistMcpSettings(enabled: boolean, reason?: string): void {
+/**
+ * R4-B-M1: persist the MCP master-switch settings through the
+ * canonical path (atomic write + re-read verification in the lib).
+ * Returns the lib result: ok:false when the canonical write failed
+ * or the change did not land on re-read — callers MUST check it and
+ * must not print success. Mirrors are best-effort after the
+ * canonical write; failures are logged loudly by the lib.
+ */
+function persistMcpSettings(enabled: boolean, reason?: string): SaveMcpSettingsResult {
   const settingsObj = {
     enabled,
     ...(enabled
@@ -2556,26 +2679,7 @@ function persistMcpSettings(enabled: boolean, reason?: string): void {
           disabledBy: 'axonwallctl',
         }),
   };
-  const serialized = JSON.stringify(settingsObj, null, 2);
-  const targets = process.env.AXONWALL_MCP_SETTINGS_PATH
-    ? [process.env.AXONWALL_MCP_SETTINGS_PATH]
-    : Array.from(
-        new Set([
-          resolveMcpSettingsPath(),
-          path.join(CONTROLLER_DIRS.varDir, 'mcp-settings.json'),
-          path.join(PERSIST_YAML_DIR, 'mcp-settings.json'),
-          path.join(ETC_DIR, 'mcp-settings.json'),
-        ])
-      );
-  for (const target of targets) {
-    try {
-      fs.mkdirSync(path.dirname(target), { recursive: true, mode: 0o775 });
-      fs.writeFileSync(target, serialized, { mode: 0o660 });
-      try {
-        fs.chmodSync(target, 0o660);
-      } catch {}
-    } catch {}
-  }
+  return saveMcpSettings(settingsObj);
 }
 
 async function cmdMcp(args: string[]) {
@@ -2612,7 +2716,11 @@ async function cmdMcp(args: string[]) {
     }
     case 'enable': {
       console.log(`[+] Enabling Axonwall MCP Server...`);
-      persistMcpSettings(true);
+      const saved = persistMcpSettings(true);
+      if (!saved.ok) {
+        console.error(`${cRed}[✗] MCP Master Switch was NOT enabled: ${saved.error}${cReset}`);
+        process.exit(1);
+      }
       const status = getMcpServerStatus();
       console.log(
         `${cGreen}[✓] MCP Master Switch is now ${status.enabled ? 'ENABLED' : 'DISABLED'}.${cReset}`
@@ -2621,13 +2729,33 @@ async function cmdMcp(args: string[]) {
     }
     case 'disable': {
       console.log(`[+] Disabling Axonwall MCP Server and revoking active leases...`);
+      // R4-B-M1: the flush/XDP failures used to be swallowed (the
+      // XDP call had a bare .catch(() => {})), so the operator was
+      // told the disable landed while leases were still enforced.
+      // Surface them; the settings write below is the fail-closed
+      // gate — if it does not land, exit 1 instead of printing
+      // success.
       try {
-        await sendAgentSocketRequest<any>('/v1/mcp/flush', 'POST', {});
-        await sendAgentSocketRequest<any>('/v1/ebpf/xdp/block', 'DELETE', { clearAll: true }).catch(() => {});
+        const flushRes = await sendAgentSocketRequest<any>('/v1/mcp/flush', 'POST', {});
+        if (flushRes?.success === false) {
+          console.warn(`${cYellow}[!] Warning: daemon flush reported failure (${flushRes?.message || flushRes?.error || 'unknown'}); tactical leases may still be active.${cReset}`);
+        }
       } catch (err: any) {
         console.warn(`${cYellow}[!] Warning: Could not flush active kernel MCP leases on daemon (${err?.message || 'offline'}).${cReset}`);
       }
-      persistMcpSettings(false, 'Disabled via axonwallctl');
+      try {
+        const xdpRes = await sendAgentSocketRequest<any>('/v1/ebpf/xdp/block', 'DELETE', { clearAll: true });
+        if (xdpRes?.success === false) {
+          console.warn(`${cYellow}[!] Warning: XDP fast-drop clear-all reported failure (${xdpRes?.message || xdpRes?.error || 'unknown'}); XDP blocks may still be enforced.${cReset}`);
+        }
+      } catch (err: any) {
+        console.warn(`${cYellow}[!] Warning: Could not clear XDP fast-drop blocks on daemon (${err?.message || 'offline'}).${cReset}`);
+      }
+      const saved = persistMcpSettings(false, 'Disabled via axonwallctl');
+      if (!saved.ok) {
+        console.error(`${cRed}[✗] MCP Master Switch was NOT disabled: ${saved.error}${cReset}`);
+        process.exit(1);
+      }
       const status = getMcpServerStatus();
       console.log(
         `${cGreen}[✓] MCP Master Switch is now ${status.enabled ? 'ENABLED' : 'DISABLED'}.${cReset}`
@@ -3663,6 +3791,7 @@ ${cBold}COMMANDS:${cReset}
   zbm <cmd> [args]    Manage ZFSBootMenu Boot Environments & Snapshots (list, snapshot, clone, activate, delete, delete-snapshot)
   update [options]    Update Axonwall packages in-place (ZBM / Rolling) or flash standby slot (A/B mode)
                       Options: [--pkg-upgrade|--apt|--pacman|--apk] [--version <ver>] [--slot <A|B>]
+                      (--version defaults to the installed version; the updater is always invoked with an explicit --version)
   kernel <cmd> [args] Detect hardware/modules, audit running kernel KSPP posture, or export stripped .config (detect, audit, config)
   plugin <cmd> [id]   Manage core roles & extension plugins (list, enable, disable, install, remove, re-sync)
   ebpf <cmd> [args]      Inspect Ring-0 XDP dataplane, LPM CIDR blocks, SYN-flood PPS & Linux 6.9+ BPF_TOKEN delegation
