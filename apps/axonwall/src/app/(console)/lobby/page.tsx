@@ -29,6 +29,22 @@ export default async function LobbyPage() {
         </p>
       </div>
 
+      {/* R4-C-H1: the daemon did not answer — uptime, commit-confirm
+          state and interface carrier state are unknown, not healthy. */}
+      {status.daemonDown && (
+        <div className="p-4 rounded-xl bg-rose-500/10 border border-rose-500/30 flex items-start gap-3">
+          <XCircle className="w-5 h-5 text-rose-400 shrink-0 mt-0.5" />
+          <div>
+            <h2 className="text-sm font-bold text-rose-300">Daemon unavailable — status unknown</h2>
+            <p className="text-xs text-rose-200/80 mt-0.5">
+              axonwalld is not responding. System uptime, commit-confirm state, version and
+              interface carrier state below are unknown — nothing on this page was measured
+              from the daemon.
+            </p>
+          </div>
+        </div>
+      )}
+
       {/* Top Metric Cards */}
       <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
         <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 flex items-center justify-between">
@@ -48,7 +64,9 @@ export default async function LobbyPage() {
           <div>
             <span className="text-xs text-slate-400 block font-medium">System Uptime</span>
             <span className="text-lg font-bold text-white mt-1 block">
-              {Math.floor(status.uptimeSeconds / 3600)}h {Math.floor((status.uptimeSeconds % 3600) / 60)}m
+              {status.daemonDown
+                ? 'Unknown'
+                : `${Math.floor(status.uptimeSeconds / 3600)}h ${Math.floor((status.uptimeSeconds % 3600) / 60)}m`}
             </span>
             <span className="text-[11px] text-slate-400 mt-1 block font-mono">
               {status.osName || 'Linux'} ({arch}){status.runtimeMode === 'dev' ? ' · dev' : ''}
@@ -83,9 +101,11 @@ export default async function LobbyPage() {
           <div>
             <span className="text-xs text-slate-400 block font-medium">Commit-Confirm State</span>
             <span className="text-lg font-bold text-white mt-1 block">
-              {status.pendingConfirm ? 'Pending' : 'Healthy'}
+              {status.daemonDown ? 'Unknown' : status.pendingConfirm ? 'Pending' : 'Healthy'}
             </span>
-            <span className="text-[11px] text-slate-400 mt-1 block">Signed LKG Enforced</span>
+            <span className="text-[11px] text-slate-400 mt-1 block">
+              {status.daemonDown ? 'Daemon unavailable — state unknown' : 'Signed LKG Enforced'}
+            </span>
           </div>
           <div className="w-10 h-10 rounded-lg bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center text-emerald-400">
             <Cpu className="w-5 h-5" />
@@ -99,10 +119,16 @@ export default async function LobbyPage() {
         <div className="bg-slate-900 border border-slate-800 rounded-xl p-5">
           <div className="flex items-center justify-between mb-4">
             <h2 className="text-base font-semibold text-white">Interfaces Status</h2>
-            <span className="text-xs text-slate-400">{status.interfaces.length} Detected</span>
+            <span className="text-xs text-slate-400">
+              {status.daemonDown ? 'Unknown' : `${status.interfaces.length} Detected`}
+            </span>
           </div>
 
-          {status.interfaces.length === 0 ? (
+          {status.daemonDown ? (
+            <div className="p-6 text-center text-rose-300 text-xs">
+              Daemon unavailable — interface status unknown. No carrier state was measured.
+            </div>
+          ) : status.interfaces.length === 0 ? (
             <div className="p-6 text-center text-slate-500 text-xs">
               No physical or virtual network interfaces detected by host kernel.
             </div>
