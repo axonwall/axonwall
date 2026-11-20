@@ -1,5 +1,28 @@
 import type { NmapHost, NmapPort, NmapRun } from '../types/nmap';
 
+function buildUpdatedRunstats(
+  prevRunstats: NmapRun['runstats'] | undefined,
+  hosts: NmapHost[]
+): NmapRun['runstats'] {
+  const finished = prevRunstats?.finished ?? {
+    time: Math.floor(Date.now() / 1000),
+    timestr: new Date().toUTCString(),
+    elapsed: 0,
+    summary: `Nmap scan: ${hosts.length} hosts`,
+    exit: 'success',
+  };
+  return {
+    ...prevRunstats,
+    finished,
+    hosts: {
+      ...prevRunstats?.hosts,
+      up: hosts.filter((h) => h.status.state === 'up').length,
+      down: hosts.filter((h) => h.status.state === 'down').length,
+      total: hosts.length,
+    },
+  };
+}
+
 /**
  * Immutably updates a specific host in an NmapRun object using an updater callback.
  * Can return either a full NmapHost or a partial patch object.
@@ -45,15 +68,7 @@ export function updateHostInScan(
   return {
     ...scan,
     hosts: updatedHosts,
-    runstats: {
-      ...scan.runstats,
-      hosts: {
-        ...scan.runstats?.hosts,
-        up: updatedHosts.filter((h) => h.status.state === 'up').length,
-        down: updatedHosts.filter((h) => h.status.state === 'down').length,
-        total: updatedHosts.length,
-      },
-    },
+    runstats: buildUpdatedRunstats(scan.runstats, updatedHosts),
   };
 }
 
@@ -66,13 +81,13 @@ export function mergeScanResults(baseScan: NmapRun, newScan: NmapRun): NmapRun {
 
   // Populate base hosts
   for (const host of baseScan.hosts) {
-    const key = host.ipv4 || host.id;
+    const key = host.ipv4 || host.ipv6 || host.id;
     hostMap.set(key, { ...host });
   }
 
   // Merge in new scan hosts
   for (const newHost of newScan.hosts) {
-    const key = newHost.ipv4 || newHost.id;
+    const key = newHost.ipv4 || newHost.ipv6 || newHost.id;
 
     if (!hostMap.has(key)) {
       // New host discovered
@@ -92,9 +107,35 @@ export function mergeScanResults(baseScan: NmapRun, newScan: NmapRun): NmapRun {
       for (const s of existing.hostscripts || []) scriptMap.set(s.id, s);
       for (const s of newHost.hostscripts || []) scriptMap.set(s.id, s);
 
+      const mergedHostnames =
+        newHost.hostnames && newHost.hostnames.length > 0 ? newHost.hostnames : existing.hostnames;
+      const mergedPrimaryHostname =
+        newHost.primaryHostname && newHost.primaryHostname !== 'Unknown'
+          ? newHost.primaryHostname
+          : existing.primaryHostname;
+      const mergedOs =
+        newHost.os && newHost.os.osmatches && newHost.os.osmatches.length > 0
+          ? newHost.os
+          : (existing.os || newHost.os);
+      const mergedPrimaryOs =
+        newHost.primaryOs && newHost.primaryOs !== 'Unknown'
+          ? newHost.primaryOs
+          : existing.primaryOs;
+      const mergedOsFamily =
+        newHost.osFamily && newHost.osFamily !== 'Unknown'
+          ? newHost.osFamily
+          : existing.osFamily;
+
       const mergedHost: NmapHost = {
         ...existing,
         ...newHost,
+        addresses: newHost.addresses && newHost.addresses.length > 0 ? newHost.addresses : existing.addresses,
+        hostnames: mergedHostnames,
+        primaryHostname: mergedPrimaryHostname,
+        mac: newHost.mac || existing.mac,
+        os: mergedOs,
+        primaryOs: mergedPrimaryOs,
+        osFamily: mergedOsFamily,
         ports: mergedPorts,
         openPortCount: mergedPorts.filter((p) => p.state === 'open').length,
         hostscripts: Array.from(scriptMap.values()),
@@ -115,14 +156,7 @@ export function mergeScanResults(baseScan: NmapRun, newScan: NmapRun): NmapRun {
   return {
     ...baseScan,
     hosts: mergedHostsList,
-    runstats: {
-      ...baseScan.runstats,
-      hosts: {
-        up: mergedHostsList.filter((h) => h.status.state === 'up').length,
-        down: mergedHostsList.filter((h) => h.status.state === 'down').length,
-        total: mergedHostsList.length,
-      },
-    },
+    runstats: buildUpdatedRunstats(baseScan.runstats, mergedHostsList),
   };
 }
 
@@ -134,15 +168,7 @@ export function addHostToScan(scan: NmapRun, host: NmapHost): NmapRun {
   return {
     ...scan,
     hosts: nextHosts,
-    runstats: {
-      ...scan.runstats,
-      hosts: {
-        ...scan.runstats?.hosts,
-        up: nextHosts.filter((h) => h.status.state === 'up').length,
-        down: nextHosts.filter((h) => h.status.state === 'down').length,
-        total: nextHosts.length,
-      },
-    },
+    runstats: buildUpdatedRunstats(scan.runstats, nextHosts),
   };
 }
 
@@ -155,20 +181,13 @@ export function removeHostFromScan(scan: NmapRun, hostIdOrIp: string): NmapRun {
     (h) =>
       h.id.toLowerCase() !== targetId &&
       (!h.ipv4 || h.ipv4.toLowerCase() !== targetId) &&
-      (!h.ipv6 || h.ipv6.toLowerCase() !== targetId)
+      (!h.ipv6 || h.ipv6.toLowerCase() !== targetId) &&
+      (!h.primaryHostname || h.primaryHostname.toLowerCase() !== targetId)
   );
 
   return {
     ...scan,
     hosts: filtered,
-    runstats: {
-      ...scan.runstats,
-      hosts: {
-        ...scan.runstats?.hosts,
-        up: filtered.filter((h) => h.status.state === 'up').length,
-        down: filtered.filter((h) => h.status.state === 'down').length,
-        total: filtered.length,
-      },
-    },
+    runstats: buildUpdatedRunstats(scan.runstats, filtered),
   };
 }

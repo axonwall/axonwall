@@ -1,3 +1,5 @@
+'use client';
+
 import React, { useState } from 'react';
 import type { NmapRun } from '../types/nmap';
 import { Terminal, Copy, Check, Info, Calendar, Clock, Activity, Shield } from 'lucide-react';

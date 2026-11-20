@@ -1,8 +1,29 @@
-import type { TrafficShaperConfig, TrafficShaperInterface } from '../../schemas/index.js';
+import type { Interface, TrafficShaperConfig, TrafficShaperInterface } from '../../schemas/index.js';
 
 export interface CompiledTrafficShaper {
   commands: string[];
   shScript: string;
+}
+
+function crc16Hex(input: string): string {
+  let crc = 0xffff;
+  for (let i = 0; i < input.length; i++) {
+    crc ^= input.charCodeAt(i);
+    for (let j = 0; j < 8; j++) {
+      crc = (crc & 1) !== 0 ? (crc >>> 1) ^ 0xa001 : crc >>> 1;
+    }
+  }
+  return crc.toString(16).padStart(4, '0');
+}
+
+function buildIfbDeviceName(dev: string): string {
+  const clean = dev.replace(/[^a-zA-Z0-9_-]/g, '');
+  const candidate = `ifb-${clean}`;
+  if (candidate.length <= 15) {
+    return candidate;
+  }
+  // Fit strictly within Linux IFNAMSIZ (15 chars + NUL) while avoiding prefix collisions
+  return `ifb-${clean.slice(0, 6)}-${crc16Hex(dev)}`;
 }
 
 /**
@@ -10,7 +31,10 @@ export interface CompiledTrafficShaper {
  * Supports CAKE (with diffserv and ack-filter), FQ_CoDel, and HTB with sub-classes.
  * For ingress download shaping, automatically uses IFB (Intermediate Functional Block) redirection.
  */
-export function compileTrafficShaper(config?: TrafficShaperConfig): CompiledTrafficShaper {
+export function compileTrafficShaper(
+  config?: TrafficShaperConfig,
+  interfaces: Interface[] = [],
+): CompiledTrafficShaper {
   if (!config || !config.enabled || !config.interfaces || config.interfaces.length === 0) {
     return {
       commands: ['# Traffic shaper is disabled or has no interfaces configured'],
@@ -18,11 +42,18 @@ export function compileTrafficShaper(config?: TrafficShaperConfig): CompiledTraf
     };
   }
 
+  const ifDeviceMap = new Map<string, string>();
+  for (const iface of interfaces) {
+    if (iface.name && iface.device) {
+      ifDeviceMap.set(iface.name, iface.device);
+    }
+  }
+
   const commands: string[] = ['#!/bin/bash', 'set -e', ''];
 
   for (const iface of config.interfaces) {
     if (!iface.enabled) continue;
-    compileInterfaceShaper(iface, commands);
+    compileInterfaceShaper(iface, commands, ifDeviceMap);
   }
 
   return {
@@ -31,10 +62,15 @@ export function compileTrafficShaper(config?: TrafficShaperConfig): CompiledTraf
   };
 }
 
-function compileInterfaceShaper(iface: TrafficShaperInterface, commands: string[]) {
-  const dev = iface.interface.replace(/[^a-zA-Z0-9_.-]/g, '');
+function compileInterfaceShaper(
+  iface: TrafficShaperInterface,
+  commands: string[],
+  ifDeviceMap: Map<string, string>,
+) {
+  const resolved = ifDeviceMap.get(iface.interface) || iface.interface;
+  const dev = resolved.replace(/[^a-zA-Z0-9_.:-]/g, '');
   if (!dev) return;
-  const ifbDev = `ifb-${dev.replace(/[^a-zA-Z0-9_-]/g, '')}`;
+  const ifbDev = buildIfbDeviceName(dev);
 
   commands.push(`### Traffic Shaper for Interface: ${dev} ###`);
 

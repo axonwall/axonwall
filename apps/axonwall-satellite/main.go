@@ -231,7 +231,12 @@ func main() {
 				if err := engine.MergeCloudInitIntoBootConfig(&bootCfg, imdsPayload, "/"); err != nil {
 					slog.Warn("Cloud-Init IMDS merge warning", "source", imdsPayload.Datasource, "error", err)
 				} else {
-					slog.Info("Applied autonomous Cloud-Init IMDS configuration", "source", imdsPayload.Datasource, "id", bootCfg.SatelliteID)
+					slog.Info("Applied autonomous Cloud-Init IMDS configuration", "source", imdsPayload.Datasource, "id", bootCfg.SatelliteID, "hostname", bootCfg.Hostname)
+					if bootCfg.Hostname != "" {
+						_ = syscall.Sethostname([]byte(bootCfg.Hostname))
+					} else if bootCfg.SatelliteID != "" {
+						_ = syscall.Sethostname([]byte(bootCfg.SatelliteID))
+					}
 					for _, iface := range bootCfg.Interfaces {
 						_ = netEngine.ConfigureInterface(iface)
 					}
@@ -281,7 +286,7 @@ func main() {
 		// falling back to the fail-closed emergency lockdown ruleset before connecting to Hub.
 		// Forwarding stays disabled (fail-closed) unless a filtering ruleset loads.
 		initialScript := engine.BuildEmergencyLockdownNft(*coreURL)
-		if ciNftBytes, err := os.ReadFile("/etc/nftables.conf"); err == nil && strings.Contains(string(ciNftBytes), "chain forward") {
+		if ciNftBytes, err := os.ReadFile("/etc/nftables.conf"); err == nil && hasNonCommentForwardChain(string(ciNftBytes)) {
 			initialScript = string(ciNftBytes)
 			slog.Info("Loading Cloud-Init baseline router nftables ruleset from /etc/nftables.conf")
 		}
@@ -301,7 +306,7 @@ func main() {
 		}
 	}
 
-	slog.Info("Starting Axonwall Satellite / Edge NGFW Agent", "version", "0.11.67", "id", *satID, "pid1", engine.IsPID1() || *pid1Mode)
+	slog.Info("Starting Axonwall Satellite / Edge NGFW Agent", "version", "0.12.3", "id", *satID, "pid1", engine.IsPID1() || *pid1Mode)
 
 	if *satID == "" || *token == "" {
 		slog.Error("Missing required ZTP parameters. Must provide -id and -token (or axonwall.id / axonwall.token on kernel cmdline).")
@@ -608,10 +613,10 @@ func main() {
 						slog.Error("Malformed interfaces sync payload", "error", err)
 						sendAck(env.Type, env.CommandID, err)
 					} else {
-						slog.Info("Applying edge network interface configurations...", "count", len(ifPayload.Interfaces))
+						slog.Info("Applying edge network interface configurations...", "count", len(ifPayload.Interfaces), "haRole", haEngine.Role())
 						var errs []error
 						for _, iface := range ifPayload.Interfaces {
-							if err := netEngine.ConfigureInterface(iface); err != nil {
+							if err := haEngine.ApplySyncedInterface(netEngine, iface); err != nil {
 								slog.Error("Failed to configure edge interface", "device", iface.Device, "error", err)
 								errs = append(errs, err)
 							}
@@ -835,4 +840,16 @@ func main() {
 		case <-time.After(3 * time.Second):
 		}
 	}
+}
+
+func hasNonCommentForwardChain(nftContent string) bool {
+	for _, rawLine := range strings.Split(nftContent, "\n") {
+		if idx := strings.IndexByte(rawLine, '#'); idx >= 0 {
+			rawLine = rawLine[:idx]
+		}
+		if strings.Contains(rawLine, "chain forward") {
+			return true
+		}
+	}
+	return false
 }

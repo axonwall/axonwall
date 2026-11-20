@@ -1,24 +1,9 @@
 import { NextRequest } from 'next/server';
 import http from 'node:http';
-import fs from 'node:fs';
 
+import { getAgentToken } from '@/server/agent-client';
+import { getAgentApiSocketPath } from '@/server/dev-paths';
 import { getSession } from '@/server/auth';
-
-const AGENT_API_SOCKET = process.env.AGENT_API_SOCKET || '/run/axonwall/agent-api.sock';
-
-// axonwalld requires the per-install agent token (see server/agent.ts).
-function getAgentToken(): string | undefined {
-  if (process.env.AXONWALL_AGENT_TOKEN) return process.env.AXONWALL_AGENT_TOKEN;
-  try {
-    return (
-      fs
-        .readFileSync(process.env.AXONWALL_AGENT_TOKEN_FILE || '/etc/axonwall/agent.token', 'utf8')
-        .trim() || undefined
-    );
-  } catch {
-    return undefined;
-  }
-}
 
 export async function GET(req: NextRequest) {
   // Live packet capture is privileged telemetry: require a console
@@ -68,14 +53,15 @@ export async function GET(req: NextRequest) {
       req.signal.addEventListener('abort', cleanup);
 
       // 1. Try proxying from axonwalld Unix socket
+      const token = getAgentToken();
       unixReq = http.request(
         {
-          socketPath: AGENT_API_SOCKET,
+          socketPath: getAgentApiSocketPath(),
           path: `/v1/events/packets?interface=${encodeURIComponent(iface)}&protocol=${encodeURIComponent(protocol)}&filter=${encodeURIComponent(filter)}`,
           method: 'GET',
           headers: {
             Accept: 'text/event-stream',
-            ...(getAgentToken() ? { 'X-Axonwall-Agent-Token': getAgentToken() } : {}),
+            ...(token ? { 'X-Axonwall-Agent-Token': token } : {}),
           },
         },
         (res) => {

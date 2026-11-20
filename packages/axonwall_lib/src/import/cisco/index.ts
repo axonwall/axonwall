@@ -47,9 +47,10 @@ export function importCiscoAsaConfig(configText: string): ImportReport {
     const tokens = line.split(/\s+/);
 
     // 1. Interfaces
-    if (tokens[0] === 'interface') {
-      currentIface = tokens[1];
-      rawInterfaces[currentIface] = { device: currentIface };
+    if (tokens[0] === 'interface' && tokens[1]) {
+      const sanitizedDev = tokens[1].replace(/\//g, '_').replace(/[^a-zA-Z0-9_.:-]/g, '_');
+      currentIface = sanitizedDev;
+      rawInterfaces[currentIface] = { device: sanitizedDev };
       continue;
     }
 
@@ -80,18 +81,16 @@ export function importCiscoAsaConfig(configText: string): ImportReport {
     // 2. Object Network
     if (tokens[0] === 'object' && tokens[1] === 'network') {
       currentIface = null;
-      if (currentObjNetwork) {
-        if (currentObjNetwork.ip) {
-          aliases.push({
-            name: currentObjNetwork.name.replace(/[^a-zA-Z0-9_]/g, '_'),
-            type: 'host',
-            entries: [currentObjNetwork.ip],
-            description: currentObjNetwork.descr || '',
-            enabled: true,
-          });
-        }
+      if (currentObjNetwork && currentObjNetwork.ip) {
+        aliases.push({
+          name: currentObjNetwork.name.replace(/[^a-zA-Z0-9_]/g, '_'),
+          type: 'host',
+          entries: [currentObjNetwork.ip],
+          description: currentObjNetwork.descr || '',
+          enabled: true,
+        });
       }
-      currentObjNetwork = { name: tokens[2] };
+      currentObjNetwork = tokens[2] ? { name: tokens[2] } : null;
       continue;
     }
 
@@ -122,7 +121,7 @@ export function importCiscoAsaConfig(configText: string): ImportReport {
           enabled: true,
         });
       }
-      currentObjGroup = { name: tokens[2], entries: [] };
+      currentObjGroup = tokens[2] ? { name: tokens[2], entries: [] } : null;
       continue;
     }
 

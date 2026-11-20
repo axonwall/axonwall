@@ -5,7 +5,7 @@ import { CodeBlock } from '../components/CodeBlock';
 export const metadata = {
   title: 'Kubernetes (K3s), Cilium eBPF CNI, Etcd Snapshots & OpenEBS | Axonwall Documentation',
   description:
-    'Complete guide to running K3s Kubernetes and OpenEBS distributed storage on Axonwall v0.11.64: Cilium eBPF CNI (kube-proxy replacement + Hubble), embedded etcd snapshots & S3 backup/restore, automated HA peer join, WireGuard flannel mesh, axonwall-kubeconfig VIP sync, ZFS-LocalPV, and Mayastor NVMe-oF replication.',
+    'Complete guide to running K3s Kubernetes and OpenEBS distributed storage on Axonwall v0.11.68: Cilium eBPF CNI (kube-proxy replacement + Hubble), embedded etcd snapshots & S3 backup/restore, automated HA peer join, WireGuard flannel mesh, axonwall-kubeconfig VIP sync, ZFS-LocalPV, and Mayastor NVMe-oF replication.',
 };
 
 export default function K3sKubernetesDocPage() {
@@ -15,14 +15,15 @@ export default function K3sKubernetesDocPage() {
       <div className="space-y-4 border-b border-slate-800/80 pb-8">
         <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-950/60 border border-emerald-500/30 text-emerald-400 text-xs font-semibold">
           <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-          Container Orchestration &amp; Cloud-Native Storage • v0.11.64
+          Container Orchestration &amp; Cloud-Native Storage • v0.11.68
         </div>
         <h1 className="text-3xl sm:text-5xl font-extrabold text-white tracking-tight">
           Kubernetes (K3s) &amp; OpenEBS Distributed Storage
         </h1>
         <p className="text-base sm:text-lg text-slate-400 leading-relaxed max-w-3xl">
           Axonwall provides modern, lightweight K3s alongside enterprise-grade NAS storage configured via{' '}
-          <code className="text-emerald-400 font-mono">/etc/axonwall/k3s.yaml</code>. Both <code className="text-slate-200 font-mono">kubectl</code> and <code className="text-slate-200 font-mono">helm</code> v3 are bundled out-of-the-box via the default <code className="text-emerald-400 font-mono">cli-workstation</code> plugin. Run containerized workloads
+          <code className="text-emerald-400 font-mono">/etc/axonwall/k3s.yaml</code>. Both <code className="text-slate-200 font-mono">kubectl</code>, interactive TUI{' '}
+          <code className="text-emerald-400 font-mono">k9s</code> (v0.51.0, alias <code className="text-slate-200 font-mono">k9</code>), and <code className="text-slate-200 font-mono">helm</code> v3 are bundled out-of-the-box, paired with our full <strong>Browser K9s Live Explorer</strong> (<code className="text-emerald-400 font-mono">/k3s/explorer</code>). Run containerized workloads
           directly on your appliance with encrypted WireGuard flannel networking, automated 2-node embedded-etcd HA cluster join, and
           OpenEBS replicated persistent volumes.
         </p>
@@ -30,6 +31,14 @@ export default function K3sKubernetesDocPage() {
 
       {/* Overview */}
       <section className="space-y-6">
+        <div className="p-4 rounded-xl bg-cyan-950/30 border border-cyan-500/30 text-xs text-slate-300 leading-relaxed">
+          <strong className="text-cyan-300">Barebones K3s + Storage Edition (<code className="font-mono">k3s-storage</code>):</strong>{' '}
+          Deploying a dedicated headless K3s + OpenZFS/OpenEBS node without firewall/NAS bloat? Select the{' '}
+          <strong className="text-white">k3s-storage</strong> edition directly from the unified ISO bootloader or installer TUI (see{' '}
+          <a href="/docs/installer-raid-zfs#k3s-storage-edition" className="text-cyan-400 underline">Barebones K3s + Storage Guide</a>) and pair it with our{' '}
+          <a href="/docs/custom-kernel" className="text-indigo-300 underline">Hardened Linux 6.12 LTS Kernel &amp; Custom Kernel Studio</a>.
+        </div>
+
         <h2 className="text-2xl font-bold text-white flex items-center gap-2">
           <Cpu className="w-6 h-6 text-emerald-400" /> Embedded K3s Architecture
         </h2>
@@ -228,9 +237,10 @@ spec:
         <CodeBlock
           title="Local, HA VIP & Remote Workstation Kubeconfig Sync"
           language="bash"
-          code={`# On the Axonwall appliance: sync ~/.kube/config for your non-root admin session
+          code={`# On the Axonwall appliance: launch k9s directly over SSH (KUBECONFIG auto-detected) or sync ~/.kube/config
 axonwall-kubeconfig
 kubectl get nodes -o wide
+k9s -A
 
 # On a 2-Host HA cluster: bind kubeconfig server URL to the floating VRRP VIP
 axonwall-kubeconfig --vip
@@ -239,8 +249,16 @@ axonwallctl kubeconfig --vip
 
 # From your remote Linux/macOS workstation: fetch & merge over SSH
 ./scripts/update-kubeconfig.sh user@10.80.0.202 --vip
-kubectl --context axonwall get pods -A`}
+kubectl --context axonwall get pods -A
+k9s --context axonwall`}
         />
+
+        <div className="p-6 rounded-2xl bg-slate-900 border border-emerald-500/30 space-y-2.5 text-xs">
+          <h3 className="font-bold text-emerald-300 text-base">Browser K9s Live Explorer, Pulse &amp; Topology Map</h3>
+          <p className="text-slate-300 leading-relaxed">
+            Open <a href="/k3s/explorer" className="text-emerald-400 underline font-mono">/k3s/explorer</a> in the Web Console to access full browser-native K9s functionality: keyboard-driven navigation (<code className="font-mono text-white">:po</code>, <code className="font-mono text-white">:svc</code>, <code className="font-mono text-white">:ing</code>, <code className="font-mono text-white">:pulse</code>, <code className="font-mono text-white">:topo</code>, <code className="font-mono text-white">/</code> filter, <code className="font-mono text-white">0..9</code> namespaces), Cluster Pulse CPU/Memory/Pod Recharts visualizations, an interactive <code className="font-mono text-cyan-300">Ingress → Service → Workload → Pod → Node / PVC</code> SVG Topology Map, live SSE log streaming, interactive container <code className="font-mono text-white">exec</code>, editable YAML with server dry-run, and admin Secret decoding.
+          </p>
+        </div>
       </section>
 
       {/* Linux 6.9+ User Namespaces & Unprivileged Pod BPF_TOKEN Delegation */}

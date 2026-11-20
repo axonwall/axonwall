@@ -1505,9 +1505,10 @@ export interface CompiledVowBundle {
 export function compileVowBundle(state: DesiredState): CompiledVowBundle {
   const k3sEnabled = isPluginEnabled('core-k3s', state);
   const vowConfig: VowConfig = state.vow ?? VowConfigSchema.parse({ enabled: false });
-  const vowRequested = Boolean(
-    vowConfig.enabled || state.plugins?.some((p) => p.id === 'vigilant-octo-waffle' && p.enabled)
-  );
+  const vowRequested =
+    state.vow?.enabled !== undefined
+      ? state.vow.enabled
+      : Boolean(state.plugins?.some((p) => p.id === 'vigilant-octo-waffle' && p.enabled));
   const baseDn =
     state.identity?.baseDn?.trim() || deriveRfc2247BaseDn(state.system?.domain || 'axonwall.local');
 

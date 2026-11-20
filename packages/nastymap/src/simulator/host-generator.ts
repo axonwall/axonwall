@@ -631,8 +631,12 @@ export function generateNetworkScenario(options: ScenarioGeneratorOptions = {}):
   scan: NmapRun;
   threats: MaliciousThreatInfo[];
 } {
-  const subnetBase = options.subnet ? options.subnet.split('/')[0].replace(/\.\d+$/, '') : '192.168.1';
-  const gatewayIp = options.gatewayIp || `${subnetBase}.1`;
+  const rawSubnetIp = options.subnet ? options.subnet.split('/')[0].trim() : '';
+  const isIPv4Subnet = /^\d{1,3}(?:\.\d{1,3}){3}$/.test(rawSubnetIp);
+  const subnetBase = isIPv4Subnet ? rawSubnetIp.replace(/\.\d+$/, '') : '192.168.1';
+  const gatewayIp = options.gatewayIp && /^\d{1,3}(?:\.\d{1,3}){3}$/.test(options.gatewayIp)
+    ? options.gatewayIp
+    : `${subnetBase}.1`;
   const totalCount = Math.max(1, Math.min(options.totalHosts || 22, 250));
   const threatCount = Math.min(options.threatCount !== undefined ? options.threatCount : 2, 5);
 
@@ -768,10 +772,11 @@ export function generateNetworkScenario(options: ScenarioGeneratorOptions = {}):
   if (options.includeLaptops !== false) normalArchetypesPool.push(...LAPTOP_ARCHETYPES);
   if (options.includeIoT !== false) normalArchetypesPool.push(...IOT_ARCHETYPES);
 
-  const remainingCount = totalCount - hosts.length;
+  const remainingCount = Math.max(0, totalCount - hosts.length);
 
-  for (let i = 0; i < remainingCount; i++) {
-    const archetype = randomElement(normalArchetypesPool);
+  if (normalArchetypesPool.length > 0) {
+    for (let i = 0; i < remainingCount; i++) {
+      const archetype = randomElement(normalArchetypesPool);
     const octet = getUniqueOctet();
     const ip = `${subnetBase}.${octet}`;
     const mac = generateMac(archetype.macPrefix);
@@ -810,7 +815,8 @@ export function generateNetworkScenario(options: ScenarioGeneratorOptions = {}):
         deviceCategory: archetype.category,
       },
     };
-    hosts.push(normalHost);
+      hosts.push(normalHost);
+    }
   }
 
   // Sort hosts by IP octet for realistic subnet order

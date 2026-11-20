@@ -56,11 +56,12 @@ test('createHttpRedirectServer redirects plaintext HTTP to HTTPS on port 2966', 
 });
 
 test('createPortMultiplexer routes both TLS and plaintext HTTP on the exact same port', async (t) => {
-  const certKeyPath = '/tmp/axon_test_key.pem';
-  const certPath = '/tmp/axon_test_cert.pem';
+  const certTmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'axon-test-'));
+  const certKeyPath = path.join(certTmpDir, 'key.pem');
+  const certPath = path.join(certTmpDir, 'cert.pem');
 
   execSync(
-    `openssl req -x509 -newkey rsa:2048 -keyout ${certKeyPath} -out ${certPath} -days 1 -nodes -subj "/CN=localhost"`
+    `openssl req -x509 -newkey rsa:2048 -keyout "${certKeyPath}" -out "${certPath}" -days 1 -nodes -subj "/CN=localhost"`
   );
 
   const cert = fs.readFileSync(certPath);
@@ -88,8 +89,7 @@ test('createPortMultiplexer routes both TLS and plaintext HTTP on the exact same
     httpsServer.close();
     redirectServer.close();
     try {
-      fs.unlinkSync(certPath);
-      fs.unlinkSync(certKeyPath);
+      fs.rmSync(certTmpDir, { recursive: true, force: true });
     } catch {}
   });
 

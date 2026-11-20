@@ -1,11 +1,17 @@
 package main
 
 import (
+	"bufio"
+	"bytes"
+	"encoding/binary"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf16"
 )
 
 func TestFilterCandidateDisks(t *testing.T) {
@@ -443,5 +449,445 @@ func TestFormatInstallerDiagnosticsBundleRedactsK3sJoinToken(t *testing.T) {
 	}
 	if !strings.Contains(bundle, "K3S_JOIN_TOKEN='[REDACTED]'") {
 		t.Errorf("expected redacted K3S_JOIN_TOKEN in diagnostics bundle:\n%s", bundle)
+	}
+}
+
+func TestClassifyDiskContent(t *testing.T) {
+	tests := []struct {
+		name            string
+		input           DiskProbeInput
+		wantKind        DiskContentKind
+		wantSummarySubs []string
+	}{
+		{
+			name:            "Completely empty disk",
+			input:           DiskProbeInput{DiskPath: "/dev/nvme0n1"},
+			wantKind:        DiskContentEmpty,
+			wantSummarySubs: []string{"Empty Disk"},
+		},
+		{
+			name: "Axonwall Dual-Root A/B",
+			input: DiskProbeInput{
+				DiskPath: "/dev/vda",
+				PTType:   "gpt",
+				Partitions: []PartitionProbe{
+					{Name: "vda2", Path: "/dev/vda2", FSType: "vfat", Label: "AXON_EFI", PartLabel: "ESP"},
+					{Name: "vda3", Path: "/dev/vda3", FSType: "ext4", Label: "axon_root_a", PartLabel: "axon_root_a"},
+					{Name: "vda4", Path: "/dev/vda4", FSType: "ext4", Label: "axon_root_b", PartLabel: "axon_root_b"},
+					{Name: "vda5", Path: "/dev/vda5", FSType: "ext4", Label: "axon_data", PartLabel: "axon_data"},
+				},
+			},
+			wantKind:        DiskContentAxonwall,
+			wantSummarySubs: []string{"Axonwall Installation", "Dual-Root A/B"},
+		},
+		{
+			name: "Axonwall Dual-Root A/B RAID-1 + LUKS2",
+			input: DiskProbeInput{
+				DiskPath: "/dev/nvme0n1",
+				PTType:   "gpt",
+				Partitions: []PartitionProbe{
+					{Name: "nvme0n1p2", Path: "/dev/nvme0n1p2", FSType: "vfat", Label: "AXON_EFI"},
+					{Name: "nvme0n1p3", Path: "/dev/nvme0n1p3", FSType: "linux_raid_member", Label: "axon_root_a_1", PartLabel: "axon_root_a"},
+					{Name: "nvme0n1p4", Path: "/dev/nvme0n1p4", FSType: "linux_raid_member", PartLabel: "axon_root_b"},
+					{Name: "nvme0n1p5", Path: "/dev/nvme0n1p5", FSType: "crypto_luks", Label: "axon_crypt_data", PartLabel: "axon_data"},
+				},
+			},
+			wantKind:        DiskContentAxonwall,
+			wantSummarySubs: []string{"Axonwall Installation", "Dual-Root A/B", "RAID-1", "LUKS2"},
+		},
+		{
+			name: "Axonwall ZFSBootMenu",
+			input: DiskProbeInput{
+				DiskPath: "/dev/sda",
+				PTType:   "gpt",
+				Partitions: []PartitionProbe{
+					{Name: "sda1", Path: "/dev/sda1", FSType: "vfat", Label: "AXON_EFI", PartLabel: "ZBM_ESP"},
+					{Name: "sda2", Path: "/dev/sda2", FSType: "zfs_member", Label: "zroot", PartLabel: "axon_zfs_1"},
+				},
+			},
+			wantKind:        DiskContentAxonwall,
+			wantSummarySubs: []string{"Axonwall Installation", "ZFSBootMenu Root-on-ZFS"},
+		},
+		{
+			name: "Axonwall Rolling",
+			input: DiskProbeInput{
+				DiskPath: "/dev/sda",
+				PTType:   "gpt",
+				Partitions: []PartitionProbe{
+					{Name: "sda2", Path: "/dev/sda2", FSType: "vfat", Label: "AXON_EFI"},
+					{Name: "sda3", Path: "/dev/sda3", FSType: "ext4", Label: "axon_root", PartLabel: "axon_root"},
+				},
+			},
+			wantKind:        DiskContentAxonwall,
+			wantSummarySubs: []string{"Axonwall Installation", "Rolling Single-Root"},
+		},
+		{
+			name: "Windows OS NTFS + MSR",
+			input: DiskProbeInput{
+				DiskPath: "/dev/nvme0n1",
+				PTType:   "gpt",
+				Partitions: []PartitionProbe{
+					{Name: "nvme0n1p1", Path: "/dev/nvme0n1p1", FSType: "vfat", PartType: "c12a7328-f81f-11d2-ba4b-00a0c93ec93b"},
+					{Name: "nvme0n1p2", Path: "/dev/nvme0n1p2", PartType: "e3c9e316-0b5c-4db8-817d-f92df00215ae"},
+					{Name: "nvme0n1p3", Path: "/dev/nvme0n1p3", FSType: "ntfs", Label: "Windows"},
+				},
+			},
+			wantKind:        DiskContentOtherOS,
+			wantSummarySubs: []string{"Windows OS"},
+		},
+		{
+			name: "Linux OS ESP + LVM2",
+			input: DiskProbeInput{
+				DiskPath: "/dev/sda",
+				PTType:   "gpt",
+				Partitions: []PartitionProbe{
+					{Name: "sda1", Path: "/dev/sda1", FSType: "vfat", PartType: "c12a7328-f81f-11d2-ba4b-00a0c93ec93b"},
+					{Name: "sda2", Path: "/dev/sda2", FSType: "ext4", Label: "boot"},
+					{Name: "sda3", Path: "/dev/sda3", FSType: "LVM2_member"},
+				},
+			},
+			wantKind:        DiskContentOtherOS,
+			wantSummarySubs: []string{"Linux OS Installation"},
+		},
+		{
+			name: "FreeBSD / TrueNAS OS",
+			input: DiskProbeInput{
+				DiskPath: "/dev/sdb",
+				PTType:   "gpt",
+				Partitions: []PartitionProbe{
+					{Name: "sdb1", Path: "/dev/sdb1", FSType: "vfat", PartLabel: "efibsd"},
+					{Name: "sdb2", Path: "/dev/sdb2", FSType: "zfs_member", Label: "boot-pool"},
+				},
+			},
+			wantKind:        DiskContentOtherOS,
+			wantSummarySubs: []string{"BSD / TrueNAS OS"},
+		},
+		{
+			name: "Non-Axonwall ZFS Root OS (Proxmox rpool)",
+			input: DiskProbeInput{
+				DiskPath: "/dev/nvme1n1",
+				PTType:   "gpt",
+				Partitions: []PartitionProbe{
+					{Name: "nvme1n1p2", Path: "/dev/nvme1n1p2", FSType: "vfat"},
+					{Name: "nvme1n1p3", Path: "/dev/nvme1n1p3", FSType: "zfs_member", Label: "rpool"},
+				},
+			},
+			wantKind:        DiskContentOtherOS,
+			wantSummarySubs: []string{"ZFS Root OS (rpool)"},
+		},
+		{
+			name: "Standalone ZFS Data Pool tank",
+			input: DiskProbeInput{
+				DiskPath: "/dev/sdc",
+				PTType:   "gpt",
+				Partitions: []PartitionProbe{
+					{Name: "sdc1", Path: "/dev/sdc1", FSType: "zfs_member", Label: "tank"},
+				},
+			},
+			wantKind:        DiskContentData,
+			wantSummarySubs: []string{"Existing ZFS Pool (tank)"},
+		},
+		{
+			name: "Non-empty raw partitioned data disk",
+			input: DiskProbeInput{
+				DiskPath: "/dev/sdd",
+				PTType:   "gpt",
+				Partitions: []PartitionProbe{
+					{Name: "sdd1", Path: "/dev/sdd1", FSType: "xfs", Label: "backups"},
+				},
+			},
+			wantKind:        DiskContentData,
+			wantSummarySubs: []string{"Existing Partitions", "xfs"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			kind, summary, _ := ClassifyDiskContent(tc.input)
+			if kind != tc.wantKind {
+				t.Fatalf("ClassifyDiskContent() kind = %q; want %q (summary=%q)", kind, tc.wantKind, summary)
+			}
+			for _, sub := range tc.wantSummarySubs {
+				if !strings.Contains(summary, sub) {
+					t.Errorf("summary %q missing expected substring %q", summary, sub)
+				}
+			}
+		})
+	}
+}
+
+func TestInspectRawDiskHeader(t *testing.T) {
+	// 1. All-zero buffer -> empty
+	zeroBuf := make([]byte, 32768)
+	zeroRes := inspectRawDiskHeader("/dev/vda", zeroBuf)
+	if zeroRes.PTType != "" || zeroRes.HasBootSector || len(zeroRes.Partitions) != 0 {
+		t.Fatalf("expected clean empty result for zero buffer, got %+v", zeroRes)
+	}
+
+	// 2. MBR buffer with Linux partition 0x83
+	mbrBuf := make([]byte, 32768)
+	mbrBuf[446+4] = 0x83
+	mbrBuf[510] = 0x55
+	mbrBuf[511] = 0xAA
+	mbrRes := inspectRawDiskHeader("/dev/sda", mbrBuf)
+	if mbrRes.PTType != "dos" || len(mbrRes.Partitions) != 1 || mbrRes.Partitions[0].PartType != "0x83" {
+		t.Fatalf("unexpected MBR parse result: %+v", mbrRes)
+	}
+
+	// 3. GPT buffer at LBA 1 + 2 partition entries at LBA 2
+	gptBuf := make([]byte, 32768)
+	copy(gptBuf[512:520], "EFI PART")
+	binary.LittleEndian.PutUint64(gptBuf[512+72:512+80], 2)   // partEntryLBA
+	binary.LittleEndian.PutUint32(gptBuf[512+80:512+84], 128) // numEntries
+	binary.LittleEndian.PutUint32(gptBuf[512+84:512+88], 128) // entrySize
+
+	writeGPTEntry := func(idx int, guidMixed [16]byte, label string) {
+		off := 1024 + idx*128
+		copy(gptBuf[off:off+16], guidMixed[:])
+		units := utf16.Encode([]rune(label))
+		for i, u := range units {
+			if i >= 36 {
+				break
+			}
+			binary.LittleEndian.PutUint16(gptBuf[off+56+i*2:off+58+i*2], u)
+		}
+	}
+
+	// ESP GUID c12a7328-f81f-11d2-ba4b-00a0c93ec93b in mixed-endian bytes
+	espGUID := [16]byte{0x28, 0x73, 0x2a, 0xc1, 0x1f, 0xf8, 0xd2, 0x11, 0xba, 0x4b, 0x00, 0xa0, 0xc9, 0x3e, 0xc9, 0x3b}
+	// Linux FS GUID 0fc63daf-8483-4772-8e79-3d69d8477de4
+	linuxGUID := [16]byte{0xaf, 0x3d, 0xc6, 0x0f, 0x83, 0x84, 0x72, 0x47, 0x8e, 0x79, 0x3d, 0x69, 0xd8, 0x47, 0x7d, 0xe4}
+	writeGPTEntry(0, espGUID, "ESP")
+	writeGPTEntry(1, linuxGUID, "axon_root_a")
+
+	gptRes := inspectRawDiskHeader("/dev/nvme0n1", gptBuf)
+	if gptRes.PTType != "gpt" || len(gptRes.Partitions) != 2 {
+		t.Fatalf("expected GPT with 2 partitions, got %+v", gptRes)
+	}
+	if gptRes.Partitions[0].PartType != "c12a7328-f81f-11d2-ba4b-00a0c93ec93b" || gptRes.Partitions[0].Path != "/dev/nvme0n1p1" {
+		t.Errorf("unexpected GPT partition 0: %+v", gptRes.Partitions[0])
+	}
+	if gptRes.Partitions[1].PartLabel != "axon_root_a" || gptRes.Partitions[1].Path != "/dev/nvme0n1p2" {
+		t.Errorf("unexpected GPT partition 1: %+v", gptRes.Partitions[1])
+	}
+}
+
+func TestConfirmTargetDiskOverwrite(t *testing.T) {
+	cfg := DefaultInstallerConfig()
+	cfg.SystemDisks = []string{"/dev/vda"}
+
+	// Empty disk requires no extra prompt even if input reader is empty
+	emptyDisks := []DiskDevice{
+		{Name: "vda", Path: "/dev/vda", SizeGB: 32, ContentKind: DiskContentEmpty, ContentSummary: "Empty Disk"},
+	}
+	var out bytes.Buffer
+	if !confirmTargetDiskOverwrite(emptyDisks, cfg, bufio.NewReader(strings.NewReader("")), &out) {
+		t.Fatalf("expected empty disk to auto-pass overwrite confirmation")
+	}
+
+	// Existing Axonwall disk should surface Axonwall warning and require literal "yes"
+	axonDisks := []DiskDevice{
+		{
+			Name:           "vda",
+			Path:           "/dev/vda",
+			SizeGB:         32,
+			ContentKind:    DiskContentAxonwall,
+			ContentSummary: "Axonwall Installation (Dual-Root A/B)",
+			ContentDetails: []string{`vda3: ext4 label="axon_root_a"`},
+		},
+	}
+	for _, reject := range []string{"\n", "n\n", "y\n", "no\n"} {
+		out.Reset()
+		if confirmTargetDiskOverwrite(axonDisks, cfg, bufio.NewReader(strings.NewReader(reject)), &out) {
+			t.Errorf("expected input %q to reject overwrite", reject)
+		}
+		if !strings.Contains(out.String(), "EXISTING AXONWALL INSTALLATION DETECTED") {
+			t.Errorf("expected Axonwall detection banner in output:\n%s", out.String())
+		}
+	}
+	for _, accept := range []string{"yes\n", "YES\n"} {
+		out.Reset()
+		if !confirmTargetDiskOverwrite(axonDisks, cfg, bufio.NewReader(strings.NewReader(accept)), &out) {
+			t.Errorf("expected input %q to accept overwrite", accept)
+		}
+	}
+
+	// Existing other OS disk should surface OS warning and require literal "yes"
+	winDisks := []DiskDevice{
+		{
+			Name:           "vda",
+			Path:           "/dev/vda",
+			SizeGB:         128,
+			ContentKind:    DiskContentOtherOS,
+			ContentSummary: "Windows OS (NTFS/Boot)",
+		},
+	}
+	out.Reset()
+	if confirmTargetDiskOverwrite(winDisks, cfg, bufio.NewReader(strings.NewReader("n\n")), &out) {
+		t.Errorf("expected 'n' to reject Windows overwrite")
+	}
+	if !strings.Contains(out.String(), "EXISTING OPERATING SYSTEM DETECTED") || !strings.Contains(out.String(), "Windows OS") {
+		t.Errorf("expected Windows OS warning in output:\n%s", out.String())
+	}
+
+	// Non-empty data disk should surface non-empty warning and accept "yes"
+	dataDisks := []DiskDevice{
+		{
+			Name:           "vda",
+			Path:           "/dev/vda",
+			SizeGB:         256,
+			ContentKind:    DiskContentData,
+			ContentSummary: "Existing ZFS Pool (tank)",
+		},
+	}
+	out.Reset()
+	if !confirmTargetDiskOverwrite(dataDisks, cfg, bufio.NewReader(strings.NewReader("yes\n")), &out) {
+		t.Errorf("expected 'yes' to confirm data disk overwrite")
+	}
+	if !strings.Contains(out.String(), "NOT EMPTY") {
+		t.Errorf("expected non-empty disk warning in output:\n%s", out.String())
+	}
+}
+
+func TestConfirmReinstallFromInstalledSystem(t *testing.T) {
+	var out bytes.Buffer
+	for _, reject := range []string{"\n", "n\n", "y\n"} {
+		out.Reset()
+		if confirmReinstallFromInstalledSystem(bufio.NewReader(strings.NewReader(reject)), &out) {
+			t.Errorf("expected %q to cancel installer entry from installed system", reject)
+		}
+		if !strings.Contains(out.String(), "ACTIVE AXONWALL INSTALLATION") {
+			t.Errorf("expected active installation warning in output:\n%s", out.String())
+		}
+	}
+	for _, accept := range []string{"yes\n", "YES\n"} {
+		out.Reset()
+		if !confirmReinstallFromInstalledSystem(bufio.NewReader(strings.NewReader(accept)), &out) {
+			t.Errorf("expected %q to allow installer entry", accept)
+		}
+	}
+}
+
+func TestDetectInstallerOSFamilyAndConsoleTTYGuard(t *testing.T) {
+	if got := DetectInstallerOSFamily("ID=omarchy\nID_LIKE=arch\nPRETTY_NAME=\"Omarchy 4.5.0\"\n"); got != "arch" {
+		t.Errorf("Omarchy os-release = %q, want arch", got)
+	}
+	if got := DetectInstallerOSFamily("ID=arch\n"); got != "arch" {
+		t.Errorf("Arch os-release = %q, want arch", got)
+	}
+	if got := DetectInstallerOSFamily("ID=alpine\n"); got != "alpine" {
+		t.Errorf("Alpine os-release = %q, want alpine", got)
+	}
+	if got := DetectInstallerOSFamily("ID=debian\n"); got != "debian" {
+		t.Errorf("Debian os-release = %q, want debian", got)
+	}
+
+	if !isPhysicalConsoleTTYPath("/dev/tty1") || !isPhysicalConsoleTTYPath("/dev/ttyS0") || !isPhysicalConsoleTTYPath("/dev/console") {
+		t.Errorf("expected physical console TTY paths to return true")
+	}
+	if isPhysicalConsoleTTYPath("/dev/pts/0") || isPhysicalConsoleTTYPath("/dev/null") || isPhysicalConsoleTTYPath("") {
+		t.Errorf("expected pts/non-physical paths to return false")
+	}
+}
+
+func TestSummarizeTargetDiskWarningsFallbackUnsyncedPrimary(t *testing.T) {
+	disks := []DiskDevice{
+		{
+			Path:           "/dev/nvme0n1",
+			SizeGB:         512,
+			SystemDisk:     true,
+			ContentKind:    DiskContentOtherOS,
+			ContentSummary: "Arch Linux / Omarchy",
+		},
+	}
+	cfg := DefaultInstallerConfig() // SystemDisks not yet synced
+	hasNonEmpty, hasAxonwall, hasOtherOS, warnings := SummarizeTargetDiskWarnings(disks, cfg)
+	if !hasNonEmpty || hasAxonwall || !hasOtherOS || len(warnings) != 1 {
+		t.Fatalf("unexpected summary for unsynced primary disk: nonEmpty=%v axonwall=%v otherOS=%v warnings=%v",
+			hasNonEmpty, hasAxonwall, hasOtherOS, warnings)
+	}
+	var out bytes.Buffer
+	if confirmTargetDiskOverwrite(disks, cfg, bufio.NewReader(strings.NewReader("n\n")), &out) {
+		t.Fatal("expected unsynced primary disk with other OS to require explicit 'yes'")
+	}
+	if !strings.Contains(out.String(), "/dev/nvme0n1") {
+		t.Fatalf("expected warning output to name /dev/nvme0n1, got:\n%s", out.String())
+	}
+
+	axonDisks := []DiskDevice{
+		{
+			Path:           "/dev/sda",
+			SizeGB:         128,
+			ContentKind:    DiskContentAxonwall,
+			ContentSummary: "Axonwall OS v0.11.67",
+		},
+	}
+	if confirmTargetDiskOverwrite(axonDisks, cfg, bufio.NewReader(strings.NewReader("\n")), &out) {
+		t.Fatal("expected single unassigned disk with existing Axonwall install to prompt warning")
+	}
+}
+
+func TestIsDiskBusyOrHeld(t *testing.T) {
+	sysRoot := t.TempDir()
+	// Holder on partition directory /sys/block/nvme0n1/nvme0n1p3/holders/dm-0
+	holderDir := filepath.Join(sysRoot, "nvme0n1", "nvme0n1p3", "holders")
+	if err := os.MkdirAll(holderDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(holderDir, "dm-0"), []byte{}, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if !isDiskBusyOrHeld("/dev/nvme0n1", "nvme0n1", "", "", "", sysRoot) {
+		t.Fatalf("expected disk with held partition to be reported busy")
+	}
+
+	// Empty holders directory -> not busy
+	freeDir := filepath.Join(sysRoot, "sda", "holders")
+	if err := os.MkdirAll(freeDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if isDiskBusyOrHeld("/dev/sda", "sda", "", "Filename\tType\tSize\n", "", sysRoot) {
+		t.Fatalf("expected idle disk without swaps/mounts/holders/zpool to be false")
+	}
+
+	// Active swap or zpool status -P match
+	swaps := "Filename\tType\tSize\n/dev/sda2 partition 1048572 0 -2\n"
+	if !isDiskBusyOrHeld("/dev/sda", "sda", "", swaps, "", sysRoot) {
+		t.Fatalf("expected disk with active swap partition to be reported busy")
+	}
+	zpoolOut := "  pool: tank\n state: ONLINE\nconfig:\n\tNAME        STATE\n\t/dev/sdb1   ONLINE\n"
+	if !isDiskBusyOrHeld("/dev/sdb", "sdb", "", "", zpoolOut, sysRoot) {
+		t.Fatalf("expected disk in active zpool status -P to be reported busy")
+	}
+}
+
+func TestInspectRawDiskHeaderZfsAndUdevDecode(t *testing.T) {
+	zfsBuf := make([]byte, 262144)
+	binary.LittleEndian.PutUint64(zfsBuf[0x20000:0x20008], 0x00bab10c)
+	zfsRes := inspectRawDiskHeader("/dev/nvme1n1", zfsBuf)
+	if zfsRes.WholeFSType != "zfs_member" {
+		t.Fatalf("expected WholeFSType=zfs_member for ZFS uberblock, got %+v", zfsRes)
+	}
+
+	if got := decodeUdevEscapedLabel(`Backup\x20Pool\x2f1`); got != "Backup Pool/1" {
+		t.Fatalf("decodeUdevEscapedLabel ASCII escapes = %q, want %q", got, "Backup Pool/1")
+	}
+	if got := decodeUdevEscapedLabel(`Caf\xc3\xa9`); got != "Café" {
+		t.Fatalf("decodeUdevEscapedLabel UTF-8 escape = %q, want %q", got, "Café")
+	}
+}
+
+func TestComputePartitionLayoutZbmNoLogsStealing(t *testing.T) {
+	cfg := DefaultInstallerConfig()
+	cfg.InstallMode = "zbm"
+	cfg.LogsEnabled = true
+	cfg.LogsGB = 8
+	layout := ComputePartitionLayout(65536, cfg)
+	if layout.LogsMB != 0 {
+		t.Fatalf("expected ZBM layout.LogsMB=0 even with LogsEnabled=true, got %d", layout.LogsMB)
+	}
+	wantZfsMB := 65536 - layout.EfiMB - 16
+	if layout.ZfsMB != wantZfsMB {
+		t.Fatalf("expected ZBM layout.ZfsMB=%d (no logsMB deducted), got %d", wantZfsMB, layout.ZfsMB)
 	}
 }

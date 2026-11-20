@@ -1,6 +1,7 @@
 import * as fs from 'node:fs';
 import * as http from 'node:http';
 import * as path from 'node:path';
+import { resolveControllerDirs } from '../dev-paths.js';
 import * as crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import {
@@ -39,18 +40,12 @@ import { acquireMcpLockFile, desiredStateLockPath } from './lockfile.js';
 export { desiredStateLockPath } from './lockfile.js';
 import { recordMcpAuditEntry, queryMcpAuditEntries } from './audit.js';
 
-const AGENT_SOCKET_PATH = process.env.AXONWALL_AGENT_API_SOCK || '/run/axonwall/agent-api.sock';
-const AGENT_TOKEN_PATHS = [
-  '/etc/axonwall/agent.token',
-  '/var/lib/axonwall/etc-axonwall/agent.token',
-  '/run/axonwall/agent.token',
-];
-
 function readAgentToken(): string {
   if (process.env.AXONWALL_AGENT_TOKEN) {
     return process.env.AXONWALL_AGENT_TOKEN.trim();
   }
-  for (const p of AGENT_TOKEN_PATHS) {
+  const tokenPaths = resolveControllerDirs().agentTokenPaths;
+  for (const p of tokenPaths) {
     try {
       if (fs.existsSync(p)) {
         const tok = fs.readFileSync(p, 'utf8').trim();
@@ -127,11 +122,12 @@ export async function callAxonwalldApi<T = any>(
   body?: unknown,
   timeoutMs = 15000
 ): Promise<{ ok: boolean; status: number; data: T }> {
-  if (!fs.existsSync(AGENT_SOCKET_PATH)) {
+  const agentSocketPath = resolveControllerDirs().agentSock;
+  if (!fs.existsSync(agentSocketPath)) {
     return {
       ok: false,
       status: 503,
-      data: { error: `axonwalld socket not available at ${AGENT_SOCKET_PATH}` } as unknown as T,
+      data: { error: `axonwalld socket not available at ${agentSocketPath}` } as unknown as T,
     };
   }
 
@@ -141,7 +137,7 @@ export async function callAxonwalldApi<T = any>(
   return new Promise((resolve) => {
     const req = http.request(
       {
-        socketPath: AGENT_SOCKET_PATH,
+        socketPath: agentSocketPath,
         path: pathUrl,
         method,
         headers: {
@@ -197,12 +193,7 @@ export async function callAxonwalldApi<T = any>(
 }
 
 function loadLocalDesiredState(): DesiredState | null {
-  const customState = process.env.AXONWALL_STATE_JSON_PATH || process.env.AXONWALL_STATE_FILE;
-  const candidates = [
-    ...(customState ? [customState] : []),
-    '/etc/axonwall/state.json',
-    '/var/lib/axonwall/state.json',
-  ];
+  const candidates = resolveControllerDirs().desiredStateCandidates;
   for (const p of candidates) {
     try {
       if (fs.existsSync(p)) {
@@ -230,6 +221,7 @@ function loadLocalDesiredState(): DesiredState | null {
 // succeed. The custom-state path has a single target, so any failure
 // there is a failure. Callers must fail closed on false.
 function persistDesiredStateToDisk(targetState: DesiredState): boolean {
+  const dirs = resolveControllerDirs();
   const customState = process.env.AXONWALL_STATE_JSON_PATH || process.env.AXONWALL_STATE_FILE;
   if (customState) {
     try {
@@ -247,23 +239,22 @@ function persistDesiredStateToDisk(targetState: DesiredState): boolean {
     }
   }
   let stateJsonLanded = false;
-  try {
-    fs.writeFileSync('/etc/axonwall/state.json', JSON.stringify(targetState, null, 2), { mode: 0o600 });
-    stateJsonLanded = true;
-  } catch {
-    // Fallback if /etc/axonwall not writable in dev
+  for (const statePath of Array.from(new Set([path.join(dirs.etcDir, 'state.json'), dirs.stateFile]))) {
+    try {
+      fs.mkdirSync(path.dirname(statePath), { recursive: true, mode: 0o770 });
+      fs.writeFileSync(statePath, JSON.stringify(targetState, null, 2), { mode: 0o600 });
+      stateJsonLanded = true;
+    } catch {
+      // Fallback if target directory not writable
+    }
   }
-  try {
-    fs.writeFileSync('/var/lib/axonwall/state.json', JSON.stringify(targetState, null, 2), { mode: 0o600 });
-    stateJsonLanded = true;
-  } catch {}
   if (!stateJsonLanded) return false;
   try {
     const yamlFiles = serializeDesiredStateToYamlFiles(targetState);
-    for (const dir of ['/etc/axonwall', '/var/lib/axonwall/etc-axonwall']) {
+    for (const dir of Array.from(new Set([dirs.etcDir, dirs.persistYamlDir]))) {
       if (fs.existsSync(dir)) {
         for (const [fn, content] of Object.entries(yamlFiles)) {
-          fs.writeFileSync(`${dir}/${fn}`, content, { mode: 0o660 });
+          fs.writeFileSync(path.join(dir, fn), content, { mode: 0o660 });
         }
       }
     }
@@ -314,7 +305,7 @@ function renderOfflineK3sBpfTokenYaml(params: {
   kind: 'Pod' | 'DaemonSet';
 }): string {
   const masks = resolveBpfTokenPresetMasks(params.preset);
-  const hostPinPath = `/run/axonwall/bpf-tokens/${params.profileId}`;
+  const hostPinPath = `/run/axonwall/bpffs-tokens/${params.profileId}`;
   const podSpec = [
     `hostUsers: false`,
     `automountServiceAccountToken: false`,
@@ -2195,6 +2186,10 @@ export async function handleMcpCallTool(
           daemonRes.data?.error || 'Daemon unavailable: emergency clear-all was not applied; tactical leases are still active'
         );
       }
+      // Main (fc576368, A-H3): the flush cleared the hub leases but
+      // left the kernel XDP blocks in place — clear them too, or the
+      // emergency clear leaves the data plane still blocking.
+      await callAxonwalldApi('DELETE', '/v1/ebpf/xdp/block', { clearAll: true });
       // B-H1 (round 3): the flush cleared the hub leases; lift the
       // matching blocks from the fleet too, or every propagated
       // blackhole outlives the emergency clear. Only blackhole
@@ -2406,39 +2401,6 @@ export async function handleMcpCallTool(
         }
       }
 
-      // B-M4: same contract as persistDesiredStateToDisk — returns true
-      // only when the state actually landed (at least one state.json
-      // copy plus every attempted YAML mirror write). The caller fails
-      // closed on false instead of applying the rule to the kernel
-      // while disk never recorded it.
-      const persistDesiredState = (targetState: DesiredState): boolean => {
-        let stateJsonLanded = false;
-        try {
-          fs.writeFileSync('/etc/axonwall/state.json', JSON.stringify(targetState, null, 2), { mode: 0o600 });
-          stateJsonLanded = true;
-        } catch {
-          // Fallback if /etc/axonwall not writable in dev
-        }
-        try {
-          fs.writeFileSync('/var/lib/axonwall/state.json', JSON.stringify(targetState, null, 2), { mode: 0o600 });
-          stateJsonLanded = true;
-        } catch {}
-        if (!stateJsonLanded) return false;
-        try {
-          const yamlFiles = serializeDesiredStateToYamlFiles(targetState);
-          for (const dir of ['/etc/axonwall', '/var/lib/axonwall/etc-axonwall']) {
-            if (fs.existsSync(dir)) {
-              for (const [fn, content] of Object.entries(yamlFiles)) {
-                fs.writeFileSync(`${dir}/${fn}`, content, { mode: 0o660 });
-              }
-            }
-          }
-        } catch {
-          return false;
-        }
-        return true;
-      };
-
       // B2-M4: serialize the load -> mutate -> persist window with
       // the MCP lockfile. Two concurrent proposes (or a propose
       // racing a console/TUI save) used to load the same state,
@@ -2469,7 +2431,9 @@ export async function handleMcpCallTool(
         // B-M4: fail closed when the rule cannot be persisted — applying
         // it to the kernel below while disk never recorded it would
         // leave kernel and disk diverged with a success report.
-        if (!persistDesiredState(fresh)) {
+        // (Shared persistDesiredStateToDisk now returns boolean per
+        // the B-M4 contract; main deleted the local closure.)
+        if (!persistDesiredStateToDisk(fresh)) {
           return deny('mcp:firewall:write', 'Could not persist the proposed rule to disk (DesiredState write failed); nothing was staged or applied', req.audit);
         }
         liveState = fresh;
@@ -2501,8 +2465,15 @@ export async function handleMcpCallTool(
           nftablesRuleset: compiled.nftScript,
           reloadServices: compiled.reloadServices,
           commitConfirmTimeoutSec: req.confirmTimeoutSeconds,
-        });
+        }, Number(process.env.AXONWALL_APPLY_TIMEOUT_MS) || 120_000);
         if (!applyRes.ok) {
+          if (applyRes.status === 504) {
+            return deny(
+              'mcp:firewall:apply',
+              `Daemon apply timed out waiting for response (pending jobId=${applyJobId}); did NOT roll back staged rule on disk—inspect pending job before retrying`,
+              req.audit,
+            );
+          }
           // B2-M4: roll the staged rule back out under the same
           // lock, reloaded fresh — restoring a stale snapshot here
           // would clobber a concurrent writer's rule exactly like
@@ -2527,7 +2498,7 @@ export async function handleMcpCallTool(
                 const idx = fresh.rules.findIndex((r) => JSON.stringify(r) === stagedRuleJson);
                 if (idx !== -1) {
                   fresh.rules.splice(idx, 1);
-                  persistDesiredState(fresh);
+                  persistDesiredStateToDisk(fresh);
                 }
               }
             }
@@ -2739,7 +2710,14 @@ export async function handleMcpCallTool(
       const targetValue = parsedIp.isSingleHost ? parsedIp.address : parsedIp.normalizedCidr;
 
       if (req.action === 'block') {
-        const { ctx } = await buildGuardContext(env.key, env.clientIp);
+        const { ctx, activeLeasesCount } = await buildGuardContext(env.key, env.clientIp);
+        if (activeLeasesCount >= env.key.policyLimits.maxActiveLeases) {
+          return deny(
+            'mcp:ebpf:manage',
+            `Maximum active tactical leases (${env.key.policyLimits.maxActiveLeases}) reached for key '${env.key.name}'`,
+            req.audit,
+          );
+        }
         const targetCheck = validateMcpTarget(targetValue, ctx);
         if (!targetCheck.valid) {
           return deny('mcp:ebpf:manage', targetCheck.reason || 'Target rejected by anti-lockout / blast-radius guard', req.audit);
@@ -3042,7 +3020,7 @@ export async function handleMcpCallTool(
           targetId: req.id,
           pool: poolCheck.normalizedTarget,
           destType: 'local',
-        });
+        }, 120_000);
       } else if (req.action === 'restore') {
         if (!req.backupArchivePath) {
           return deny('mcp:virt:manage', 'backupArchivePath (.vma.zst filename) is required for restore action', req.audit);
@@ -3058,7 +3036,7 @@ export async function handleMcpCallTool(
           targetType: req.workloadType,
           targetId: req.id,
           pool: poolCheck.normalizedTarget,
-        });
+        }, 120_000);
       } else if (req.action === 'snapshot' || req.action === 'rollback') {
         const label = req.snapshotName || (req.action === 'snapshot' ? `mcp-${Date.now()}` : '');
         if (!label) {
@@ -3079,7 +3057,7 @@ export async function handleMcpCallTool(
           newVmid: req.newId,
           newName: req.newName || '',
           linked: req.linkedClone !== false,
-        });
+        }, 120_000);
       } else if (req.action === 'live_migrate') {
         if (req.workloadType !== 'vm' || !req.targetHostIp) {
           return deny('mcp:virt:manage', 'live_migrate requires workloadType="vm" and targetHostIp', req.audit);
@@ -3087,7 +3065,7 @@ export async function handleMcpCallTool(
         daemonRes = await callAxonwalldApi('POST', '/v1/virt/migrate', {
           vmid: req.id,
           targetPeerIp: req.targetHostIp,
-        });
+        }, 120_000);
       } else if (req.action === 'qga_interfaces') {
         daemonRes = await callAxonwalldApi('GET', `/v1/virt/qga?vmid=${encodeURIComponent(String(req.id))}`);
       } else if (req.action === 'export_libvirt_xml') {
@@ -3187,10 +3165,14 @@ export async function handleMcpCallTool(
       }
 
       let compiledConfig = '';
-      let releaseLock: (() => void) | null = null;
-      // B-H5 (round 3): hoisted so the daemon-failure branch below
-      // can restore it (see the comment at the assignment).
+      // B-H5 (round 3, both sides): hoisted so the daemon-failure
+      // branch below can restore the previous delegation. Main's
+      // hadPrevBpfToken flag + the branch's typed declaration:
+      // the flag distinguishes "no previous delegation" (delete the
+      // key on rollback) from "previous delegation present".
+      let hadPrevBpfToken = false;
       let prevBpfToken: BpfTokenDelegationSpec | undefined;
+      let releaseLock: (() => void) | null = null;
       try {
         try {
           releaseLock = acquireMcpLockFile(desiredStateLockPath());
@@ -3219,8 +3201,14 @@ export async function handleMcpCallTool(
         // back out. The old code persisted first and reported
         // success either way, so DesiredState claimed a delegation
         // the kernel never got (enable) — or claimed it revoked
-        // while the profile was still live (disable).
-        prevBpfToken = ct.bpfToken;
+        // while the profile was still live (disable). Deep-cloned
+        // (main) so later mutation of ct cannot corrupt the saved
+        // copy; hadPrevBpfToken records whether one existed at all.
+        if (ct.bpfToken !== undefined) {
+          hadPrevBpfToken = true;
+          prevBpfToken = structuredClone(ct.bpfToken);
+        }
+
         ct.bpfToken = req.enabled
           ? {
               enabled: true,
@@ -3273,6 +3261,12 @@ export async function handleMcpCallTool(
       // mcp_manage_bpf_token_profile. The old code returned
       // success:true with daemonProfileSync 'staged_offline' and an
       // audit decision of 'allowed' either way.
+      // Trigger is the branch's `!daemonRes.ok` (any failure),
+      // NOT main's 4xx-only check: a daemon-down failure must also
+      // roll back and deny, or the 'staged_offline' success report
+      // survives for exactly the case the guard exists for. Restore
+      // uses main's hadPrevBpfToken distinction (delete the key when
+      // there was no previous delegation).
       if (!daemonRes.ok) {
         let releaseRollbackLock: (() => void) | null = null;
         try {
@@ -3287,7 +3281,11 @@ export async function handleMcpCallTool(
             if (rollbackState) {
               const rollbackCt = rollbackState.virt?.containers?.find((c) => c.ctid === req.ctid);
               if (rollbackCt) {
-                rollbackCt.bpfToken = prevBpfToken;
+                if (hadPrevBpfToken) {
+                  rollbackCt.bpfToken = prevBpfToken;
+                } else {
+                  delete rollbackCt.bpfToken;
+                }
                 persistDesiredStateToDisk(rollbackState);
               }
             }
@@ -3580,7 +3578,7 @@ export async function handleMcpCallTool(
           }
           daemonRes = await callAxonwalldApi('POST', '/v1/nas/cloudsync', {
             taskName: req.target.trim(),
-          });
+          }, 120_000);
           break;
         }
       }
@@ -3663,7 +3661,7 @@ export async function handleMcpCallTool(
       const daemonRes = await callAxonwalldApi('POST', '/v1/k3s/etcd-snapshots', {
         action: req.action === 'etcd_snapshot_save' ? 'save' : 'restore',
         name: req.snapshotName || '',
-      });
+      }, 120_000);
       if (!daemonRes.ok) {
         return deny('mcp:k3s:manage', daemonRes.data?.error || 'Daemon rejected K3s etcd snapshot operation', req.audit);
       }

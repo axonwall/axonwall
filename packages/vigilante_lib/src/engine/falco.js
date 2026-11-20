@@ -71,7 +71,7 @@ export const BUILTIN_FALCO_RULES = [
   {
     rule: 'Write Below Root or Etc',
     desc: 'Attempt to create or modify system configuration files under /etc directory inside a container',
-    condition: 'open_write and fd.name startswith "/etc" and not proc.name in (dpkg, apt-get, apk, yum, rpm, pip)',
+    condition: 'open_write and fd.name startswith "/etc" and not proc.name in (dpkg, apt-get, apk, pacman, yum, rpm, pip)',
     output: 'System configuration modification under /etc (file=%fd.name proc=%proc.name cmdline=%proc.cmdline pod=%k8s.pod.name user=%user.name)',
     priority: 'ERROR',
     source: 'syscall',

@@ -195,6 +195,21 @@ case "$1" in
         chmod 0750 /var/lib/axonwall/vault
         fi
 
+        if getent group openldap >/dev/null 2>&1 && [ -d /var/lib/axonwall/secrets/ha-pki ]; then
+            chown root:openldap /var/lib/axonwall/secrets /var/lib/axonwall/secrets/ha-pki
+            chmod 0750 /var/lib/axonwall/secrets /var/lib/axonwall/secrets/ha-pki
+            for pki_f in ca.crt node.crt; do
+                if [ -f "/var/lib/axonwall/secrets/ha-pki/$pki_f" ]; then
+                    chown root:openldap "/var/lib/axonwall/secrets/ha-pki/$pki_f"
+                    chmod 0644 "/var/lib/axonwall/secrets/ha-pki/$pki_f"
+                fi
+            done
+            if [ -f /var/lib/axonwall/secrets/ha-pki/node.key ]; then
+                chown root:openldap /var/lib/axonwall/secrets/ha-pki/node.key
+                chmod 0640 /var/lib/axonwall/secrets/ha-pki/node.key
+            fi
+        fi
+
         # Register /usr/local/bin/axonwall-opshell in /etc/shells
         if [ -f /etc/shells ] && ! grep -qxF '/usr/local/bin/axonwall-opshell' /etc/shells; then
             echo '/usr/local/bin/axonwall-opshell' >> /etc/shells
@@ -280,6 +295,11 @@ case "$1" in
             # serves the same hub leaf, so the key is root:axonwall-vault
             # 0640, matching the vault tmpfiles entry. On k3s-storage
             # no service identity reads it at install time.
+            # (Main's fc576368 sets the same vault ownership via the
+            # legacy marker; this keeps the single D-M9 detection
+            # source and covers k3s-storage explicitly instead of
+            # relying on a chown to a nonexistent user failing
+            # silently.)
             if [ "${AXONWALL_EDITION}" = "axonwall" ]; then
                 chown axonwall-controller:axonwall-controller /etc/axonwall/certs/hub.key /etc/axonwall/certs/hub.crt 2>/dev/null || true
                 chmod 0600 /etc/axonwall/certs/hub.key 2>/dev/null || true
@@ -447,6 +467,10 @@ ENV_EOF
         # D-M9: the sync list is the edition's own unit set; syncing the
         # NGFW list on a flavor box would resurrect units the flavor
         # deliberately does not ship.
+        # (Main's fc576368 instead skips k3s.service when either flavor
+        # marker exists; that is subsumed here — k3s.service is absent
+        # from the vault list, and on k3s-storage it is the flavor's
+        # own unit, which must be synced, not skipped.)
         case "${AXONWALL_EDITION}" in
             vault) UNITS="axonwall-console.service seaweedfs.service axonwall-vault-firstboot.service axonwall-vault-provision.service" ;;
             k3s-storage) UNITS="axonwall-console.service k3s.service k3s-agent.service axonwall-k3s-firstboot.service axonwall-k3s-verify.service" ;;
@@ -458,11 +482,23 @@ ENV_EOF
             fi
         done
 
+        # 5d. Configure Axonwall Plymouth graphical boot theme when plymouth is installed
+        if [ -x /usr/sbin/plymouth-set-default-theme ] && [ -f /usr/share/plymouth/themes/axonwall/axonwall.plymouth ]; then
+            /usr/sbin/plymouth-set-default-theme axonwall >/dev/null 2>&1 || true
+            if [ -d /run/systemd/system ] && command -v update-initramfs >/dev/null 2>&1; then
+                update-initramfs -u >/dev/null 2>&1 || true
+            fi
+        fi
+
         # 6. Reload systemd daemon and enable services if systemd is running
         # D-M9: enable/restart only the edition's own units (ssh,
         # chrony, sysstat stay shared). k3s is enabled but not
         # restarted on either edition that ships it, matching the
         # pre-existing NGFW behaviour for k3s.service.
+        # (Main's fc576368 enables only ssh on k3s-storage and restarts
+        # nothing on either flavor; the D-M9 lists below are kept —
+        # they enable each flavor's own units and restart the shared
+        # services, matching the pre-existing NGFW behaviour.)
         if [ -d /run/systemd/system ]; then
             systemctl daemon-reload || true
             case "${AXONWALL_EDITION}" in

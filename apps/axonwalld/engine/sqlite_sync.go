@@ -80,6 +80,8 @@ type SqliteSyncManager struct {
 	k3sManager         *K3sManager
 	nasManager         *NasManager
 	lastZfsSync        time.Time
+	lastZfsAttempt     time.Time
+	zfsRetryBackoff    time.Duration
 	effectiveTransport string // transport the master server is actually serving ("token-http" or "mtls")
 	peerSignsPayloads  bool   // capability from the peer's latest sync status (D-04 P4b); set by the poller each round before any payload fetch
 }
@@ -208,7 +210,7 @@ func (m *SqliteSyncManager) OnStateChange(state string) {
 		if autoPromote {
 			slog.Info("Promoting local Headscale service to Active Master...")
 			if _, err := exec.LookPath("systemctl"); err == nil {
-				_ = exec.Command("systemctl", "try-reload-or-restart", "headscale").Run()
+				_ = exec.Command("systemctl", "--no-ask-password", "try-reload-or-restart", "headscale").Run()
 			}
 		}
 
@@ -231,7 +233,7 @@ func (m *SqliteSyncManager) OnStateChange(state string) {
 		if autoPromote {
 			slog.Info("Demoting local node to Standby: stopping Headscale to prevent split-brain writes...")
 			if _, err := exec.LookPath("systemctl"); err == nil {
-				_ = exec.Command("systemctl", "stop", "headscale").Run()
+				_ = exec.Command("systemctl", "--no-ask-password", "stop", "headscale").Run()
 			}
 		}
 
@@ -416,16 +418,17 @@ func (m *SqliteSyncManager) peerClient(timeout time.Duration) (*http.Client, str
 }
 
 func (m *SqliteSyncManager) startMasterServer() error {
-	listenAddr := fmt.Sprintf("0.0.0.0:%d", m.cfg.ListenPort)
+	listenAddr := net.JoinHostPort("0.0.0.0", strconv.Itoa(m.cfg.ListenPort))
 	if m.cfg.LocalAddress != "" && m.cfg.LocalAddress != "0.0.0.0" {
-		listenAddr = fmt.Sprintf("%s:%d", m.cfg.LocalAddress, m.cfg.ListenPort)
+		listenAddr = net.JoinHostPort(m.cfg.LocalAddress, strconv.Itoa(m.cfg.ListenPort))
 	}
 
 	m.server = &http.Server{
-		Addr:         listenAddr,
-		Handler:      m.syncMux(),
-		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 300 * time.Second,
+		Addr:              listenAddr,
+		Handler:           m.syncMux(),
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      300 * time.Second,
 	}
 
 	if m.cfg.AuthToken == "" {
@@ -915,7 +918,7 @@ func (m *SqliteSyncManager) pollAndSync(stopCh <-chan struct{}, pollerCtx contex
 						} else {
 							km.MarkHaAutoJoined(cfg.PeerAddress)
 						}
-					} else if err := exec.Command("systemctl", "reload-or-restart", "k3s").Run(); err != nil {
+					} else if err := exec.Command("systemctl", "--no-ask-password", "reload-or-restart", "k3s").Run(); err != nil {
 						slog.Error("HA Backup Poller: Failed to reload k3s after retrieving join token", "error", err)
 					}
 				}
@@ -986,6 +989,30 @@ func (m *SqliteSyncManager) handleZfsSendStream(w http.ResponseWriter, r *http.R
 		return
 	}
 
+	if strings.HasPrefix(dataset, "zroot/ROOT") || strings.Contains(dataset, "/ROOT/") {
+		http.Error(w, "Access to root boot environment dataset denied", http.StatusForbidden)
+		return
+	}
+
+	m.mu.Lock()
+	nm := m.nasManager
+	m.mu.Unlock()
+	var allowedDatasets []string
+	if nm != nil {
+		allowedDatasets = nm.GetReplicatedDatasets()
+	}
+	allowed := false
+	for _, ds := range allowedDatasets {
+		if ds == dataset {
+			allowed = true
+			break
+		}
+	}
+	if !allowed {
+		http.Error(w, "Access to requested ZFS dataset denied", http.StatusForbidden)
+		return
+	}
+
 	snapTag := fmt.Sprintf("ha-sync-%d", time.Now().UTC().UnixNano())
 	targetSnap := fmt.Sprintf("%s@%s", dataset, snapTag)
 
@@ -996,6 +1023,8 @@ func (m *SqliteSyncManager) handleZfsSendStream(w http.ResponseWriter, r *http.R
 
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("X-Zfs-Snapshot", targetSnap)
+	rc := http.NewResponseController(w)
+	_ = rc.SetWriteDeadline(time.Time{})
 
 	var sendArgs []string
 	if fromSnap != "" {
@@ -1004,10 +1033,12 @@ func (m *SqliteSyncManager) handleZfsSendStream(w http.ResponseWriter, r *http.R
 		sendArgs = []string{"send", "-w", targetSnap}
 	}
 
-	cmd := exec.Command("zfs", sendArgs...)
+	cmd := exec.CommandContext(r.Context(), "zfs", sendArgs...)
 	cmd.Stdout = w
 	if err := cmd.Run(); err != nil {
 		slog.Warn("zfs send stream finished with error", "dataset", dataset, "error", err)
+		_ = exec.Command("zfs", "destroy", targetSnap).Run()
+		pruneHaSyncSnapshots(dataset, 3)
 		return
 	}
 	pruneHaSyncSnapshots(dataset, 3)
@@ -1065,6 +1096,8 @@ func (m *SqliteSyncManager) syncZfsDatasetsFromPeer(peerPort int, peerDatasets [
 	authToken := m.cfg.AuthToken
 	nm := m.nasManager
 	lastSync := m.lastZfsSync
+	lastAttempt := m.lastZfsAttempt
+	retryBackoff := m.zfsRetryBackoff
 	m.mu.Unlock()
 
 	if peerAddr == "" {
@@ -1092,6 +1125,7 @@ func (m *SqliteSyncManager) syncZfsDatasetsFromPeer(peerPort int, peerDatasets [
 	}
 
 	// Rate-limit ZFS snapshot streaming to once every 60s unless a dataset has never been synced locally.
+	// When an initial sync fails, apply exponential backoff instead of polling tightly.
 	needsInitialSync := false
 	for _, ds := range datasets {
 		if latestLocalHaSyncSnapshot(ds) == "" {
@@ -1099,11 +1133,17 @@ func (m *SqliteSyncManager) syncZfsDatasetsFromPeer(peerPort int, peerDatasets [
 			break
 		}
 	}
-	if !needsInitialSync && !lastSync.IsZero() && time.Since(lastSync) < 60*time.Second {
+	if needsInitialSync {
+		if retryBackoff > 0 && !lastAttempt.IsZero() && time.Since(lastAttempt) < retryBackoff {
+			return
+		}
+	} else if !lastSync.IsZero() && time.Since(lastSync) < 60*time.Second {
 		return
 	}
 
 	zfsClient, _ := m.peerClient(120 * time.Second)
+	anyFailed := false
+	anySynced := false
 	for _, ds := range datasets {
 		if pollerStopped(stopCh) {
 			return
@@ -1117,17 +1157,34 @@ func (m *SqliteSyncManager) syncZfsDatasetsFromPeer(peerPort int, peerDatasets [
 			slog.Warn("Incremental ZFS HA receive failed; falling back to full stream", "dataset", ds, "from", fromSnap, "error", err)
 			if errFull := m.receiveZfsStream(zfsClient, scheme, peerAddr, peerPort, authToken, ds, "", pollerCtx); errFull != nil {
 				slog.Error("Full ZFS HA receive failed", "dataset", ds, "error", errFull)
+				anyFailed = true
 				continue
 			}
 		} else if err != nil {
 			slog.Error("ZFS HA receive failed", "dataset", ds, "error", err)
+			anyFailed = true
 			continue
 		}
+		anySynced = true
 		pruneHaSyncSnapshots(ds, 3)
 	}
 
+	now := time.Now()
 	m.mu.Lock()
-	m.lastZfsSync = time.Now()
+	m.lastZfsAttempt = now
+	if anyFailed {
+		if m.zfsRetryBackoff <= 0 {
+			m.zfsRetryBackoff = 5 * time.Second
+		} else {
+			m.zfsRetryBackoff *= 2
+			if m.zfsRetryBackoff > 60*time.Second {
+				m.zfsRetryBackoff = 60 * time.Second
+			}
+		}
+	} else if anySynced {
+		m.lastZfsSync = now
+		m.zfsRetryBackoff = 0
+	}
 	m.mu.Unlock()
 }
 
@@ -1206,6 +1263,156 @@ func (m *SqliteSyncManager) handleK3sToken(w http.ResponseWriter, r *http.Reques
 // preserved. A missing replica is not an error — it only means the
 // poller never fetched peer state — and the replica file itself is
 // kept as the backup copy.
+// mergePeerReplicaPreservingLocalIdentity overlays the verified peer state
+// replica onto the local node while preserving node-local identity fields
+// (system.hostname, interface device/IPs/gateway/MACs, and HA role/peer/VRRP
+// priorities) so promoting a peer replica on failover never overwrites the
+// node's own LAN/WAN/keepalivenet IPs or creates an IP/VRRP split-brain.
+func mergePeerReplicaPreservingLocalIdentity(localBytes, replicaBytes []byte) ([]byte, error) {
+	if len(replicaBytes) == 0 || !json.Valid(replicaBytes) {
+		return nil, fmt.Errorf("peer state replica is empty or not valid JSON")
+	}
+	var replicaMap map[string]any
+	if err := json.Unmarshal(replicaBytes, &replicaMap); err != nil {
+		return nil, fmt.Errorf("failed to parse peer state replica JSON: %w", err)
+	}
+
+	preserved := false
+	if len(localBytes) > 0 {
+		var localMap map[string]any
+		if err := json.Unmarshal(localBytes, &localMap); err == nil {
+			// 1. Preserve system.hostname
+			if localSys, ok := localMap["system"].(map[string]any); ok {
+				if localHost, ok := localSys["hostname"].(string); ok && strings.TrimSpace(localHost) != "" {
+					repSys, ok := replicaMap["system"].(map[string]any)
+					if !ok || repSys == nil {
+						repSys = make(map[string]any)
+						replicaMap["system"] = repSys
+					}
+					repSys["hostname"] = localHost
+					preserved = true
+				}
+			}
+
+			// 2. Preserve per-interface node-local fields (device, IPs, gateways, MAC)
+			if localIfaces, ok := localMap["interfaces"].([]any); ok {
+				localByName := make(map[string]map[string]any)
+				localByDev := make(map[string]map[string]any)
+				for _, item := range localIfaces {
+					m, ok := item.(map[string]any)
+					if !ok {
+						continue
+					}
+					if n, _ := m["name"].(string); n != "" {
+						localByName[n] = m
+					}
+					if d, _ := m["device"].(string); d != "" {
+						localByDev[d] = m
+					}
+				}
+				if repIfaces, ok := replicaMap["interfaces"].([]any); ok {
+					preservedKeys := []string{"device", "ipv4Address", "ipv6Address", "address", "gateway", "ipv6Gateway", "macAddress"}
+					for _, item := range repIfaces {
+						rm, ok := item.(map[string]any)
+						if !ok {
+							continue
+						}
+						var lm map[string]any
+						if n, _ := rm["name"].(string); n != "" {
+							lm = localByName[n]
+						}
+						if lm == nil {
+							if d, _ := rm["device"].(string); d != "" {
+								lm = localByDev[d]
+							}
+						}
+						if lm == nil {
+							continue
+						}
+						for _, k := range preservedKeys {
+							if v, exists := lm[k]; exists {
+								rm[k] = v
+							} else {
+								delete(rm, k)
+							}
+						}
+						preserved = true
+					}
+				}
+			}
+
+			// 3. Preserve local HA role, peer address, syncInterface, and VRRP instance priorities/interfaces
+			if localHA, ok := localMap["ha"].(map[string]any); ok {
+				repHA, ok := replicaMap["ha"].(map[string]any)
+				if !ok || repHA == nil {
+					repHA = make(map[string]any)
+					replicaMap["ha"] = repHA
+				}
+				for _, k := range []string{"role", "nodeRole", "peerIp", "peerAddress", "syncInterface"} {
+					if v, exists := localHA[k]; exists {
+						repHA[k] = v
+						preserved = true
+					}
+				}
+				if localVrrp, ok := localHA["vrrpInstances"].([]any); ok {
+					localVrrpByName := make(map[string]map[string]any)
+					localVrrpByVrid := make(map[string]map[string]any)
+					for _, item := range localVrrp {
+						vm, ok := item.(map[string]any)
+						if !ok {
+							continue
+						}
+						if n, _ := vm["name"].(string); n != "" {
+							localVrrpByName[n] = vm
+						}
+						if vrid, exists := vm["vrid"]; exists && vrid != nil {
+							localVrrpByVrid[fmt.Sprintf("%v", vrid)] = vm
+						}
+					}
+					if repVrrp, ok := repHA["vrrpInstances"].([]any); ok {
+						for _, item := range repVrrp {
+							rvm, ok := item.(map[string]any)
+							if !ok {
+								continue
+							}
+							var lvm map[string]any
+							if n, _ := rvm["name"].(string); n != "" {
+								lvm = localVrrpByName[n]
+							}
+							if lvm == nil {
+								if vrid, exists := rvm["vrid"]; exists && vrid != nil {
+									lvm = localVrrpByVrid[fmt.Sprintf("%v", vrid)]
+								}
+							}
+							if lvm == nil {
+								continue
+							}
+							if p, exists := lvm["priority"]; exists {
+								rvm["priority"] = p
+								preserved = true
+							}
+							if iface, exists := lvm["interface"]; exists {
+								rvm["interface"] = iface
+								preserved = true
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	if !preserved {
+		return replicaBytes, nil
+	}
+
+	out, err := json.MarshalIndent(replicaMap, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	return append(out, '\n'), nil
+}
+
 func promoteStateReplicaFile(livePath, replicaPath string) (bool, error) {
 	data, err := os.ReadFile(replicaPath)
 	if err != nil {
@@ -1213,6 +1420,11 @@ func promoteStateReplicaFile(livePath, replicaPath string) (bool, error) {
 	}
 	if len(data) == 0 || !json.Valid(data) {
 		return false, fmt.Errorf("peer state replica %s is empty or not valid JSON; refusing to promote", replicaPath)
+	}
+	localBytes, _ := os.ReadFile(livePath)
+	mergedData, err := mergePeerReplicaPreservingLocalIdentity(localBytes, data)
+	if err != nil {
+		return false, fmt.Errorf("failed to merge peer state replica %s safely: %w", replicaPath, err)
 	}
 	dir := filepath.Dir(livePath)
 	if err := os.MkdirAll(dir, 0755); err != nil {
@@ -1224,7 +1436,7 @@ func promoteStateReplicaFile(livePath, replicaPath string) (bool, error) {
 	}
 	tmpName := tmp.Name()
 	defer os.Remove(tmpName)
-	if _, err := tmp.Write(data); err != nil {
+	if _, err := tmp.Write(mergedData); err != nil {
 		_ = tmp.Close()
 		return false, err
 	}
@@ -1460,7 +1672,7 @@ func (m *SqliteSyncManager) fetchAndApplyDb(dbPath string, peerPort int, client 
 	}
 	if headscaleWasActive {
 		defer func() {
-			if err := exec.Command("systemctl", "start", "headscale").Run(); err != nil {
+			if err := exec.Command("systemctl", "--no-ask-password", "start", "headscale").Run(); err != nil {
 				slog.Error("HA sync: FAILED to restart headscale after database replace; service is down", "error", err)
 			}
 		}()
@@ -1525,7 +1737,7 @@ func stopServiceIfActive(unit string) bool {
 	if err := exec.Command("systemctl", "is-active", "--quiet", unit).Run(); err != nil {
 		return false
 	}
-	if err := exec.Command("systemctl", "stop", unit).Run(); err != nil {
+	if err := exec.Command("systemctl", "--no-ask-password", "stop", unit).Run(); err != nil {
 		slog.Warn("HA sync: failed to stop service before database replace", "service", unit, "error", err)
 		return false
 	}

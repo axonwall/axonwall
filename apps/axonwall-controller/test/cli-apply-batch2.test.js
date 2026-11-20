@@ -29,6 +29,7 @@ const cliEnv = {
   AXONWALL_STATE_FILE: statePath,
   AXONWALL_GITOPS_DIR: gitopsDir,
   AXONWALL_AGENT_API_SOCK: sockPath,
+  AXONWALL_APPLY_TIMEOUT_MS: '1500',
 };
 
 // Async spawn (not spawnSync): the fake daemon runs in this

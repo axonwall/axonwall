@@ -1,4 +1,4 @@
-import type { FrrConfig } from '../../schemas/index.js';
+import type { FrrConfig, Interface } from '../../schemas/index.js';
 
 export interface CompiledFrr {
   frrConf: string;
@@ -10,7 +10,7 @@ export interface CompiledFrr {
  * Compiles FrrConfig into modern FRRouting frr.conf and daemons configuration.
  * Supports BGP, OSPFv2, and BFD.
  */
-export function compileFrr(config?: FrrConfig): CompiledFrr {
+export function compileFrr(config?: FrrConfig, interfaces: Interface[] = []): CompiledFrr {
   const daemons = {
     zebra: true,
     bgpd: false,
@@ -43,12 +43,22 @@ export function compileFrr(config?: FrrConfig): CompiledFrr {
     lines.push(` bgp router-id ${config.bgp.routerId.replace(/[\r\n\s]+/g, '')}`);
     lines.push(' no bgp ebgp-requires-policy');
 
+    const v4Nets: string[] = [];
+    const v6Nets: string[] = [];
     for (const net of config.bgp.networks) {
-      lines.push(` network ${net.replace(/[\r\n\s]+/g, '')}`);
+      const cleanNet = net.replace(/[\r\n\s]+/g, '');
+      if (!cleanNet) continue;
+      if (cleanNet.includes(':')) v6Nets.push(cleanNet);
+      else v4Nets.push(cleanNet);
+    }
+    for (const net of v4Nets) {
+      lines.push(` network ${net}`);
     }
 
+    const v6Neighbors: typeof config.bgp.neighbors = [];
     for (const neighbor of config.bgp.neighbors) {
       const safePeerIp = neighbor.peerIp.replace(/[\r\n\s]+/g, '');
+      const isV6 = safePeerIp.includes(':');
       lines.push(` neighbor ${safePeerIp} remote-as ${neighbor.remoteAs}`);
       if (neighbor.description) {
         const safeDesc = neighbor.description.replace(/[\r\n]+/g, ' ').replace(/"/g, "'").trim();
@@ -62,12 +72,36 @@ export function compileFrr(config?: FrrConfig): CompiledFrr {
         daemons.bfdd = true;
         lines.push(` neighbor ${safePeerIp} bfd`);
       }
-      if (neighbor.nextHopSelf) {
-        lines.push(` neighbor ${safePeerIp} next-hop-self`);
+      if (!isV6) {
+        if (neighbor.nextHopSelf) {
+          lines.push(` neighbor ${safePeerIp} next-hop-self`);
+        }
+        if (neighbor.softReconfiguration) {
+          lines.push(` neighbor ${safePeerIp} soft-reconfiguration inbound`);
+        }
+      } else {
+        lines.push(` no neighbor ${safePeerIp} activate`);
+        v6Neighbors.push(neighbor);
       }
-      if (neighbor.softReconfiguration) {
-        lines.push(` neighbor ${safePeerIp} soft-reconfiguration inbound`);
+    }
+
+    if (v6Nets.length > 0 || v6Neighbors.length > 0) {
+      lines.push(' !');
+      lines.push(' address-family ipv6 unicast');
+      for (const net of v6Nets) {
+        lines.push(`  network ${net}`);
       }
+      for (const neighbor of v6Neighbors) {
+        const safePeerIp = neighbor.peerIp.replace(/[\r\n\s]+/g, '');
+        lines.push(`  neighbor ${safePeerIp} activate`);
+        if (neighbor.nextHopSelf) {
+          lines.push(`  neighbor ${safePeerIp} next-hop-self`);
+        }
+        if (neighbor.softReconfiguration) {
+          lines.push(`  neighbor ${safePeerIp} soft-reconfiguration inbound`);
+        }
+      }
+      lines.push(' exit-address-family');
     }
     lines.push('!');
   }
@@ -77,10 +111,19 @@ export function compileFrr(config?: FrrConfig): CompiledFrr {
     daemons.ospfd = true;
 
     // Interface-level OSPF configurations
+    const ifDeviceMap = new Map<string, string>();
+    for (const iface of interfaces) {
+      if (iface.name && iface.device) {
+        ifDeviceMap.set(iface.name, iface.device);
+      }
+    }
     for (const area of config.ospf.areas) {
-      const safeAreaId = area.areaId.replace(/[\r\n\s]+/g, '');
+      const safeAreaId = area.areaId.replace(/[^a-zA-Z0-9.:_-]/g, '');
       for (const iface of area.interfaces) {
-        lines.push(`interface ${iface.replace(/[\r\n\s]+/g, '')}`);
+        const resolvedIf = ifDeviceMap.get(iface) || iface;
+        const safeIf = resolvedIf.replace(/[^a-zA-Z0-9_.:-]/g, '');
+        if (!safeIf) continue;
+        lines.push(`interface ${safeIf}`);
         lines.push(` ip ospf area ${safeAreaId}`);
         lines.push('!');
       }
@@ -97,8 +140,8 @@ export function compileFrr(config?: FrrConfig): CompiledFrr {
     }
 
     for (const area of config.ospf.areas) {
-      const safeAreaId = area.areaId.replace(/[\r\n\s]+/g, '');
-      for (const net of area.networks) {
+      const safeAreaId = area.areaId.replace(/[^a-zA-Z0-9.:_-]/g, '');
+      for (const net of area.networks ?? []) {
         lines.push(` network ${net.replace(/[\r\n\s]+/g, '')} area ${safeAreaId}`);
       }
     }

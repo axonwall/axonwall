@@ -5,7 +5,7 @@ import { CodeBlock } from '../components/CodeBlock';
 export const metadata = {
   title: 'Neovim Super Configurator, axonwall-tui, axonwallctl & ZSH Workstation | Axonwall Documentation',
   description:
-    'Configure every Axonwall v0.11.64 subsystem from SSH or serial console using the 12-domain Neovim Super Configurator (axonwall-config), standalone 11-tab axonwall-tui + NastyMap simulator, axonwallctl CLI, and ZSH workstation.',
+    'Configure every Axonwall v0.11.68 subsystem from SSH or serial console using the 12-domain Neovim Super Configurator (axonwall-config), standalone 11-tab axonwall-tui + NastyMap simulator, axonwallctl CLI, and ZSH workstation.',
 };
 
 export default function CliSuperConfiguratorDocPage() {
@@ -15,7 +15,7 @@ export default function CliSuperConfiguratorDocPage() {
       <div className="space-y-4 border-b border-slate-800/80 pb-8">
         <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-950/60 border border-emerald-500/30 text-emerald-400 text-xs font-semibold">
           <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-          Terminal UX • 12-Domain Neovim TUI, axonwall-tui &amp; ZSH Workstation • v0.11.64
+          Terminal UX • 12-Domain Neovim TUI, axonwall-tui &amp; ZSH Workstation • v0.11.68
         </div>
         <h1 className="text-3xl sm:text-5xl font-extrabold text-white tracking-tight">
           Neovim Super Configurator, axonwall-tui &amp; CLI Reference
@@ -154,6 +154,9 @@ sudo axonwallctl apply --no-confirm        # Apply and commit immediately (autom
 sudo axonwallctl confirm                   # Confirm pending Commit-Confirm transaction before timeout
 sudo axonwallctl rollback [revision]       # Roll back to previous or specific GitOps SHA revision
 axonwallctl zbm <list|snapshot|clone|activate|delete|delete-snapshot>
+axonwallctl kernel detect [--json]         # Inventory CPU flags, IOMMU, TPM2, NVMe, NICs & lsmod
+axonwallctl kernel audit [--json]          # Run 25-check KSPP + k3s + OpenZFS + nftables + eBPF audit
+axonwallctl kernel config [--mode universal|stripped] [--output-dir <dir>]
 sudo axonwallctl update [--apt] [--version <ver>] [--slot <A|B>]
 sudo axonwallctl plugin <list|enable|disable|install|remove|re-sync> <id>
 axonwallctl kubeconfig [--vip]             # Export local or VRRP VIP-bound K3s ~/.kube/config
@@ -164,11 +167,12 @@ sudo axonwallctl ebpf xdp-drop <ip|cidr> [--ttl <sec>] [--reason <text>]
 sudo axonwallctl ebpf xdp-unblock <ip|cidr>
 sudo axonwallctl ebpf syn-limit [pps|off]  # Inspect or set Ring-0 TCP SYN-flood PPS rate limit (>= 100 PPS)
 axonwallctl ebpf render-k3s [--profile networking-safe] [--namespace default] [--name <pod>]
+axonwallctl harvester <status|episodes|simulate|export|ship> [--json]  # Blackbox Threat-LLM Harvester CLI
 axonwallctl nas <status|snapshot|rollback|scrub|trim|checkpoint|unlock|lock> ...
 axonwallctl virt <list|start|stop|reboot|snapshot|rollback|clone|migrate|xml> ...
 axonwallctl k3s <status|etcd-snapshots|etcd-save|etcd-restore> ...
 axonwallctl import <file> [--type auto|pfsense|opnsense|proxmox|truenas|...] [--merge] [--stage] [--apply]
-axonwallctl mcp                            # Start stdio Model Context Protocol (MCP) 24-tool security server
+axonwallctl mcp                            # Start stdio Model Context Protocol (MCP) 25-tool security server
 axonwallctl cloudinit export --iso -o cidata.iso
 axonwallctl config [domain]                # Launch Neovim Super Configurator on optional domain
 axonwallctl edit <domain>                  # Edit raw /etc/axonwall/<domain>.yaml with schema check
@@ -185,7 +189,7 @@ axonwallctl completion <zsh|bash|fish>     # Generate shell tab-completion scrip
         <p className="text-sm text-slate-300 leading-relaxed">
           Enabled by default on every Axonwall appliance, <code className="text-emerald-400 font-mono">cli-workstation</code>{' '}
           configures <code className="text-white font-mono">zsh</code> with Oh My Zsh, syntax highlighting, autosuggestions, Tmux, bundled{' '}
-          <code className="text-emerald-400 font-mono">kubectl</code> &amp; <code className="text-emerald-400 font-mono">helm</code> v3, tactical aliases (<code className="text-slate-200 font-mono">ax</code> for <code className="text-slate-200 font-mono">axonwallctl</code>, <code className="text-slate-200 font-mono">axc</code> for <code className="text-slate-200 font-mono">axonwall-config</code>, <code className="text-slate-200 font-mono">axt</code> for <code className="text-slate-200 font-mono">axonwall-tui</code>, <code className="text-slate-200 font-mono">k</code> for <code className="text-slate-200 font-mono">kubectl</code>), a custom <strong>Starship</strong> prompt that displays a flashing red{' '}
+          <code className="text-emerald-400 font-mono">kubectl</code>, <code className="text-emerald-400 font-mono">k9s</code> (v0.51.0), &amp; <code className="text-emerald-400 font-mono">helm</code> v3, tactical aliases (<code className="text-slate-200 font-mono">ax</code> for <code className="text-slate-200 font-mono">axonwallctl</code>, <code className="text-slate-200 font-mono">axc</code> for <code className="text-slate-200 font-mono">axonwall-config</code>, <code className="text-slate-200 font-mono">axt</code> for <code className="text-slate-200 font-mono">axonwall-tui</code>, <code className="text-slate-200 font-mono">k</code> for <code className="text-slate-200 font-mono">kubectl</code>, <code className="text-slate-200 font-mono">k9</code> for <code className="text-slate-200 font-mono">k9s</code>), a custom <strong>Starship</strong> prompt that displays a flashing red{' '}
           <code className="text-rose-400 font-mono">COMMIT-CONFIRM (120s)</code> badge whenever a rollback timer is
           pending, and complete tab-completions for <code className="text-white font-mono">axonwallctl</code>,{' '}
           <code className="text-white font-mono">axonwall-config</code>, <code className="text-white font-mono">axonwall-tui</code>, <code className="text-white font-mono">kubectl</code>,{' '}

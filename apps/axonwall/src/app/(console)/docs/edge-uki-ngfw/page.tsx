@@ -26,7 +26,7 @@ export default function EdgeUkiNgfwDocPage() {
       {/* Header */}
       <div className="space-y-4 border-b border-slate-800 pb-8">
         <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-950/60 border border-emerald-500/30 text-emerald-400 text-xs font-semibold">
-          <Cpu className="w-3.5 h-3.5" /> Zero-Surface Perimeter • Single-File UEFI UKI • v0.11.64
+          <Cpu className="w-3.5 h-3.5" /> Zero-Surface Perimeter • Single-File UEFI UKI • v0.11.68
         </div>
         <h1 className="text-3xl sm:text-4xl font-extrabold text-white tracking-tight">
           Super-Slim Edge NGFW (Single-File UEFI UKI)
@@ -350,12 +350,12 @@ axonwall:
         </div>
 
         <CodeBlock
-          title="Download & Boot the Official v0.11.64 Edge UKI & Companion Initramfs in QEMU/KVM"
+          title="Download & Boot the Official v0.11.68 Edge UKI & Companion Initramfs in QEMU/KVM"
           language="bash"
           code={`# 1. Download the signed Edge UKI and companion initramfs cpio from GitHub Releases
-wget https://github.com/axonwall/axonwall/releases/download/v0.11.64/axonwall-edge-sku-vm-virtio.efi
-wget https://github.com/axonwall/axonwall/releases/download/v0.11.64/axonwall-edge-sku-vm-virtio-initramfs.cpio.gz
-wget https://github.com/axonwall/axonwall/releases/download/v0.11.64/axonwall-edge-sku-vm-virtio.efi.sha256
+wget https://github.com/axonwall/axonwall/releases/download/v0.11.68/axonwall-edge-sku-vm-virtio.efi
+wget https://github.com/axonwall/axonwall/releases/download/v0.11.68/axonwall-edge-sku-vm-virtio-initramfs.cpio.gz
+wget https://github.com/axonwall/axonwall/releases/download/v0.11.68/axonwall-edge-sku-vm-virtio.efi.sha256
 sha256sum -c axonwall-edge-sku-vm-virtio.efi.sha256
 
 # 2. Boot the single-file UKI directly into RAM (< 1.2s boot time, zero disk required)

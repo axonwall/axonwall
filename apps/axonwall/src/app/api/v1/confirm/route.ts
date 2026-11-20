@@ -4,6 +4,14 @@ import { confirmActiveRuleset } from '../../../../server/agent';
 export async function POST() {
   try {
     const result = await confirmActiveRuleset();
+    if (!result.success) {
+      const msg = result.message || 'Failed to confirm ruleset';
+      const status = msg.toLowerCase().includes('unavailable') || msg.toLowerCase().includes('unreachable') ? 502 : 409;
+      return NextResponse.json(
+        { status: 'error', error: msg, data: result },
+        { status }
+      );
+    }
     return NextResponse.json({
       status: 'ok',
       data: result,

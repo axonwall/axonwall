@@ -34,7 +34,7 @@ export async function verifyOidcToken(token, store) {
   try {
     if (!cachedJwks || cachedIssuer !== config.issuer) {
       const wellKnownUrl = new URL(
-        '/.well-known/openid-configuration',
+        '.well-known/openid-configuration',
         config.issuer.endsWith('/') ? config.issuer : `${config.issuer}/`
       );
       const res = await fetch(wellKnownUrl.toString());

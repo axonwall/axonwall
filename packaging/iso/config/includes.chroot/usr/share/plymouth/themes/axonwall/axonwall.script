@@ -1,0 +1,384 @@
+# ==============================================================================
+# Axonwall Fortress Boot Splash Theme (Plymouth Script Plugin)
+# Fortified Brick Wall + Neural Cyber-Shield + Twin Crossed Battle Axes
+# ==============================================================================
+
+Window.SetBackgroundTopColor(0.031, 0.047, 0.078);     # #080c14
+Window.SetBackgroundBottomColor(0.016, 0.094, 0.086);  # #041816
+
+win_w = Window.GetWidth();
+win_h = Window.GetHeight();
+win_x = Window.GetX();
+win_y = Window.GetY();
+
+# ------------------------------------------------------------------------------
+# Visual Layers: Back Glow -> Hero Emblem -> Crisp Wordmark -> Progress Bar
+# ------------------------------------------------------------------------------
+emblem_raw = Image("hero_emblem.png");
+glow_raw = Image("glow.png");
+wordmark_raw = Image("wordmark.png");
+progress_box_raw = Image("progress_box.png");
+progress_bar_raw = Image("progress_bar.png");
+
+emblem_aspect = emblem_raw.GetWidth() / emblem_raw.GetHeight();
+target_h = Math.Int(win_h * 0.48);
+if (target_h < 185) target_h = 185;
+if (target_h > 491) target_h = 491;
+target_w = Math.Int(target_h * emblem_aspect);
+
+max_w = Math.Int(win_w * 0.88);
+if (target_w > max_w) {
+    target_w = max_w;
+    target_h = Math.Int(target_w / emblem_aspect);
+}
+
+emblem_img = emblem_raw.Scale(target_w, target_h);
+
+glow_size = Math.Int(target_h * 1.15);
+glow_img = glow_raw.Scale(glow_size, glow_size);
+
+wm_scale = 1.0;
+max_wm_w = win_w * 0.78;
+if (wordmark_raw.GetWidth() > max_wm_w) {
+    wm_scale = max_wm_w / wordmark_raw.GetWidth();
+} else if (win_h >= 1200) {
+    wm_scale = 1.15;
+}
+wm_w = Math.Int(wordmark_raw.GetWidth() * wm_scale);
+wm_h = Math.Int(wordmark_raw.GetHeight() * wm_scale);
+wordmark_img = wordmark_raw.Scale(wm_w, wm_h);
+
+box_scale = Math.Min(1.0, (win_w * 0.65) / progress_box_raw.GetWidth());
+box_w = Math.Int(progress_box_raw.GetWidth() * box_scale);
+box_h = Math.Max(6, Math.Int(progress_box_raw.GetHeight() * box_scale));
+progress_box_img = progress_box_raw.Scale(box_w, box_h);
+
+bar_max_w = Math.Max(4, box_w - 4);
+bar_h = Math.Max(4, box_h - 4);
+
+gap_emblem_wm = Math.Int(Math.Max(6, win_h * 0.016));
+gap_wm_bar = Math.Int(Math.Max(8, win_h * 0.020));
+gap_bar_status = Math.Int(Math.Max(10, win_h * 0.022));
+
+stack_h = target_h + gap_emblem_wm + wm_h + gap_wm_bar + box_h + gap_bar_status + 28;
+top_y = win_y + Math.Max(12, Math.Int((win_h - stack_h) * 0.42));
+
+emblem_x = win_x + Math.Int((win_w - target_w) * 0.5);
+emblem_y = top_y;
+
+glow_sprite = Sprite(glow_img);
+glow_sprite.SetPosition(
+    win_x + Math.Int((win_w - glow_size) * 0.5),
+    emblem_y + Math.Int((target_h - glow_size) * 0.5),
+    1
+);
+glow_sprite.SetOpacity(0.55);
+
+emblem_sprite = Sprite(emblem_img);
+emblem_sprite.SetPosition(emblem_x, emblem_y, 2);
+
+wm_x = win_x + Math.Int((win_w - wm_w) * 0.5);
+wm_y = emblem_y + target_h + gap_emblem_wm;
+wordmark_sprite = Sprite(wordmark_img);
+wordmark_sprite.SetPosition(wm_x, wm_y, 3);
+
+box_x = win_x + Math.Int((win_w - box_w) * 0.5);
+box_y = wm_y + wm_h + gap_wm_bar;
+progress_box_sprite = Sprite(progress_box_img);
+progress_box_sprite.SetPosition(box_x, box_y, 4);
+
+progress_bar_sprite = Sprite();
+progress_bar_sprite.SetPosition(box_x + 2, box_y + 2, 5);
+progress_bar_sprite.SetOpacity(0);
+
+# ------------------------------------------------------------------------------
+# Mode-Aware Default Status & Dynamic Message Display
+# ------------------------------------------------------------------------------
+status = "normal";
+prompt_active = 0;
+tick_counter = 0;
+current_progress = 0.0;
+
+boot_mode = Plymouth.GetMode();
+default_status = "Booting Axonwall Security OS...";
+if (boot_mode == "shutdown") {
+    default_status = "Shutting Down Axonwall Appliance...";
+} else if (boot_mode == "reboot") {
+    default_status = "Rebooting Axonwall Appliance...";
+} else if (boot_mode == "updates" || boot_mode == "system-upgrade" || boot_mode == "firmware-upgrade") {
+    default_status = "Applying Firmware Update...";
+}
+
+status_y = box_y + box_h + gap_bar_status;
+action_y = status_y + 22;
+
+status_sprite = Sprite();
+action_sprite = Sprite();
+
+fun set_status_text(text) {
+    if (!text || text == "") text = default_status;
+    img = Image.Text(text, 0.796, 0.835, 0.882);  # #cbd5e1
+    status_sprite.SetImage(img);
+    status_sprite.SetPosition(
+        win_x + Math.Int((win_w - img.GetWidth()) * 0.5),
+        status_y,
+        100
+    );
+    status_sprite.SetOpacity(1);
+}
+
+fun set_action_text(text) {
+    if (!text || text == "") {
+        action_sprite.SetOpacity(0);
+        return;
+    }
+    img = Image.Text(text, 0.204, 0.827, 0.600);  # #34d399
+    action_sprite.SetImage(img);
+    action_sprite.SetPosition(
+        win_x + Math.Int((win_w - img.GetWidth()) * 0.5),
+        action_y,
+        100
+    );
+    action_sprite.SetOpacity(1);
+}
+
+set_status_text(default_status);
+
+# ------------------------------------------------------------------------------
+# Boot Progress & 50Hz Breathing Halo Callbacks
+# ------------------------------------------------------------------------------
+fun boot_progress_callback(time, progress) {
+    if (progress < 0.0) progress = 0.0;
+    if (progress > 1.0) progress = 1.0;
+    global.current_progress = progress;
+
+    if (prompt_active) return;
+
+    fill_w = Math.Int(bar_max_w * progress);
+    if (fill_w < 3) {
+        progress_bar_sprite.SetOpacity(0);
+    } else {
+        scaled = progress_bar_raw.Scale(fill_w, bar_h);
+        progress_bar_sprite.SetImage(scaled);
+        progress_bar_sprite.SetOpacity(1);
+    }
+}
+Plymouth.SetBootProgressFunction(boot_progress_callback);
+
+fun refresh_callback() {
+    global.tick_counter++;
+    pulse = 0.48 + 0.32 * Math.Cos(global.tick_counter * 0.045);
+    glow_sprite.SetOpacity(pulse);
+}
+Plymouth.SetRefreshFunction(refresh_callback);
+
+# ------------------------------------------------------------------------------
+# String Helpers (Plymouth Script does not expose strstr/length builtins)
+# ------------------------------------------------------------------------------
+fun string_index(haystack, needle) {
+    start = 0;
+    while (String(haystack).CharAt(start)) {
+        walk = 0;
+        while (String(needle).CharAt(walk) == String(haystack).CharAt(start + walk)) {
+            walk++;
+            if (!String(needle).CharAt(walk)) return start;
+        }
+        start++;
+    }
+    return NULL;
+}
+
+fun string_length(str) {
+    idx = 0;
+    while (String(str).CharAt(idx)) idx++;
+    return idx;
+}
+
+fun string_slice(src, start, end) {
+    out = "";
+    for (i = start; ((end == NULL || i <= end) && String(src).CharAt(i)); i++) {
+        out += String(src).CharAt(i);
+    }
+    return out;
+}
+
+# ------------------------------------------------------------------------------
+# Message & fsckd / Firstboot Status Callbacks
+# ------------------------------------------------------------------------------
+fun message_callback(message) {
+    if (!message || message == "") {
+        set_status_text(default_status);
+        set_action_text("");
+        return;
+    }
+
+    keys_idx = string_index(message, "keys:");
+    if (keys_idx != NULL) {
+        clean = string_slice(message, keys_idx + string_length("keys:"), NULL);
+        if (!prompt_active) set_action_text(clean);
+        return;
+    }
+
+    fsck_idx = string_index(message, "fsckd-cancel-msg:");
+    if (fsck_idx != NULL) {
+        clean = string_slice(message, fsck_idx + string_length("fsckd-cancel-msg:"), NULL);
+        if (!prompt_active) set_action_text(clean);
+        return;
+    }
+
+    set_status_text(message);
+}
+Plymouth.SetMessageFunction(message_callback);
+
+fun update_status_callback(msg) {
+    if (!msg || msg == "") return;
+
+    it = 0;
+    parts[0] = "";
+    for (i = 0; String(msg).CharAt(i) != ""; i++) {
+        ch = String(msg).CharAt(i);
+        if (ch != ":") {
+            parts[it] += ch;
+        } else {
+            it++;
+            parts[it] = "";
+        }
+    }
+
+    if (parts[0] == "fsck" && it >= 2) {
+        set_status_text("Checking disk integrity (" + parts[1] + ": " + parts[2] + "%)...");
+    } else if (parts[0] == "fsckd" && it >= 3) {
+        set_status_text(parts[3]);
+    }
+}
+Plymouth.SetUpdateStatusFunction(update_status_callback);
+
+# ------------------------------------------------------------------------------
+# Password (LUKS2) & Interactive Question Dialogs
+# ------------------------------------------------------------------------------
+pw_field_img = Image("password_field.png");
+pw_dot_img = Image("password_dot.png");
+
+fun ensure_pw_dialog(prompt_text) {
+    if (global.pw_dialog) return;
+
+    local.d;
+    d.prompt_img = Image.Text(prompt_text, 0.973, 0.980, 0.988);
+    d.prompt_sprite = Sprite(d.prompt_img);
+
+    d.field_sprite = Sprite(pw_field_img);
+    dlg_y = box_y + 18;
+    if (dlg_y + pw_field_img.GetHeight() + 12 > win_y + win_h) {
+        dlg_y = win_y + win_h - pw_field_img.GetHeight() - 16;
+    }
+    prompt_y = dlg_y - d.prompt_img.GetHeight() - 8;
+
+    d.prompt_sprite.SetPosition(
+        win_x + Math.Int((win_w - d.prompt_img.GetWidth()) * 0.5),
+        prompt_y,
+        10000
+    );
+    d.field_sprite.SetPosition(
+        win_x + Math.Int((win_w - pw_field_img.GetWidth()) * 0.5),
+        dlg_y,
+        10000
+    );
+    d.field_x = win_x + Math.Int((win_w - pw_field_img.GetWidth()) * 0.5);
+    d.field_y = dlg_y;
+    global.pw_dialog = d;
+}
+
+fun clear_pw_dialog() {
+    if (!global.pw_dialog) return;
+    if (global.pw_dialog.prompt_sprite) global.pw_dialog.prompt_sprite.SetOpacity(0);
+    if (global.pw_dialog.field_sprite) global.pw_dialog.field_sprite.SetOpacity(0);
+    if (global.pw_dialog.entry_sprite) global.pw_dialog.entry_sprite.SetOpacity(0);
+    if (global.pw_dialog.bullets) {
+        for (i = 0; global.pw_dialog.bullets[i]; i++) {
+            global.pw_dialog.bullets[i].SetOpacity(0);
+        }
+    }
+    global.pw_dialog = NULL;
+}
+
+fun display_password_callback(prompt, bullets) {
+    global.status = "password";
+    global.prompt_active = 1;
+    progress_box_sprite.SetOpacity(0);
+    progress_bar_sprite.SetOpacity(0);
+    status_sprite.SetOpacity(0);
+    action_sprite.SetOpacity(0);
+
+    ensure_pw_dialog(prompt);
+    d = global.pw_dialog;
+    d.prompt_sprite.SetOpacity(1);
+    d.field_sprite.SetOpacity(1);
+
+    dot_w = pw_dot_img.GetWidth();
+    dot_h = pw_dot_img.GetHeight();
+    step = dot_w + 4;
+    margin = 14;
+    max_bullets = Math.Int((pw_field_img.GetWidth() - margin * 2) / step);
+    if (bullets > max_bullets) bullets = max_bullets;
+
+    dot_y = d.field_y + Math.Int((pw_field_img.GetHeight() - dot_h) * 0.5);
+    for (i = 0; (d.bullets[i] || i < bullets); i++) {
+        if (!d.bullets[i]) {
+            d.bullets[i] = Sprite(pw_dot_img);
+            d.bullets[i].SetPosition(d.field_x + margin + i * step, dot_y, 10001);
+        }
+        if (i < bullets) {
+            d.bullets[i].SetOpacity(1);
+        } else {
+            d.bullets[i].SetOpacity(0);
+        }
+    }
+}
+Plymouth.SetDisplayPasswordFunction(display_password_callback);
+
+fun display_question_callback(prompt, entry) {
+    global.status = "question";
+    global.prompt_active = 1;
+    progress_box_sprite.SetOpacity(0);
+    progress_bar_sprite.SetOpacity(0);
+    status_sprite.SetOpacity(0);
+    action_sprite.SetOpacity(0);
+
+    ensure_pw_dialog(prompt);
+    d = global.pw_dialog;
+    d.prompt_sprite.SetOpacity(1);
+    d.field_sprite.SetOpacity(1);
+
+    entry_img = Image.Text(entry, 0.204, 0.827, 0.600);
+    if (!d.entry_sprite) d.entry_sprite = Sprite();
+    d.entry_sprite.SetImage(entry_img);
+    d.entry_sprite.SetPosition(
+        d.field_x + 14,
+        d.field_y + Math.Int((pw_field_img.GetHeight() - entry_img.GetHeight()) * 0.5),
+        10001
+    );
+    d.entry_sprite.SetOpacity(1);
+}
+Plymouth.SetDisplayQuestionFunction(display_question_callback);
+
+fun display_normal_callback() {
+    global.status = "normal";
+    global.prompt_active = 0;
+    clear_pw_dialog();
+    progress_box_sprite.SetOpacity(1);
+    boot_progress_callback(0, global.current_progress);
+    status_sprite.SetOpacity(1);
+}
+Plymouth.SetDisplayNormalFunction(display_normal_callback);
+
+fun quit_callback() {
+    glow_sprite.SetOpacity(0);
+    emblem_sprite.SetOpacity(0);
+    wordmark_sprite.SetOpacity(0);
+    progress_box_sprite.SetOpacity(0);
+    progress_bar_sprite.SetOpacity(0);
+    status_sprite.SetOpacity(0);
+    action_sprite.SetOpacity(0);
+    clear_pw_dialog();
+}
+Plymouth.SetQuitFunction(quit_callback);

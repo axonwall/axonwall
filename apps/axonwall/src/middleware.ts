@@ -20,6 +20,39 @@ const SESSION_COOKIE = 'axonwall_session';
 
 export async function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
+  const isMutation = !['GET', 'HEAD', 'OPTIONS'].includes(request.method.toUpperCase());
+
+  if (isMutation) {
+    const secFetchSite = request.headers.get('sec-fetch-site');
+    if (secFetchSite && secFetchSite.toLowerCase() === 'cross-site') {
+      return NextResponse.json(
+        { error: 'Forbidden: Cross-site request rejected.' },
+        { status: 403 }
+      );
+    }
+    const origin = request.headers.get('origin');
+    const host = request.headers.get('host') || request.headers.get('x-forwarded-host');
+    if (origin === 'null') {
+      return NextResponse.json(
+        { error: 'Forbidden: Null Origin header rejected.' },
+        { status: 403 }
+      );
+    }
+    if (origin && host) {
+      try {
+        const originUrl = new URL(origin);
+        const expectedHost = host.split(',')[0].trim().toLowerCase();
+        if (originUrl.host.toLowerCase() !== expectedHost) {
+          return NextResponse.json(
+            { error: 'Forbidden: Cross-origin request rejected.' },
+            { status: 403 }
+          );
+        }
+      } catch {
+        return NextResponse.json({ error: 'Forbidden: Invalid Origin header.' }, { status: 403 });
+      }
+    }
+  }
 
   // Auth endpoints (login, logout, OIDC) must stay reachable without password change.
   // Note: /api/auth/gateway is the zero-trust forward-auth proxy and MUST be gated.
@@ -58,38 +91,6 @@ export async function middleware(request: NextRequest) {
       new TextEncoder().encode(secret),
       { algorithms: ['HS256'] }
     );
-    const isMutation = !['GET', 'HEAD', 'OPTIONS'].includes(request.method.toUpperCase());
-    if (isMutation) {
-      const secFetchSite = request.headers.get('sec-fetch-site');
-      if (secFetchSite && secFetchSite.toLowerCase() === 'cross-site') {
-        return NextResponse.json(
-          { error: 'Forbidden: Cross-site request rejected.' },
-          { status: 403 }
-        );
-      }
-      const origin = request.headers.get('origin');
-      const host = request.headers.get('host') || request.headers.get('x-forwarded-host');
-      if (origin === 'null') {
-        return NextResponse.json(
-          { error: 'Forbidden: Null Origin header rejected.' },
-          { status: 403 }
-        );
-      }
-      if (origin && host) {
-        try {
-          const originUrl = new URL(origin);
-          const expectedHost = host.split(',')[0].trim().toLowerCase();
-          if (originUrl.host.toLowerCase() !== expectedHost) {
-            return NextResponse.json(
-              { error: 'Forbidden: Cross-origin request rejected.' },
-              { status: 403 }
-            );
-          }
-        } catch {
-          return NextResponse.json({ error: 'Forbidden: Invalid Origin header.' }, { status: 403 });
-        }
-      }
-    }
     if (payload.pwd_change_required === true && (isMutation || pathname === '/api/auth/gateway')) {
       return NextResponse.json(
         {

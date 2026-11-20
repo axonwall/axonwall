@@ -48,6 +48,7 @@ export const DOCS_NAVIGATION: DocCategory[] = [
       { title: 'Overview & Introduction', href: '/docs' },
       { title: 'Installation Guide (ISO, UKI, Cloud)', href: '/docs#installation' },
       { title: 'Multi-Disk RAID & ZFSBootMenu', href: '/docs/installer-raid-zfs', badge: 'ZBM' },
+      { title: 'Barebones K3s + Storage Edition', href: '/docs/installer-raid-zfs#k3s-storage-edition', badge: 'K3s' },
       { title: 'Quickstart & First Boot', href: '/docs#quickstart' },
       { title: 'Hardware Compatibility List', href: '/docs#hardware' },
     ],
@@ -58,6 +59,7 @@ export const DOCS_NAVIGATION: DocCategory[] = [
     items: [
       { title: 'Linux nftables Architecture', href: '/docs/architecture' },
       { title: 'Super-Slim Edge NGFW (UEFI UKI)', href: '/docs/edge-uki-ngfw', badge: 'PID-1' },
+      { title: 'Custom Hardened Kernels & Studio', href: '/docs/custom-kernel', badge: 'KSPP' },
       { title: 'Modular Core Roles (5 Roles)', href: '/docs/modular-architecture', badge: 'Core' },
       { title: 'Multi-Core vs FreeBSD pf', href: '/docs/architecture#comparison' },
       { title: 'Junos Commit-Confirm Rollback', href: '/docs/architecture#commit-confirm' },
@@ -83,6 +85,8 @@ export const DOCS_NAVIGATION: DocCategory[] = [
     icon: Bug,
     items: [
       { title: 'Ghost-in-the-Ring & rkhunter', href: '/docs/ghost-in-the-ring-rootkits', badge: 'Ring-0' },
+      { title: 'Blackbox Threat-LLM Harvester', href: '/docs/threat-harvester', badge: 'eBPF+LLM' },
+      { title: 'Dual-Track SFT & Parquet Export', href: '/docs/threat-harvester#dataset-format' },
       { title: 'Host Malware & Integrity Suite', href: '/docs/ghost-in-the-ring-rootkits#host-scanners' },
       { title: 'io_uring Syscall-Less Implants', href: '/docs/ghost-in-the-ring-rootkits#io-uring' },
       { title: 'eBPF Rootkits & /proc/kcore Audit', href: '/docs/ghost-in-the-ring-rootkits#ebpf-pmu' },
@@ -355,8 +359,8 @@ export function DocsSidebar({ onClose }: DocsSidebarProps) {
 
       {/* Footer Status */}
       <div className="p-3 border-t border-slate-800/80 text-[11px] text-slate-500 flex items-center justify-between">
-        <span className="font-mono">Axonwall v0.11.64</span>
-        <span className="text-emerald-400 font-medium">24 Guides</span>
+        <span className="font-mono">Axonwall v0.11.71</span>
+        <span className="text-emerald-400 font-medium">26 Guides</span>
       </div>
     </aside>
   );

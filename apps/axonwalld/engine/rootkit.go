@@ -289,8 +289,25 @@ func ListInstalledRootkitScanners() []ScannerBinaryStatus {
 		{"bpf-lsm-lockdown", "Preventive BPF_LSM & bpftool Inspector", "bpftool", "kernel_lockdown", "lsm_enforcement"},
 	}
 
+	osFamily := DetectOSFamily()
 	out := make([]ScannerBinaryStatus, 0, len(specs))
 	for _, s := range specs {
+		if s.id == "debsums" && osFamily != "debian" {
+			switch osFamily {
+			case "arch":
+				s.id = "pacman-qk"
+				s.name = "Pacman Package Integrity Verifier (pacman -Qk)"
+				s.binary = "pacman"
+			case "alpine":
+				s.id = "apk-audit"
+				s.name = "Alpine Package Integrity Auditor (apk audit)"
+				s.binary = "apk"
+			default:
+				s.id = "pkg-integrity"
+				s.name = "System Package Integrity Verifier"
+				s.binary = "rpm"
+			}
+		}
 		p, err := exec.LookPath(s.binary)
 		installed := err == nil && p != ""
 		if !installed && strings.HasSuffix(s.binary, ".sh") {

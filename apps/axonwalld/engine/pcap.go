@@ -42,14 +42,14 @@ type PacketCaptureManager struct {
 
 func NewPacketCaptureManager() *PacketCaptureManager {
 	dir := "/var/lib/axonwall/captures"
-	if err := os.MkdirAll(dir, 0775); err != nil {
+	if err := os.MkdirAll(dir, 0750); err != nil {
 		dir = "/var/log/axonwall/captures"
-		if err2 := os.MkdirAll(dir, 0775); err2 != nil {
+		if err2 := os.MkdirAll(dir, 0750); err2 != nil {
 			dir = filepath.Join(os.TempDir(), "axonwall-captures")
-			_ = os.MkdirAll(dir, 0775)
+			_ = os.MkdirAll(dir, 0750)
 		}
 	}
-	_ = os.Chmod(dir, 0775)
+	_ = os.Chmod(dir, 0750)
 	return &PacketCaptureManager{captureDir: dir}
 }
 
@@ -115,7 +115,7 @@ func (m *PacketCaptureManager) RunCapture(ctx context.Context, iface string, fil
 	var tcpdumpStderr strings.Builder
 	cmd.Stderr = &tcpdumpStderr
 	runErr := cmd.Run() // tcpdump exits when count packets captured or timeout occurs
-	_ = os.Chmod(pcapFile, 0664)
+	_ = os.Chmod(pcapFile, 0640)
 
 	completedAt := time.Now().UTC().Format(time.RFC3339)
 
@@ -162,6 +162,7 @@ func (m *PacketCaptureManager) parsePcap(pcapFile string) ([]CapturedPacket, err
 	}
 
 	scanner := bufio.NewScanner(out)
+	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
 	idx := 1
 
 	for scanner.Scan() {
@@ -170,9 +171,11 @@ func (m *PacketCaptureManager) parsePcap(pcapFile string) ([]CapturedPacket, err
 			idx++
 		}
 	}
-	_ = cmd.Wait()
-
-	return packets, nil
+	waitErr := cmd.Wait()
+	if serr := scanner.Err(); serr != nil {
+		return packets, serr
+	}
+	return packets, waitErr
 }
 
 var (

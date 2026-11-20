@@ -257,3 +257,108 @@ func TestBatch5ResolveIfaceMtuDefaultsForNewEntries(t *testing.T) {
 		t.Errorf("expected new-entry MTU default 1500, got %v", got)
 	}
 }
+
+func TestGetAdminCredentialsDefaultFallback(t *testing.T) {
+	// When running in test environment where /etc/axonwall/.password_changed does not exist,
+	// getAdminCredentials should return adminUser "admin" and fallback adminPass "axonwall"
+	u, p := getAdminCredentials()
+	if u == "" {
+		t.Errorf("expected non-empty adminUser, got empty string")
+	}
+	if p == "" {
+		t.Errorf("expected non-empty adminPass fallback, got empty string")
+	}
+}
+
+func TestDetectLiveMode(t *testing.T) {
+	statNone := func(string) bool { return false }
+	statSet := func(paths ...string) func(string) bool {
+		m := make(map[string]bool, len(paths))
+		for _, p := range paths {
+			m[p] = true
+		}
+		return func(p string) bool { return m[p] }
+	}
+
+	tests := []struct {
+		name    string
+		cmdline string
+		statFn  func(string) bool
+		want    bool
+	}{
+		{
+			name:    "Live ISO boot=live cmdline",
+			cmdline: "BOOT_IMAGE=/live/vmlinuz boot=live components quiet",
+			statFn:  statNone,
+			want:    true,
+		},
+		{
+			name:    "Live ISO axonwall_install=1",
+			cmdline: "quiet axonwall_install=1",
+			statFn:  statNone,
+			want:    true,
+		},
+		{
+			name:    "Live ISO /run/live/medium present",
+			cmdline: "quiet",
+			statFn:  statSet("/run/live/medium", "/usr/local/bin/axonwall-install"),
+			want:    true,
+		},
+		{
+			name:    "Installed Dual-Root slot=A overrides axonwall-install presence",
+			cmdline: "root=LABEL=axon_root_a ro slot=A quiet",
+			statFn:  statSet("/usr/local/bin/axonwall-install", "/etc/axonwall/install-mode"),
+			want:    false,
+		},
+		{
+			name:    "Installed Dual-Root slot=B",
+			cmdline: "root=LABEL=axon_root_b ro slot=B",
+			statFn:  statSet("/usr/local/bin/axonwall-install"),
+			want:    false,
+		},
+		{
+			name:    "Installed Rolling root=LABEL=axon_root",
+			cmdline: "root=LABEL=axon_root ro quiet",
+			statFn:  statSet("/usr/local/bin/axonwall-install"),
+			want:    false,
+		},
+		{
+			name:    "Installed ZFSBootMenu root=ZFS=...",
+			cmdline: "root=ZFS=zroot/ROOT/axonwall-0.11.67 ro quiet",
+			statFn:  statSet("/usr/local/bin/axonwall-install"),
+			want:    false,
+		},
+		{
+			name:    "Installed /etc/axonwall/install-mode marker with neutral cmdline",
+			cmdline: "quiet",
+			statFn:  statSet("/usr/local/bin/axonwall-install", "/etc/axonwall/install-mode"),
+			want:    false,
+		},
+		{
+			name:    "Installed /var/lib/axonwall/install-mode marker with neutral cmdline",
+			cmdline: "quiet",
+			statFn:  statSet("/usr/local/bin/axonwall-install", "/var/lib/axonwall/install-mode"),
+			want:    false,
+		},
+		{
+			name:    "Fallback live when only installer binary exists",
+			cmdline: "",
+			statFn:  statSet("/usr/local/bin/axonwall-install"),
+			want:    true,
+		},
+		{
+			name:    "No markers and no installer binary",
+			cmdline: "",
+			statFn:  statNone,
+			want:    false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := detectLiveMode(tc.cmdline, tc.statFn); got != tc.want {
+				t.Errorf("detectLiveMode(%q) = %v; want %v", tc.cmdline, got, tc.want)
+			}
+		})
+	}
+}

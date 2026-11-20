@@ -4,12 +4,49 @@ import type { ImportReport, ImportReviewItem } from '../types.js';
 
 export type { ImportReport } from '../types.js';
 
+function isXmlFlagSet(val: unknown): boolean {
+  return val === '' || val === '1' || val === 1 || val === true || val === 'true' || val === 'yes';
+}
+
+function isXmlEnableActive(val: unknown): boolean {
+  return val === '' || val === '1' || val === 1 || val === true || val === 'true' || val === 'yes';
+}
+
+function normalizeXmlPort(raw: unknown, aliasMap: Map<string, string>): string {
+  const s = String(raw ?? '').trim();
+  if (!s) return '';
+  const alias = aliasMap.get(s);
+  if (alias) return `$${alias}`;
+  const lower = s.toLowerCase();
+  const named: Record<string, string> = {
+    http: '80',
+    https: '443',
+    ssh: '22',
+    telnet: '23',
+    smtp: '25',
+    domain: '53',
+    dns: '53',
+    bootps: '67',
+    bootpc: '68',
+    tftp: '69',
+    ntp: '123',
+    snmp: '161',
+    ldap: '389',
+    ldaps: '636',
+    rdp: '3389',
+    'ms-wbt-server': '3389',
+  };
+  if (named[lower]) return named[lower];
+  return s.replace(/:/g, '-');
+}
+
 export function importOpnsenseConfig(xmlContent: string): ImportReport {
   const warnings: string[] = [];
   const reviewItems: ImportReviewItem[] = [];
   const parser = new XMLParser({
     ignoreAttributes: false,
     attributeNamePrefix: '@_',
+    parseTagValue: false,
     isArray: (name) => {
       return ['alias', 'rule', 'staticmap', 'hosts'].includes(name);
     },
@@ -55,25 +92,31 @@ export function importOpnsenseConfig(xmlContent: string): ImportReport {
         name: key.toLowerCase(),
         device: device,
         type: ifData.ipaddr === 'dhcp' ? 'dhcp' : 'static',
-        enabled: ifData.enable === '' || ifData.enable === '1' || ifData.enable === undefined,
+        enabled: ifData.enable === undefined ? true : isXmlEnableActive(ifData.enable),
         description: descr,
         ipv4Address: ip4 || undefined,
-        mtu: ifData.mtu ? Number.parseInt(ifData.mtu, 10) : 1500,
+        mtu: ifData.mtu ? Number.parseInt(String(ifData.mtu), 10) : 1500,
       });
     }
   }
 
   // 2. Aliases
   const aliases: Alias[] = [];
+  const aliasMap = new Map<string, string>();
   if (root.aliases?.alias) {
     const rawAliases = Array.isArray(root.aliases.alias) ? root.aliases.alias : [root.aliases.alias];
     for (const a of rawAliases) {
       if (!a.name) continue;
+      const origName = String(a.name).trim();
+      const safeName = origName.replace(/[^a-zA-Z0-9_]/g, '_');
+      aliasMap.set(origName, safeName);
+      aliasMap.set(safeName, safeName);
+
       let rawEntries: string[] = [];
-      if (typeof a.address === 'string') {
-        rawEntries = a.address.split(/[\s,]+/).filter(Boolean);
-      } else if (typeof a.content === 'string') {
-        rawEntries = a.content.split(/[\s,]+/).filter(Boolean);
+      if (a.address !== undefined && a.address !== null && String(a.address).trim() !== '') {
+        rawEntries = String(a.address).split(/[\s,]+/).filter(Boolean);
+      } else if (a.content !== undefined && a.content !== null && String(a.content).trim() !== '') {
+        rawEntries = String(a.content).split(/[\s,]+/).filter(Boolean);
       }
 
       let aliasType: 'host' | 'network' | 'port' | 'mac' | 'urltable' = 'host';
@@ -84,11 +127,11 @@ export function importOpnsenseConfig(xmlContent: string): ImportReport {
       else if (opnType.includes('url')) aliasType = 'urltable';
 
       aliases.push({
-        name: String(a.name).replace(/[^a-zA-Z0-9_]/g, '_'),
+        name: safeName,
         type: aliasType,
-        entries: rawEntries,
-        description: a.descr || '',
-        enabled: a.enabled !== '0',
+        entries: aliasType === 'port' ? rawEntries.map((e) => e.replace(/:/g, '-')) : rawEntries,
+        description: a.descr ? String(a.descr) : '',
+        enabled: a.enabled !== '0' && a.enabled !== 0 && a.enabled !== 'no',
       });
     }
   }
@@ -118,9 +161,13 @@ export function importOpnsenseConfig(xmlContent: string): ImportReport {
         else if (r.source.network) {
           const rawNet = String(r.source.network);
           src = rawNet === '(self)' ? 'self' : `$${rawNet.replace(/[^a-zA-Z0-9_]/g, '_')}`;
-        } else if (r.source.address) src = String(r.source.address);
+        } else if (r.source.address) {
+          const rawAddr = String(r.source.address).trim();
+          const aliasMatch = aliasMap.get(rawAddr);
+          src = aliasMatch ? `$${aliasMatch}` : rawAddr;
+        }
         if (r.source.not !== undefined && src !== 'any') negatedSrc = true;
-        if (r.source.port) srcPort = String(r.source.port);
+        if (r.source.port) srcPort = normalizeXmlPort(r.source.port, aliasMap);
       }
 
       // Parse destination
@@ -132,15 +179,19 @@ export function importOpnsenseConfig(xmlContent: string): ImportReport {
         else if (r.destination.network) {
           const rawNet = String(r.destination.network);
           dst = rawNet === '(self)' ? 'self' : `$${rawNet.replace(/[^a-zA-Z0-9_]/g, '_')}`;
-        } else if (r.destination.address) dst = String(r.destination.address);
+        } else if (r.destination.address) {
+          const rawAddr = String(r.destination.address).trim();
+          const aliasMatch = aliasMap.get(rawAddr);
+          dst = aliasMatch ? `$${aliasMatch}` : rawAddr;
+        }
         if (r.destination.not !== undefined && dst !== 'any') negatedDst = true;
-        if (r.destination.port) dstPort = String(r.destination.port);
+        if (r.destination.port) dstPort = normalizeXmlPort(r.destination.port, aliasMap);
       }
 
       const hasNegation = negatedSrc || negatedDst;
       const ruleIndex = rules.length;
       const finalDescr = hasNegation ? `[REVIEW: Negated match] ${descr}`.trim() : descr;
-      const isEnabled = hasNegation ? false : r.disabled !== '1';
+      const isEnabled = hasNegation ? false : !isXmlFlagSet(r.disabled);
 
       if (hasNegation) {
         const reason: ImportReviewItem['reason'] =
@@ -163,11 +214,12 @@ export function importOpnsenseConfig(xmlContent: string): ImportReport {
         });
       }
 
+      const rawDir = String(r.direction || 'in').toLowerCase();
       rules.push({
         action,
-        direction: (r.direction as any) || 'in',
+        direction: rawDir === 'out' ? 'out' : 'in',
         interface: iface.toLowerCase(),
-        quick: r.quick !== '0',
+        quick: r.quick !== '0' && r.quick !== 0,
         protocol: (proto as any) || 'any',
         source: src,
         sourcePort: srcPort,
@@ -187,20 +239,24 @@ export function importOpnsenseConfig(xmlContent: string): ImportReport {
   if (root.nat?.rule) {
     const rawNat = Array.isArray(root.nat.rule) ? root.nat.rule : [root.nat.rule];
     let sortOrder = 10;
+    const validNatProtos = new Set(['any', 'tcp', 'udp', 'tcp_udp', 'icmp', 'ipv6-icmp', 'esp', 'ah', 'gre']);
     for (const n of rawNat) {
+      const rawNatProto = String(n.protocol || 'tcp').toLowerCase();
+      let natProto = rawNatProto === 'tcp/udp' || rawNatProto === 'tcp_udp' ? 'tcp_udp' : rawNatProto === 'icmpv6' ? 'ipv6-icmp' : rawNatProto;
+      if (!validNatProtos.has(natProto)) natProto = 'tcp';
       nat.push({
         type: 'dnat',
         interface: (n.interface || 'wan').toLowerCase(),
-        protocol: (n.protocol as any) || 'tcp',
+        protocol: natProto as any,
         source: 'any',
         sourcePort: '',
         destination: 'wan_ip',
-        destinationPort: String(n.destination?.port || n.local_port || ''),
-        targetIp: n.target || '',
-        targetPort: String(n.local_port || ''),
+        destinationPort: normalizeXmlPort(n.destination?.port || n.local_port || '', aliasMap),
+        targetIp: n.target ? String(n.target) : '',
+        targetPort: normalizeXmlPort(n.local_port || '', aliasMap),
         log: Boolean(n.log),
-        enabled: n.disabled !== '1',
-        description: n.descr || '',
+        enabled: !isXmlFlagSet(n.disabled),
+        description: n.descr ? String(n.descr) : '',
         sortOrder,
       });
       sortOrder += 10;
@@ -211,7 +267,7 @@ export function importOpnsenseConfig(xmlContent: string): ImportReport {
   const subnets: DhcpSubnet[] = [];
   if (root.dhcpd) {
     for (const [ifKey, dData] of Object.entries<any>(root.dhcpd)) {
-      if (typeof dData !== 'object' || !dData || !dData.enable) continue;
+      if (typeof dData !== 'object' || !dData || !isXmlEnableActive(dData.enable)) continue;
       const range = dData.range || {};
       const staticMappings = [];
       if (dData.staticmap) {

@@ -151,27 +151,43 @@ jobs:
           done
 
           # Install basic dependencies first (including Linux kernel UKI build deps)
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            -o APT::Immediate-Configure=false \
-            -o Dpkg::Pre-Install-Pkgs='echo "Skipping pre-install"' \
-            bc \
-            bison \
-            cpio \
-            flex \
-            libelf-dev \
-            libssl-dev \
-            xz-utils \
-            debootstrap \
-            debian-archive-keyring \
-            xorriso \
-            isolinux \
-            syslinux-efi \
-            syslinux-common \
-            grub-pc-bin \
-            grub-efi-amd64-bin \
-            dosfstools \
-            mtools \
-            qemu-utils || sudo apt-get install -fy --fix-broken
+          pkgs=(
+            bc
+            bison
+            cpio
+            flex
+            libelf-dev
+            libssl-dev
+            xz-utils
+            debootstrap
+            debian-archive-keyring
+            xorriso
+            isolinux
+            syslinux-efi
+            syslinux-common
+            grub-pc-bin
+            grub-efi-amd64-bin
+            dosfstools
+            mtools
+            qemu-utils
+          )
+          for attempt in 1 2 3; do
+            echo "apt-get install attempt $attempt..."
+            if sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+              -o APT::Immediate-Configure=false \
+              -o Dpkg::Pre-Install-Pkgs='echo "Skipping pre-install"' \
+              "${pkgs[@]}"; then
+              break
+            fi
+            if [ "$attempt" -lt 3 ]; then
+              sudo DEBIAN_FRONTEND=noninteractive apt-get install -fy --fix-broken || true
+              sudo apt-get update -y || true
+              sleep $((attempt * 10))
+            else
+              echo "Failed to install ISO build dependencies after 3 attempts" >&2
+              exit 1
+            fi
+          done
 
           # Download and install live-build directly. HTTPS + a pinned
           # SHA-256 (cross-checked against the hash published for
@@ -246,9 +262,48 @@ jobs:
             echo "::error::vault preseed enabled-service lists differ"
             fail=1
           fi
+          if ! diff -u <(extract_pkgs packaging/k3s-storage/preseed-k3s-storage.cfg) <(extract_pkgs packaging/k3s-storage/preseed-k3s-storage-binary.cfg); then
+            echo "::error::k3s-storage preseed package lists differ"
+            fail=1
+          fi
+          if ! diff -u <(extract_services packaging/k3s-storage/preseed-k3s-storage.cfg) <(extract_services packaging/k3s-storage/preseed-k3s-storage-binary.cfg); then
+            echo "::error::k3s-storage preseed enabled-service lists differ"
+            fail=1
+          fi
+          if ! diff -u packaging/iso/config/includes.chroot/usr/local/bin/axonwall-install packaging/alpine/overlay/usr/local/bin/axonwall-install; then
+            echo "::error::axonwall-install differs between Debian ISO and Alpine ISO overlays"
+            fail=1
+          fi
+          for s in \
+            packaging/iso/config/includes.chroot/usr/local/bin/axonwall-install \
+            packaging/iso/config/includes.chroot/usr/local/bin/axonwall-update \
+            packaging/iso/config/includes.chroot/usr/local/bin/axonwallctl \
+            packaging/k3s-storage/axonwall-k3s-firstboot \
+            packaging/k3s-storage/axonwall-k3s-verify \
+            packaging/vault/axonwall-vault-firstboot \
+            packaging/vault/axonwall-vault-provision \
+            packaging/vault/axonwall-vault-status \
+            packaging/debian/postinst \
+            packaging/alpine/overlay/usr/local/bin/axonwall-firstboot-alpine; do
+            if ! sh -n "$s"; then
+              echo "::error::POSIX sh syntax check failed for $s"
+              fail=1
+            fi
+          done
+          for b in \
+            packaging/cloud-image/build-qcow2.sh \
+            packaging/debian/build-deb.sh \
+            packaging/iso/build-iso.sh \
+            packaging/alpine/build-alpine-iso.sh \
+            packaging/iso/config/includes.chroot/usr/local/bin/axonwall-cloud-init; do
+            if ! bash -n "$b"; then
+              echo "::error::bash syntax check failed for $b"
+              fail=1
+            fi
+          done
           exit $fail
 
-      - name: Build Hybrid Appliance ISO (Unified NGFW + Vault Edition)
+      - name: Build Hybrid Appliance ISO (Unified NGFW, Vault & K3s Storage Editions)
         run: |
           sudo ./packaging/iso/build-iso.sh
 
@@ -415,31 +470,62 @@ jobs:
           name: axonwall-cloud-qcow2
           path: packaging/cloud-image/output
 
+      - name: Stage & Verify Mandatory Release Artifacts
+        run: |
+          set -euo pipefail
+          rm -rf release-assets
+          mkdir -p release-assets
+          for req in \
+            packaging/iso/output/axonwall-debian13-amd64.iso \
+            packaging/iso/output/axonwall-debian13-amd64.iso.sha256 \
+            packaging/edge-uki/output/axonwall-edge-sku-vm-virtio.efi \
+            packaging/edge-uki/output/axonwall-edge-sku-vm-virtio.efi.sha256 \
+            packaging/edge-uki/output/axonwall-edge-sku-vm-virtio-initramfs.cpio.gz \
+            packaging/edge-uki/output/axonwall-edge-sku-vm-virtio-initramfs.cpio.gz.sha256; do
+            test -s "$req" || { echo "::error::Missing required release artifact: $req"; exit 1; }
+            cp -v "$req" release-assets/
+          done
+          for glob_dir_pat in \
+            "packaging/cloud-image/output/*.qcow2" \
+            "packaging/cloud-image/output/*.qcow2.sha256" \
+            "packaging/debian/output/*.deb" \
+            "packaging/debian/output/*.deb.sha256"; do
+            matched=0
+            for f in $glob_dir_pat; do
+              if [ -s "$f" ]; then
+                matched=1
+                cp -v "$f" release-assets/
+              fi
+            done
+            if [ "$matched" -eq 0 ]; then
+              echo "::error::Missing required release artifact matching: $glob_dir_pat"
+              exit 1
+            fi
+          done
+          for sig in \
+            packaging/debian/output/*.deb.sha256.sig \
+            packaging/iso/output/axonwall-debian13-amd64.iso.sha256.sig \
+            packaging/cloud-image/output/*.qcow2.sha256.sig \
+            packaging/edge-uki/output/axonwall-edge-sku-vm-virtio.efi.sha256.sig \
+            packaging/edge-uki/output/axonwall-edge-sku-vm-virtio-initramfs.cpio.gz.sha256.sig; do
+            if [ -s "$sig" ]; then
+              cp -v "$sig" release-assets/
+            fi
+          done
+
       - name: Release Distribution Artifacts (on tag)
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
+          fail_on_unmatched_files: true
           files: |
-            packaging/iso/output/axonwall-debian13-amd64.iso
-            packaging/iso/output/axonwall-debian13-amd64.iso.sha256
-            packaging/cloud-image/output/*.qcow2
-            packaging/cloud-image/output/*.qcow2.sha256
-            packaging/debian/output/*.deb
-            packaging/debian/output/*.deb.sha256
-            packaging/debian/output/*.deb.sha256.sig
-            packaging/iso/output/axonwall-debian13-amd64.iso.sha256.sig
-            packaging/cloud-image/output/*.qcow2.sha256.sig
-            packaging/edge-uki/output/axonwall-edge-sku-vm-virtio.efi
-            packaging/edge-uki/output/axonwall-edge-sku-vm-virtio.efi.sha256
-            packaging/edge-uki/output/axonwall-edge-sku-vm-virtio.efi.sha256.sig
-            packaging/edge-uki/output/axonwall-edge-sku-vm-virtio-initramfs.cpio.gz
-            packaging/edge-uki/output/axonwall-edge-sku-vm-virtio-initramfs.cpio.gz.sha256
-            packaging/edge-uki/output/axonwall-edge-sku-vm-virtio-initramfs.cpio.gz.sha256.sig
+            release-assets/*
 
       - name: Publish Rolling Latest Pre-Release (on main)
         if: github.ref == 'refs/heads/main'
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
+          fail_on_unmatched_files: true
           tag_name: rolling-latest
           name: "Axonwall Appliance ISO, Cloud QCOW2, Edge UKI & Debian Package (Rolling Latest)"
           body: |
@@ -447,10 +533,10 @@ jobs:
             - **Commit**: ${{ github.sha }}
             - **Branch**: `main`
             - **Distribution**:
-              - Debian 13 (Trixie) amd64 (Unified Hybrid ISO for NGFW & Vault Editions + Cloud QCOW2 + .deb Package)
+              - Debian 13 (Trixie) amd64 (Unified Hybrid ISO for NGFW, Vault & K3s Storage Editions + Cloud QCOW2 + .deb Package)
               - Super-Slim Edge NGFW UEFI Unified Kernel Image (`sku-vm-virtio` default virtual appliance)
             - **Artifacts**:
-              - `axonwall-debian13-amd64.iso` (Unified Next-Gen Installer: Axonwall NGFW + Vault S3 Storage Edition)
+              - `axonwall-debian13-amd64.iso` (Unified Next-Gen Installer: Axonwall NGFW + Vault S3 + K3s Storage Editions)
               - `axonwall-debian13-amd64-cloud.qcow2`
               - `axonwall-edge-sku-vm-virtio.efi` (Single-File EFI UKI with embedded Go PID 1)
               - `axonwall-edge-sku-vm-virtio-initramfs.cpio.gz`
@@ -459,18 +545,4 @@ jobs:
               - `axonwall-k3s-storage_*.deb` (K3s-Storage edition)
           prerelease: true
           files: |
-            packaging/iso/output/axonwall-debian13-amd64.iso
-            packaging/iso/output/axonwall-debian13-amd64.iso.sha256
-            packaging/cloud-image/output/*.qcow2
-            packaging/cloud-image/output/*.qcow2.sha256
-            packaging/debian/output/*.deb
-            packaging/debian/output/*.deb.sha256
-            packaging/debian/output/*.deb.sha256.sig
-            packaging/iso/output/axonwall-debian13-amd64.iso.sha256.sig
-            packaging/cloud-image/output/*.qcow2.sha256.sig
-            packaging/edge-uki/output/axonwall-edge-sku-vm-virtio.efi
-            packaging/edge-uki/output/axonwall-edge-sku-vm-virtio.efi.sha256
-            packaging/edge-uki/output/axonwall-edge-sku-vm-virtio.efi.sha256.sig
-            packaging/edge-uki/output/axonwall-edge-sku-vm-virtio-initramfs.cpio.gz
-            packaging/edge-uki/output/axonwall-edge-sku-vm-virtio-initramfs.cpio.gz.sha256
-            packaging/edge-uki/output/axonwall-edge-sku-vm-virtio-initramfs.cpio.gz.sha256.sig
+            release-assets/*

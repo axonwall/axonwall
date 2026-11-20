@@ -45,7 +45,7 @@ export const COUNTRY_CIDR_TABLE: Record<string, string[]> = {
     '185.87.12.0/22', '194.126.32.0/19',
   ],
   RO: [
-    '79.112.0.0/13', '82.76.0.0/14', '86.120.0.0/13', '89.32.0.0/14',
+    '79.112.0.0/13', '86.120.0.0/13', '89.32.0.0/14',
     '92.80.0.0/13', '188.24.0.0/14',
   ],
   US: [
@@ -69,7 +69,7 @@ export const COUNTRY_CIDR_TABLE: Record<string, string[]> = {
   ],
   IN: [
     '49.12.0.0/14', '103.0.0.0/10', '106.192.0.0/11', '115.96.0.0/11',
-    '117.192.0.0/11', '182.64.0.0/11',
+    '117.192.0.0/11',
   ],
   AU: [
     '1.120.0.0/13', '101.160.0.0/11', '120.144.0.0/12', '139.130.0.0/16',
@@ -115,17 +115,22 @@ export function compileGeoIp(config?: GeoIpConfig): CompiledGeoIp {
   setDefs.push(`  set set_geoip_countries {`);
   setDefs.push(`    type ipv4_addr;`);
   setDefs.push(`    flags interval;`);
+  setDefs.push(`    auto-merge;`);
   setDefs.push(`    elements = { ${elements} };`);
   setDefs.push(`  }`);
 
   // 2. Excluded Subnets Set (e.g. RFC 1918 Private ranges)
-  const excluded = (config.excludedSubnets && config.excludedSubnets.length > 0)
-    ? config.excludedSubnets
+  const validExcluded = (config.excludedSubnets || []).filter((s) =>
+    /^(?:25[0-5]|2[0-4]\d|1?\d\d?)\.(?:25[0-5]|2[0-4]\d|1?\d\d?)\.(?:25[0-5]|2[0-4]\d|1?\d\d?)\.(?:25[0-5]|2[0-4]\d|1?\d\d?)(?:\/(?:3[0-2]|[12]?\d))?$/.test(s.trim())
+  );
+  const excluded = validExcluded.length > 0
+    ? validExcluded.map((s) => s.trim())
     : ['10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16'];
 
   setDefs.push(`  set set_geoip_excluded {`);
   setDefs.push(`    type ipv4_addr;`);
   setDefs.push(`    flags interval;`);
+  setDefs.push(`    auto-merge;`);
   setDefs.push(`    elements = { ${excluded.join(', ')} };`);
   setDefs.push(`  }`);
 

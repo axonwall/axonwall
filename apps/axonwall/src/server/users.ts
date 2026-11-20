@@ -2,7 +2,7 @@
 
 import { getSession } from './auth';
 import { assertActionPermitted } from './auth-guard';
-import { callAgentApi } from './agent-client';
+import { callAgentApi, callAgentApiResponse } from './agent-client';
 import type {
   LocalUser,
   LocalGroup,
@@ -45,7 +45,7 @@ export async function createLocalUser(req: CreateLocalUserRequest): Promise<{ su
     throw new Error('Invalid username format');
   }
 
-  const res = await callAgentApi<{ success?: boolean; message?: string }>(
+  const res = await callAgentApiResponse<{ success?: boolean; message?: string }>(
     '/v1/system/users',
     'POST',
     req
@@ -66,7 +66,7 @@ export async function updateLocalUser(
     throw new Error('Invalid username format');
   }
 
-  const res = await callAgentApi<{ success?: boolean; message?: string }>(
+  const res = await callAgentApiResponse<{ success?: boolean; message?: string }>(
     `/v1/system/users/${encodeURIComponent(username)}`,
     'PUT',
     req
@@ -87,7 +87,7 @@ export async function deleteLocalUser(
     throw new Error('Invalid username format');
   }
 
-  const res = await callAgentApi<{ success?: boolean; message?: string }>(
+  const res = await callAgentApiResponse<{ success?: boolean; message?: string }>(
     `/v1/system/users/${encodeURIComponent(username)}?removeHome=${removeHome}`,
     'DELETE'
   );
@@ -104,7 +104,7 @@ export async function createLocalGroup(name: string): Promise<{ success: boolean
     throw new Error('Invalid group name format');
   }
 
-  const res = await callAgentApi<{ success?: boolean; message?: string }>(
+  const res = await callAgentApiResponse<{ success?: boolean; message?: string }>(
     '/v1/system/groups',
     'POST',
     { name }
@@ -157,7 +157,7 @@ export async function updateDirectoryPasswordPolicy(
   const session = await getSession();
   assertActionPermitted(session, 'admin');
 
-  const res = await callAgentApi<{ success?: boolean; message?: string; policy?: PasswordPolicyConfig }>(
+  const res = await callAgentApiResponse<{ success?: boolean; message?: string; policy?: PasswordPolicyConfig }>(
     '/v1/system/directory/policy',
     'PUT',
     policy
@@ -180,10 +180,11 @@ export async function migrateLocalUsersToLdap(): Promise<{
   const session = await getSession();
   assertActionPermitted(session, 'admin');
 
-  const res = await callAgentApi<{ success?: boolean; migrated?: string[]; message?: string }>(
+  const res = await callAgentApiResponse<{ success?: boolean; migrated?: string[]; message?: string }>(
     '/v1/system/directory/migrate',
     'POST',
-    {}
+    {},
+    60_000
   );
   if (!res || !res.success) {
     throw new Error(res?.message || 'Failed to migrate local users into OpenLDAP');

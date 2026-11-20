@@ -68,7 +68,7 @@ func getSystemInfo() (hostname, osName, kernel, uptime, loadAvg, memStr string) 
 		}
 	}
 	if osName == "" {
-		osName = "Debian GNU/Linux 13 (Trixie)"
+		osName = "Linux"
 	}
 
 	// Kernel version
@@ -79,7 +79,7 @@ func getSystemInfo() (hostname, osName, kernel, uptime, loadAvg, memStr string) 
 		}
 	}
 	if kernel == "" {
-		kernel = "Linux 6.12"
+		kernel = "Linux"
 	}
 
 	// Uptime
@@ -1484,6 +1484,23 @@ func getAdminCredentials() (string, string) {
 		}
 	}
 
+	// 3. Fallback: If no password is configured and password was never explicitly changed,
+	// default to standard initial factory credentials "axonwall"
+	hasChanged := false
+	changedCandidates := []string{
+		"/var/lib/axonwall/.password_changed",
+		"/etc/axonwall/.password_changed",
+	}
+	for _, f := range changedCandidates {
+		if _, err := os.Stat(f); err == nil {
+			hasChanged = true
+			break
+		}
+	}
+	if !hasChanged && adminPass == "" {
+		adminPass = "axonwall"
+	}
+
 	return adminUser, adminPass
 }
 
@@ -1600,6 +1617,26 @@ func detectInstalledEdition() string {
 	return "axonwall"
 }
 
+func isAxonwallFirewallMenuAvailable() bool {
+	return detectInstalledEdition() == "axonwall" || isLiveMode()
+}
+
+func isK3sAgentHost() bool {
+	if _, err := os.Stat("/etc/rancher/k3s/agent-mode"); err == nil {
+		return true
+	}
+	for _, envPath := range []string{"/etc/axonwall/.k3s-edition", "/etc/axonwall/k3s-storage.env"} {
+		if data, err := os.ReadFile(envPath); err == nil {
+			s := string(data)
+			if strings.Contains(s, "K3S_ROLE=agent") || strings.Contains(s, "K3S_ROLE='agent'") || strings.Contains(s, `K3S_ROLE="agent"`) {
+				return true
+			}
+		}
+	}
+	return unitExistsAny([]string{"/etc/systemd/system/k3s-agent.service", "/usr/lib/systemd/system/k3s-agent.service"}) &&
+		!unitExistsAny([]string{"/etc/systemd/system/k3s.service", "/usr/lib/systemd/system/k3s.service"})
+}
+
 func authenticateConsole(reader *bufio.Reader) (string, bool) {
 	clearScreen()
 	hostname, osName, _, _, _, _ := getSystemInfo()
@@ -1635,11 +1672,37 @@ func authenticateConsole(reader *bufio.Reader) (string, bool) {
 	}
 	fmt.Println("--------------------------------------------------------------------------------")
 	fmt.Println(" Authentication required. Please enter appliance credentials to proceed.")
+	hasChanged := false
+	for _, f := range []string{"/var/lib/axonwall/.password_changed", "/etc/axonwall/.password_changed"} {
+		if _, err := os.Stat(f); err == nil {
+			hasChanged = true
+			break
+		}
+	}
 	if isLiveMode() {
 		fmt.Printf(" %s[Live ISO Mode: Default Credentials: admin / axonwall]%s\n", colorYellow, colorReset)
+	} else if !hasChanged {
+		fmt.Printf(" %s[Factory Default Credentials: admin / axonwall (Change recommended)]%s\n", colorYellow, colorReset)
 	}
 	fmt.Println("--------------------------------------------------------------------------------")
 	fmt.Println()
+
+	expectedUser, expectedPass := getAdminCredentials()
+	if expectedPass == "" {
+		fmt.Printf("%s[!] No appliance administrator password configured or discovered in persistent storage.%s\n", colorYellow, colorBold)
+		fmt.Println("    An administrator password must be set before accessing the console.")
+		fmt.Println()
+		actionResetAdminPassword(reader)
+		expectedUser, expectedPass = getAdminCredentials()
+		if expectedPass != "" {
+			fmt.Printf("\n%s[✓] Administrator credentials configured successfully. Entering console session...%s\n", colorGreen, colorReset)
+			time.Sleep(500 * time.Millisecond)
+			return expectedUser, true
+		}
+		fmt.Printf("\n%s[!] Administrator password configuration was not completed.%s\n", colorRed, colorReset)
+		pause(reader)
+		return "", false
+	}
 
 	fmt.Print(" Username: ")
 	username, err := reader.ReadString('\n')
@@ -1664,17 +1727,10 @@ func authenticateConsole(reader *bufio.Reader) (string, bool) {
 		return "", false
 	}
 
-	expectedUser, expectedPass := getAdminCredentials()
-	if expectedPass == "" {
-		time.Sleep(1500 * time.Millisecond)
-		fmt.Printf("\n%s[!] No appliance admin password configured or found in persistent storage.%s\n", colorRed, colorReset)
-		fmt.Printf("    Please configure credentials via the Web Console or check /etc/axonwall/initial-admin-password.\n\n")
-		time.Sleep(2 * time.Second)
-		return "", false
-	}
-
-	// Verify constant-time match for configured administrator account
-	userMatches := subtle.ConstantTimeCompare([]byte(username), []byte(expectedUser)) == 1
+	// Verify constant-time match for configured administrator account (or root/admin alias)
+	userMatches := subtle.ConstantTimeCompare([]byte(username), []byte(expectedUser)) == 1 ||
+		subtle.ConstantTimeCompare([]byte(username), []byte("admin")) == 1 ||
+		subtle.ConstantTimeCompare([]byte(username), []byte("root")) == 1
 	passMatches := verifyPassword(password, expectedPass)
 
 	if userMatches && passMatches {
@@ -1689,26 +1745,57 @@ func authenticateConsole(reader *bufio.Reader) (string, bool) {
 	return "", false
 }
 
-func isLiveMode() bool {
-	if data, err := os.ReadFile("/proc/cmdline"); err == nil {
-		cmd := string(data)
-		if strings.Contains(cmd, "slot=A") || strings.Contains(cmd, "slot=B") || strings.Contains(cmd, "root=LABEL=axon_root") {
-			return false
-		}
-		if strings.Contains(cmd, "boot=live") || strings.Contains(cmd, "axonwall_install=1") || strings.Contains(cmd, "axonwall.install=1") || strings.Contains(cmd, "axonwall.unattended=1") {
-			return true
-		}
+func detectLiveMode(cmdline string, statExists func(string) bool) bool {
+	if strings.Contains(cmdline, "slot=A") || strings.Contains(cmdline, "slot=B") || strings.Contains(cmdline, "root=LABEL=axon_root") || strings.Contains(cmdline, "root=ZFS=") {
+		return false
 	}
-	if _, err := os.Stat("/run/live/medium"); err == nil {
+	if strings.Contains(cmdline, "boot=live") || strings.Contains(cmdline, "axonwall_install=1") || strings.Contains(cmdline, "axonwall.install=1") || strings.Contains(cmdline, "axonwall.unattended=1") {
 		return true
 	}
-	if _, err := os.Stat("/usr/local/bin/axonwall-install"); err == nil {
-		if _, errMode := os.Stat("/etc/axonwall/install-mode"); errMode == nil {
-			return false
-		}
+	if statExists("/run/live/medium") {
+		return true
+	}
+	if statExists("/etc/axonwall/install-mode") || statExists("/var/lib/axonwall/install-mode") {
+		return false
+	}
+	if statExists("/usr/local/bin/axonwall-install") {
 		return true
 	}
 	return false
+}
+
+func isLiveMode() bool {
+	cmdline := ""
+	if data, err := os.ReadFile("/proc/cmdline"); err == nil {
+		cmdline = string(data)
+	}
+	return detectLiveMode(cmdline, func(path string) bool {
+		_, err := os.Stat(path)
+		return err == nil
+	})
+}
+
+func readInstalledMode() string {
+	for _, path := range []string{"/etc/axonwall/install-mode", "/var/lib/axonwall/install-mode"} {
+		if data, err := os.ReadFile(path); err == nil {
+			mode := strings.TrimSpace(string(data))
+			if mode != "" {
+				return mode
+			}
+		}
+	}
+	if data, err := os.ReadFile("/proc/cmdline"); err == nil {
+		cmd := string(data)
+		switch {
+		case strings.Contains(cmd, "slot=A") || strings.Contains(cmd, "slot=B"):
+			return "ab"
+		case strings.Contains(cmd, "root=ZFS="):
+			return "zbm"
+		case strings.Contains(cmd, "root=LABEL=axon_root"):
+			return "rolling"
+		}
+	}
+	return "installed"
 }
 
 func printHeader() {
@@ -1846,8 +1933,8 @@ func printHeader() {
 	fmt.Println(" 11) Power Off System")
 	if isLiveMode() {
 		fmt.Printf(" %s12) Install Axonwall OS to Storage Disk (A/B + RAID + OpenZFS) [Press I]%s\n", colorGreen+colorBold, colorReset)
-	} else if _, err := os.Stat("/usr/local/bin/axonwall-install"); err == nil {
-		fmt.Println(" 12) Run Axonwall Disk Installer Utility")
+	} else {
+		fmt.Println(" 12) Advanced & Recovery Menu")
 	}
 	switch edition {
 	case "k3s-storage":
@@ -1866,14 +1953,73 @@ func printHeader() {
 	if isLiveMode() {
 		fmt.Print(" Enter option [0-12, T, N, A, E, or I]: ")
 	} else if edition == "k3s-storage" || edition == "vault" {
-		fmt.Print(" Enter option [0-11, S, or E]: ")
+		fmt.Print(" Enter option [0-12, S, or E]: ")
 	} else {
-		fmt.Print(" Enter option [0-11, T, N, A, or E]: ")
+		fmt.Print(" Enter option [0-12, T, N, A, or E]: ")
 	}
 }
 
 func actionInstallToDisk(reader *bufio.Reader) {
 	RunNextGenInstallerTUI(reader)
+}
+
+func actionAdvancedMenu(reader *bufio.Reader) {
+	for {
+		clearScreen()
+		hostname, _, _, _, _, _ := getSystemInfo()
+		edition := detectInstalledEdition()
+		mode := readInstalledMode()
+		_, instErr := os.Stat("/usr/local/bin/axonwall-install")
+		hasInstaller := instErr == nil
+
+		fmt.Println("================================================================================")
+		fmt.Printf("  %s=== Advanced & Recovery Menu ===%s\n", colorBold, colorReset)
+		fmt.Printf("  Host: %s | Edition: %s | Mode: %s\n", hostname, edition, mode)
+		fmt.Println("================================================================================")
+		if hasInstaller {
+			fmt.Printf("  %s1) Run Axonwall Disk Installer Utility (WARNING: Active Installed System)%s\n", colorYellow+colorBold, colorReset)
+		}
+		fmt.Println("  2) View Last Installation Log (/var/log/axonwall-install.log)")
+		fmt.Println("  0) Return to Main Console Menu")
+		fmt.Println("--------------------------------------------------------------------------------")
+		fmt.Print(" Enter option [0-2]: ")
+
+		choice, err := reader.ReadString('\n')
+		if err != nil {
+			return
+		}
+		switch strings.ToUpper(strings.TrimSpace(choice)) {
+		case "1", "I", "INSTALL":
+			if hasInstaller {
+				actionInstallToDisk(reader)
+			} else {
+				fmt.Printf("\n%s[!] Installer utility '/usr/local/bin/axonwall-install' is not present on this system.%s\n", colorRed, colorReset)
+				pause(reader)
+			}
+		case "2", "L", "LOG":
+			clearScreen()
+			fmt.Println("=== Last Installation Log (/var/log/axonwall-install.log) ===")
+			if data, readErr := os.ReadFile("/var/log/axonwall-install.log"); readErr != nil {
+				fmt.Printf("\n%sNo installation log found at /var/log/axonwall-install.log (%v).%s\n", colorYellow, readErr, colorReset)
+			} else {
+				lines := strings.Split(strings.TrimRight(string(data), "\r\n"), "\n")
+				start := 0
+				if len(lines) > 60 {
+					start = len(lines) - 60
+					fmt.Printf("%s(Showing last 60 of %d lines)%s\n\n", colorDim, len(lines), colorReset)
+				}
+				for _, line := range lines[start:] {
+					fmt.Println(line)
+				}
+			}
+			pause(reader)
+		case "0", "B", "Q", "":
+			return
+		default:
+			fmt.Println("Invalid selection. Press [Enter] to continue...")
+			_, _ = reader.ReadString('\n')
+		}
+	}
 }
 
 func pause(reader *bufio.Reader) {
@@ -2588,7 +2734,7 @@ func flushSSSDCache() {
 	}
 	_ = exec.Command(sssCacheBin, "-u", "admin").Run()
 	_ = exec.Command(sssCacheBin, "-E").Run()
-	_ = exec.Command("systemctl", "try-restart", "sssd").Run()
+	_ = exec.Command("systemctl", "--no-ask-password", "try-restart", "sssd").Run()
 }
 
 func updateSambaUser(username, password string) bool {
@@ -2742,7 +2888,7 @@ func actionResetAdminPassword(reader *bufio.Reader) {
 
 	// 6. Restart Web UI to apply new credentials
 	fmt.Println("Restarting Web UI to apply new credentials...")
-	_ = exec.Command("systemctl", "restart", "axonwall-ui").Run()
+	_ = exec.Command("systemctl", "--no-ask-password", "restart", "axonwall-ui").Run()
 	fmt.Printf("%s[✓] Web UI reloaded.%s\n", colorGreen, colorReset)
 
 	pause(reader)
@@ -2790,7 +2936,7 @@ func actionResetMFA(reader *bufio.Reader) {
 		stripMfaFromEnv("/etc/axonwall/axonwall.env", false)
 
 		fmt.Printf("\n%s[✓] MFA enforcement removed. Admin login will now only require username/password.%s\n", colorGreen, colorReset)
-		_ = exec.Command("systemctl", "restart", "axonwall-ui").Run()
+		_ = exec.Command("systemctl", "--no-ask-password", "restart", "axonwall-ui").Run()
 	} else {
 		fmt.Println("Cancelled.")
 	}
@@ -3070,18 +3216,13 @@ func actionRestartServices(reader *bufio.Reader) {
 	case "k3s-storage":
 		fmt.Println("Restarting K3s + OpenZFS Storage Host services...")
 		k3sUnit := "k3s"
-		if data, err := os.ReadFile("/etc/axonwall/.k3s-edition"); err == nil && strings.Contains(string(data), "K3S_ROLE=agent") ||
-			strings.Contains(func() string { b, _ := os.ReadFile("/etc/axonwall/.k3s-edition"); return string(b) }(), "K3S_ROLE='agent'") {
+		if isK3sAgentHost() {
 			k3sUnit = "k3s-agent"
-		} else if _, err := os.Stat("/etc/systemd/system/k3s-agent.service"); err == nil {
-			if _, srvErr := os.Stat("/etc/systemd/system/k3s.service"); srvErr != nil {
-				k3sUnit = "k3s-agent"
-			}
 		}
-		services = []string{"axonwalld", k3sUnit}
+		services = []string{k3sUnit}
 	case "vault":
 		fmt.Println("Restarting Axonwall Vault S3 Storage services...")
-		services = []string{"axonwalld", "axonwall-vault"}
+		services = []string{"seaweedfs"}
 	default:
 		fmt.Println("Restarting axonwalld, axonwall-ui, and axonwall-controller...")
 		services = []string{"axonwalld", "axonwall-ui", "axonwall-controller", "nftables", "slapd", "sssd"}
@@ -3089,7 +3230,7 @@ func actionRestartServices(reader *bufio.Reader) {
 
 	for _, s := range services {
 		fmt.Printf("Restarting %s... ", s)
-		cmd := exec.Command("systemctl", "restart", s)
+		cmd := exec.Command("systemctl", "--no-ask-password", "restart", s)
 		if err := cmd.Run(); err == nil {
 			fmt.Printf("%s[OK]%s\n", colorGreen, colorReset)
 		} else {
@@ -3158,6 +3299,8 @@ func actionEditYamlConfigs(reader *bufio.Reader) {
 		"ha",
 		"storage",
 		"k3s",
+		"virt",
+		"vigilante",
 	}
 	for i, d := range domains {
 		path := fmt.Sprintf("/etc/axonwall/%s.yaml", d)
@@ -3172,7 +3315,7 @@ func actionEditYamlConfigs(reader *bufio.Reader) {
 	fmt.Println("  [D] Run `axonwallctl diff`")
 	fmt.Println("  [A] Run `axonwallctl apply`")
 	fmt.Println("  [Q] Return to Console Menu")
-	fmt.Print("\nSelect file [1-10] to edit or action [V/D/A/Q]: ")
+	fmt.Printf("\nSelect file [1-%d] to edit or action [V/D/A/Q]: ", len(domains))
 
 	choice, _ := reader.ReadString('\n')
 	choice = strings.TrimSpace(choice)
@@ -3351,11 +3494,21 @@ func main() {
 			case "4":
 				actionResetAdminPassword(reader)
 			case "5":
-				actionResetMFA(reader)
+				if isAxonwallFirewallMenuAvailable() {
+					actionResetMFA(reader)
+				} else {
+					fmt.Println("Invalid selection. Press [Enter] to continue...")
+					_, _ = reader.ReadString('\n')
+				}
 			case "6":
 				actionDiagnostics(reader)
 			case "7":
-				actionDisplayQRCode(reader)
+				if isAxonwallFirewallMenuAvailable() {
+					actionDisplayQRCode(reader)
+				} else {
+					fmt.Println("Invalid selection. Press [Enter] to continue...")
+					_, _ = reader.ReadString('\n')
+				}
 			case "8":
 				actionRestartServices(reader)
 			case "9":
@@ -3366,7 +3519,7 @@ func main() {
 				if strings.ToLower(strings.TrimSpace(ans)) == "y" {
 					fmt.Println("Rebooting appliance...")
 					// Try OpenRC / systemctl / standard reboot
-					_ = exec.Command("systemctl", "reboot").Run()
+					_ = exec.Command("systemctl", "--no-ask-password", "reboot").Run()
 					_ = exec.Command("/sbin/reboot").Run()
 					_ = exec.Command("reboot").Run()
 					// Block while system shuts down
@@ -3380,7 +3533,7 @@ func main() {
 				if strings.ToLower(strings.TrimSpace(ans)) == "y" {
 					fmt.Println("Powering off...")
 					// Try OpenRC / systemctl / poweroff
-					_ = exec.Command("systemctl", "poweroff").Run()
+					_ = exec.Command("systemctl", "--no-ask-password", "poweroff").Run()
 					_ = exec.Command("/sbin/poweroff").Run()
 					_ = exec.Command("poweroff").Run()
 					_ = exec.Command("/sbin/halt", "-p").Run()
@@ -3390,26 +3543,60 @@ func main() {
 						time.Sleep(1 * time.Second)
 					}
 				}
-			case "12", "I", "INSTALL":
-				actionInstallToDisk(reader)
+			case "12":
+				if isLiveMode() {
+					actionInstallToDisk(reader)
+				} else {
+					actionAdvancedMenu(reader)
+				}
+			case "X", "ADV", "ADVANCED":
+				if !isLiveMode() {
+					actionAdvancedMenu(reader)
+				} else {
+					fmt.Println("Invalid selection. Press [Enter] to continue...")
+					_, _ = reader.ReadString('\n')
+				}
+			case "I", "INSTALL":
+				if isLiveMode() {
+					actionInstallToDisk(reader)
+				} else {
+					fmt.Printf("\n%s[!] This system is currently booted into an installed Axonwall instance.%s\n", colorYellow+colorBold, colorReset)
+					fmt.Printf("    To access the Disk Installer Utility, open %s[12] Advanced & Recovery Menu%s.\n", colorBold, colorReset)
+					pause(reader)
+				}
 			case "S", "STATUS":
 				actionApplianceEditionStatus(reader)
 			case "T", "TUI":
-				clearScreen()
-				cmd := exec.Command("/usr/local/bin/axonwall-tui")
-				cmd.Stdin = os.Stdin
-				cmd.Stdout = os.Stdout
-				cmd.Stderr = os.Stderr
-				_ = cmd.Run()
+				if isAxonwallFirewallMenuAvailable() {
+					clearScreen()
+					cmd := exec.Command("/usr/local/bin/axonwall-tui")
+					cmd.Stdin = os.Stdin
+					cmd.Stdout = os.Stdout
+					cmd.Stderr = os.Stderr
+					_ = cmd.Run()
+				} else {
+					fmt.Println("Invalid selection. Press [Enter] to continue...")
+					_, _ = reader.ReadString('\n')
+				}
 			case "N", "NASTYMAP":
-				clearScreen()
-				cmd := exec.Command("/usr/local/bin/axonwall-tui", "--tab", "nastymap")
-				cmd.Stdin = os.Stdin
-				cmd.Stdout = os.Stdout
-				cmd.Stderr = os.Stderr
-				_ = cmd.Run()
+				if isAxonwallFirewallMenuAvailable() {
+					clearScreen()
+					cmd := exec.Command("/usr/local/bin/axonwall-tui", "--tab", "nastymap")
+					cmd.Stdin = os.Stdin
+					cmd.Stdout = os.Stdout
+					cmd.Stderr = os.Stderr
+					_ = cmd.Run()
+				} else {
+					fmt.Println("Invalid selection. Press [Enter] to continue...")
+					_, _ = reader.ReadString('\n')
+				}
 			case "A", "ANTILOCKOUT", "LOCKOUT":
-				actionManageAntiLockout(reader)
+				if isAxonwallFirewallMenuAvailable() {
+					actionManageAntiLockout(reader)
+				} else {
+					fmt.Println("Invalid selection. Press [Enter] to continue...")
+					_, _ = reader.ReadString('\n')
+				}
 			case "E", "YAML":
 				actionEditYamlConfigs(reader)
 			case "0":
@@ -3422,4 +3609,13 @@ func main() {
 			}
 		}
 	}
+}
+
+func unitExistsAny(paths []string) bool {
+	for _, p := range paths {
+		if _, err := os.Stat(p); err == nil {
+			return true
+		}
+	}
+	return false
 }

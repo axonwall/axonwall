@@ -72,13 +72,8 @@ export function simulatePacket(query: PacketTracerQuery, state: DesiredState): S
       .map((i) => i.ipv4Address!.split('/')[0]),
   );
 
-  // 2. Anti-Lockout check (never applies on WAN interfaces)
+  // 2. Anti-Lockout check (matches compileNftables: uses configured antiLockout interfaces, never WAN)
   const antiLockoutIfaces = new Set(normalizeAntiLockoutInterfaces(state.system.antiLockout));
-  for (const iface of state.interfaces) {
-    if (iface.enabled && inferInterfaceRole(iface) === 'lan') {
-      antiLockoutIfaces.add(iface.name);
-    }
-  }
   if (!isWanIngress && state.system.antiLockout?.enabled && antiLockoutIfaces.has(inIface.name)) {
     if (
       query.protocol === 'tcp' &&
@@ -147,8 +142,10 @@ export function simulatePacket(query: PacketTracerQuery, state: DesiredState): S
 
   for (const rule of applicableRules) {
     if (!matchProtocol(rule.protocol, query.protocol)) continue;
-    if (!matchAddress(rule.source, query.srcIp, state.aliases, state.interfaces)) continue;
-    if (!matchAddress(rule.destination, currentDstIp, state.aliases, state.interfaces)) continue;
+    const srcMatch = matchAddress(rule.source, query.srcIp, state.aliases, state.interfaces);
+    if (rule.invertSource ? srcMatch : !srcMatch) continue;
+    const dstMatch = matchAddress(rule.destination, currentDstIp, state.aliases, state.interfaces);
+    if (rule.invertDestination ? dstMatch : !dstMatch) continue;
     if (!matchPort(rule.sourcePort, query.srcPort, state.aliases)) continue;
     if (!matchPort(rule.destinationPort, currentDstPort, state.aliases)) continue;
 
@@ -288,19 +285,29 @@ function matchPort(rulePort: string, packetPort: number, aliases: Alias[]): bool
   if (!rulePort || rulePort === 'any' || rulePort === '') return true;
   if (rulePort.startsWith('$')) {
     const aliasName = rulePort.slice(1);
-    const alias = aliases.find((a) => a.name === aliasName);
-    if (!alias) return false;
+    const alias = aliases.find((a) => a.name.toLowerCase() === aliasName.toLowerCase());
+    if (!alias || !alias.enabled) return false;
     return alias.entries.some((entry) => matchSinglePort(entry, packetPort));
   }
   return matchSinglePort(rulePort, packetPort);
 }
 
 function matchSinglePort(spec: string, port: number): boolean {
-  if (spec.includes('-')) {
-    const [start, end] = spec.split('-').map((s) => Number.parseInt(s.trim(), 10));
+  const parts = spec.split(',').map((s) => s.trim()).filter(Boolean);
+  if (parts.length > 1) {
+    return parts.some((part) => matchSinglePort(part, port));
+  }
+  const trimmed = parts[0] ?? '';
+  if (!trimmed || trimmed === 'any') return true;
+  if (trimmed.includes(':')) {
+    const [start, end] = trimmed.split(':').map((s) => Number.parseInt(s.trim(), 10));
     return port >= start && port <= end;
   }
-  return Number.parseInt(spec, 10) === port;
+  if (trimmed.includes('-')) {
+    const [start, end] = trimmed.split('-').map((s) => Number.parseInt(s.trim(), 10));
+    return port >= start && port <= end;
+  }
+  return Number.parseInt(trimmed, 10) === port;
 }
 
 function isIpInCidr(ip: string, cidr: string): boolean {

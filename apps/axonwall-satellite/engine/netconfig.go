@@ -135,6 +135,11 @@ func (e *EdgeNetworkEngine) ConfigureInterface(spec EdgeInterfaceSpec) error {
 
 	dev := strings.TrimSpace(spec.Device)
 
+	// 0. Create 802.1Q VLAN subinterface (<parent>.<vlanId>) if absent before setting MTU/addresses
+	if err := e.ensureVlanSubinterface(dev); err != nil {
+		return err
+	}
+
 	// 1. Set MTU via /sys/class/net/<dev>/mtu if specified
 	// A-L36: the old code discarded the write, so a hub-pushed MTU
 	// the kernel refused was acked as configured.
@@ -345,6 +350,84 @@ func setInterfaceFlags(dev string, up bool) error {
 	_, _, errno = syscall.Syscall(syscall.SYS_IOCTL, uintptr(fd), uintptr(syscall.SIOCSIFFLAGS), uintptr(unsafe.Pointer(&ifr)))
 	if errno != 0 {
 		return errno
+	}
+	return nil
+}
+
+func parseVlanDeviceName(dev string) (parent string, vlanID uint16, isVlan bool) {
+	dot := strings.LastIndex(dev, ".")
+	if dot <= 0 || dot >= len(dev)-1 {
+		return "", 0, false
+	}
+	vid, err := strconv.Atoi(dev[dot+1:])
+	if err != nil || vid < 1 || vid > 4094 {
+		return "", 0, false
+	}
+	return dev[:dot], uint16(vid), true
+}
+
+func buildCreateVlanLinkNetlinkMessage(parentIndex int, vlanDev string, vlanID uint16) []byte {
+	const (
+		iflaIfname   = 3
+		iflaLink     = 5
+		iflaLinkInfo = 18
+		iflaInfoKind = 1
+		iflaInfoData = 2
+		iflaVlanID   = 1
+		nlaFNested   = 0x8000
+	)
+	// nlmsghdr (16B) + ifinfomsg (16B)
+	msg := make([]byte, 32)
+	msg = addRouteAttr(msg, iflaIfname, append([]byte(vlanDev), 0))
+	var linkIdx [4]byte
+	binary.NativeEndian.PutUint32(linkIdx[:], uint32(parentIndex))
+	msg = addRouteAttr(msg, iflaLink, linkIdx[:])
+
+	var vidBytes [2]byte
+	binary.NativeEndian.PutUint16(vidBytes[:], vlanID)
+	infoData := addRouteAttr(nil, iflaVlanID, vidBytes[:])
+	linkInfo := addRouteAttr(nil, iflaInfoKind, []byte("vlan\x00"))
+	linkInfo = addRouteAttr(linkInfo, iflaInfoData|nlaFNested, infoData)
+	msg = addRouteAttr(msg, iflaLinkInfo|nlaFNested, linkInfo)
+
+	binary.NativeEndian.PutUint32(msg[0:4], uint32(len(msg)))
+	binary.NativeEndian.PutUint16(msg[4:6], uint16(syscall.RTM_NEWLINK))
+	binary.NativeEndian.PutUint16(msg[6:8], uint16(syscall.NLM_F_REQUEST|syscall.NLM_F_CREATE|syscall.NLM_F_EXCL|syscall.NLM_F_ACK))
+	binary.NativeEndian.PutUint32(msg[8:12], nlSeq.Add(1))
+	binary.NativeEndian.PutUint32(msg[12:16], uint32(os.Getpid()))
+	return msg
+}
+
+func (e *EdgeNetworkEngine) ensureVlanSubinterface(dev string) error {
+	parent, vid, isVlan := parseVlanDeviceName(dev)
+	if !isVlan {
+		return nil
+	}
+	if _, err := net.InterfaceByName(dev); err == nil {
+		return nil
+	}
+	if e.SysClassNetDir != "" {
+		if _, err := os.Stat(filepath.Join(e.SysClassNetDir, dev)); err == nil {
+			return nil
+		}
+	}
+	parentIface, err := net.InterfaceByName(parent)
+	if err != nil {
+		return fmt.Errorf("VLAN parent interface %q does not exist for %s: %w", parent, dev, err)
+	}
+	_ = setInterfaceFlags(parent, true)
+	nlMsg := buildCreateVlanLinkNetlinkMessage(parentIface.Index, dev, vid)
+	if nlErr := sendNetlinkRouteMessage(nlMsg); nlErr != nil && !errors.Is(nlErr, syscall.EEXIST) {
+		if ipBin, lookErr := exec.LookPath("ip"); lookErr == nil {
+			if out, cmdErr := exec.Command(ipBin, "link", "add", "link", parent, "name", dev, "type", "vlan", "id", strconv.Itoa(int(vid))).CombinedOutput(); cmdErr != nil {
+				if _, statErr := net.InterfaceByName(dev); statErr != nil {
+					return fmt.Errorf("failed to create 802.1Q VLAN interface %s (parent %s, vlan %d): netlink: %v; ip fallback: %w (%s)",
+						dev, parent, vid, nlErr, cmdErr, strings.TrimSpace(string(out)))
+				}
+			}
+		} else {
+			return fmt.Errorf("failed to create 802.1Q VLAN interface %s via netlink: %w", dev, nlErr)
+		}
 	}
 	return nil
 }

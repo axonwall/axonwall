@@ -186,7 +186,7 @@ _axonwall_tui_completion() {
     'plugins:Core Appliance Roles, Extension Plugins & Oh My Zsh Shell Config'
     'shell:ZSH, Oh My Zsh, Starship & VIM Workstation Plugin Control'
     'nastymap:NastyMap Interactive Nmap Scanner, Topology & Host Inventory'
-    'cli_ops:CLI Ops Toolkit (btop, slurm, iftop, iotop, sysstat, dig, nft, zpool, kubectl)'
+    'cli_ops:CLI Ops Toolkit (btop, slurm, iftop, iotop, sysstat, dig, nft, zpool, kubectl, k9s)'
     'cli-tools:Alias for cli_ops'
     'users:OpenLDAP Directory & Local OS Users'
     'gitops:Etckeeper /etc Git Revision History'

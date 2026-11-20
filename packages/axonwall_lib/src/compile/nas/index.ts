@@ -305,12 +305,20 @@ export function compileLioTargetSaveconfig(nas?: NasConfig): string {
   );
 }
 
+function escapeEnvDoubleQuoted(v?: string): string {
+  return sanitizeIniVal(v)
+    .replace(/\\/g, '\\\\')
+    .replace(/"/g, '\\"')
+    .replace(/\$/g, '\\$')
+    .replace(/`/g, '\\`');
+}
+
 export function compileS3MinioEnv(nas?: NasConfig): string {
   const s3 = nas?.s3;
   if (!s3?.enabled) return '';
-  const rootDir = sanitizeIniVal(s3.rootDataset || '/mnt/tank/s3');
-  const accessKey = sanitizeIniVal(s3.accessKey || 'axonwall-admin');
-  const secretKey = sanitizeIniVal(s3.secretKey || '');
+  const rootDir = escapeEnvDoubleQuoted(s3.rootDataset || '/mnt/tank/s3');
+  const accessKey = escapeEnvDoubleQuoted(s3.accessKey || 'axonwall-admin');
+  const secretKey = escapeEnvDoubleQuoted(s3.secretKey || '');
   return [
     '# Axonwall Auto-Generated S3 Object Storage (MinIO) Configuration',
     `MINIO_VOLUMES="${rootDir}"`,

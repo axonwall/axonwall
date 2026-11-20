@@ -2,7 +2,7 @@
 
 import { getSession } from './auth';
 import { assertActionPermitted } from './auth-guard';
-import { callAgentApi } from './agent-client';
+import { callAgentApi, callAgentApiResponse } from './agent-client';
 import { invalidateDesiredStateCache } from './agent';
 
 export interface ExtensionPluginLiveStatus {
@@ -66,7 +66,7 @@ export async function executePluginAction(
     };
   }
 
-  const res = await callAgentApi<PluginActionResult>(
+  const res = await callAgentApiResponse<PluginActionResult>(
     '/v1/system/plugins/action',
     'POST',
     { pluginId, action },

@@ -44,6 +44,58 @@ die() { echo "vault-firstboot: ERROR: $*" >&2; exit 1; }
 
 [ -f "$ENV_FILE" ] && . "$ENV_FILE"
 
+if command -v plymouth >/dev/null 2>&1 && plymouth --ping 2>/dev/null; then
+    plymouth display-message --text="Provisioning Axonwall Vault Appliance..." 2>/dev/null || true
+fi
+
+# --- 0. Appliance credentials verification ---
+mkdir -p "$CONF_DIR" /var/lib/axonwall/etc-axonwall
+if [ ! -s "${CONF_DIR}/admin.env" ] && [ ! -s "${CONF_DIR}/initial-admin-password" ]; then
+    if [ -s "/var/lib/axonwall/etc-axonwall/initial-admin-password" ]; then
+        cp -f /var/lib/axonwall/etc-axonwall/initial-admin-password "${CONF_DIR}/initial-admin-password"
+        chmod 0600 "${CONF_DIR}/initial-admin-password"
+    elif [ -s "/var/lib/axonwall/etc-axonwall/admin.env" ]; then
+        cp -f /var/lib/axonwall/etc-axonwall/admin.env "${CONF_DIR}/admin.env"
+        chmod 0600 "${CONF_DIR}/admin.env"
+    else
+        log "no administrator credentials found; establishing default factory credentials (admin / axonwall)"
+        printf 'axonwall\n' > "${CONF_DIR}/initial-admin-password"
+        chmod 0600 "${CONF_DIR}/initial-admin-password"
+        cp -f "${CONF_DIR}/initial-admin-password" /var/lib/axonwall/etc-axonwall/initial-admin-password 2>/dev/null || true
+        chmod 0600 /var/lib/axonwall/etc-axonwall/initial-admin-password 2>/dev/null || true
+        if command -v chpasswd >/dev/null 2>&1; then
+            printf 'root:axonwall\n' | chpasswd 2>/dev/null || true
+            if grep -q '^admin:' /etc/passwd 2>/dev/null; then
+                printf 'admin:axonwall\n' | chpasswd 2>/dev/null || true
+            fi
+        fi
+    fi
+fi
+
+# --- 0b. SSH host keys & baseline DHCP networking ----------------------------
+ssh-keygen -A >/dev/null 2>&1 || true
+mkdir -p /etc/systemd/network
+if ! ls /etc/systemd/network/*.network >/dev/null 2>&1; then
+    cat << 'NET_EOF' > /etc/systemd/network/20-axonwall-vault-dhcp.network
+[Match]
+Name=en* eth*
+
+[Network]
+DHCP=yes
+NET_EOF
+    chmod 0644 /etc/systemd/network/20-axonwall-vault-dhcp.network
+fi
+if [ -n "$(ip -4 -o addr show scope global 2>/dev/null || true)" ]; then
+    :
+else
+    for _nic in $(ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | cut -d@ -f1 | grep -vE '^(lo|wg.*|tailscale.*|tun.*|tap.*|veth.*|br-.*|docker.*)$' || true); do
+        ip link set up dev "$_nic" 2>/dev/null || true
+    done
+    if command -v networkctl >/dev/null 2>&1; then
+        networkctl reload >/dev/null 2>&1 || true
+    fi
+fi
+
 # D-M9 (marker): this IS the vault firstboot, so its edition is known by
 # construction. Stamp the canonical edition file (creating it if the
 # installer/builder didn't, correcting it if it disagrees) and log it.

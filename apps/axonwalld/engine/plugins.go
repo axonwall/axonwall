@@ -26,6 +26,7 @@ type PluginDefinition struct {
 	Privileges       []string        `json:"privileges"`
 	DebianPackages   []string        `json:"debianPackages"`
 	AlpinePackages   []string        `json:"alpinePackages"`
+	ArchPackages     []string        `json:"archPackages"`
 	RequiredBinaries []string        `json:"requiredBinaries"`
 	LdapIntegration  *PluginLDAPSpec `json:"ldapIntegration,omitempty"`
 }
@@ -133,13 +134,6 @@ func (pm *PluginManager) ensurePluginLDAP(pluginID string) {
 	}
 }
 
-func DetectOSFamily() string {
-	if _, err := os.Stat("/etc/alpine-release"); err == nil {
-		return "alpine"
-	}
-	return "debian"
-}
-
 func GetExtensionPluginDefinitions() []PluginDefinition {
 	return []PluginDefinition{
 		{
@@ -182,6 +176,23 @@ func GetExtensionPluginDefinitions() []PluginDefinition {
 				"git",
 				"kubectl",
 			},
+			ArchPackages: []string{
+				"zsh",
+				"vim",
+				"neovim",
+				"starship",
+				"tmux",
+				"zsh-autosuggestions",
+				"zsh-syntax-highlighting",
+				"fzf",
+				"zoxide",
+				"bat",
+				"ripgrep",
+				"fd",
+				"git",
+				"kubectl",
+				"helm",
+			},
 			RequiredBinaries: []string{"zsh", "vim", "nvim", "starship", "tmux", "kubectl", "helm"},
 		},
 		{
@@ -194,6 +205,7 @@ func GetExtensionPluginDefinitions() []PluginDefinition {
 			Privileges:       []string{"system.monitoring", "network.interfaces"},
 			DebianPackages:   []string{"nmap", "dnsutils", "net-tools", "btop", "htop", "iftop", "iotop", "slurm", "sysstat"},
 			AlpinePackages:   []string{"nmap", "bind-tools", "net-tools", "btop", "htop", "iftop", "iotop", "slurm", "sysstat"},
+			ArchPackages:     []string{"nmap", "bind", "net-tools", "btop", "htop", "iftop", "iotop", "sysstat"},
 			RequiredBinaries: []string{"nmap", "dig", "netstat", "btop", "htop", "iftop", "iostat", "mpstat"},
 		},
 		{
@@ -207,6 +219,7 @@ func GetExtensionPluginDefinitions() []PluginDefinition {
 			Privileges:       []string{"services.haproxy", "system.certificates"},
 			DebianPackages:   []string{"haproxy"},
 			AlpinePackages:   []string{"haproxy"},
+			ArchPackages:     []string{"haproxy"},
 			RequiredBinaries: []string{"haproxy"},
 		},
 		{
@@ -220,6 +233,7 @@ func GetExtensionPluginDefinitions() []PluginDefinition {
 			Privileges:       []string{"services.freeradius", "system.users"},
 			DebianPackages:   []string{"freeradius", "freeradius-ldap"},
 			AlpinePackages:   []string{"freeradius"},
+			ArchPackages:     []string{"freeradius"},
 			RequiredBinaries: []string{"freeradius"},
 			LdapIntegration: &PluginLDAPSpec{
 				EnabledByDefault:           true,
@@ -247,6 +261,7 @@ func GetExtensionPluginDefinitions() []PluginDefinition {
 			Privileges:       []string{"system.monitoring"},
 			DebianPackages:   []string{"snmpd", "snmp"},
 			AlpinePackages:   []string{"net-snmp"},
+			ArchPackages:     []string{"net-snmp"},
 			RequiredBinaries: []string{"snmpd"},
 		},
 		{
@@ -260,6 +275,7 @@ func GetExtensionPluginDefinitions() []PluginDefinition {
 			Privileges:       []string{"system.hardware", "system.power"},
 			DebianPackages:   []string{"nut-server", "nut-client"},
 			AlpinePackages:   []string{"nut"},
+			ArchPackages:     []string{"nut"},
 			RequiredBinaries: []string{"upsd"},
 		},
 		{
@@ -273,6 +289,7 @@ func GetExtensionPluginDefinitions() []PluginDefinition {
 			Privileges:       []string{"vpn.admin", "network.interfaces"},
 			DebianPackages:   []string{},
 			AlpinePackages:   []string{},
+			ArchPackages:     []string{},
 			RequiredBinaries: []string{"headscale"},
 		},
 		{
@@ -286,6 +303,7 @@ func GetExtensionPluginDefinitions() []PluginDefinition {
 			Privileges:       []string{"vpn.tailscale", "network.interfaces"},
 			DebianPackages:   []string{"tailscale"},
 			AlpinePackages:   []string{"tailscale"},
+			ArchPackages:     []string{"tailscale"},
 			RequiredBinaries: []string{"tailscaled", "tailscale"},
 		},
 		{
@@ -299,6 +317,7 @@ func GetExtensionPluginDefinitions() []PluginDefinition {
 			Privileges:       []string{"reporting.flows", "system.monitoring"},
 			DebianPackages:   []string{"ntopng"},
 			AlpinePackages:   []string{"ntopng"},
+			ArchPackages:     []string{"ntopng"},
 			RequiredBinaries: []string{"ntopng"},
 		},
 		{
@@ -312,6 +331,7 @@ func GetExtensionPluginDefinitions() []PluginDefinition {
 			Privileges:       []string{"vpn.admin", "network.interfaces"},
 			DebianPackages:   []string{"wireguard-tools"},
 			AlpinePackages:   []string{"rosenpass", "wireguard-tools"},
+			ArchPackages:     []string{"rosenpass", "wireguard-tools"},
 			RequiredBinaries: []string{"rosenpass", "wg"},
 		},
 		{
@@ -326,6 +346,7 @@ func GetExtensionPluginDefinitions() []PluginDefinition {
 			Privileges:       []string{"k3s.cluster", "services.vow", "security.certificates", "services.dns"},
 			DebianPackages:   []string{"kubectl", "mkcert", "libnss3-tools", "gettext-base", "git", "curl", "jq"},
 			AlpinePackages:   []string{"kubectl", "mkcert", "nss-tools", "gettext", "git", "curl", "jq"},
+			ArchPackages:     []string{"kubectl", "helm", "mkcert", "nss", "gettext", "git", "curl", "jq"},
 			RequiredBinaries: []string{"kubectl", "helm", "mkcert", "git", "envsubst"},
 			LdapIntegration: &PluginLDAPSpec{
 				EnabledByDefault:           true,
@@ -390,6 +411,17 @@ func GetExtensionPluginDefinitions() []PluginDefinition {
 				"bpftrace",
 				"perf",
 			},
+			ArchPackages: []string{
+				"rkhunter",
+				"chkrootkit",
+				"clamav",
+				"lynis",
+				"aide",
+				"yara",
+				"bpf",
+				"bpftrace",
+				"perf",
+			},
 			RequiredBinaries: []string{"rkhunter", "chkrootkit", "yara", "unhide", "debsums"},
 		},
 		{
@@ -404,6 +436,7 @@ func GetExtensionPluginDefinitions() []PluginDefinition {
 			Privileges:       []string{"system.ai", "security.forensics", "services.dns"},
 			DebianPackages:   []string{"nodejs", "git", "curl", "jq", "sqlite3"},
 			AlpinePackages:   []string{"nodejs", "git", "curl", "jq", "sqlite"},
+			ArchPackages:     []string{"nodejs", "git", "curl", "jq", "sqlite"},
 			RequiredBinaries: []string{"node", "git"},
 			LdapIntegration: &PluginLDAPSpec{
 				EnabledByDefault:           true,
@@ -432,6 +465,21 @@ func GetExtensionPluginDefinitions() []PluginDefinition {
 				},
 			},
 		},
+		{
+			ID:               "ebpf-threat-harvester",
+			Name:             "eBPF Threat-LLM Harvester (Blackbox)",
+			Version:          "1.0.0",
+			Category:         "extension",
+			DefaultEnabled:   false,
+			Description:      "Extreme multi-plane CO-RE eBPF flight recorder (tcx ingress/egress, socket_cookie + cgroup_id process/memfd lineage, and guarded TLS uprobes) that correlates Gold honeypot/LSM and Silver IDS/XDP oracles into scrubbed SFT/RLVR Causal Episode JSONL and Apache Parquet datasets for custom Threat Detection LLMs.",
+			Author:           "Axonwall Core",
+			SystemdUnits:     []string{},
+			Privileges:       []string{"security.forensics", "system.monitoring", "system.ai"},
+			DebianPackages:   []string{},
+			AlpinePackages:   []string{},
+			ArchPackages:     []string{},
+			RequiredBinaries: []string{},
+		},
 	}
 }
 
@@ -446,7 +494,7 @@ func NewPluginManager(baseDataDir string) *PluginManager {
 		installedMap: make(map[string]string),
 		disabledMap:  make(map[string]bool),
 	}
-	if pm.osFamily == "debian" {
+	if pm.osFamily == "debian" && os.Geteuid() == 0 && !strings.Contains(baseDataDir, "axonwall-plugins-test-") {
 		// Eliminate tens of thousands of fsync / ZIL commit stalls on ZFS filesystems during dpkg package extraction
 		_ = os.MkdirAll("/etc/dpkg/dpkg.cfg.d", 0755)
 		_ = os.WriteFile("/etc/dpkg/dpkg.cfg.d/force-unsafe-io", []byte("force-unsafe-io\n"), 0644)
@@ -501,6 +549,32 @@ func (pm *PluginManager) IsPluginEnabled(pluginID string) bool {
 	return pm.installedMap[pluginID] != ""
 }
 
+func packagesForOS(osFamily string, d PluginDefinition) []string {
+	switch osFamily {
+	case "alpine":
+		return d.AlpinePackages
+	case "arch":
+		if d.ArchPackages != nil {
+			return d.ArchPackages
+		}
+		return d.DebianPackages
+	default:
+		return d.DebianPackages
+	}
+}
+
+func hasPluginBinary(osFamily, bin string) bool {
+	if _, err := exec.LookPath(bin); err == nil {
+		return true
+	}
+	if bin == "freeradius" && osFamily != "debian" {
+		if _, err := exec.LookPath("radiusd"); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
 func (pm *PluginManager) ListPlugins() []PluginStatus {
 	pm.mu.RLock()
 	defer pm.mu.RUnlock()
@@ -511,15 +585,15 @@ func (pm *PluginManager) ListPlugins() []PluginStatus {
 	for _, d := range defs {
 		var missing []string
 		for _, bin := range d.RequiredBinaries {
-			if _, err := exec.LookPath(bin); err != nil {
+			if bin == "debsums" && pm.osFamily != "debian" {
+				continue
+			}
+			if !hasPluginBinary(pm.osFamily, bin) {
 				missing = append(missing, bin)
 			}
 		}
 
-		pkgs := d.DebianPackages
-		if pm.osFamily == "alpine" {
-			pkgs = d.AlpinePackages
-		}
+		pkgs := packagesForOS(pm.osFamily, d)
 
 		installedAt := pm.installedMap[d.ID]
 		installed := len(missing) == 0
@@ -686,9 +760,9 @@ func enablePluginUnits(def PluginDefinition) error {
 	if !systemctlAvailable() {
 		return nil
 	}
-	_ = exec.Command("systemctl", "daemon-reload").Run()
+	_ = exec.Command("systemctl", "--no-ask-password", "daemon-reload").Run()
 	for _, unit := range def.SystemdUnits {
-		if out, err := exec.Command("systemctl", "enable", "--now", unit).CombinedOutput(); err != nil {
+		if out, err := exec.Command("systemctl", "--no-ask-password", "enable", "--now", unit).CombinedOutput(); err != nil {
 			return fmt.Errorf("failed to enable unit %s: %w (output: %s)", unit, err, strings.TrimSpace(string(out)))
 		}
 		if err := exec.Command("systemctl", "is-active", "--quiet", unit).Run(); err != nil {
@@ -709,7 +783,7 @@ func disablePluginUnits(def PluginDefinition) error {
 	}
 	var errs []error
 	for _, unit := range def.SystemdUnits {
-		_ = exec.Command("systemctl", "disable", "--now", unit).Run()
+		_ = exec.Command("systemctl", "--no-ask-password", "disable", "--now", unit).Run()
 		if err := exec.Command("systemctl", "is-active", "--quiet", unit).Run(); err == nil {
 			errs = append(errs, fmt.Errorf("unit %s is still active after disable", unit))
 		}
@@ -731,7 +805,7 @@ func verifyRosenpassUnit() error {
 	if err != nil {
 		return fmt.Errorf("rosenpass unit %s is missing: %w", unitPath, err)
 	}
-	_ = exec.Command("systemctl", "daemon-reload").Run()
+	_ = exec.Command("systemctl", "--no-ask-password", "daemon-reload").Run()
 	if out, err := exec.Command("systemctl", "cat", "rosenpass.service").CombinedOutput(); err != nil {
 		return fmt.Errorf("rosenpass unit does not load: %w (output: %s)", err, strings.TrimSpace(string(out)))
 	}
@@ -782,12 +856,18 @@ func (pm *PluginManager) InstallPlugin(pluginID string) PluginActionResponse {
 		}
 	}
 
-	pkgs := target.DebianPackages
-	if pm.osFamily == "alpine" {
-		pkgs = target.AlpinePackages
-	}
+	pkgs := packagesForOS(pm.osFamily, *target)
 
 	var output strings.Builder
+
+	if pm.osFamily == "arch" && len(pkgs) > 0 {
+		if _, err := os.Stat("/var/lib/pacman/db.lck"); err == nil {
+			return PluginActionResponse{
+				Success: false,
+				Message: "Pacman database is locked (/var/lib/pacman/db.lck); another package operation is in progress",
+			}
+		}
+	}
 
 	// Upstream repository preparation hooks for plugins not hosted in base Debian repos
 	if pm.osFamily == "debian" {
@@ -831,10 +911,14 @@ func (pm *PluginManager) InstallPlugin(pluginID string) PluginActionResponse {
 
 		if len(corePkgs) > 0 {
 			var cmd *exec.Cmd
-			if pm.osFamily == "alpine" {
+			switch pm.osFamily {
+			case "alpine":
 				args := append([]string{"add", "--no-cache"}, corePkgs...)
 				cmd = exec.Command("apk", args...)
-			} else {
+			case "arch":
+				args := append([]string{"-Sy", "--needed", "--noconfirm"}, corePkgs...)
+				cmd = exec.Command("pacman", args...)
+			default:
 				args := append([]string{"install", "-y", "--no-install-recommends", "-o", "Dpkg::Options::=--force-unsafe-io"}, corePkgs...)
 				cmd = exec.Command("apt-get", args...)
 				cmd.Env = append(os.Environ(), "DEBIAN_FRONTEND=noninteractive")
@@ -853,9 +937,12 @@ func (pm *PluginManager) InstallPlugin(pluginID string) PluginActionResponse {
 
 		for _, optPkg := range optionalPkgs {
 			var optCmd *exec.Cmd
-			if pm.osFamily == "alpine" {
+			switch pm.osFamily {
+			case "alpine":
 				optCmd = exec.Command("apk", "add", "--no-cache", optPkg)
-			} else {
+			case "arch":
+				optCmd = exec.Command("pacman", "-S", "--needed", "--noconfirm", optPkg)
+			default:
 				optCmd = exec.Command("apt-get", "install", "-y", "--no-install-recommends", "-o", "Dpkg::Options::=--force-unsafe-io", optPkg)
 				optCmd.Env = append(os.Environ(), "DEBIAN_FRONTEND=noninteractive")
 			}
@@ -910,6 +997,9 @@ func (pm *PluginManager) InstallPlugin(pluginID string) PluginActionResponse {
 	}
 	if pluginID == "eluvix" {
 		_ = os.MkdirAll("/etc/axonwall/eluvix", 0755)
+	}
+	if pluginID == "ebpf-threat-harvester" {
+		_ = os.MkdirAll("/var/lib/axonwall/threat-corpus", 0750)
 	}
 
 	pm.mu.Lock()
@@ -969,19 +1059,29 @@ func (pm *PluginManager) UninstallPlugin(pluginID string) PluginActionResponse {
 		}
 	}
 
-	pkgs := target.DebianPackages
-	if pm.osFamily == "alpine" {
-		pkgs = target.AlpinePackages
-	}
+	pkgs := packagesForOS(pm.osFamily, *target)
 
 	var output strings.Builder
 
+	if pm.osFamily == "arch" && len(pkgs) > 0 {
+		if _, err := os.Stat("/var/lib/pacman/db.lck"); err == nil {
+			return PluginActionResponse{
+				Success: false,
+				Message: "Pacman database is locked (/var/lib/pacman/db.lck); another package operation is in progress",
+			}
+		}
+	}
+
 	if len(pkgs) > 0 {
 		var cmd *exec.Cmd
-		if pm.osFamily == "alpine" {
+		switch pm.osFamily {
+		case "alpine":
 			args := append([]string{"del"}, pkgs...)
 			cmd = exec.Command("apk", args...)
-		} else {
+		case "arch":
+			args := append([]string{"-Rs", "--noconfirm"}, pkgs...)
+			cmd = exec.Command("pacman", args...)
+		default:
 			args := append([]string{"remove", "-y", "-o", "Dpkg::Options::=--force-unsafe-io"}, pkgs...)
 			cmd = exec.Command("apt-get", args...)
 			cmd.Env = append(os.Environ(), "DEBIAN_FRONTEND=noninteractive")
@@ -1132,6 +1232,20 @@ func (pm *PluginManager) ReconfigurePlugin(pluginID string) PluginActionResponse
 		return PluginActionResponse{
 			Success: true,
 			Message: "Eluvix Sovereign AI Router, Enterprise Tokenomics & Prompt/PII Guard enabled; configuration provisioned.",
+		}
+	}
+	if pluginID == "ebpf-threat-harvester" {
+		_ = os.MkdirAll("/var/lib/axonwall/threat-corpus", 0750)
+		pm.mu.Lock()
+		delete(pm.disabledMap, pluginID)
+		if pm.installedMap[pluginID] == "" {
+			pm.installedMap[pluginID] = time.Now().UTC().Format(time.RFC3339)
+		}
+		pm.saveState()
+		pm.mu.Unlock()
+		return PluginActionResponse{
+			Success: true,
+			Message: "eBPF Threat-LLM Harvester (Blackbox) CO-RE telemetry spool configured.",
 		}
 	}
 	pm.ensurePluginLDAP(pluginID)
@@ -1414,9 +1528,14 @@ setopt HIST_IGNORE_SPACE
 if [[ -f /usr/share/zsh-autosuggestions/zsh-autosuggestions.zsh ]]; then
   ZSH_AUTOSUGGEST_HIGHLIGHT_STYLE='fg=242'
   source /usr/share/zsh-autosuggestions/zsh-autosuggestions.zsh
+elif [[ -f /usr/share/zsh/plugins/zsh-autosuggestions/zsh-autosuggestions.zsh ]]; then
+  ZSH_AUTOSUGGEST_HIGHLIGHT_STYLE='fg=242'
+  source /usr/share/zsh/plugins/zsh-autosuggestions/zsh-autosuggestions.zsh
 fi
 if [[ -f /usr/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh ]]; then
   source /usr/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh
+elif [[ -f /usr/share/zsh/plugins/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh ]]; then
+  source /usr/share/zsh/plugins/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh
 fi
 
 if command -v starship >/dev/null 2>&1; then

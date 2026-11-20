@@ -17,7 +17,7 @@ export default function GhostInTheRingDocsPage() {
       <div className="space-y-4 border-b border-slate-800/80 pb-8">
         <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-950/60 border border-emerald-500/30 text-emerald-400 text-xs font-semibold">
           <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-          Ring-0 Kernel Telemetry &amp; Host Malware Defense Suite • v0.11.64
+          Ring-0 Kernel Telemetry &amp; Host Malware Defense Suite • v0.11.68
         </div>
         <h1 className="text-3xl sm:text-5xl font-extrabold text-white tracking-tight">
           Host Malware &amp; Ghost-in-the-Ring Kernel Rootkit Hunter

@@ -36,22 +36,51 @@ if [ -f "$AGENT_FLAG" ]; then
     while [ "$_elapsed" -lt 60 ]; do
         _agent_live=0
         if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet k3s-agent; then
-            _agent_live=1
-        elif command -v rc-service >/dev/null 2>&1 && rc-service k3s-agent status >/dev/null 2>&1; then
-            _agent_live=1
-        fi
-        if [ "$_agent_live" -eq 1 ] && agent_node_joined; then
-            _node="$(hostname 2>/dev/null || echo "?")"
-            log "k3s-agent is active and node '${_node}' is registered with the cluster"
-            # Ready status is informative, not gating: a registered node
-            # can legitimately be NotReady while the CNI comes up.
-            _ready="unknown"
-            if [ -n "$_node" ] && [ "$_node" != "?" ]; then
-                _ready="$("$K3S_BIN" kubectl --kubeconfig="$KUBELET_KUBECONFIG" get node "$_node" -o 'jsonpath={.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || echo unknown)"
+            _pid1="$(systemctl show -p MainPID --value k3s-agent 2>/dev/null || echo 0)"
+            sleep 3
+            _elapsed=$(( _elapsed + 3 ))
+            _pid2="$(systemctl show -p MainPID --value k3s-agent 2>/dev/null || echo 0)"
+            if systemctl is-active --quiet k3s-agent && [ -n "$_pid1" ] && [ "$_pid1" != "0" ] && [ "$_pid1" = "$_pid2" ]; then
+                if command -v curl >/dev/null 2>&1; then
+                    if curl -fsS --max-time 2 http://127.0.0.1:10248/healthz >/dev/null 2>&1; then
+                        _agent_live=1
+                        _live_msg="k3s-agent is active, stable (PID=$_pid2), and kubelet /healthz is ready"
+                    fi
+                else
+                    _agent_live=1
+                    _live_msg="k3s-agent is active and stable (PID=$_pid2)"
+                fi
             fi
-            log "node Ready status: ${_ready:-unknown}"
-            rm -f "$MARKER"
-            exit 0
+        elif command -v rc-service >/dev/null 2>&1 && rc-service k3s-agent status >/dev/null 2>&1; then
+            sleep 3
+            _elapsed=$(( _elapsed + 3 ))
+            if rc-service k3s-agent status >/dev/null 2>&1; then
+                _agent_live=1
+                _live_msg="k3s-agent (OpenRC) is active and sustained"
+            fi
+        fi
+        # D-M4 + main: liveness is main's PID-stability / kubelet healthz
+        # (systemd) or sustained-status (OpenRC) check; the marker clears
+        # only once the node is ALSO proven registered with the cluster
+        # (agent_node_joined above). Liveness alone is not a join proof.
+        if [ "$_agent_live" -eq 1 ]; then
+            if [ "${_logged_live:-0}" -eq 0 ]; then
+                log "$_live_msg"
+                _logged_live=1
+            fi
+            if agent_node_joined; then
+                _node="$(hostname 2>/dev/null || echo "?")"
+                log "node '${_node}' is registered with the cluster"
+                # Ready status is informative, not gating: a registered node
+                # can legitimately be NotReady while the CNI comes up.
+                _ready="unknown"
+                if [ -n "$_node" ] && [ "$_node" != "?" ]; then
+                    _ready="$("$K3S_BIN" kubectl --kubeconfig="$KUBELET_KUBECONFIG" get node "$_node" -o 'jsonpath={.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || echo unknown)"
+                fi
+                log "node Ready status: ${_ready:-unknown}"
+                rm -f "$MARKER"
+                exit 0
+            fi
         fi
         sleep 2
         _elapsed=$(( _elapsed + 2 ))

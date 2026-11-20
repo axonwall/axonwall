@@ -78,6 +78,7 @@ import {
 import { probeServiceSla, AttackDefenseRunner } from '../engine/ad-runner.js';
 import { generateBinaryTriageReport } from '../engine/wasm.js';
 import fs from 'node:fs/promises';
+import fsSync from 'node:fs';
 import {
   checkOobscanInstalled,
   runOobScan,
@@ -149,6 +150,30 @@ import { FalcoModule } from '../modules/falco/index.js';
 
 const SENSITIVE_SYSTEM_PREFIXES = ['/etc', '/root', '/var', '/proc', '/sys', '/boot', '/usr', '/dev'];
 
+function canonicalizeWithMissingTail(targetPath) {
+  const abs = path.resolve(targetPath);
+  const missingSegments = [];
+  let cursor = abs;
+  while (true) {
+    try {
+      const realCursor = fsSync.realpathSync(cursor);
+      return missingSegments.length > 0
+        ? path.resolve(realCursor, ...missingSegments.reverse())
+        : realCursor;
+    } catch (err) {
+      if (err && err.code !== 'ENOENT') {
+        throw err;
+      }
+      const parent = path.dirname(cursor);
+      if (parent === cursor) {
+        return abs;
+      }
+      missingSegments.push(path.basename(cursor));
+      cursor = parent;
+    }
+  }
+}
+
 function assertConfinedMcpPath(inputPath, label = 'path', allowedBaseDir = null) {
   if (!inputPath || typeof inputPath !== 'string') {
     throw new Error(`Argument '${label}' must be a non-empty string`);
@@ -158,22 +183,29 @@ function assertConfinedMcpPath(inputPath, label = 'path', allowedBaseDir = null)
     throw new Error(`Refusing '${label}': path traversal ('..') is not allowed`);
   }
   const resolved = path.resolve(inputPath);
+  const realResolved = canonicalizeWithMissingTail(resolved);
   for (const prefix of SENSITIVE_SYSTEM_PREFIXES) {
-    if (resolved === prefix || resolved.startsWith(`${prefix}/`)) {
+    if (
+      resolved === prefix ||
+      resolved.startsWith(`${prefix}/`) ||
+      realResolved === prefix ||
+      realResolved.startsWith(`${prefix}/`)
+    ) {
       throw new Error(`Refusing '${label}': access to sensitive system directory '${prefix}' is forbidden`);
     }
   }
   if (allowedBaseDir) {
-    return resolvePathInside(allowedBaseDir, resolved);
+    const realBase = canonicalizeWithMissingTail(allowedBaseDir);
+    return resolvePathInside(realBase, realResolved);
   }
-  const cwd = path.resolve(process.cwd());
-  const cfgDir = path.resolve(getVigilanteConfigDir());
-  const inCwd = resolved === cwd || resolved.startsWith(cwd + path.sep);
-  const inCfg = resolved === cfgDir || resolved.startsWith(cfgDir + path.sep);
+  const realCwd = canonicalizeWithMissingTail(process.cwd());
+  const realCfgDir = canonicalizeWithMissingTail(getVigilanteConfigDir());
+  const inCwd = realResolved === realCwd || realResolved.startsWith(realCwd + path.sep);
+  const inCfg = realResolved === realCfgDir || realResolved.startsWith(realCfgDir + path.sep);
   if (!inCwd && !inCfg) {
     throw new Error(`Refusing '${label}': path '${resolved}' must reside within the workspace or Vigilante config directory`);
   }
-  return resolved;
+  return realResolved;
 }
 
 function redactConfigForMcp(cfg) {
@@ -389,20 +421,15 @@ export function createVigilanteMcpServer() {
       const xmlScans = await listSavedXmlScans();
       const hostMap = new Map();
 
-      for (const scan of xmlScans) {
-        try {
-          const report = await readXmlScan(scan.filePath);
-          for (const host of report.hosts) {
-            if (!hostMap.has(host.ip) || (host.ports && host.ports.length > 0)) {
-              hostMap.set(host.ip, {
-                ...host,
-                lastSeenScan: scan.filename,
-                scanTime: report.summary?.finishedTime || scan.time
-              });
-            }
+      for (const report of xmlScans) {
+        for (const host of report.hosts || []) {
+          if (!hostMap.has(host.ip) || (host.ports && host.ports.length > 0)) {
+            hostMap.set(host.ip, {
+              ...host,
+              lastSeenScan: report.filename,
+              scanTime: report.runStats?.finished?.timestr || report.mtime
+            });
           }
-        } catch {
-          // Ignore unreadable individual scans
         }
       }
 
@@ -423,22 +450,17 @@ export function createVigilanteMcpServer() {
       const xmlScans = await listSavedXmlScans();
       const subnets = {};
 
-      for (const scan of xmlScans) {
-        try {
-          const report = await readXmlScan(scan.filePath);
-          const netTarget = report.summary?.target || 'unknown';
-          if (!subnets[netTarget]) {
-            subnets[netTarget] = {
-              target: netTarget,
-              scanFile: scan.filename,
-              scanTime: report.summary?.finishedTime || scan.time,
-              hostsCount: report.hosts.length,
-              totalOpenPorts: report.hosts.reduce((acc, h) => acc + (h.ports?.length || 0), 0),
-              hosts: report.hosts
-            };
-          }
-        } catch {
-          // Ignore
+      for (const report of xmlScans) {
+        const netTarget = report.target || 'unknown';
+        if (!subnets[netTarget]) {
+          subnets[netTarget] = {
+            target: netTarget,
+            scanFile: report.filename,
+            scanTime: report.runStats?.finished?.timestr || report.mtime,
+            hostsCount: (report.hosts || []).length,
+            totalOpenPorts: (report.hosts || []).reduce((acc, h) => acc + (h.ports?.length || 0), 0),
+            hosts: report.hosts || []
+          };
         }
       }
 
@@ -701,20 +723,23 @@ export function createVigilanteMcpServer() {
       const xmlScans = await listSavedXmlScans();
       let matchedHost = null;
 
-      for (const scan of xmlScans) {
-        try {
-          const report = await readXmlScan(scan.filePath);
-          const found = report.hosts.find(h => h.ip === targetIp || (h.hostnames && h.hostnames.includes(targetIp)));
-          if (found) {
-            matchedHost = {
-              ...found,
-              scanReport: scan.filename,
-              networkTarget: report.summary?.target
-            };
-            break;
+      for (const report of xmlScans) {
+        const found = (report.hosts || []).find((h) => {
+          if (h.ip === targetIp || h.id === targetIp) return true;
+          if (Array.isArray(h.hostnames)) {
+            return h.hostnames.some((hn) =>
+              typeof hn === 'string' ? hn === targetIp : hn?.name === targetIp
+            );
           }
-        } catch {
-          // Ignore
+          return false;
+        });
+        if (found) {
+          matchedHost = {
+            ...found,
+            scanReport: report.filename,
+            networkTarget: report.target
+          };
+          break;
         }
       }
 
@@ -2753,7 +2778,7 @@ export function createVigilanteMcpServer() {
               hostMap.set(h.ip, {
                 ...h,
                 scanSource: scan.filename,
-                networkTarget: report.summary?.target
+                networkTarget: report.target || report.summary?.target
               });
             }
           }
@@ -2765,15 +2790,24 @@ export function createVigilanteMcpServer() {
       let results = Array.from(hostMap.values());
 
       if (args.state && args.state !== 'all') {
-        results = results.filter(h => h.state === args.state);
+        results = results.filter(h => (h.status?.state || h.state) === args.state);
       }
       if (args.port) {
         const targetPort = Number(args.port);
-        results = results.filter(h => h.ports && h.ports.some(p => p.portId === targetPort && p.state === 'open'));
+        results = results.filter(h =>
+          h.ports &&
+          h.ports.some(p => (p.portid ?? p.portId ?? p.port) === targetPort && p.state === 'open')
+        );
       }
       if (args.service) {
         const targetSvc = String(args.service).toLowerCase();
-        results = results.filter(h => h.ports && h.ports.some(p => p.service && p.service.toLowerCase().includes(targetSvc)));
+        results = results.filter(h =>
+          h.ports &&
+          h.ports.some(p => {
+            const svcName = typeof p.service === 'string' ? p.service : p.service?.name;
+            return svcName && svcName.toLowerCase().includes(targetSvc);
+          })
+        );
       }
       if (args.subnet) {
         const subnetPrefix = args.subnet.split('/')[0].replace(/\.[0-9]+$/, '');
@@ -2800,7 +2834,12 @@ export function createVigilanteMcpServer() {
       for (const scan of xmlScans) {
         try {
           const report = await readXmlScan(scan.filePath);
-          const found = report.hosts.find(h => h.ip === targetHost || (h.hostnames && h.hostnames.includes(targetHost)));
+          const found = report.hosts.find(
+            h =>
+              h.ip === targetHost ||
+              h.id === targetHost ||
+              (h.hostnames && h.hostnames.some(hn => (typeof hn === 'string' ? hn : hn?.name) === targetHost))
+          );
           if (found) {
             matchedHost = found;
             matchedReport = report;
@@ -2811,17 +2850,17 @@ export function createVigilanteMcpServer() {
         }
       }
 
-      const networkTarget = matchedReport?.summary?.target || 'default';
+      const networkTarget = matchedReport?.target || matchedReport?.summary?.target || 'default';
       const evidence = await listHostEvidence(networkTarget, targetHost);
 
       const responsePayload = {
         host: targetHost,
         foundInScan: !!matchedHost,
         scanReport: matchedReport ? {
-          filename: matchedReport.summary?.scanName,
-          target: matchedReport.summary?.target,
-          args: matchedReport.summary?.nmapArgs,
-          scanTime: matchedReport.summary?.finishedTime
+          filename: matchedReport.filename || matchedReport.summary?.scanName,
+          target: matchedReport.target || matchedReport.summary?.target,
+          args: matchedReport.args || matchedReport.summary?.nmapArgs,
+          scanTime: matchedReport.runStats?.finished?.timestr || matchedReport.summary?.finishedTime
         } : null,
         nmapData: matchedHost,
         evidenceVault: evidence
@@ -2847,10 +2886,13 @@ export function createVigilanteMcpServer() {
           const report = await readXmlScan(scan.filePath);
           topology.push({
             scanFile: scan.filename,
-            targetNetwork: report.summary?.target,
-            startTime: report.summary?.startTime,
-            finishedTime: report.summary?.finishedTime,
-            hostsUp: report.summary?.hostsUp || report.hosts.filter(h => h.state === 'up').length,
+            targetNetwork: report.target || report.summary?.target,
+            startTime: report.startstr || report.summary?.startTime,
+            finishedTime: report.runStats?.finished?.timestr || report.summary?.finishedTime,
+            hostsUp:
+              report.runStats?.hosts?.up ??
+              report.summary?.hostsUp ??
+              report.hosts.filter(h => (h.status?.state || h.state) === 'up').length,
             totalHosts: report.hosts.length,
             hosts: report.hosts.map(h => ({
               ip: h.ip,
@@ -2859,9 +2901,9 @@ export function createVigilanteMcpServer() {
               vendor: h.vendor,
               os: h.osMatches?.[0]?.name || null,
               openPorts: (h.ports || []).filter(p => p.state === 'open').map(p => ({
-                port: p.portId,
+                port: p.portid ?? p.port ?? p.portId,
                 protocol: p.protocol,
-                service: p.service,
+                service: typeof p.service === 'string' ? p.service : p.service?.name,
                 product: p.product,
                 version: p.version
               }))
@@ -2935,7 +2977,12 @@ export function createVigilanteMcpServer() {
           result = await runTlsCertDump(host, port || 443);
           break;
         case 'ab':
-          result = await runBenchmark(host, { port: port || 80, path: httpPath, count: count || 100, concurrency: 10 });
+          result = await runBenchmark(host, {
+            port: port || 80,
+            isHttps: port === 443,
+            requests: count || 100,
+            concurrency: 10
+          });
           break;
         case 'arp':
           result = await runArpCheck(host);
@@ -2999,7 +3046,7 @@ export function createVigilanteMcpServer() {
       let parsed = null;
       if (scanRes.xmlFilePath) {
         try {
-          parsed = await parseNmapXml(scanRes.xmlFilePath);
+          parsed = await readXmlScan(scanRes.xmlFilePath);
         } catch {
           // Ignore
         }
@@ -3023,7 +3070,7 @@ export function createVigilanteMcpServer() {
     if (name === 'verify_evidence_signature') {
       const { filePath, signaturePath } = args;
       const safeFilePath = assertConfinedMcpPath(filePath, 'filePath');
-      const safeSigPath = signaturePath ? assertConfinedMcpPath(signaturePath, 'signaturePath') : undefined;
+      const safeSigPath = assertConfinedMcpPath(signaturePath || `${safeFilePath}.asc`, 'signaturePath');
       const verification = await verifyFileSignature(safeFilePath, safeSigPath);
 
       return {
@@ -4388,9 +4435,10 @@ ${observation ? `Observation noted: ${observation}` : ''}`;
 
     // Tool: scan_file_entropy
     if (name === 'scan_file_entropy') {
-      const targetInput = args.content
-        ? args.content
-        : (args.filePath ? assertConfinedMcpPath(args.filePath, 'filePath') : '');
+      const hasInlineContent = args.content !== undefined && args.content !== null;
+      const targetInput = hasInlineContent
+        ? Buffer.from(String(args.content), 'utf8')
+        : (args.filePath ? assertConfinedMcpPath(args.filePath, 'filePath') : Buffer.alloc(0));
       const entropyResult = calculateFileEntropy(targetInput);
       return {
         content: [{ type: 'text', text: JSON.stringify(entropyResult, null, 2) }]

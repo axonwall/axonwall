@@ -48,6 +48,7 @@ import {
   setXdpSynLimitAction,
   renderK3sBpfTokenManifestAction,
   getCurrentDesiredState,
+  applyDesiredStateAction,
   type NetworkInsightTelemetry,
   type K3sRuntimeStatus,
   type HostRootkitAuditApiResponse,
@@ -335,8 +336,12 @@ export default function EbpfObservabilityConsolePage() {
     zfsArcZilTelemetryEnabled: true,
   });
   const [savingConfig, setSavingConfig] = useState(false);
-  const [saveBanner, setSaveBanner] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
-  const { applyState } = useDesiredStateApply();
+  // C-L5: typed banner — errors render red, not emerald. Main fixed the
+  // same finding with an { ok, text } banner; this file uses main's shape.
+  // The hook is kept for its fingerprint: the APM save below threads it
+  // through applyDesiredStateAction (C-M8) instead of the hook's applyState.
+  const [saveBanner, setSaveBanner] = useState<{ ok: boolean; text: string } | null>(null);
+  const { getFingerprint, refreshFingerprint } = useDesiredStateApply();
 
   // Live telemetry states
   const [insight, setInsight] = useState<NetworkInsightTelemetry | null>(null);
@@ -427,6 +432,8 @@ export default function EbpfObservabilityConsolePage() {
         });
         await fetchAllTelemetry();
       }
+    } catch (err: any) {
+      setActionNotice({ type: 'err', text: err?.message || 'Failed to mount delegated bpffs token profile.' });
     } finally {
       setActionBusy(false);
     }
@@ -443,6 +450,8 @@ export default function EbpfObservabilityConsolePage() {
         setActionNotice({ type: 'ok', text: `Unmounted and removed bpffs token profile "${name}".` });
         await fetchAllTelemetry();
       }
+    } catch (err: any) {
+      setActionNotice({ type: 'err', text: err?.message || 'Failed to delete token profile.' });
     } finally {
       setActionBusy(false);
     }
@@ -469,6 +478,8 @@ export default function EbpfObservabilityConsolePage() {
         setXdpDropIp('');
         await fetchAllTelemetry();
       }
+    } catch (err: any) {
+      setActionNotice({ type: 'err', text: err?.message || 'Failed to program XDP_DROP entry.' });
     } finally {
       setActionBusy(false);
     }
@@ -492,6 +503,8 @@ export default function EbpfObservabilityConsolePage() {
               : `Configured XDP Ring-0 TCP SYN-flood shield at ${res.maxSynPps.toLocaleString()} PPS.`,
         });
       }
+    } catch (err: any) {
+      setActionNotice({ type: 'err', text: err?.message || 'Failed to update XDP SYN-flood rate limit.' });
     } finally {
       setActionBusy(false);
     }
@@ -508,24 +521,32 @@ export default function EbpfObservabilityConsolePage() {
         setActionNotice({ type: 'ok', text: `Removed ${ip} from XDP_DROP map.` });
         await fetchAllTelemetry();
       }
+    } catch (err: any) {
+      setActionNotice({ type: 'err', text: err?.message || 'Failed to remove XDP_DROP entry.' });
     } finally {
       setActionBusy(false);
     }
   };
 
   const handleRenderK3sYaml = async () => {
-    const res = await renderK3sBpfTokenManifestAction({
-      name: k3sPodName,
-      profileName: tokenName || 'k3s-net-safe',
-      preset: tokenPreset,
-      kind: k3sKind,
-    });
-    if (res.success) {
-      setRenderedK3sYaml(res.manifestYaml);
-    } else {
-      // A failed render must not leave a stale manifest on screen.
+    setActionNotice(null);
+    try {
+      const res = await renderK3sBpfTokenManifestAction({
+        name: k3sPodName,
+        profileName: tokenName || 'k3s-net-safe',
+        preset: tokenPreset,
+        kind: k3sKind,
+      });
+      if (res.success) {
+        setRenderedK3sYaml(res.manifestYaml);
+      } else {
+        // A failed render must not leave a stale manifest on screen.
+        setRenderedK3sYaml('');
+        setActionNotice({ type: 'err', text: res.error || 'Failed to render K3s BPF token manifest.' });
+      }
+    } catch (err: any) {
       setRenderedK3sYaml('');
-      setActionNotice({ type: 'err', text: res.error || 'Failed to render K3s manifest.' });
+      setActionNotice({ type: 'err', text: err?.message || 'Failed to render K3s BPF token manifest.' });
     }
   };
 
@@ -545,18 +566,30 @@ export default function EbpfObservabilityConsolePage() {
           ? { ...desiredState.observability, ebpfApm: apmConfig }
           : ObservabilityConfigSchema.parse({ ebpfApm: apmConfig }),
       };
-      const res = await applyState(nextState);
-      if (!res.success) {
-        setSaveBanner({ type: 'err', text: res.message || 'Failed to save eBPF APM configuration.' });
+      // C-M8: thread the fingerprint this page loaded with through the
+      // apply, so a concurrent save in another tab cannot be silently
+      // reverted by this save.
+      const fingerprint = getFingerprint();
+      const rpc = await applyDesiredStateAction(
+        nextState,
+        120,
+        fingerprint ? { expectedFingerprint: fingerprint } : undefined
+      );
+      if (!rpc.ok) {
+        setSaveBanner({ ok: false, text: rpc.error });
         return;
       }
       setDesiredState(nextState);
       setSaveBanner({
-        type: 'ok',
-        text: res.message || 'Saved Axonwall eBPF APM & probe configuration to DesiredState.',
+        ok: true,
+        text: rpc.result.message || 'Saved Axonwall eBPF APM & probe configuration to DesiredState.',
       });
+      // The save rewrote the on-disk config, so the fingerprint captured
+      // at mount is stale — refresh it for this page's next save.
+      await refreshFingerprint();
+      window.dispatchEvent(new Event('axonwall:status-refresh'));
     } catch (err: any) {
-      setSaveBanner({ type: 'err', text: err?.message || 'Failed to save eBPF APM configuration.' });
+      setSaveBanner({ ok: false, text: err?.message || 'Failed to save eBPF APM configuration.' });
     } finally {
       setSavingConfig(false);
     }
@@ -787,9 +820,9 @@ export default function EbpfObservabilityConsolePage() {
         {saveBanner && (
           <div
             className={`px-3 py-2 rounded-lg border text-xs ${
-              saveBanner.type === 'ok'
+              saveBanner.ok
                 ? 'bg-emerald-950/50 border-emerald-500/30 text-emerald-300'
-                : 'bg-rose-950/50 border-rose-500/30 text-rose-300'
+                : 'bg-rose-950/50 border-rose-500/40 text-rose-300'
             }`}
           >
             {saveBanner.text}

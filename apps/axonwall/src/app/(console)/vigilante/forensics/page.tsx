@@ -44,36 +44,41 @@ export default function ForensicsVaultPage() {
     setCreating(true);
     setStatusBanner(null);
 
-    const cfg = await getVigilanteConfigAction();
-    const res = await createIncidentSnapshotAction(
-      cfg.evidenceVault?.zfsPool ?? 'tank',
-      cfg.evidenceVault?.datasetName ?? 'vigilante-evidence',
-      incidentId.trim()
-    );
-    setCreating(false);
+    try {
+      const cfg = await getVigilanteConfigAction();
+      const res = await createIncidentSnapshotAction(
+        cfg.evidenceVault?.zfsPool ?? 'tank',
+        cfg.evidenceVault?.datasetName ?? 'vigilante-evidence',
+        incidentId.trim()
+      );
 
-    if (res.success && res.snapshot) {
-      setStatusBanner({
-        type: 'success',
-        message: `Forensic snapshot created: ${res.snapshot}`,
-      });
-      setSnapshots((prev) => [
-        {
-          name: res.snapshot!,
-          incidentId: incidentId.trim(),
-          timestamp: new Date().toISOString(),
-          // D14: the create call returns no size and performs no
-          // verification, so neither is claimed. Size stays unknown and
-          // the snapshot is unverified until a real hash/immutability
-          // check runs against it.
-          size: 'Unknown',
-          verified: false,
-        },
-        ...prev,
-      ]);
-      setIncidentId('');
-    } else {
-      setStatusBanner({ type: 'error', message: res.error || 'Failed to create snapshot' });
+      if (res.success && res.snapshot) {
+        setStatusBanner({
+          type: 'success',
+          message: `Forensic snapshot created: ${res.snapshot}`,
+        });
+        setSnapshots((prev) => [
+          {
+            name: res.snapshot!,
+            incidentId: incidentId.trim(),
+            timestamp: new Date().toISOString(),
+            // D14: the create call returns no size and performs no
+            // verification, so neither is claimed. Size stays unknown and
+            // the snapshot is unverified until a real hash/immutability
+            // check runs against it.
+            size: 'Unknown',
+            verified: false,
+          },
+          ...prev,
+        ]);
+        setIncidentId('');
+      } else {
+        setStatusBanner({ type: 'error', message: res.error || 'Failed to create snapshot' });
+      }
+    } catch (err: any) {
+      setStatusBanner({ type: 'error', message: err?.message || 'Failed to create snapshot' });
+    } finally {
+      setCreating(false);
     }
   };
 

@@ -12,6 +12,7 @@ import {
   Code2,
   Sliders,
   ExternalLink,
+  Shield,
 } from 'lucide-react';
 import { Callout } from '../components/Callout';
 import { CodeBlock } from '../components/CodeBlock';
@@ -29,13 +30,13 @@ export default function ThemesDocumentationPage() {
       <div className="space-y-4 border-b border-slate-800/80 pb-8">
         <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-950/60 border border-emerald-500/30 text-emerald-400 text-xs font-semibold">
           <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-          Theming &amp; Ecosystem • v0.11.64
+          Theming &amp; Ecosystem • v0.11.73
         </div>
         <h1 className="text-3xl sm:text-5xl font-extrabold text-white tracking-tight">
           Theme Customization &amp; Repository Ecosystem
         </h1>
         <p className="text-base sm:text-lg text-slate-400 leading-relaxed max-w-3xl">
-          Axonwall features an extensible, token-driven theming architecture supporting over 20 curated Web Console palettes—including canonical Solarized, Gruvbox, Catppuccin, and pure OLED black—plus hardware-level ZFSBootMenu UEFI splash and ANSI boot-console theming via <code className="text-emerald-400 font-mono">axonwall-zbm-theme</code>. Learn how to create custom palettes, publish multi-theme Git repositories, import community themes with 1-click, and brand your appliance boot environment.
+          Axonwall features an extensible, token-driven theming architecture supporting over 20 curated Web Console palettes—including canonical Solarized, Gruvbox, Catppuccin, and pure OLED black—plus a branded <code className="text-emerald-400 font-mono">axonwall</code> Plymouth graphical boot splash and hardware-level ZFSBootMenu UEFI splash and ANSI boot-console theming via <code className="text-emerald-400 font-mono">axonwall-zbm-theme</code>. Learn how to create custom palettes, publish multi-theme Git repositories, import community themes with 1-click, and brand your appliance boot environment.
         </p>
       </div>
 
@@ -310,7 +311,7 @@ export default function ThemesDocumentationPage() {
           <Layers className="w-6 h-6 text-emerald-400" /> ZFSBootMenu UEFI Splash &amp; Boot-Screen Theming
         </h2>
         <p className="text-sm text-slate-300 leading-relaxed">
-          Beyond the browser-based Web Console, Axonwall v0.11.64 ships <code className="text-emerald-400 font-mono">axonwall-zbm-theme</code> to customize the physical/KVM early-boot environment on ZFS installations. It renders a branded 24-bit UEFI <code className="text-slate-200 font-mono">.splash</code> BMP image into the ZFSBootMenu v3.1.0 Unified Kernel Image (UKI), configures high-DPI Linux framebuffer console fonts (Terminus / Lat15), applies tactical 16-color ANSI kernel VT palettes, and automatically synchronizes the rebuilt EFI binary across mirrored EFI System Partitions (<code className="text-slate-200 font-mono">/boot/efi</code> and <code className="text-slate-200 font-mono">/boot/efi-mirror</code>).
+          Beyond the browser-based Web Console, Axonwall v0.11.68 ships <code className="text-emerald-400 font-mono">axonwall-zbm-theme</code> to customize the physical/KVM early-boot environment on ZFS installations. It renders a branded 24-bit UEFI <code className="text-slate-200 font-mono">.splash</code> BMP image into the ZFSBootMenu v3.1.0 Unified Kernel Image (UKI), configures high-DPI Linux framebuffer console fonts (Terminus / Lat15), applies tactical 16-color ANSI kernel VT palettes, and automatically synchronizes the rebuilt EFI binary across mirrored EFI System Partitions (<code className="text-slate-200 font-mono">/boot/efi</code> and <code className="text-slate-200 font-mono">/boot/efi-mirror</code>).
         </p>
 
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3 text-xs">
@@ -354,6 +355,45 @@ sudo axonwallctl zbm status`}
             Hardware Installer, RAID &amp; ZFS Boot Environments
           </Link>{' '}
           documentation.
+        </Callout>
+      </section>
+
+      {/* Plymouth Branded Boot Splash */}
+      <section id="plymouth-boot-splash" className="space-y-6 pt-6 border-t border-slate-800/80">
+        <h2 className="text-2xl font-bold text-white flex items-center gap-2">
+          <Shield className="w-6 h-6 text-emerald-400" /> Branded Plymouth Boot Splash (<code className="text-emerald-400 font-mono">axonwall</code>)
+        </h2>
+        <p className="text-sm text-slate-300 leading-relaxed">
+          From early initramfs handoff right up to the local appliance console (<code className="text-slate-200 font-mono">axonwall-console</code>), Debian-based Axonwall appliances, live ISOs, and cloud images display the custom <code className="text-emerald-400 font-mono">axonwall</code> Plymouth theme installed under <code className="text-slate-200 font-mono">/usr/share/plymouth/themes/axonwall</code>.
+        </p>
+
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-xs">
+          <div className="p-4 rounded-xl bg-slate-900 border border-slate-800 space-y-1.5">
+            <span className="font-bold text-emerald-400">Fortified Crest &amp; 50 Hz Pulse</span>
+            <p className="text-slate-400">Renders the Axonwall neural shield mounted on a fortified obsidian brick wall with crossed battle axes in front and a 50 Hz emerald-cyan breathing glow behind the core emblem.</p>
+          </div>
+          <div className="p-4 rounded-xl bg-slate-900 border border-slate-800 space-y-1.5">
+            <span className="font-bold text-sky-400">LUKS2 Passphrase &amp; FSCK Progress</span>
+            <p className="text-slate-400">Replaces plain text prompts with a dark emerald-bordered passphrase input dialog, status telemetry (including firstboot provisioning), and interactive <kbd className="px-1.5 py-0.5 rounded bg-slate-800 text-slate-200 font-mono">Esc</kbd> live kernel/systemd log toggling.</p>
+          </div>
+          <div className="p-4 rounded-xl bg-slate-900 border border-slate-800 space-y-1.5">
+            <span className="font-bold text-purple-400">Serial Console Coexistence</span>
+            <p className="text-slate-400">Boots with <code className="text-slate-300 font-mono">plymouth.ignore-serial-consoles</code> and <code className="text-slate-300 font-mono">console=ttyS0,115200 console=tty0</code> so graphical VGA/EFI displays remain active even when an IPMI/SOL serial port is attached.</p>
+          </div>
+        </div>
+
+        <CodeBlock
+          code={`# Verify installed Plymouth themes and active default theme
+plymouth-set-default-theme --list
+plymouth-set-default-theme
+
+# Re-apply the branded Axonwall splash theme and regenerate initramfs across installed kernels
+sudo plymouth-set-default-theme axonwall -R`}
+          language="bash"
+        />
+
+        <Callout type="tip" title="Toggle Live Boot Logs Any Time">
+          Press <kbd className="px-1.5 py-0.5 rounded bg-slate-800 text-slate-200 font-mono text-xs">Esc</kbd> during graphical startup to switch seamlessly between the branded Plymouth splash and verbose systemd/kernel boot logs—or select the explicit <strong>Serial Console</strong> entry in GRUB/ISOLINUX to boot with <code className="text-slate-200 font-mono text-xs">nosplash plymouth.enable=0</code>.
         </Callout>
       </section>
     </div>

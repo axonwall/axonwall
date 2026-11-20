@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -15,6 +17,15 @@ import (
 	"syscall"
 	"time"
 )
+
+var validS3BucketRe = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{1,61}[a-z0-9]$`)
+
+func nasSmbServiceName() string {
+	if DetectOSFamily() == "arch" {
+		return "smb"
+	}
+	return "smbd"
+}
 
 type InstallZfsBootstrapSpec struct {
 	PoolName        string   `json:"poolName"`
@@ -904,7 +915,13 @@ func (m *NasManager) RunCloudSyncTask(taskName string) (string, error) {
 		return "", fmt.Errorf("rclone is not installed on this system")
 	}
 	bucket := strings.Trim(strings.TrimSpace(found.RemoteBucket), "/")
+	if !validS3BucketRe.MatchString(bucket) || strings.HasPrefix(bucket, "-") || strings.Contains(bucket, "..") {
+		return "", fmt.Errorf("invalid S3 bucket name %q", found.RemoteBucket)
+	}
 	prefix := strings.Trim(strings.TrimSpace(found.RemotePrefix), "/")
+	if strings.HasPrefix(prefix, "-") || strings.ContainsAny(prefix, "\x00\r\n") {
+		return "", fmt.Errorf("invalid S3 remote prefix")
+	}
 	remoteTarget := fmt.Sprintf(":s3:%s", bucket)
 	if prefix != "" {
 		remoteTarget = fmt.Sprintf(":s3:%s/%s", bucket, prefix)
@@ -915,8 +932,15 @@ func (m *NasManager) RunCloudSyncTask(taskName string) (string, error) {
 	} else {
 		args = append(args, localPath, remoteTarget)
 	}
-	if strings.TrimSpace(found.RemoteEndpoint) != "" {
-		args = append(args, "--s3-provider=Other", "--s3-env-auth=true", fmt.Sprintf("--s3-endpoint=%s", strings.TrimSpace(found.RemoteEndpoint)))
+	if endpoint := strings.TrimSpace(found.RemoteEndpoint); endpoint != "" {
+		if strings.HasPrefix(endpoint, "-") || strings.ContainsAny(endpoint, "\x00\r\n") {
+			return "", fmt.Errorf("invalid S3 remote endpoint")
+		}
+		u, parseErr := url.Parse(endpoint)
+		if parseErr != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			return "", fmt.Errorf("invalid S3 remote endpoint URL %q: must be http or https", endpoint)
+		}
+		args = append(args, "--s3-provider=Other", "--s3-env-auth=true", fmt.Sprintf("--s3-endpoint=%s", endpoint))
 	}
 	if found.BandwidthLimitKbps > 0 {
 		args = append(args, fmt.Sprintf("--bwlimit=%dK", found.BandwidthLimitKbps))
@@ -968,8 +992,20 @@ func (m *NasManager) ApplyConfig(rawJSON []byte) error {
 	// an invalid bundle is neither stored as the live config nor
 	// reported as applied.
 	for _, pool := range bundle.Pools {
-		if err := ValidateZfsPoolSpec(pool); err != nil {
-			return fmt.Errorf("invalid ZFS pool spec %q: %w", pool.Name, err)
+		poolExists := false
+		if pool.Name != "" && validZfsPoolName(pool.Name) {
+			if err := exec.Command("zpool", "list", "-H", "-o", "name", pool.Name).Run(); err == nil {
+				poolExists = true
+			}
+		}
+		if poolExists {
+			if err := ValidateInstallZfsPoolSpec(pool); err != nil {
+				return fmt.Errorf("invalid existing ZFS pool spec %q: %w", pool.Name, err)
+			}
+		} else {
+			if err := ValidateZfsPoolSpec(pool); err != nil {
+				return fmt.Errorf("invalid ZFS pool spec %q: %w", pool.Name, err)
+			}
 		}
 	}
 	for _, ds := range bundle.Datasets {
@@ -986,7 +1022,7 @@ func (m *NasManager) ApplyConfig(rawJSON []byte) error {
 		m.cfg = bundle
 		m.mu.Unlock()
 		slog.Info("NAS plugin is disabled; stopping SMB and NFS share daemons")
-		_ = exec.Command("systemctl", "stop", "smbd", "nfs-server").Run()
+		_ = exec.Command("systemctl", "--no-ask-password", "stop", nasSmbServiceName(), "nfs-server").Run()
 		return nil
 	}
 
@@ -1050,8 +1086,8 @@ func (m *NasManager) ApplyConfig(rawJSON []byte) error {
 		if err := f.Close(); err != nil {
 			return fmt.Errorf("failed to close /etc/samba/smb.conf: %w", err)
 		}
-		if out, err := exec.Command("systemctl", "reload-or-restart", "smbd").CombinedOutput(); err != nil {
-			return fmt.Errorf("failed to reload smbd: %s (%w)", strings.TrimSpace(string(out)), err)
+		if out, err := exec.Command("systemctl", "--no-ask-password", "reload-or-restart", nasSmbServiceName()).CombinedOutput(); err != nil {
+			return fmt.Errorf("failed to reload %s: %s (%w)", nasSmbServiceName(), strings.TrimSpace(string(out)), err)
 		}
 	}
 
@@ -1097,14 +1133,32 @@ func (m *NasManager) ApplyConfig(rawJSON []byte) error {
 
 	// 5. Write & reload S3 MinIO gateway environment if configured and minio unit is installed
 	if bundle.S3EnvConf != "" {
+		// A-M5 (round 3): every failure in this step fails the
+		// apply — the bundle is stored as live config below, so a
+		// swallowed write/reload would report success while disk
+		// state diverges. Main's Arch path (a648c351) is kept:
+		// /etc/minio/minio.conf is written when /etc/minio exists
+		// or the OS family is Arch. Its failures fail the apply
+		// too (judgment call — main made it best-effort, but a
+		// silently skipped Arch config is the A-M5 failure mode
+		// on Arch). Main's --no-ask-password flag is kept on the
+		// reload.
 		if err := os.MkdirAll("/etc/default", 0755); err != nil {
 			return fmt.Errorf("failed to create /etc/default: %w", err)
 		}
 		if err := os.WriteFile("/etc/default/minio", []byte(bundle.S3EnvConf), 0600); err != nil {
 			return fmt.Errorf("failed to write /etc/default/minio: %w", err)
 		}
+		if info, err := os.Stat("/etc/minio"); (err == nil && info.IsDir()) || DetectOSFamily() == "arch" {
+			if err := os.MkdirAll("/etc/minio", 0755); err != nil {
+				return fmt.Errorf("failed to create /etc/minio: %w", err)
+			}
+			if err := os.WriteFile("/etc/minio/minio.conf", []byte(bundle.S3EnvConf), 0600); err != nil {
+				return fmt.Errorf("failed to write /etc/minio/minio.conf: %w", err)
+			}
+		}
 		if isSystemdServiceActive("minio") {
-			if out, err := exec.Command("systemctl", "reload-or-restart", "minio").CombinedOutput(); err != nil {
+			if out, err := exec.Command("systemctl", "--no-ask-password", "reload-or-restart", "minio").CombinedOutput(); err != nil {
 				return fmt.Errorf("failed to reload-or-restart minio: %s (%w)", strings.TrimSpace(string(out)), err)
 			}
 		}
@@ -1180,7 +1234,7 @@ func (m *NasManager) PromoteFailoverMaster() {
 		_ = exec.Command("zfs", "mount", "-a").Run()
 	}
 	_ = exec.Command("exportfs", "-ra").Run()
-	_ = exec.Command("systemctl", "reload-or-restart", "smbd", "nfs-server").Run()
+	_ = exec.Command("systemctl", "--no-ask-password", "reload-or-restart", nasSmbServiceName(), "nfs-server").Run()
 }
 
 // DemoteFailoverBackup is triggered by HAEngine when this node transitions to BACKUP or FAULT.

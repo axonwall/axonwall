@@ -1,3 +1,5 @@
+'use client';
+
 import React from 'react';
 import type { NmapRun } from '../types/nmap';
 import { Server, Activity, ShieldCheck, Layers, PieChart, BarChart2, Clock, Globe } from 'lucide-react';
@@ -98,7 +100,7 @@ export function NmapStats({ scan, className = '' }: NmapStatsProps) {
             <Clock size={15} className="text-purple-400" />
           </div>
           <div className="text-2xl font-bold text-white font-mono">
-            {scan.runstats?.finished.elapsed ? `${scan.runstats.finished.elapsed}s` : 'Completed'}
+            {scan.runstats?.finished?.elapsed ? `${scan.runstats.finished.elapsed}s` : 'Completed'}
           </div>
           <div className="text-xs text-zinc-500 mt-1 font-mono text-[11px] truncate">Nmap v{scan.version}</div>
         </div>

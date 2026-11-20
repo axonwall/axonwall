@@ -11,10 +11,11 @@ import (
 	"strings"
 )
 
-// SysfsRoot and ProcSysNetRoot allow unit tests to override kernel filesystem roots.
+// SysfsNetRoot, ProcSysNetRoot, and AxonwallEtcDir allow unit tests to override filesystem roots.
 var (
 	SysfsNetRoot   = "/sys/class/net"
 	ProcSysNetRoot = "/proc/sys/net"
+	AxonwallEtcDir = "/etc/axonwall"
 )
 
 var validNetdevNameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.\-]{0,14}$`)
@@ -279,37 +280,163 @@ func AttachTapToBridge(tapDev, bridgeName string, vlanTag int) error {
 	return nil
 }
 
+// NetdevVlanBundle accepts both @axonwall/lib TypeScript field names (`parentInterface`, `vlanInterface`)
+// and legacy Go field names (`parent`).
+type NetdevVlanBundle struct {
+	ParentInterface string `json:"parentInterface"`
+	Parent          string `json:"parent"`
+	VlanInterface   string `json:"vlanInterface"`
+	Tag             int    `json:"tag"`
+	Mtu             int    `json:"mtu,omitempty"`
+	Description     string `json:"description,omitempty"`
+}
+
+func (v NetdevVlanBundle) EffectiveParent() string {
+	if p := strings.TrimSpace(v.ParentInterface); p != "" {
+		return p
+	}
+	return strings.TrimSpace(v.Parent)
+}
+
+func (v NetdevVlanBundle) EffectiveVlanInterface() string {
+	if vi := strings.TrimSpace(v.VlanInterface); vi != "" {
+		return vi
+	}
+	p := v.EffectiveParent()
+	if p == "" {
+		return ""
+	}
+	return fmt.Sprintf("%s.%d", p, v.Tag)
+}
+
+// NetdevBondBundle accepts both @axonwall/lib (`members`) and legacy Go (`slaves`) field names.
+type NetdevBondBundle struct {
+	Name    string   `json:"name"`
+	Mode    string   `json:"mode"`
+	Members []string `json:"members"`
+	Slaves  []string `json:"slaves"`
+	Mtu     int      `json:"mtu,omitempty"`
+}
+
+func (b NetdevBondBundle) EffectiveMembers() []string {
+	if len(b.Members) > 0 {
+		return b.Members
+	}
+	return b.Slaves
+}
+
+// NetdevBridgeMemberBundle accepts both @axonwall/lib (`interface`) and legacy Go (`device`) field names.
+type NetdevBridgeMemberBundle struct {
+	Interface string `json:"interface"`
+	Device    string `json:"device"`
+}
+
+func (m NetdevBridgeMemberBundle) EffectiveDevice() string {
+	if dev := strings.TrimSpace(m.Interface); dev != "" {
+		return dev
+	}
+	return strings.TrimSpace(m.Device)
+}
+
+// NetdevVirtualIpBundle accepts both CIDR `ip` strings and separate `ip` + `subnetBits`.
+type NetdevVirtualIpBundle struct {
+	Ip         string `json:"ip"`
+	SubnetBits int    `json:"subnetBits,omitempty"`
+	Interface  string `json:"interface"`
+}
+
 // NetdevConfigBundle represents `/etc/axonwall/managed/netdev_config.json` emitted by @axonwall/lib.
 type NetdevConfigBundle struct {
-	Vlans []struct {
-		Parent      string `json:"parent"`
-		Tag         int    `json:"tag"`
-		Mtu         int    `json:"mtu,omitempty"`
-		Description string `json:"description,omitempty"`
-	} `json:"vlans"`
-	Bonds []struct {
-		Name   string   `json:"name"`
-		Mode   string   `json:"mode"`
-		Slaves []string `json:"slaves"`
-		Mtu    int      `json:"mtu,omitempty"`
-	} `json:"bonds"`
+	Vlans   []NetdevVlanBundle `json:"vlans"`
+	Bonds   []NetdevBondBundle `json:"bonds"`
 	Bridges []struct {
-		Name          string `json:"name"`
-		VlanFiltering bool   `json:"vlanFiltering"`
-		Ipv4Address   string `json:"ipv4Address,omitempty"`
-		Members       []struct {
-			Device string `json:"device"`
-		} `json:"members"`
+		Name          string                     `json:"name"`
+		VlanFiltering bool                       `json:"vlanFiltering"`
+		Ipv4Address   string                     `json:"ipv4Address,omitempty"`
+		Members       []NetdevBridgeMemberBundle `json:"members"`
 	} `json:"bridges"`
 	Vrfs []struct {
 		Name       string   `json:"name"`
 		TableId    int      `json:"tableId"`
 		Interfaces []string `json:"interfaces"`
 	} `json:"vrfs"`
-	VirtualIps []struct {
-		Ip        string `json:"ip"`
-		Interface string `json:"interface"`
-	} `json:"virtualIps"`
+	VirtualIps []NetdevVirtualIpBundle `json:"virtualIps"`
+}
+
+func resolveLogicalInterfaceDev(ifaceOrDev string) string {
+	cand := strings.TrimSpace(ifaceOrDev)
+	if cand == "" {
+		return ""
+	}
+	if _, err := net.InterfaceByName(cand); err == nil {
+		return cand
+	}
+	lowerCand := strings.ToLower(cand)
+	for _, confPath := range []string{filepath.Join(AxonwallEtcDir, "interfaces.conf"), "/var/lib/axonwall/etc-axonwall/interfaces.conf"} {
+		data, err := os.ReadFile(confPath)
+		if err != nil {
+			continue
+		}
+		rawKv := make(map[string]string)
+		for _, line := range strings.Split(string(data), "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" || strings.HasPrefix(line, "#") || !strings.Contains(line, "=") {
+				continue
+			}
+			parts := strings.SplitN(line, "=", 2)
+			rawKv[strings.TrimSpace(parts[0])] = strings.TrimSpace(strings.Trim(parts[1], `"`))
+		}
+		if lowerCand == "wan" && rawKv["WAN_INTERFACE"] != "" {
+			return rawKv["WAN_INTERFACE"]
+		}
+		if lowerCand == "lan" && rawKv["LAN_INTERFACE"] != "" {
+			return rawKv["LAN_INTERFACE"]
+		}
+		if lowerCand == "opt1" && rawKv["OPT1_INTERFACE"] != "" {
+			return rawKv["OPT1_INTERFACE"]
+		}
+		if lowerCand == "opt2" && rawKv["OPT2_INTERFACE"] != "" {
+			return rawKv["OPT2_INTERFACE"]
+		}
+		for k, v := range rawKv {
+			if strings.HasPrefix(k, "IFACE_") && strings.HasSuffix(k, "_DEVICE") && v != "" {
+				keyBase := strings.TrimSuffix(strings.TrimPrefix(k, "IFACE_"), "_DEVICE")
+				logicalName := strings.TrimSpace(rawKv["IFACE_"+keyBase+"_NAME"])
+				if logicalName == "" {
+					logicalName = strings.ToLower(keyBase)
+				}
+				if strings.EqualFold(logicalName, lowerCand) {
+					return v
+				}
+			}
+		}
+		break
+	}
+	return cand
+}
+
+func formatVirtualIpCIDR(vip NetdevVirtualIpBundle) string {
+	addrStr := strings.TrimSpace(vip.Ip)
+	if addrStr == "" {
+		return ""
+	}
+	if strings.Contains(addrStr, "/") {
+		return addrStr
+	}
+	parsed := net.ParseIP(addrStr)
+	if parsed == nil {
+		return addrStr
+	}
+	if parsed.To4() != nil {
+		if vip.SubnetBits >= 1 && vip.SubnetBits <= 32 {
+			return fmt.Sprintf("%s/%d", addrStr, vip.SubnetBits)
+		}
+		return addrStr + "/32"
+	}
+	if vip.SubnetBits >= 1 && vip.SubnetBits <= 128 {
+		return fmt.Sprintf("%s/%d", addrStr, vip.SubnetBits)
+	}
+	return addrStr + "/128"
 }
 
 var validBondModes = map[string]bool{
@@ -352,15 +479,20 @@ func ApplyNetdevBundleJSON(rawJSON []byte, unmarshalFn func([]byte, any) error) 
 		if !validBondModes[mode] {
 			return fmt.Errorf("invalid bond mode %q for bond %q (valid: balance-rr, active-backup, balance-xor, broadcast, 802.3ad, balance-tlb, balance-alb)", b.Mode, b.Name)
 		}
-		for _, sl := range b.Slaves {
+		// A-H4 (round 3) mode validation above is kept; member
+		// iteration uses main's EffectiveMembers (fc576368) so
+		// both `members` (lib) and `slaves` (legacy) are honoured.
+		for _, sl := range b.EffectiveMembers() {
 			if !ValidNetdevName(sl) {
 				return fmt.Errorf("invalid bond slave %q", sl)
 			}
 		}
 	}
 	for _, v := range cfg.Vlans {
-		if !ValidNetdevName(v.Parent) || v.Tag < 1 || v.Tag > 4094 {
-			return fmt.Errorf("invalid VLAN %s.%d", v.Parent, v.Tag)
+		parent := v.EffectiveParent()
+		vlanDev := v.EffectiveVlanInterface()
+		if !ValidNetdevName(parent) || v.Tag < 1 || v.Tag > 4094 || !ValidNetdevName(vlanDev) {
+			return fmt.Errorf("invalid VLAN %s.%d", parent, v.Tag)
 		}
 	}
 	for _, vrf := range cfg.Vrfs {
@@ -398,7 +530,10 @@ func ApplyNetdevBundleJSON(rawJSON []byte, unmarshalFn func([]byte, any) error) 
 				}
 			}
 		}
-		for _, sl := range b.Slaves {
+		// A-H4 (round 3): enslave failures fail the apply instead
+		// of being discarded. Members come from main's
+		// EffectiveMembers (fc576368).
+		for _, sl := range b.EffectiveMembers() {
 			if err := runIpCmd("link", "set", "dev", sl, "down"); err != nil {
 				return fmt.Errorf("failed to enslave %s into bond %s: %w", sl, b.Name, err)
 			}
@@ -421,17 +556,19 @@ func ApplyNetdevBundleJSON(rawJSON []byte, unmarshalFn func([]byte, any) error) 
 
 	// 2. 802.1Q VLAN sub-interfaces
 	for _, v := range cfg.Vlans {
-		vlanDev := fmt.Sprintf("%s.%d", v.Parent, v.Tag)
-		if !ValidNetdevName(vlanDev) {
-			return fmt.Errorf("invalid VLAN device name %q", vlanDev)
-		}
+		// Parent/device names come from main's Effective*
+		// accessors (fc576368) so lib field names work; the
+		// parent-existence check and error-checked creation are
+		// A-H4 (round 3).
+		parent := v.EffectiveParent()
+		vlanDev := v.EffectiveVlanInterface()
 		// A-H4: the parent was never existence-checked, so a VLAN
 		// on a renamed/missing parent failed silently.
-		if err := exec.Command("ip", "link", "show", "dev", v.Parent).Run(); err != nil {
-			return fmt.Errorf("cannot create VLAN %s: parent interface %s does not exist (%v)", vlanDev, v.Parent, err)
+		if err := exec.Command("ip", "link", "show", "dev", parent).Run(); err != nil {
+			return fmt.Errorf("cannot create VLAN %s: parent interface %s does not exist (%v)", vlanDev, parent, err)
 		}
 		if err := exec.Command("ip", "link", "show", "dev", vlanDev).Run(); err != nil {
-			if err := runIpCmd("link", "add", "link", v.Parent, "name", vlanDev, "type", "vlan", "id", strconv.Itoa(v.Tag)); err != nil {
+			if err := runIpCmd("link", "add", "link", parent, "name", vlanDev, "type", "vlan", "id", strconv.Itoa(v.Tag)); err != nil {
 				return fmt.Errorf("failed to create VLAN %s: %w", vlanDev, err)
 			}
 		}
@@ -456,8 +593,18 @@ func ApplyNetdevBundleJSON(rawJSON []byte, unmarshalFn func([]byte, any) error) 
 			return fmt.Errorf("failed to bring up VRF %s: %w", vrf.Name, err)
 		}
 		for _, iface := range vrf.Interfaces {
-			if err := runIpCmd("link", "set", "dev", iface, "master", vrf.Name); err != nil {
-				return fmt.Errorf("failed to assign %s to VRF %s: %w", iface, vrf.Name, err)
+			// Logical names resolve via main's
+			// resolveLogicalInterfaceDev (fc576368); the
+			// assignment failure fails the apply per A-H4
+			// (round 3) instead of being discarded. An
+			// unresolvable name is skipped as on main — the
+			// up-front validation loop already rejected
+			// invalid member names.
+			dev := resolveLogicalInterfaceDev(iface)
+			if ValidNetdevName(dev) {
+				if err := runIpCmd("link", "set", "dev", dev, "master", vrf.Name); err != nil {
+					return fmt.Errorf("failed to assign %s to VRF %s: %w", dev, vrf.Name, err)
+				}
 			}
 		}
 	}
@@ -466,9 +613,10 @@ func ApplyNetdevBundleJSON(rawJSON []byte, unmarshalFn func([]byte, any) error) 
 	for _, br := range cfg.Bridges {
 		var members []string
 		for _, m := range br.Members {
-			if ValidNetdevName(m.Device) {
-				if _, err := net.InterfaceByName(m.Device); err == nil {
-					members = append(members, m.Device)
+			dev := resolveLogicalInterfaceDev(m.EffectiveDevice())
+			if ValidNetdevName(dev) {
+				if _, err := net.InterfaceByName(dev); err == nil {
+					members = append(members, dev)
 				}
 			}
 		}
@@ -486,21 +634,22 @@ func ApplyNetdevBundleJSON(rawJSON []byte, unmarshalFn func([]byte, any) error) 
 
 	// 5. Virtual IP Aliases
 	for _, vip := range cfg.VirtualIps {
-		addrStr := strings.TrimSpace(vip.Ip)
-		if !strings.Contains(addrStr, "/") {
-			if parsed := net.ParseIP(addrStr); parsed != nil {
-				if parsed.To4() != nil {
-					addrStr += "/32"
-				} else {
-					addrStr += "/128"
-				}
-			}
+		// Interface resolves via main's resolveLogicalInterfaceDev
+		// (fc576368) and the CIDR via main's formatVirtualIpCIDR
+		// (fc576368), which subsumes the branch's bare-IP /32//128
+		// defaulting and adds subnetBits. A-H4 (round 3): an
+		// invalid VIP or a failed `ip addr replace` fails the
+		// apply instead of being silently skipped/discarded.
+		dev := resolveLogicalInterfaceDev(vip.Interface)
+		if !ValidNetdevName(dev) || strings.TrimSpace(vip.Ip) == "" {
+			return fmt.Errorf("invalid virtual IP %q on interface %q", vip.Ip, vip.Interface)
 		}
+		addrStr := formatVirtualIpCIDR(vip)
 		if _, _, err := net.ParseCIDR(addrStr); err != nil {
 			return fmt.Errorf("invalid virtual IP %q on interface %s: %w", vip.Ip, vip.Interface, err)
 		}
-		if err := runIpCmd("addr", "replace", addrStr, "dev", vip.Interface); err != nil {
-			return fmt.Errorf("failed to assign VIP %s to %s: %w", addrStr, vip.Interface, err)
+		if err := runIpCmd("addr", "replace", addrStr, "dev", dev); err != nil {
+			return fmt.Errorf("failed to assign VIP %s to %s: %w", addrStr, dev, err)
 		}
 	}
 

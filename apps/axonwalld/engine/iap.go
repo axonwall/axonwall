@@ -69,12 +69,12 @@ func (m *IAPManager) ApplyConfig(configJSON []byte) error {
 	caddyfileContent := m.generateCaddyfile(config)
 
 	caddyfilePath := "/etc/axonwall/Caddyfile"
-	if err := os.MkdirAll(filepath.Dir(caddyfilePath), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(caddyfilePath), 0750); err != nil {
 		return fmt.Errorf("failed to create config dir: %w", err)
 	}
-	_ = os.MkdirAll("/run/axonwall", 0755)
+	_ = os.MkdirAll("/run/axonwall", 0750)
 
-	if err := os.WriteFile(caddyfilePath, []byte(caddyfileContent), 0644); err != nil {
+	if err := os.WriteFile(caddyfilePath, []byte(caddyfileContent), 0640); err != nil {
 		return fmt.Errorf("failed to write Caddyfile: %w", err)
 	}
 

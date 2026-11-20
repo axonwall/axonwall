@@ -6,6 +6,8 @@ Requires=local-fs.target
 Before=network.target
 Wants=network-pre.target
 DefaultDependencies=no
+ConditionPathExists=!/etc/axonwall/.vault-edition
+ConditionPathExists=!/etc/axonwall/.k3s-edition
 ConditionKernelCommandLine=!axonwall_install=1
 ConditionKernelCommandLine=!axonwall.install=1
 ConditionKernelCommandLine=!axonwall.unattended=1

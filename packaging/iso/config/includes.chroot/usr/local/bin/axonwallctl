@@ -15,8 +15,7 @@ fi
 
 for candidate in \
   "/opt/axonwall/apps/axonwall-controller/dist/axonwallctl.js" \
-  "$(dirname "$0")/../../../apps/axonwall-controller/dist/axonwallctl.js" \
-  "/home/djehauti/git/axonwall/apps/axonwall-controller/dist/axonwallctl.js"
+  "$(dirname "$0")/../../../apps/axonwall-controller/dist/axonwallctl.js"
 do
   if [ -f "$candidate" ]; then
     exec node "$candidate" "$@"

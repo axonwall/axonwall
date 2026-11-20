@@ -7,7 +7,7 @@ import { CodeBlock } from '../components/CodeBlock';
 export const metadata = {
   title: 'GitOps Configuration Versioning & Etckeeper /etc Audit | Axonwall Documentation',
   description:
-    'Git-backed declarative YAML configuration versioning (/var/lib/axonwall/gitops), unified diff inspection, 1-click rollback, and Etckeeper /etc host configuration auditing in Axonwall v0.11.64.',
+    'Git-backed declarative YAML configuration versioning (/var/lib/axonwall/gitops), unified diff inspection, 1-click rollback, and Etckeeper /etc host configuration auditing in Axonwall v0.11.68.',
 };
 
 export default function GitOpsAuditDocPage() {
@@ -17,7 +17,7 @@ export default function GitOpsAuditDocPage() {
       <div className="space-y-4 border-b border-slate-800/80 pb-8">
         <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-950/60 border border-emerald-500/30 text-emerald-400 text-xs font-semibold">
           <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-          Version Control &amp; Compliance Audit • v0.11.64
+          Version Control &amp; Compliance Audit • v0.11.68
         </div>
         <h1 className="text-3xl sm:text-5xl font-extrabold text-white tracking-tight">
           GitOps Configuration &amp; Etckeeper /etc Audit Trail

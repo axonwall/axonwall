@@ -10,13 +10,13 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
-	"os/user"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -78,17 +78,24 @@ type AgentServer struct {
 	watchdog         *engine.WatchdogEngine
 	nasManager       *engine.NasManager
 	k3sManager       *engine.K3sManager
-	virtManager      *engine.VirtManager
-	vigilanteManager *engine.VigilanteManager
-	etckeeperManager *engine.EtckeeperManager
-	directoryManager *engine.DirectoryManager
-	ddnsManager      *engine.DdnsManager
+	virtManager            *engine.VirtManager
+	vigilanteManager       *engine.VigilanteManager
+	threatHarvesterManager *engine.ThreatHarvesterManager
+	etckeeperManager       *engine.EtckeeperManager
+	directoryManager       *engine.DirectoryManager
+	ddnsManager            *engine.DdnsManager
 }
 
 func (s *AgentServer) SetVirtManager(vm *engine.VirtManager) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.virtManager = vm
+}
+
+func (s *AgentServer) SetThreatHarvesterManager(thm *engine.ThreatHarvesterManager) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.threatHarvesterManager = thm
 }
 
 // isSnapshotEligibleName reports whether a config file name is covered
@@ -104,42 +111,106 @@ func isSnapshotEligibleName(name string) bool {
 var lkgConfigSrcDirs = []string{"/var/lib/axonwall/etc-axonwall", "/etc/axonwall"}
 var lkgConfigDstDirs = []string{"/etc/axonwall", "/var/lib/axonwall/etc-axonwall"}
 
+func axonwallEtcDir() string {
+	if v := strings.TrimSpace(os.Getenv("AXONWALL_ETC_DIR")); v != "" {
+		return v
+	}
+	return "/etc/axonwall"
+}
+
+func axonwallStateDir() string {
+	if v := strings.TrimSpace(os.Getenv("AXONWALL_STATE_DIR")); v != "" {
+		return v
+	}
+	return "/var/lib/axonwall"
+}
+
+func resolveRepoDevDir() string {
+	if v := strings.TrimSpace(os.Getenv("AXONWALL_DEV_DIR")); v != "" {
+		return filepath.Clean(v)
+	}
+	cwd, err := os.Getwd()
+	if err == nil {
+		dir := cwd
+		for {
+			if _, serr := os.Stat(filepath.Join(dir, "pnpm-workspace.yaml")); serr == nil {
+				return filepath.Join(dir, ".axonwall-dev")
+			}
+			if _, serr := os.Stat(filepath.Join(dir, ".git")); serr == nil {
+				return filepath.Join(dir, ".axonwall-dev")
+			}
+			parent := filepath.Dir(dir)
+			if parent == dir {
+				break
+			}
+			dir = parent
+		}
+	}
+	return ".axonwall-dev"
+}
+
+func readHostKernelRelease() string {
+	if data, err := os.ReadFile("/proc/sys/kernel/osrelease"); err == nil {
+		if rel := strings.TrimSpace(string(data)); rel != "" {
+			return rel
+		}
+	}
+	if data, err := os.ReadFile("/proc/version"); err == nil {
+		fields := strings.Fields(string(data))
+		if len(fields) >= 3 {
+			return fields[2]
+		}
+	}
+	return ""
+}
+
 func snapshotLkgConfig(bundleDir string) {
 	lkgConfigDir := filepath.Join(bundleDir, "lkg-config")
 	if err := os.MkdirAll(lkgConfigDir, 0700); err != nil {
 		return
 	}
 
-	// Read fallback dir first so live /etc/axonwall files take precedence
+	// Walk configured directories recursively so managed/* and conf.d/*
+	// subsystem files are preserved alongside top-level configs.
 	srcDirs := lkgConfigSrcDirs
 	for _, srcDir := range srcDirs {
-		entries, err := os.ReadDir(srcDir)
-		if err != nil {
-			continue
-		}
-		for _, e := range entries {
-			if e.IsDir() {
-				continue
+		_ = filepath.WalkDir(srcDir, func(path string, d fs.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return nil
 			}
-			name := e.Name()
-			if isSnapshotEligibleName(name) {
-				srcPath := filepath.Join(srcDir, name)
-				dstPath := filepath.Join(lkgConfigDir, name)
-				if data, err := os.ReadFile(srcPath); err == nil && len(data) > 0 {
+			if d.Type()&os.ModeSymlink != 0 {
+				if d.IsDir() {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if d.IsDir() {
+				return nil
+			}
+			base := d.Name()
+			if !isSnapshotEligibleName(base) {
+				return nil
+			}
+			if base == "admin.env" || base == "axonwall.env" || base == "agent.token" || base == "controller.env" || base == "mfa.env" || base == "slapd.seed" {
+				return nil
+			}
+			rel, err := filepath.Rel(srcDir, path)
+			if err != nil || rel == "." || strings.HasPrefix(rel, "..") {
+				return nil
+			}
+			dstPath := filepath.Join(lkgConfigDir, rel)
+			if data, err := os.ReadFile(path); err == nil && len(data) > 0 {
+				if mkErr := os.MkdirAll(filepath.Dir(dstPath), 0700); mkErr == nil {
 					_ = os.WriteFile(dstPath, data, 0600)
 				}
 			}
-		}
+			return nil
+		})
 	}
 }
 
 func resolveAxonwallApiGid() int {
-	if grp, err := user.LookupGroup("axonwall-api"); err == nil {
-		if gid, err := strconv.Atoi(grp.Gid); err == nil {
-			return gid
-		}
-	}
-	return -1
+	return resolveSocketGroupGID()
 }
 
 func ensureSharedConfigPerm(path string, mode os.FileMode) {
@@ -233,38 +304,47 @@ func normalizeConfigTreePermissions() {
 // successful restore (M3).
 func restoreLkgConfig(bundleDir string) bool {
 	lkgConfigDir := filepath.Join(bundleDir, "lkg-config")
-	entries, err := os.ReadDir(lkgConfigDir)
-	if err != nil {
+	if _, err := os.Stat(lkgConfigDir); err != nil {
 		return false
 	}
 
 	restored := false
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
+	snapshotRels := make(map[string]bool)
+	_ = filepath.WalkDir(lkgConfigDir, func(srcPath string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return nil
 		}
-		name := e.Name()
+		if d.Type()&os.ModeSymlink != 0 {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if d.IsDir() {
+			return nil
+		}
+		name := d.Name()
 		if name == "admin.env" || name == "axonwall.env" || name == "agent.token" || name == "controller.env" || name == "mfa.env" || name == "slapd.seed" {
-			continue
+			return nil
 		}
-		srcPath := filepath.Join(lkgConfigDir, name)
-		if fi, lerr := os.Lstat(srcPath); lerr != nil || (fi.Mode()&os.ModeSymlink) != 0 {
-			continue
+		rel, err := filepath.Rel(lkgConfigDir, srcPath)
+		if err != nil || rel == "." || strings.HasPrefix(rel, "..") {
+			return nil
 		}
+		snapshotRels[rel] = true
 		data, err := os.ReadFile(srcPath)
 		if err != nil || len(data) == 0 {
-			continue
+			return nil
 		}
 
 		mode := os.FileMode(0660)
-		if name == "interfaces.conf" {
+		if rel == "interfaces.conf" {
 			mode = 0664
 		}
 
-		targetDirs := lkgConfigDstDirs
-		for _, dir := range targetDirs {
-			_ = os.MkdirAll(dir, 0775)
-			dst := filepath.Join(dir, name)
+		for _, dir := range lkgConfigDstDirs {
+			dst := filepath.Join(dir, rel)
+			_ = os.MkdirAll(filepath.Dir(dst), 0775)
 			if fi, lerr := os.Lstat(dst); lerr == nil && (fi.Mode()&os.ModeSymlink) != 0 {
 				continue
 			}
@@ -273,49 +353,52 @@ func restoreLkgConfig(bundleDir string) bool {
 				restored = true
 			}
 		}
-		if name == "state.json" {
-			if fi, lerr := os.Lstat("/var/lib/axonwall/state.json"); lerr != nil || (fi.Mode()&os.ModeSymlink) == 0 {
-				if err := os.WriteFile("/var/lib/axonwall/state.json", data, 0660); err == nil {
-					ensureSharedConfigPerm("/var/lib/axonwall/state.json", 0660)
+		if rel == "state.json" {
+			statePath := filepath.Join(axonwallStateDir(), "state.json")
+			if fi, lerr := os.Lstat(statePath); lerr != nil || (fi.Mode()&os.ModeSymlink) == 0 {
+				if err := os.WriteFile(statePath, data, 0660); err == nil {
+					ensureSharedConfigPerm(statePath, 0660)
 					restored = true
 				}
 			}
 		}
-	}
+		return nil
+	})
 
 	// A-H1 (round 2): delete files the failed bundle added — snapshot-
 	// eligible files present on disk but absent from the snapshot.
-	// Without this, a bundle that introduced e.g. a new subsystem
-	// config file leaves it live after rollback, and the subsystem
-	// keeps running config that never existed in last-known-good.
 	// state.json is excluded: it is runtime appliance state maintained
-	// by the HA sync (engine/sqlite_sync.go), not bundle config, so
-	// its presence on disk is not evidence a bundle added it.
-	snapshotNames := make(map[string]bool, len(entries))
-	for _, e := range entries {
-		snapshotNames[e.Name()] = true
-	}
+	// by HA sync (engine/sqlite_sync.go), not bundle config.
 	for _, dir := range lkgConfigDstDirs {
-		live, err := os.ReadDir(dir)
-		if err != nil {
-			continue
-		}
-		for _, e := range live {
-			if e.IsDir() {
-				continue
+		_ = filepath.WalkDir(dir, func(p string, d fs.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return nil
 			}
-			name := e.Name()
-			if name == "state.json" || !isSnapshotEligibleName(name) || snapshotNames[name] {
-				continue
+			if d.Type()&os.ModeSymlink != 0 {
+				if d.IsDir() {
+					return filepath.SkipDir
+				}
+				return nil
 			}
-			p := filepath.Join(dir, name)
-			if fi, lerr := os.Lstat(p); lerr != nil || (fi.Mode()&os.ModeSymlink) != 0 {
-				continue
+			if d.IsDir() {
+				return nil
+			}
+			rel, err := filepath.Rel(dir, p)
+			if err != nil || rel == "." || strings.HasPrefix(rel, "..") {
+				return nil
+			}
+			base := d.Name()
+			if rel == "state.json" || !isSnapshotEligibleName(base) || snapshotRels[rel] {
+				return nil
+			}
+			if base == "admin.env" || base == "axonwall.env" || base == "agent.token" || base == "controller.env" || base == "mfa.env" || base == "slapd.seed" {
+				return nil
 			}
 			if err := os.Remove(p); err == nil {
 				log.Printf("[Agent] Rollback: removed config file added by failed bundle: %s", p)
 			}
-		}
+			return nil
+		})
 	}
 	return restored
 }
@@ -517,12 +600,17 @@ func validateBundleFiles(files []*pb.BundleFile) ([]validatedBundleFile, error) 
 		"/etc/swanctl/",
 		"/etc/haproxy/",
 		"/etc/freeradius/",
+		"/etc/raddb/",
 		"/etc/snmp/",
 		"/etc/nut/",
+		"/etc/ups/",
 		"/etc/openvpn/",
 		"/etc/avahi/",
 		"/etc/miniupnpd/",
 		"/etc/rtslib-fb-target/",
+		"/etc/target/",
+		"/etc/minio/",
+		"/etc/systemd/network/",
 	}
 	allowedExactFiles := map[string]bool{
 		"/etc/radvd.conf":    true,
@@ -628,6 +716,27 @@ func validateBundleFiles(files []*pb.BundleFile) ([]validatedBundleFile, error) 
 // results used to be discarded, so a bundle naming a typo'd, renamed,
 // or non-allowlisted unit reported full success while the service
 // kept running its old config.
+func ensureUnboundDropInInclude() {
+	if os.Geteuid() != 0 || currentRuntimeMode == engine.ModeDev {
+		return
+	}
+	const confPath = "/etc/unbound/unbound.conf"
+	data, err := os.ReadFile(confPath)
+	if err != nil {
+		return
+	}
+	text := string(data)
+	if strings.Contains(text, "/etc/unbound/unbound.conf.d") {
+		return
+	}
+	_ = os.MkdirAll("/etc/unbound/unbound.conf.d", 0755)
+	if !strings.HasSuffix(text, "\n") {
+		text += "\n"
+	}
+	text += "\n# Added by Axonwall to load managed DNS overrides\ninclude-toplevel: \"/etc/unbound/unbound.conf.d/*.conf\"\n"
+	_ = os.WriteFile(confPath, []byte(text), 0644)
+}
+
 func reloadBundleServices(services []string) []error {
 	var errs []error
 	for _, svc := range services {
@@ -636,6 +745,9 @@ func reloadBundleServices(services []string) []error {
 			log.Printf("[Agent] Rejected malformed/malicious service reload request: %s", svc)
 			errs = append(errs, fmt.Errorf("rejected malformed service reload request: %s", svc))
 			continue
+		}
+		if svc == "unbound" {
+			ensureUnboundDropInInclude()
 		}
 		log.Printf("[Agent] Reloading system service: %s", svc)
 		if _, err := reloadOrRestartService(svc); err != nil {
@@ -686,9 +798,38 @@ func mirrorBundleFile(mirrorPath string, mode os.FileMode, content []byte, isSha
 // when this fails — a discarded error left the box reporting host
 // mode while NGFW enforcement was still live.
 func stopNgfwDaemons() error {
-	stopCtx, stopCancel := context.WithTimeout(context.Background(), serviceCommandTimeout)
-	defer stopCancel()
-	return exec.CommandContext(stopCtx, "systemctl", "stop", "kea-dhcp4-server", "suricata", "frr", "conntrackd", "crowdsec-firewall-bouncer").Run()
+	units := []string{"kea-dhcp4-server", "suricata", "frr", "conntrackd", "crowdsec-firewall-bouncer"}
+	if !hasSystemdOrFakeSystemctl() {
+		for _, u := range units {
+			rcUnit := resolveOpenRCServiceName(u)
+			if _, err := os.Stat(filepath.Join("/etc/init.d", rcUnit)); err != nil {
+				continue
+			}
+			if _, err := stopSystemService(u); err != nil {
+				return fmt.Errorf("stop OpenRC NGFW service %s: %w", rcUnit, err)
+			}
+		}
+		return nil
+	}
+
+	sysPath, _ := exec.LookPath("systemctl")
+	cleanSysPath := filepath.Clean(sysPath)
+	isFakeSystemctl := cleanSysPath != "" && cleanSysPath != "/usr/bin/systemctl" && cleanSysPath != "/bin/systemctl"
+
+	for _, u := range units {
+		resolved := resolveDistroServiceUnit(u)
+		if !isFakeSystemctl && !systemdUnitFileExists(resolved) {
+			continue
+		}
+		stopCtx, stopCancel := context.WithTimeout(context.Background(), serviceCommandTimeout)
+		cmd := exec.CommandContext(stopCtx, "systemctl", "--no-ask-password", "stop", resolved)
+		err := cmd.Run()
+		stopCancel()
+		if err != nil {
+			return fmt.Errorf("stop %s: %w", resolved, err)
+		}
+	}
+	return nil
 }
 
 // pendingSubsystemApply is one subsystem apply queued while the
@@ -742,11 +883,17 @@ func runWithTimeout(fn func() error, timeout time.Duration) error {
 }
 
 func (s *AgentServer) ApplyBundle(ctx context.Context, req *pb.ApplyBundleRequest) (*pb.ApplyBundleResponse, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, status.FromContextError(err).Err()
+	}
 	// M1: serialise whole applies. A second ApplyBundle waits here
 	// instead of interleaving with the first across the lock-release
 	// windows below and corrupting its pending-confirm state.
 	s.applyMu.Lock()
 	defer s.applyMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return nil, status.FromContextError(err).Err()
+	}
 
 	s.mu.Lock()
 	s.applyInProgress = true
@@ -964,6 +1111,14 @@ func (s *AgentServer) ApplyBundle(ctx context.Context, req *pb.ApplyBundleReques
 			})
 		}
 
+		if filepath.Base(cleanPath) == "threat_harvester_config.json" && s.threatHarvesterManager != nil {
+			content := []byte(f.Content)
+			pendingApplies = append(pendingApplies, pendingSubsystemApply{
+				name:  "eBPF Threat Harvester config",
+				apply: func() error { return s.threatHarvesterManager.ApplyConfig(content) },
+			})
+		}
+
 		if filepath.Base(cleanPath) == "vow_config.json" && s.k3sManager != nil {
 			content := []byte(f.Content)
 			pendingApplies = append(pendingApplies, pendingSubsystemApply{
@@ -1007,7 +1162,7 @@ func (s *AgentServer) ApplyBundle(ctx context.Context, req *pb.ApplyBundleReques
 	// progress (M2) instead of rolling back underneath it. The
 	// deferred s.mu.Unlock at the top of ApplyBundle releases the
 	// lock re-acquired here.
-	if len(pendingApplies) > 0 {
+	if subsystemErr == nil && len(pendingApplies) > 0 {
 		s.mu.Unlock()
 		subsystemErr = runSubsystemApplies(pendingApplies)
 		s.mu.Lock()
@@ -1345,8 +1500,16 @@ func (s *AgentServer) executeRollback(reason string) error {
 // stops on a missing file), for the others there is nothing to apply.
 func (s *AgentServer) reapplyRestoredSubsystems() error {
 	var errs []string
+	etcDir := axonwallEtcDir()
 	apply := func(name string, fn func([]byte) error) {
-		data, err := os.ReadFile(filepath.Join("/etc/axonwall", name))
+		var data []byte
+		var err error
+		if !strings.Contains(name, "/") {
+			data, err = os.ReadFile(filepath.Join(etcDir, "managed", name))
+		}
+		if err != nil || len(data) == 0 {
+			data, err = os.ReadFile(filepath.Join(etcDir, name))
+		}
 		if err != nil {
 			return
 		}
@@ -1363,7 +1526,11 @@ func (s *AgentServer) reapplyRestoredSubsystems() error {
 	if s.sdwanProber != nil {
 		// ReloadConfig reads the file from the path and stops the
 		// prober when it is missing (correct: no config, no prober).
-		if err := s.sdwanProber.ReloadConfig("/etc/axonwall/sdwan_config.json"); err != nil {
+		sdwanPath := filepath.Join(etcDir, "managed", "sdwan_config.json")
+		if _, err := os.Stat(sdwanPath); err != nil {
+			sdwanPath = filepath.Join(etcDir, "sdwan_config.json")
+		}
+		if err := s.sdwanProber.ReloadConfig(sdwanPath); err != nil {
 			errs = append(errs, fmt.Sprintf("sdwan_config.json: %v", err))
 			log.Printf("[Agent] Rollback: re-applying sdwan_config.json failed: %v", err)
 		} else {
@@ -1376,6 +1543,9 @@ func (s *AgentServer) reapplyRestoredSubsystems() error {
 	if s.nasManager != nil {
 		apply("nas_config.json", func(b []byte) error { return s.nasManager.ApplyConfig(b) })
 	}
+	if s.virtManager != nil {
+		apply("virt_config.json", func(b []byte) error { return s.virtManager.ApplyVirtBundleJSON(b) })
+	}
 	if s.k3sManager != nil {
 		apply("k3s_config.json", func(b []byte) error { return s.k3sManager.ApplyConfig(b) })
 		apply("vow_config.json", func(b []byte) error { return s.k3sManager.ApplyVowConfig(b) })
@@ -1383,8 +1553,11 @@ func (s *AgentServer) reapplyRestoredSubsystems() error {
 	if s.vigilanteManager != nil {
 		apply("vigilante_config.json", func(b []byte) error { return s.vigilanteManager.ApplyConfig(b) })
 	}
+	if s.threatHarvesterManager != nil {
+		apply("threat_harvester_config.json", func(b []byte) error { return s.threatHarvesterManager.ApplyConfig(b) })
+	}
 	if s.ddnsManager != nil {
-		apply("managed/ddns_config.json", func(b []byte) error { return s.ddnsManager.ApplyConfigJSON(b) })
+		apply("ddns_config.json", func(b []byte) error { return s.ddnsManager.ApplyConfigJSON(b) })
 	}
 	if len(errs) > 0 {
 		return fmt.Errorf("subsystem re-apply failures: %s", strings.Join(errs, "; "))
@@ -1412,7 +1585,7 @@ func (s *AgentServer) restartNgfwDaemonsIfEnabled() error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), serviceCommandTimeout)
 	defer cancel()
-	if err := exec.CommandContext(ctx, "systemctl", "start", "kea-dhcp4-server", "suricata", "frr", "conntrackd", "crowdsec-firewall-bouncer").Run(); err != nil {
+	if err := exec.CommandContext(ctx, "systemctl", "--no-ask-password", "start", "kea-dhcp4-server", "suricata", "frr", "conntrackd", "crowdsec-firewall-bouncer").Run(); err != nil {
 		return fmt.Errorf("restarting NGFW daemons after rollback: %w", err)
 	}
 	log.Printf("[Agent] Rollback: restarted NGFW daemons (restored firewall config is enabled)")
@@ -2141,11 +2314,103 @@ func installStaticDefaultRoute(gateways []staticWanGateway) error {
 	return fmt.Errorf("no static WAN gateway yielded a default route (last error: %w)", lastErr)
 }
 
+func isResolvConfSymlink() bool {
+	fi, err := os.Lstat("/etc/resolv.conf")
+	return err == nil && (fi.Mode()&os.ModeSymlink) != 0
+}
+
+func isSystemdUnitActive(unit string) bool {
+	if !engine.IsSystemdRunning() {
+		return false
+	}
+	return exec.Command("systemctl", "is-active", "--quiet", unit).Run() == nil
+}
+
+func isExternallyManagedHostIface(dev string) bool {
+	if currentRuntimeMode == engine.ModeAppliance {
+		return false
+	}
+	if isSystemdUnitActive("NetworkManager.service") {
+		if out, err := exec.Command("nmcli", "-t", "-f", "DEVICE,STATE", "dev").Output(); err == nil {
+			for _, line := range strings.Split(string(out), "\n") {
+				parts := strings.SplitN(strings.TrimSpace(line), ":", 2)
+				if len(parts) == 2 && parts[0] == dev {
+					state := strings.ToLower(parts[1])
+					if state != "unmanaged" && state != "" {
+						return true
+					}
+				}
+			}
+		}
+	}
+	if isSystemdUnitActive("iwd.service") && strings.HasPrefix(dev, "wl") {
+		return true
+	}
+	return false
+}
+
+func configureSystemdResolvedDNS(dnsServers []string) {
+	if currentRuntimeMode == engine.ModeDev || len(dnsServers) == 0 || !isSystemdUnitActive("systemd-resolved.service") {
+		return
+	}
+	_ = os.MkdirAll("/etc/systemd/resolved.conf.d", 0755)
+	content := fmt.Sprintf("[Resolve]\nDNS=%s\n", strings.Join(dnsServers, " "))
+	_ = os.WriteFile("/etc/systemd/resolved.conf.d/axonwall.conf", []byte(content), 0644)
+	_ = exec.Command("systemctl", "--no-ask-password", "reload-or-restart", "systemd-resolved.service").Run()
+}
+
+func configureArchSystemdNetworkd(spec bootIfaceSpec) {
+	if engine.DetectOSFamily() != string(engine.OSFamilyArch) || currentRuntimeMode == engine.ModeDev {
+		return
+	}
+	if _, err := os.Stat("/etc/network/interfaces"); err == nil {
+		return
+	}
+	if !isSystemdUnitActive("systemd-networkd.service") {
+		return
+	}
+	_ = os.MkdirAll("/etc/systemd/network", 0755)
+	var b strings.Builder
+	fmt.Fprintf(&b, "[Match]\nName=%s\n\n[Network]\n", spec.Device)
+	if spec.Mode == "static" && spec.IPv4 != "" {
+		fmt.Fprintf(&b, "Address=%s\n", spec.IPv4)
+		if spec.Gateway != "" {
+			fmt.Fprintf(&b, "Gateway=%s\n", spec.Gateway)
+		}
+	} else {
+		b.WriteString("DHCP=ipv4\n")
+	}
+	_ = os.WriteFile(filepath.Join("/etc/systemd/network", "10-axonwall-"+spec.Device+".network"), []byte(b.String()), 0644)
+	_ = exec.Command("networkctl", "reload").Run()
+	_ = exec.Command("networkctl", "reconfigure", spec.Device).Run()
+}
+
+func discoverActiveNetIfaces() []string {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, ifa := range ifaces {
+		if (ifa.Flags&net.FlagLoopback) != 0 || (ifa.Flags&net.FlagUp) == 0 {
+			continue
+		}
+		out = append(out, ifa.Name)
+		if len(out) >= 8 {
+			break
+		}
+	}
+	return out
+}
+
 func applyBootInterfaces() error {
+	if currentRuntimeMode == engine.ModeDev {
+		return nil
+	}
 	sanitizeEtcNetworkInterfaces()
 
 	config := make(map[string]string)
-	if data, err := os.ReadFile("/etc/axonwall/interfaces.conf"); err == nil {
+	if data, err := os.ReadFile(filepath.Join(axonwallEtcDir(), "interfaces.conf")); err == nil {
 		for _, line := range strings.Split(string(data), "\n") {
 			line = strings.TrimSpace(line)
 			if strings.HasPrefix(line, "#") || !strings.Contains(line, "=") {
@@ -2170,24 +2435,36 @@ func applyBootInterfaces() error {
 	wanDNS1 := validIP(config["WAN_DNS1"])
 	wanDNS2 := validIP(config["WAN_DNS2"])
 
-	// Ensure fast DNS failover (1s timeout instead of 5s glibc default) and fallback resolvers
-	_ = os.WriteFile("/etc/resolv.conf.head", []byte("options timeout:1 attempts:2\n"), 0644)
-	{
-		var tail strings.Builder
+	// Preserve systemd-resolved / NetworkManager stub symlinks in host mode
+	if currentRuntimeMode == engine.ModeAppliance && !isResolvConfSymlink() {
+		// Ensure fast DNS failover (1s timeout instead of 5s glibc default) and fallback resolvers
+		_ = os.WriteFile("/etc/resolv.conf.head", []byte("options timeout:1 attempts:2\n"), 0644)
+		{
+			var tail strings.Builder
+			if wanDNS1 != "" {
+				tail.WriteString(fmt.Sprintf("nameserver %s\n", wanDNS1))
+			} else {
+				tail.WriteString("nameserver 1.1.1.1\n")
+			}
+			if wanDNS2 != "" {
+				tail.WriteString(fmt.Sprintf("nameserver %s\n", wanDNS2))
+			} else {
+				tail.WriteString("nameserver 8.8.8.8\n")
+			}
+			_ = os.WriteFile("/etc/resolv.conf.tail", []byte(tail.String()), 0644)
+		}
+		if rData, rErr := os.ReadFile("/etc/resolv.conf"); rErr == nil && len(rData) > 0 && !strings.Contains(string(rData), "options timeout:") {
+			_ = os.WriteFile("/etc/resolv.conf", []byte("options timeout:1 attempts:2\n"+string(rData)), 0644)
+		}
+	} else {
+		var dnsList []string
 		if wanDNS1 != "" {
-			tail.WriteString(fmt.Sprintf("nameserver %s\n", wanDNS1))
-		} else {
-			tail.WriteString("nameserver 1.1.1.1\n")
+			dnsList = append(dnsList, wanDNS1)
 		}
 		if wanDNS2 != "" {
-			tail.WriteString(fmt.Sprintf("nameserver %s\n", wanDNS2))
-		} else {
-			tail.WriteString("nameserver 8.8.8.8\n")
+			dnsList = append(dnsList, wanDNS2)
 		}
-		_ = os.WriteFile("/etc/resolv.conf.tail", []byte(tail.String()), 0644)
-	}
-	if rData, rErr := os.ReadFile("/etc/resolv.conf"); rErr == nil && len(rData) > 0 && !strings.Contains(string(rData), "options timeout:") {
-		_ = os.WriteFile("/etc/resolv.conf", []byte("options timeout:1 attempts:2\n"+string(rData)), 0644)
+		configureSystemdResolvedDNS(dnsList)
 	}
 
 	var dhcpSpecs []bootIfaceSpec
@@ -2201,6 +2478,11 @@ func applyBootInterfaces() error {
 	var firstIfaceErr error
 
 	for _, spec := range specs {
+		if isExternallyManagedHostIface(spec.Device) {
+			log.Printf("[Agent] Host mode: skipping externally managed interface %s (%s)", spec.Device, spec.Name)
+			continue
+		}
+		configureArchSystemdNetworkd(spec)
 		if spec.Role == "wan-delegated" {
 			log.Printf("[Agent] Boot-apply: delegating WAN device %s (%s) to br-wan (host L3 disabled)", spec.Device, spec.Name)
 			if err := engine.HardenDelegatedWAN(spec.Device, "br-wan"); err != nil {
@@ -2244,7 +2526,7 @@ func applyBootInterfaces() error {
 			if spec.Gateway != "" && spec.Role == "wan" {
 				staticGateways = append(staticGateways, staticWanGateway{gateway: spec.Gateway, device: spec.Device})
 			}
-			if spec.Role == "wan" && (wanDNS1 != "" || wanDNS2 != "") {
+			if currentRuntimeMode == engine.ModeAppliance && !isResolvConfSymlink() && spec.Role == "wan" && (wanDNS1 != "" || wanDNS2 != "") {
 				if rData, rErr := os.ReadFile("/etc/resolv.conf"); rErr != nil || len(strings.TrimSpace(string(rData))) == 0 {
 					var resolv strings.Builder
 					resolv.WriteString("# Generated by Axonwall\noptions timeout:1 attempts:2\n")
@@ -2570,6 +2852,9 @@ func main() {
 	socketPath := flag.String("socket", "/run/axonwall/agent.sock", "Path to agent Unix socket")
 	bundleDir := flag.String("bundle-dir", "/var/lib/axonwall/bundles", "Directory for storing last-known-good bundles")
 	bootApply := flag.Bool("boot-apply", false, "Apply last-known-good configuration immediately on boot")
+	modeFlag := flag.String("mode", "auto", "Runtime mode: auto, appliance, host, or dev")
+	devFlag := flag.Bool("dev", false, "Run in non-destructive local development mode (equivalent to --mode=dev)")
+	socketGroupFlag := flag.String("socket-group", "", "Group name or GID granted access to agent sockets and token")
 	flag.Parse()
 
 	if *notifyState != "" {
@@ -2580,11 +2865,39 @@ func main() {
 		os.Exit(0)
 	}
 
-	log.Printf("Starting Axonwall Privileged Agent (axonwalld)")
-	syncPersistentYamlConfigs()
+	runtimeMode, modeErr := engine.ParseRuntimeMode(*modeFlag, *devFlag, *bootApply || engine.HasAxonwallMarker("/"))
+	if modeErr != nil {
+		log.Fatalf("Invalid runtime mode: %v", modeErr)
+	}
+	currentRuntimeMode = runtimeMode
+	runtimeSocketGroup = strings.TrimSpace(*socketGroupFlag)
 
-	// If boot-apply is requested, load last-known-good configuration and ensure network interfaces are configured
-	if *bootApply {
+	if runtimeMode == engine.ModeDev {
+		devDir := resolveRepoDevDir()
+		if os.Getenv("AXONWALL_ETC_DIR") == "" {
+			_ = os.Setenv("AXONWALL_ETC_DIR", filepath.Join(devDir, "etc"))
+		}
+		if os.Getenv("AXONWALL_STATE_DIR") == "" {
+			_ = os.Setenv("AXONWALL_STATE_DIR", filepath.Join(devDir, "var"))
+		}
+		if *socketPath == "/run/axonwall/agent.sock" {
+			*socketPath = filepath.Join(devDir, "run", "agent.sock")
+		}
+		if *bundleDir == "/var/lib/axonwall/bundles" {
+			*bundleDir = filepath.Join(axonwallStateDir(), "bundles")
+		}
+		_ = os.MkdirAll(axonwallEtcDir(), 0750)
+		_ = os.MkdirAll(axonwallStateDir(), 0750)
+	}
+
+	osInfo := engine.DetectOSInfo("/")
+	log.Printf("Starting Axonwall Privileged Agent (axonwalld) [os=%s family=%s mode=%s]", osInfo.ID, osInfo.Family, runtimeMode)
+	if runtimeMode == engine.ModeAppliance {
+		syncPersistentYamlConfigs()
+	}
+
+	// If boot-apply is requested in appliance mode, load last-known-good configuration
+	if *bootApply && runtimeMode == engine.ModeAppliance {
 		// A-M16: log a failed interface apply at boot; boot itself
 		// must not abort on one interface (the post-boot checks and
 		// later bundle applies still run).
@@ -2622,10 +2935,10 @@ func main() {
 
 	// Ensure directory for socket exists
 	sockDir := filepath.Dir(*socketPath)
-	if err := os.MkdirAll(sockDir, 0770); err != nil {
+	if err := os.MkdirAll(sockDir, 0750); err != nil {
 		log.Fatalf("Failed to create socket directory %s: %v", sockDir, err)
 	}
-	chownSocketToAPIGroup(sockDir, 0770)
+	chownSocketToAPIGroup(sockDir, 0750)
 	_ = os.Remove(*socketPath)
 
 	listener, err := net.Listen("unix", *socketPath)
@@ -2634,15 +2947,17 @@ func main() {
 	}
 	defer os.Remove(*socketPath)
 
-	// Socket permissions: 0660 root:axonwall-api so control plane group can access
+	// Socket permissions: 0660 root:<group> so control plane group can access
 	chownSocketToAPIGroup(*socketPath, 0660)
 
 	// Agent API authentication: every gRPC call and every HTTP REST
 	// call must carry the per-install agent token (see agent_auth.go).
 	agentToken, agentTokenSource := resolveAgentToken()
+	writeRuntimeTokenCopy(sockDir, agentToken)
 	log.Printf("[Agent] Agent API token authentication enabled (source: %s)", agentTokenSource)
 
 	grpcServer := grpc.NewServer(
+		grpc.MaxRecvMsgSize(64<<20),
 		grpc.UnaryInterceptor(agentTokenUnaryInterceptor(agentToken)),
 		grpc.StreamInterceptor(agentTokenStreamInterceptor(agentToken)),
 	)
@@ -2651,6 +2966,9 @@ func main() {
 	nasManager := engine.NewNasManager()
 	k3sManager := engine.NewK3sManager()
 	haEngine := NewHAEngine(nasManager)
+	if sockDir != "/run/axonwall" {
+		haEngine.sockPath = filepath.Join(sockDir, "ha.sock")
+	}
 	haEngine.SetK3sManager(k3sManager)
 	if err := haEngine.StartSocketListener(); err != nil {
 		log.Printf("[Agent] Warning: Failed to start HA socket listener: %v", err)
@@ -2660,6 +2978,7 @@ func main() {
 	pcapManager := engine.NewPacketCaptureManager()
 	packetStreamMgr := engine.NewPacketStreamManager(pcapManager)
 	hardwareMgr := engine.NewHardwareManager()
+	kernelStudioMgr := engine.NewKernelStudioManager()
 	terminalMgr := engine.NewTerminalManager()
 	taskManager := engine.NewTaskManager()
 	virtManager := engine.NewVirtManager(taskManager, nasManager)
@@ -2667,24 +2986,34 @@ func main() {
 	vfioManager := engine.NewVFIOManager()
 	consoleProxy := engine.NewConsoleProxy()
 	watchdog := engine.NewWatchdogEngine()
-	watchdog.Start()
-	vigilanteManager := engine.NewVigilanteManager("/var/lib/axonwall/vigilante")
+	if runtimeMode == engine.ModeAppliance {
+		watchdog.Start()
+	} else {
+		log.Printf("[Agent] Mode %s: skipping hardware boot watchdog takeover", runtimeMode)
+	}
+	stateDir := axonwallStateDir()
+	etcDir := axonwallEtcDir()
+	vigilanteManager := engine.NewVigilanteManager(filepath.Join(stateDir, "vigilante"))
 	etckeeperManager := engine.NewEtckeeperManager("/etc")
-	if etckeeperManager.IsInstalled() {
+	if runtimeMode == engine.ModeAppliance && etckeeperManager.IsInstalled() {
 		_ = etckeeperManager.Init()
 	}
 	userManager := engine.NewUserManager(etckeeperManager)
 	directoryManager := engine.NewDirectoryManager(userManager, etckeeperManager)
-	pluginManager := engine.NewPluginManager("/var/lib/axonwall")
+	pluginManager := engine.NewPluginManager(stateDir)
 	pluginManager.SetDirectoryManager(directoryManager)
 	mcpTrafficManager := engine.NewMcpTrafficManager()
 	haEngine.SetDirectoryManager(directoryManager)
 
-	go func() {
-		if err := directoryManager.Bootstrap("axonwall.local", 1); err != nil {
-			log.Printf("[Directory] Warning during initial OpenLDAP bootstrap: %v", err)
-		}
-	}()
+	if runtimeMode == engine.ModeAppliance {
+		go func() {
+			if err := directoryManager.Bootstrap("axonwall.local", 1); err != nil {
+				log.Printf("[Directory] Warning during initial OpenLDAP bootstrap: %v", err)
+			}
+		}()
+	} else {
+		log.Printf("[Agent] Mode %s: skipping automatic OpenLDAP/sshd directory bootstrap", runtimeMode)
+	}
 
 	agentServer := NewAgentServer(*bundleDir, iapManager, haEngine, sdwanProber, pcapManager, watchdog, nasManager, k3sManager, vigilanteManager, etckeeperManager, directoryManager)
 	agentServer.SetVirtManager(virtManager)
@@ -2692,10 +3021,10 @@ func main() {
 
 	go func() {
 		readManagedOrRoot := func(name string) ([]byte, error) {
-			if data, err := os.ReadFile(filepath.Join("/etc/axonwall/managed", name)); err == nil && len(data) > 0 {
+			if data, err := os.ReadFile(filepath.Join(etcDir, "managed", name)); err == nil && len(data) > 0 {
 				return data, nil
 			}
-			return os.ReadFile(filepath.Join("/etc/axonwall", name))
+			return os.ReadFile(filepath.Join(etcDir, name))
 		}
 		if data, err := readManagedOrRoot("netdev_config.json"); err == nil {
 			if err := engine.ApplyNetdevBundleJSON(data, json.Unmarshal); err != nil {
@@ -2722,17 +3051,41 @@ func main() {
 		}
 	}()
 
-	// Start eBPF Manager
+	// Start eBPF Manager across real UP non-loopback host interfaces
 	ebpfManager := engine.NewEBPFManager()
-	if err := ebpfManager.Start([]string{"eth0"}); err != nil {
-		log.Printf("[Agent] Warning: Failed to start eBPF manager: %v", err)
+	if runtimeMode == engine.ModeDev && strings.TrimSpace(os.Getenv("AXONWALL_DEV_EBPF")) != "1" {
+		log.Printf("[Agent] Dev mode: skipping automatic XDP/eBPF interface attach (set AXONWALL_DEV_EBPF=1 to enable)")
+	} else if activeIfaces := discoverActiveNetIfaces(); len(activeIfaces) > 0 {
+		if err := ebpfManager.Start(activeIfaces); err != nil {
+			log.Printf("[Agent] Warning: Failed to start eBPF manager (%v): %v", activeIfaces, err)
+		}
 	}
 
-	// Start in-kernel BPF-LSM Preventive Guard & Copy Fail (CVE-2026-31431) Mitigation
+	// Start in-kernel BPF-LSM Preventive Guard only in appliance mode or when explicitly enabled
 	lsmGuardManager := engine.NewLsmGuardManager()
-	if err := lsmGuardManager.Start(engine.DefaultLsmGuardPolicyConfig()); err != nil {
-		log.Printf("[Agent] Warning: Failed to start BPF-LSM guard: %v", err)
+	if runtimeMode == engine.ModeAppliance || strings.TrimSpace(os.Getenv("AXONWALL_LSM_ENFORCE")) == "1" {
+		if err := lsmGuardManager.Start(engine.DefaultLsmGuardPolicyConfig()); err != nil {
+			log.Printf("[Agent] Warning: Failed to start BPF-LSM guard: %v", err)
+		}
+	} else {
+		log.Printf("[Agent] Mode %s: skipping BPF-LSM enforcing attachment (set AXONWALL_LSM_ENFORCE=1 to enable)", runtimeMode)
 	}
+
+	threatHarvesterManager := engine.NewThreatHarvesterManager(ebpfManager, lsmGuardManager, vigilanteManager, mcpTrafficManager)
+	agentServer.SetThreatHarvesterManager(threatHarvesterManager)
+	go func() {
+		for _, cand := range []string{
+			filepath.Join(etcDir, "managed", "threat_harvester_config.json"),
+			filepath.Join(etcDir, "threat_harvester_config.json"),
+		} {
+			if data, err := os.ReadFile(cand); err == nil && len(data) > 0 {
+				if err := threatHarvesterManager.ApplyConfig(data); err != nil {
+					log.Printf("[Agent] Startup Threat Harvester config warning (%s): %v", cand, err)
+				}
+				break
+			}
+		}
+	}()
 
 	// Start HTTP REST listener over Unix socket for local UI and management tooling
 	apiSocketPath := filepath.Join(sockDir, "agent-api.sock")
@@ -2766,6 +3119,11 @@ func main() {
 				"pending_job_id":        currentPendingJobID,
 				"pendingJobId":          currentPendingJobID,
 				"interfaces":            resp.Interfaces,
+				"os_name":               osInfo.PrettyName,
+				"os_id":                 osInfo.ID,
+				"os_family":             osInfo.Family,
+				"kernel_version":        readHostKernelRelease(),
+				"runtime_mode":          string(currentRuntimeMode),
 			}
 			_ = json.NewEncoder(w).Encode(statusMap)
 		})
@@ -2774,6 +3132,7 @@ func main() {
 				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 				return
 			}
+			r.Body = http.MaxBytesReader(w, r.Body, 64<<20)
 			bodyBytes, err := io.ReadAll(r.Body)
 			if err != nil {
 				http.Error(w, fmt.Sprintf("failed to read body: %v", err), http.StatusBadRequest)
@@ -2825,7 +3184,12 @@ func main() {
 				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 				return
 			}
-			bodyBytes, _ := io.ReadAll(r.Body)
+			r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
+			bodyBytes, err := io.ReadAll(r.Body)
+			if err != nil {
+				http.Error(w, fmt.Sprintf("failed to read body: %v", err), http.StatusBadRequest)
+				return
+			}
 			var req pb.ConfirmRequest
 			if len(bodyBytes) > 0 {
 				unmarshaler := protojson.UnmarshalOptions{DiscardUnknown: true}
@@ -2846,7 +3210,12 @@ func main() {
 				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 				return
 			}
-			bodyBytes, _ := io.ReadAll(r.Body)
+			r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
+			bodyBytes, err := io.ReadAll(r.Body)
+			if err != nil {
+				http.Error(w, fmt.Sprintf("failed to read body: %v", err), http.StatusBadRequest)
+				return
+			}
 			var req pb.RollbackRequest
 			if len(bodyBytes) > 0 {
 				unmarshaler := protojson.UnmarshalOptions{DiscardUnknown: true}
@@ -3162,7 +3531,7 @@ func main() {
 				}
 				if action == "reboot" {
 					log.Printf("[Agent] System reboot initiated via API")
-					if runPower("systemctl", "reboot") {
+					if runPower("systemctl", "--no-ask-password", "reboot") {
 						return
 					}
 					if runPower("/sbin/reboot") {
@@ -3171,7 +3540,7 @@ func main() {
 					runPower("reboot")
 				} else {
 					log.Printf("[Agent] System poweroff initiated via API")
-					if runPower("systemctl", "poweroff") {
+					if runPower("systemctl", "--no-ask-password", "poweroff") {
 						return
 					}
 					if runPower("/sbin/poweroff") {
@@ -3196,6 +3565,65 @@ func main() {
 			}
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(telem)
+		})
+		mux.HandleFunc("/v1/system/kernel/studio", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodGet {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			upid := strings.TrimSpace(r.URL.Query().Get("upid"))
+			state := kernelStudioMgr.InspectStudioState(watchdog, taskManager, upid)
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(state)
+		})
+		mux.HandleFunc("/v1/system/kernel/build", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			var req engine.KernelBuildRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, fmt.Sprintf("invalid json payload: %v", err), http.StatusBadRequest)
+				return
+			}
+			upid, buildID, err := kernelStudioMgr.StartBuild(taskManager, req, "api@axonwall")
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"success": true,
+				"upid":    upid,
+				"buildId": buildID,
+				"message": "Kernel build task started",
+			})
+		})
+		mux.HandleFunc("/v1/system/kernel/install", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			var req struct {
+				ArtifactName string `json:"artifactName"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, fmt.Sprintf("invalid json payload: %v", err), http.StatusBadRequest)
+				return
+			}
+			upid, installMode, safetyNote, err := kernelStudioMgr.InstallArtifactSafely(taskManager, watchdog, req.ArtifactName, "api@axonwall")
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"success":     true,
+				"upid":        upid,
+				"installMode": installMode,
+				"safetyNote":  safetyNote,
+				"message":     fmt.Sprintf("Safe kernel install staged (%s)", installMode),
+			})
 		})
 		mux.HandleFunc("/v1/terminal/exec", func(w http.ResponseWriter, r *http.Request) {
 			if r.Method != http.MethodPost {
@@ -3496,6 +3924,41 @@ func main() {
 				"snapshots": k3sManager.ListEtcdSnapshots(),
 			})
 		})
+		mux.HandleFunc("/v1/k3s/nodes/scheduling", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			if r.Method != http.MethodPost {
+				w.WriteHeader(http.StatusMethodNotAllowed)
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"success": false,
+					"error":   "Method not allowed: expected POST",
+				})
+				return
+			}
+			var req engine.K3sNodeUpdateRequest
+			dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64*1024))
+			if err := dec.Decode(&req); err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"success": false,
+					"error":   fmt.Sprintf("Invalid JSON request body: %v", err),
+				})
+				return
+			}
+			node, err := k3sManager.UpdateNodeScheduling(req)
+			if err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"success": false,
+					"error":   err.Error(),
+				})
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"success": true,
+				"message": fmt.Sprintf("Updated scheduling roles and taints on node %s", req.NodeName),
+				"node":    node,
+			})
+		})
 		mux.HandleFunc("/v1/ha/sync-trust", func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			if haEngine == nil {
@@ -3527,6 +3990,153 @@ func main() {
 				"success": true,
 				"message": fmt.Sprintf("Auto-joined K3s cluster at %s", net.JoinHostPort(req.PeerIp, "6443")),
 			})
+		})
+		mux.HandleFunc("/v1/k3s/pulse", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			if r.Method != http.MethodGet {
+				w.WriteHeader(http.StatusMethodNotAllowed)
+				_ = json.NewEncoder(w).Encode(map[string]any{"error": "Method not allowed: expected GET"})
+				return
+			}
+			pulse, err := k3sManager.GetClusterPulse(r.Context())
+			if err != nil {
+				w.WriteHeader(http.StatusInternalServerError)
+				_ = json.NewEncoder(w).Encode(map[string]any{"available": false, "error": err.Error()})
+				return
+			}
+			_ = json.NewEncoder(w).Encode(pulse)
+		})
+		mux.HandleFunc("/v1/k3s/api-resources", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			if r.Method != http.MethodGet {
+				w.WriteHeader(http.StatusMethodNotAllowed)
+				_ = json.NewEncoder(w).Encode(map[string]any{"error": "Method not allowed: expected GET"})
+				return
+			}
+			resources, err := k3sManager.ListAPIResources(r.Context())
+			if err != nil {
+				w.WriteHeader(http.StatusBadGateway)
+				_ = json.NewEncoder(w).Encode(map[string]any{"resources": []engine.K3sAPIResource{}, "error": err.Error()})
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"resources": resources})
+		})
+		mux.HandleFunc("/v1/k3s/namespaces", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			if r.Method != http.MethodGet {
+				w.WriteHeader(http.StatusMethodNotAllowed)
+				_ = json.NewEncoder(w).Encode(map[string]any{"error": "Method not allowed: expected GET"})
+				return
+			}
+			namespaces, err := k3sManager.ListNamespaces(r.Context())
+			if err != nil {
+				w.WriteHeader(http.StatusBadGateway)
+				_ = json.NewEncoder(w).Encode(map[string]any{"namespaces": []engine.K3sNamespaceSummary{}, "error": err.Error()})
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"namespaces": namespaces})
+		})
+		mux.HandleFunc("/v1/k3s/resources", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			if r.Method != http.MethodGet {
+				w.WriteHeader(http.StatusMethodNotAllowed)
+				_ = json.NewEncoder(w).Encode(map[string]any{"error": "Method not allowed: expected GET"})
+				return
+			}
+			q := r.URL.Query()
+			res, err := k3sManager.ListResources(r.Context(), q.Get("resource"), q.Get("namespace"), q.Get("labelSelector"))
+			if err != nil {
+				statusCode := http.StatusBadRequest
+				if res != nil && res.Error != "" {
+					statusCode = http.StatusBadGateway
+				}
+				w.WriteHeader(statusCode)
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"resource":  q.Get("resource"),
+					"namespace": q.Get("namespace"),
+					"items":     []engine.K3sResourceItem{},
+					"count":     0,
+					"error":     err.Error(),
+				})
+				return
+			}
+			_ = json.NewEncoder(w).Encode(res)
+		})
+		mux.HandleFunc("/v1/k3s/resource/inspect", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			if r.Method != http.MethodGet {
+				w.WriteHeader(http.StatusMethodNotAllowed)
+				_ = json.NewEncoder(w).Encode(map[string]any{"error": "Method not allowed: expected GET"})
+				return
+			}
+			q := r.URL.Query()
+			decode := q.Get("decode") == "true" || q.Get("decode") == "1"
+			res, err := k3sManager.InspectResource(r.Context(), q.Get("resource"), q.Get("namespace"), q.Get("name"), decode)
+			if err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				_ = json.NewEncoder(w).Encode(map[string]any{"error": err.Error()})
+				return
+			}
+			_ = json.NewEncoder(w).Encode(res)
+		})
+		mux.HandleFunc("/v1/k3s/logs", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			if r.Method != http.MethodGet {
+				w.WriteHeader(http.StatusMethodNotAllowed)
+				_ = json.NewEncoder(w).Encode(map[string]any{"error": "Method not allowed: expected GET"})
+				return
+			}
+			q := r.URL.Query()
+			tail, _ := strconv.Atoi(q.Get("tail"))
+			since, _ := strconv.Atoi(q.Get("sinceSeconds"))
+			logsResp, err := k3sManager.GetPodLogs(r.Context(), engine.K3sLogsRequest{
+				Namespace:    q.Get("namespace"),
+				Name:         q.Get("name"),
+				Resource:     q.Get("resource"),
+				Container:    q.Get("container"),
+				Tail:         tail,
+				Previous:     q.Get("previous") == "true" || q.Get("previous") == "1",
+				Timestamps:   q.Get("timestamps") == "true" || q.Get("timestamps") == "1",
+				SinceSeconds: since,
+			})
+			if err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				_ = json.NewEncoder(w).Encode(map[string]any{"error": err.Error()})
+				return
+			}
+			_ = json.NewEncoder(w).Encode(logsResp)
+		})
+		mux.HandleFunc("/v1/k3s/logs/stream", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodGet {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			k3sManager.StreamPodLogsSSE(w, r)
+		})
+		mux.HandleFunc("/v1/k3s/action", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			if r.Method != http.MethodPost {
+				w.WriteHeader(http.StatusMethodNotAllowed)
+				_ = json.NewEncoder(w).Encode(map[string]any{"success": false, "error": "Method not allowed: expected POST"})
+				return
+			}
+			var req engine.K3sActionRequest
+			dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 2*1024*1024))
+			if err := dec.Decode(&req); err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				_ = json.NewEncoder(w).Encode(map[string]any{"success": false, "error": fmt.Sprintf("Invalid JSON request body: %v", err)})
+				return
+			}
+			resp, err := k3sManager.ExecuteK3sAction(r.Context(), req)
+			if err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				_ = json.NewEncoder(w).Encode(map[string]any{"success": false, "error": err.Error()})
+				return
+			}
+			if !resp.Success {
+				w.WriteHeader(http.StatusBadGateway)
+			}
+			_ = json.NewEncoder(w).Encode(resp)
 		})
 
 		// Virt / Hypervisor APIs
@@ -4835,10 +5445,172 @@ func main() {
 					"profiles":     tokMgr.ListProfiles(),
 					"activeMounts": engine.DiscoverDelegatedBpffsMounts(),
 				},
-				"virt": virtManager.GetEbpfTelemetry(),
-				"k3s":  k3sManager.GetEbpfTelemetry(),
-				"nas":  nasManager.GetDeepTelemetry(),
+				"virt":            virtManager.GetEbpfTelemetry(),
+				"k3s":             k3sManager.GetEbpfTelemetry(),
+				"nas":             nasManager.GetDeepTelemetry(),
+				"threatHarvester": threatHarvesterManager.GetCompactSummary(),
 			})
+		})
+
+		// =====================================================================
+		// Axonwall Blackbox: eBPF Threat-LLM Harvester REST APIs
+		// =====================================================================
+		mux.HandleFunc("/v1/security/threat-harvester/status", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodGet {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(threatHarvesterManager.SnapshotStatus())
+		})
+
+		mux.HandleFunc("/v1/security/threat-harvester/config", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			bodyBytes, err := io.ReadAll(io.LimitReader(r.Body, 256*1024))
+			if err != nil {
+				http.Error(w, "Failed to read config body", http.StatusBadRequest)
+				return
+			}
+			if err := threatHarvesterManager.ApplyConfig(bodyBytes); err != nil {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				_ = json.NewEncoder(w).Encode(map[string]any{"success": false, "error": err.Error()})
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"success": true,
+				"status":  threatHarvesterManager.SnapshotStatus(),
+			})
+		})
+
+		mux.HandleFunc("/v1/security/threat-harvester/episodes", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodGet {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			tier := r.URL.Query().Get("tier")
+			reviewStatus := r.URL.Query().Get("reviewStatus")
+			limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+			eps := threatHarvesterManager.ListEpisodes(tier, reviewStatus, limit)
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"episodes": eps,
+				"total":    len(eps),
+			})
+		})
+
+		mux.HandleFunc("/v1/security/threat-harvester/episodes/review", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			var req struct {
+				ID           string `json:"id"`
+				Action       string `json:"action"`
+				ReviewStatus string `json:"reviewStatus"`
+				Delete       bool   `json:"delete"`
+			}
+			if err := json.NewDecoder(io.LimitReader(r.Body, 16384)).Decode(&req); err != nil {
+				http.Error(w, "Invalid JSON body", http.StatusBadRequest)
+				return
+			}
+			act := strings.TrimSpace(req.Action)
+			if req.Delete {
+				act = "delete"
+			} else if act == "" {
+				act = strings.TrimSpace(req.ReviewStatus)
+			}
+			ep, err := threatHarvesterManager.ReviewEpisode(req.ID, act)
+			if err != nil {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				_ = json.NewEncoder(w).Encode(map[string]any{"success": false, "error": err.Error()})
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "episode": ep})
+		})
+
+		mux.HandleFunc("/v1/security/threat-harvester/episodes/annotate", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			var req struct {
+				ID string `json:"id"`
+			}
+			if err := json.NewDecoder(io.LimitReader(r.Body, 8192)).Decode(&req); err != nil {
+				http.Error(w, "Invalid JSON body", http.StatusBadRequest)
+				return
+			}
+			ep, err := threatHarvesterManager.AnnotateEpisodeWithTeacherLLM(r.Context(), req.ID)
+			if err != nil {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				_ = json.NewEncoder(w).Encode(map[string]any{"success": false, "error": err.Error()})
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "episode": ep})
+		})
+
+		mux.HandleFunc("/v1/security/threat-harvester/simulate", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			var req struct {
+				Scenario string `json:"scenario"`
+			}
+			_ = json.NewDecoder(io.LimitReader(r.Body, 8192)).Decode(&req)
+			ep, err := threatHarvesterManager.InjectSimulatedEpisode(req.Scenario)
+			if err != nil {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusInternalServerError)
+				_ = json.NewEncoder(w).Encode(map[string]any{"success": false, "error": err.Error()})
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "episode": ep})
+		})
+
+		mux.HandleFunc("/v1/security/threat-harvester/export", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodGet {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			anonParam := strings.TrimSpace(strings.ToLower(r.URL.Query().Get("anonymize")))
+			anonymize := threatHarvesterManager.SnapshotStatus().Config.AnonymizeOnExport
+			if anonParam == "false" || anonParam == "0" {
+				anonymize = false
+			} else if anonParam == "true" || anonParam == "1" {
+				anonymize = true
+			}
+			w.Header().Set("Content-Type", "application/zstd")
+			w.Header().Set("Content-Disposition", `attachment; filename="axonwall-threat-corpus.tar.zst"`)
+			if err := threatHarvesterManager.ExportCorpusTarZst(w, anonymize); err != nil {
+				log.Printf("[ThreatHarvester] Export stream error: %v", err)
+			}
+		})
+
+		mux.HandleFunc("/v1/security/threat-harvester/ship", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			keyName, err := threatHarvesterManager.ShipCorpusToS3(r.Context())
+			if err != nil {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				_ = json.NewEncoder(w).Encode(map[string]any{"success": false, "error": err.Error()})
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "objectKey": keyName})
 		})
 
 		mux.HandleFunc("/v1/ebpf/xdp/block", func(w http.ResponseWriter, r *http.Request) {
@@ -5047,7 +5819,10 @@ func main() {
 			_ = json.NewEncoder(w).Encode(k3sManager.GetEbpfTelemetry())
 		})
 
-		apiServer = &http.Server{Handler: agentTokenHTTPMiddleware(agentToken, mux)}
+		apiServer = &http.Server{
+			Handler:           agentTokenHTTPMiddleware(agentToken, mux),
+			ReadHeaderTimeout: 10 * time.Second,
+		}
 		go func() {
 			log.Printf("[Agent] Listening on REST Unix socket: %s", apiSocketPath)
 			if err := apiServer.Serve(apiListener); err != nil && err != http.ErrServerClosed {
@@ -5071,6 +5846,7 @@ func main() {
 		haEngine.Stop()
 		sdwanProber.stop()
 		lsmGuardManager.Stop()
+		threatHarvesterManager.Stop()
 		ebpfManager.Stop()
 		etckeeperManager.Close()
 		grpcServer.GracefulStop()

@@ -92,7 +92,7 @@ lb config \
   --chroot-squashfs-compression-type xz \
   --binary-images iso-hybrid \
   --bootloaders "syslinux,grub-efi" \
-  --bootappend-live "boot=live components quiet loglevel=3 systemd.show_status=0 lsm=landlock,lockdown,yama,integrity,apparmor,bpf hostname=${LIVE_HOSTNAME} username=axonwall live-config.user-default-groups=sudo,adm,dialout live-config.nottyautologin console=ttyS0,115200 console=tty0" \
+  --bootappend-live "boot=live components quiet splash plymouth.ignore-serial-consoles loglevel=3 systemd.show_status=0 lsm=landlock,lockdown,yama,integrity,apparmor,bpf hostname=${LIVE_HOSTNAME} username=axonwall live-config.user-default-groups=sudo,adm,dialout live-config.nottyautologin console=ttyS0,115200 console=tty0" \
   --bootappend-install "auto=true priority=critical preseed/file=/preseed.cfg" \
   --debian-installer live \
   --debian-installer-distribution trixie \
@@ -155,6 +155,10 @@ fi
 if [[ -f "${SCRIPT_DIR}/config/bootloaders/grub-pc/live-theme/theme.txt" ]]; then
   cp "${SCRIPT_DIR}/config/bootloaders/grub-pc/live-theme/theme.txt" config/includes.chroot/boot/grub/themes/axonwall/theme.txt
   cp "${SCRIPT_DIR}/config/bootloaders/grub-pc/live-theme/theme.txt" config/includes.chroot/etc/axonwall/branding/theme.txt
+fi
+if [[ -d "${SCRIPT_DIR}/branding/plymouth/axonwall" ]]; then
+  mkdir -p config/includes.chroot/usr/share/plymouth/themes/axonwall
+  cp -a "${SCRIPT_DIR}/branding/plymouth/axonwall/." config/includes.chroot/usr/share/plymouth/themes/axonwall/
 fi
 
 # Stage detect-cloudinit into Live chroot so unattended/live installer can discover NoCloud seeds
@@ -448,6 +452,19 @@ if [[ ! -f config/includes.chroot/usr/local/bin/k3s ]]; then
   chmod 0755 config/includes.chroot/usr/local/bin/k3s
 fi
 
+# Fetch K9s v0.51.0 interactive Kubernetes terminal UI
+K9S_VERSION="0.51.0"
+K9S_SHA256="c3752ad51a5a4015a113819c4eeb6e55a4d0e4b8e652494797532f6fc8161dd7"
+if [[ ! -f config/includes.chroot/usr/local/bin/k9s ]]; then
+  echo "[+] Fetching K9s v${K9S_VERSION}..."
+  K9S_TAR="$(mktemp -t k9s-XXXXXX.tar.gz)"
+  curl -fsSL -o "${K9S_TAR}" "https://github.com/derailed/k9s/releases/download/v${K9S_VERSION}/k9s_Linux_amd64.tar.gz"
+  echo "${K9S_SHA256}  ${K9S_TAR}" | sha256sum -c -
+  tar -xzf "${K9S_TAR}" -C config/includes.chroot/usr/local/bin/ k9s
+  chmod 0755 config/includes.chroot/usr/local/bin/k9s
+  rm -f "${K9S_TAR}"
+fi
+
 # Stage Vault Edition payload into /usr/share/axonwall/vault/ so the unified
 # main ISO can install EITHER Axonwall NGFW OR Axonwall Vault Edition.
 mkdir -p config/includes.chroot/usr/share/axonwall/vault
@@ -502,7 +519,7 @@ chmod +x config/includes.chroot/usr/share/axonwall/vault/axonwall-vault-provisio
   cp "${SCRIPT_DIR}/../k3s-storage/zfs-operator.yaml" config/includes.chroot/usr/share/axonwall/k3s/zfs-operator.yaml
 elif [[ "${FLAVOR}" == "k3s-storage" ]]; then
   # Fetch K3s binary for Barebones K3s + OpenZFS Storage Host
-  K3S_VERSION="${K3S_VERSION:-v1.31.5+k3s1}"
+  K3S_VERSION="${K3S_VERSION:-v1.32.3+k3s1}"
   K3S_URL_VERSION="${K3S_VERSION//+/%2B}"
   case "${K3S_VERSION}" in
     v1.31.5+k3s1) K3S_SHA256="${K3S_SHA256:-399b87b432ce55013fa81adad572a8e4ecf56e0df97369cf02d4b8a41f039091}" ;;
@@ -525,6 +542,17 @@ elif [[ "${FLAVOR}" == "k3s-storage" ]]; then
   fi
   ln -sf k3s config/includes.chroot/usr/local/bin/crictl
   ln -sf k3s config/includes.chroot/usr/local/bin/ctr
+  K9S_VERSION="0.51.0"
+  K9S_SHA256="c3752ad51a5a4015a113819c4eeb6e55a4d0e4b8e652494797532f6fc8161dd7"
+  if [[ ! -f config/includes.chroot/usr/local/bin/k9s ]]; then
+    echo "[+] Fetching K9s v${K9S_VERSION}..."
+    K9S_TAR="$(mktemp -t k9s-XXXXXX.tar.gz)"
+    curl -fsSL -o "${K9S_TAR}" "https://github.com/derailed/k9s/releases/download/v${K9S_VERSION}/k9s_Linux_amd64.tar.gz"
+    echo "${K9S_SHA256}  ${K9S_TAR}" | sha256sum -c -
+    tar -xzf "${K9S_TAR}" -C config/includes.chroot/usr/local/bin/ k9s
+    chmod 0755 config/includes.chroot/usr/local/bin/k9s
+    rm -f "${K9S_TAR}"
+  fi
 else
 # Fetch SeaweedFS binary (Vault Edition storage engine)
 WEED_VERSION="4.48"
@@ -702,6 +730,11 @@ intel-microcode
 amd64-microcode
 systemd
 systemd-sysv
+plymouth
+plymouth-label
+fontconfig
+fontconfig-config
+fonts-dejavu-core
 grub-pc
 grub-pc-bin
 grub-efi-amd64-bin
@@ -813,6 +846,11 @@ intel-microcode
 amd64-microcode
 systemd
 systemd-sysv
+plymouth
+plymouth-label
+fontconfig
+fontconfig-config
+fonts-dejavu-core
 grub-pc
 grub-pc-bin
 grub-efi-amd64-bin
@@ -927,6 +965,11 @@ intel-microcode
 amd64-microcode
 systemd
 systemd-sysv
+plymouth
+plymouth-label
+fontconfig
+fontconfig-config
+fonts-dejavu-core
 grub-pc
 grub-pc-bin
 grub-efi-amd64-bin
@@ -1049,6 +1092,28 @@ bpftool
 python3-drgn
 linux-perf
 EOF
+fi
+
+# Stage Axonwall Custom Hardened Kernel Builder onto deployed hosts
+if [[ "${FLAVOR}" == "axonwall" || "${FLAVOR}" == "k3s-storage" ]]; then
+  if [[ -d "${SCRIPT_DIR}/../kernel/fragments" && -f "${SCRIPT_DIR}/../kernel/build-kernel.sh" ]]; then
+    echo "[+] Staging Axonwall Hardened Kernel Builder (/usr/share/axonwall/kernel-builder)..."
+    mkdir -p config/includes.chroot/usr/share/axonwall/kernel-builder/fragments
+    cp "${SCRIPT_DIR}/../kernel/build-kernel.sh" config/includes.chroot/usr/share/axonwall/kernel-builder/build-kernel.sh
+    cp "${SCRIPT_DIR}/../kernel/README.md" config/includes.chroot/usr/share/axonwall/kernel-builder/README.md || true
+    cp "${SCRIPT_DIR}/../kernel/fragments/"* config/includes.chroot/usr/share/axonwall/kernel-builder/fragments/
+    chmod 0755 config/includes.chroot/usr/share/axonwall/kernel-builder/build-kernel.sh
+  fi
+fi
+
+# Include prebuilt Axonwall custom hardened kernel .deb packages when available
+if compgen -G "${SCRIPT_DIR}/../kernel/output/linux-image-*axonwall*.deb" >/dev/null; then
+  echo "[+] Installing prebuilt Axonwall custom hardened kernel .deb packages into chroot..."
+  mkdir -p config/packages.chroot
+  cp "${SCRIPT_DIR}/../kernel/output/linux-image-"*axonwall*.deb config/packages.chroot/
+  if compgen -G "${SCRIPT_DIR}/../kernel/output/linux-headers-*axonwall*.deb" >/dev/null; then
+    cp "${SCRIPT_DIR}/../kernel/output/linux-headers-"*axonwall*.deb config/packages.chroot/
+  fi
 fi
 
 # 5. Build ISO

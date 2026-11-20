@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -352,7 +353,9 @@ func SetForwarding(procSysRoot string, enabled bool) error {
 	if err := os.WriteFile(filepath.Join(procSysRoot, "net", "ipv4", "ip_forward"), val, 0644); err != nil {
 		return err
 	}
-	_ = os.WriteFile(filepath.Join(procSysRoot, "net", "ipv6", "conf", "all", "forwarding"), val, 0644)
+	if err := os.WriteFile(filepath.Join(procSysRoot, "net", "ipv6", "conf", "all", "forwarding"), val, 0644); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
 	return nil
 }
 

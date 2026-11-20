@@ -7,10 +7,13 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/axonwall/axonwall/apps/axonwalld/engine"
 )
 
 // serviceCommandTimeout bounds every systemctl/service invocation made
@@ -27,24 +30,54 @@ var serviceCommandTimeout = 90 * time.Second
 var managedServices = map[string]bool{
 	"suricata": true, "crowdsec": true, "crowdsec-firewall-bouncer": true,
 	"kea-dhcp4-server": true, "kea-dhcp6-server": true, "kea-dhcp-ddns-server": true,
+	"kea-dhcp4": true, "kea-dhcp6": true, "kea-dhcp-ddns": true,
 	"radvd": true, "avahi-daemon": true, "miniupnpd": true,
 	"unbound": true, "frr": true, "caddy": true, "headscale": true,
 	"keepalived": true, "conntrackd": true, "nftables": true,
 	"ssh": true, "sshd": true,
-	"slapd": true, "sssd": true, "chrony": true,
+	"slapd": true, "sssd": true, "chrony": true, "chronyd": true,
 	"wg-quick@wg0": true, "rosenpass": true,
-	"haproxy": true, "freeradius": true,
+	"haproxy": true, "freeradius": true, "radiusd": true,
 	"openvpn": true, "openvpn@server": true,
 	"strongswan": true, "strongswan-starter": true,
-	"smbd": true, "nmbd": true, "wsdd": true, "minio": true,
-	"nfs-server": true, "nfs-kernel-server": true, "tgt": true, "rtslib-fb-targetctl": true,
-	"k3s": true, "libvirtd": true, "nut-server": true, "nut-monitor": true, "nut-client": true, "snmpd": true,
+	"smbd": true, "smb": true, "nmbd": true, "nmb": true, "wsdd": true, "minio": true,
+	"nfs-server": true, "nfs-kernel-server": true, "tgt": true, "rtslib-fb-targetctl": true, "target": true,
+	"k3s": true, "k3s-agent": true, "libvirtd": true, "nut-server": true, "nut-monitor": true, "nut-client": true, "snmpd": true,
 	"tailscaled": true, "ntopng": true, "eluvix": true,
 	"clamav-freshclam": true, "clamav-daemon": true, "vector": true,
+	"NetworkManager": true, "systemd-networkd": true, "systemd-resolved": true,
+}
+
+var distroServiceAliases = map[string][]string{
+	"kea-dhcp4-server":     {"kea-dhcp4-server", "kea-dhcp4"},
+	"kea-dhcp4":            {"kea-dhcp4", "kea-dhcp4-server"},
+	"kea-dhcp6-server":     {"kea-dhcp6-server", "kea-dhcp6"},
+	"kea-dhcp6":            {"kea-dhcp6", "kea-dhcp6-server"},
+	"kea-dhcp-ddns-server": {"kea-dhcp-ddns-server", "kea-dhcp-ddns"},
+	"kea-dhcp-ddns":        {"kea-dhcp-ddns", "kea-dhcp-ddns-server"},
+	"smbd":                 {"smbd", "smb"},
+	"smb":                  {"smb", "smbd"},
+	"nmbd":                 {"nmbd", "nmb"},
+	"nmb":                  {"nmb", "nmbd"},
+	"chrony":               {"chrony", "chronyd"},
+	"chronyd":              {"chronyd", "chrony"},
+	"freeradius":           {"freeradius", "radiusd"},
+	"radiusd":              {"radiusd", "freeradius"},
+	"ssh":                  {"ssh", "sshd"},
+	"sshd":                 {"sshd", "ssh"},
+	"nfs-kernel-server":    {"nfs-kernel-server", "nfs-server"},
+	"nfs-server":           {"nfs-server", "nfs-kernel-server"},
+	"rtslib-fb-targetctl":  {"rtslib-fb-targetctl", "target", "tgt"},
+	"target":               {"target", "rtslib-fb-targetctl", "tgt"},
+	"tgt":                  {"tgt", "rtslib-fb-targetctl", "target"},
+	"nut-client":           {"nut-client", "nut-monitor"},
+	"nut-monitor":          {"nut-monitor", "nut-client"},
+	"strongswan":           {"strongswan", "strongswan-starter"},
+	"strongswan-starter":   {"strongswan-starter", "strongswan"},
 }
 
 func isSafeInstanceToken(tok string) bool {
-	if tok == "" || len(tok) > 32 {
+	if tok == "" || len(tok) > 64 {
 		return false
 	}
 	for _, r := range tok {
@@ -69,7 +102,113 @@ func validServiceName(svc string) bool {
 	if strings.HasPrefix(unit, "openvpn-server@") && isSafeInstanceToken(strings.TrimPrefix(unit, "openvpn-server@")) {
 		return true
 	}
+	if strings.HasPrefix(unit, "openvpn-client@") && isSafeInstanceToken(strings.TrimPrefix(unit, "openvpn-client@")) {
+		return true
+	}
 	return false
+}
+
+func systemdUnitFileExists(unit string) bool {
+	base := strings.TrimSuffix(unit, ".service")
+	candidates := []string{base + ".service"}
+	if idx := strings.IndexByte(base, '@'); idx >= 0 {
+		candidates = append(candidates, base[:idx+1]+".service")
+	}
+	dirs := []string{
+		"/etc/systemd/system",
+		"/run/systemd/system",
+		"/usr/lib/systemd/system",
+		"/lib/systemd/system",
+	}
+	for _, dir := range dirs {
+		for _, c := range candidates {
+			if _, err := os.Stat(filepath.Join(dir, c)); err == nil {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func resolveDistroServiceUnit(svc string) string {
+	hasSuffix := strings.HasSuffix(svc, ".service")
+	unit := strings.TrimSuffix(svc, ".service")
+	if systemdUnitFileExists(unit) {
+		return svc
+	}
+	candidates := distroServiceAliases[unit]
+	if engine.DetectOSFamily() == "arch" && len(candidates) > 0 {
+		for _, c := range candidates {
+			if c != unit && systemdUnitFileExists(c) {
+				if hasSuffix {
+					return c + ".service"
+				}
+				return c
+			}
+		}
+	}
+	for _, c := range candidates {
+		if systemdUnitFileExists(c) {
+			if hasSuffix {
+				return c + ".service"
+			}
+			return c
+		}
+	}
+	return svc
+}
+
+var openRCServiceAliases = map[string]string{
+	"kea-dhcp4-server":     "kea-dhcp4",
+	"kea-dhcp6-server":     "kea-dhcp6",
+	"kea-dhcp-ddns-server": "kea-dhcp-ddns",
+	"ssh":                  "sshd",
+	"chrony":               "chronyd",
+	"smbd":                 "samba",
+	"nmbd":                 "samba",
+	"nfs-kernel-server":    "nfs",
+	"freeradius":           "radiusd",
+}
+
+func resolveOpenRCServiceName(unit string) string {
+	base := strings.TrimSuffix(unit, ".service")
+	for _, prefix := range []string{"openvpn-client@", "openvpn-server@", "openvpn@"} {
+		if strings.HasPrefix(base, prefix) {
+			inst := strings.TrimPrefix(base, prefix)
+			if isSafeInstanceToken(inst) {
+				return "openvpn." + inst
+			}
+		}
+	}
+	if strings.HasPrefix(base, "wg-quick@") {
+		inst := strings.TrimPrefix(base, "wg-quick@")
+		if isSafeInstanceToken(inst) {
+			return "wg-quick." + inst
+		}
+	}
+	if candidates, ok := distroServiceAliases[base]; ok {
+		for _, c := range candidates {
+			if _, err := os.Stat(filepath.Join("/etc/init.d", c)); err == nil {
+				return c
+			}
+		}
+	}
+	if mapped, ok := openRCServiceAliases[base]; ok {
+		return mapped
+	}
+	return base
+}
+
+func hasSystemdOrFakeSystemctl() bool {
+	p, err := exec.LookPath("systemctl")
+	if err != nil {
+		return false
+	}
+	if engine.IsSystemdRunning() {
+		return true
+	}
+	clean := filepath.Clean(p)
+	return clean != "/usr/bin/systemctl" && clean != "/bin/systemctl"
 }
 
 func keaHasActiveInterfaces() bool {
@@ -113,30 +252,40 @@ func reloadOrRestartService(svc string) ([]byte, error) {
 		return nil, fmt.Errorf("service %q is not in the managed-services allowlist", svc)
 	}
 	unit := strings.TrimSuffix(svc, ".service")
-	if unit == "kea-dhcp4-server" && !keaHasActiveInterfaces() {
+	if (unit == "kea-dhcp4-server" || unit == "kea-dhcp4") && !keaHasActiveInterfaces() {
 		return stopSystemService(svc)
 	}
-	if unit == "kea-dhcp6-server" && !keaHasActiveInterfaces6() {
+	if (unit == "kea-dhcp6-server" || unit == "kea-dhcp6") && !keaHasActiveInterfaces6() {
 		return stopSystemService(svc)
 	}
+	resolvedSvc := resolveDistroServiceUnit(svc)
 	ctx, cancel := context.WithTimeout(context.Background(), serviceCommandTimeout)
 	defer cancel()
-	if _, err := exec.LookPath("systemctl"); err == nil {
-		return exec.CommandContext(ctx, "systemctl", "reload-or-restart", svc).CombinedOutput()
+	if hasSystemdOrFakeSystemctl() {
+		return exec.CommandContext(ctx, "systemctl", "--no-ask-password", "reload-or-restart", resolvedSvc).CombinedOutput()
 	}
-	return exec.CommandContext(ctx, "service", unit, "restart").CombinedOutput()
+	rcUnit := resolveOpenRCServiceName(resolvedSvc)
+	if _, err := exec.LookPath("rc-service"); err == nil {
+		return exec.CommandContext(ctx, "rc-service", rcUnit, "restart").CombinedOutput()
+	}
+	return exec.CommandContext(ctx, "service", rcUnit, "restart").CombinedOutput()
 }
 
 func stopSystemService(svc string) ([]byte, error) {
 	if !validServiceName(svc) {
 		return nil, fmt.Errorf("service %q is not in the managed-services allowlist", svc)
 	}
+	resolvedSvc := resolveDistroServiceUnit(svc)
 	ctx, cancel := context.WithTimeout(context.Background(), serviceCommandTimeout)
 	defer cancel()
-	if _, err := exec.LookPath("systemctl"); err == nil {
-		return exec.CommandContext(ctx, "systemctl", "stop", svc).CombinedOutput()
+	if hasSystemdOrFakeSystemctl() {
+		return exec.CommandContext(ctx, "systemctl", "--no-ask-password", "stop", resolvedSvc).CombinedOutput()
 	}
-	return exec.CommandContext(ctx, "service", strings.TrimSuffix(svc, ".service"), "stop").CombinedOutput()
+	rcUnit := resolveOpenRCServiceName(resolvedSvc)
+	if _, err := exec.LookPath("rc-service"); err == nil {
+		return exec.CommandContext(ctx, "rc-service", rcUnit, "stop").CombinedOutput()
+	}
+	return exec.CommandContext(ctx, "service", rcUnit, "stop").CombinedOutput()
 }
 
 // dhcpPidFilesForDev lists the pidfiles a DHCP client for one device
@@ -212,7 +361,7 @@ func dhcpClientRunning(dev string) bool {
 }
 
 func triggerDhcpClient(dev string, roles ...string) {
-	if dev == "" {
+	if !isValidNetdev(dev) {
 		return
 	}
 	role := "wan"
@@ -241,7 +390,7 @@ func triggerDhcpClient(dev string, roles ...string) {
 }
 
 func releaseDhcpLease(dev string) {
-	if dev == "" {
+	if !isValidNetdev(dev) {
 		return
 	}
 	if dhcpcdPath, err := exec.LookPath("dhcpcd"); err == nil {

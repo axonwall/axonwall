@@ -7,7 +7,7 @@ import { CodeBlock } from '../components/CodeBlock';
 export const metadata = {
   title: 'Next-Gen Installer, Multi-Disk RAID, LUKS2+TPM2 & ZFSBootMenu | Axonwall Documentation',
   description:
-    'Documentation for Axonwall v0.11.64 bare-metal installation: axonwall-console --install Express/Custom TUI, --unattended automation, unified Vault edition, Smart Disk Tiering, LUKS2 + TPM 2.0 PCR 0+2+7 auto-unlock, and ZFSBootMenu v3.1.0 Boot Environments.',
+    'Documentation for Axonwall v0.11.68 bare-metal installation: axonwall-console --install Express/Custom TUI, --unattended automation, unified Vault edition, Smart Disk Tiering, LUKS2 + TPM 2.0 PCR 0+2+7 auto-unlock, and ZFSBootMenu v3.1.0 Boot Environments.',
 };
 
 export default function InstallerRaidZfsDocPage() {
@@ -17,13 +17,13 @@ export default function InstallerRaidZfsDocPage() {
       <div className="space-y-4 border-b border-slate-800/80 pb-8">
         <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-950/60 border border-emerald-500/30 text-emerald-400 text-xs font-semibold">
           <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-          Bare-Metal Installer &amp; Boot Engines • v0.11.64
+          Bare-Metal Installer &amp; Boot Engines • v0.11.68
         </div>
         <h1 className="text-3xl sm:text-5xl font-extrabold text-white tracking-tight">
           Next-Gen Installer, Multi-Disk RAID &amp; ZFSBootMenu
         </h1>
         <p className="text-base sm:text-lg text-slate-400 leading-relaxed max-w-3xl">
-          Deploy unbrickable bare-metal appliances via the interactive <code className="text-emerald-400 font-mono">axonwall-console --install</code> TUI or zero-touch <code className="text-emerald-400 font-mono">--unattended</code> manifests. Choose between unified <code className="text-slate-200 font-mono">axonwall</code> vs. <code className="text-slate-200 font-mono">vault</code> editions, Smart NVMe/SSD/HDD disk tiering, LUKS2 encryption with TPM 2.0 auto-unlock, <code className="text-emerald-400 font-mono">mdadm</code> RAID-1 A/B slots, or native ZFSBootMenu v3.1.0 Root-on-ZFS Boot Environments.
+          Deploy unbrickable bare-metal appliances via the interactive <code className="text-emerald-400 font-mono">axonwall-console --install</code> TUI or zero-touch <code className="text-emerald-400 font-mono">--unattended</code> manifests. Choose between unified <code className="text-slate-200 font-mono">axonwall</code> (NGFW), <code className="text-slate-200 font-mono">vault</code> (Immutable S3 Backup), and <code className="text-cyan-300 font-mono">k3s-storage</code> (Barebones K3s + OpenZFS/OpenEBS) editions, Smart NVMe/SSD/HDD disk tiering, LUKS2 encryption with TPM 2.0 auto-unlock, <code className="text-emerald-400 font-mono">mdadm</code> RAID-1 A/B slots, or native ZFSBootMenu v3.1.0 Root-on-ZFS Boot Environments.
         </p>
       </div>
 
@@ -42,7 +42,7 @@ export default function InstallerRaidZfsDocPage() {
             <div className="font-bold text-emerald-400 text-sm">Express 1-Click vs. 5-Step Custom Wizard</div>
             <p className="text-slate-400 leading-relaxed">
               <strong>Express Mode</strong> inspects hardware topology and provisions optimal defaults in a single confirmation.{' '}
-              <strong>5-Step Custom Wizard</strong> walks operators through (1) Edition (<code className="text-slate-200 font-mono">axonwall</code> NGFW/Converged vs. <code className="text-slate-200 font-mono">vault</code> S3 Immutable Backup), (2) Boot Mode (<code className="text-slate-200 font-mono">ab-dual-root</code>, <code className="text-slate-200 font-mono">zbm</code>, or <code className="text-slate-200 font-mono">rolling</code>), (3) Smart Disk Tiering, (4) LUKS2 + TPM 2.0 Encryption, and (5) Initial Management NIC &amp; Credentials.
+              <strong>5-Step Custom Wizard</strong> walks operators through (1) Edition (<code className="text-slate-200 font-mono">axonwall</code> NGFW/Converged, <code className="text-slate-200 font-mono">vault</code> S3 Immutable Backup, or <code className="text-cyan-300 font-mono">k3s-storage</code> Barebones K3s + OpenZFS/OpenEBS Host), (2) Boot Mode (<code className="text-slate-200 font-mono">ab-dual-root</code>, <code className="text-slate-200 font-mono">zbm</code>, or <code className="text-slate-200 font-mono">rolling</code>), (3) Smart Disk Tiering, (4) LUKS2 + TPM 2.0 Encryption, and (5) Initial Management NIC &amp; Credentials.
             </p>
           </div>
 
@@ -232,7 +232,7 @@ Enter ZFS pool name [default: tank]: tank`}
               <span>Native Boot Environments (BEs)</span>
             </div>
             <p className="text-xs text-slate-400 leading-relaxed">
-              System root datasets reside in <code className="text-slate-200 font-mono">zroot/ROOT/&lt;be_name&gt;</code>. OTA firmware updates snapshot the active BE (e.g. <code className="text-slate-200 font-mono">zroot/ROOT/axonwall-0.11.63@pre-update-v0.11.64</code>) and clone it instantaneously with zero wasted disk space into a new target BE (<code className="text-slate-200 font-mono">zroot/ROOT/axonwall-0.11.64</code>).
+              System root datasets reside in <code className="text-slate-200 font-mono">zroot/ROOT/&lt;be_name&gt;</code>. OTA firmware updates snapshot the active BE (e.g. <code className="text-slate-200 font-mono">zroot/ROOT/axonwall-0.11.67@pre-update-v0.11.68</code>) and clone it instantaneously with zero wasted disk space into a new target BE (<code className="text-slate-200 font-mono">zroot/ROOT/axonwall-0.11.68</code>).
             </p>
             <ul className="text-xs text-slate-300 list-disc list-inside space-y-1">
               <li>Instantaneous atomic updates and rollbacks via <code className="font-mono text-emerald-300">axonwallctl zbm</code></li>
@@ -272,9 +272,9 @@ Enter ZFS pool name [default: tank]: tank`}
 Dataset Hierarchy:
 zroot
 ├── ROOT
-│   ├── axonwall-0.11.63          (mountpoint=/, org.zfsbootmenu:commandline="...")
-│   │   └── @pre-update-v0.11.64  (Point-in-time snapshot)
-│   └── axonwall-0.11.64          (mountpoint=/, clone/promoted next-boot BE)
+│   ├── axonwall-0.11.67          (mountpoint=/, org.zfsbootmenu:commandline="...")
+│   │   └── @pre-update-v0.11.68  (Point-in-time snapshot)
+│   └── axonwall-0.11.68          (mountpoint=/, clone/promoted next-boot BE)
 └── data
     └── axonwall                  (mountpoint=/var/lib/axonwall, persistent config & logs)`}
         />
@@ -286,18 +286,18 @@ zroot
 axonwallctl zbm list
 
 # Create a point-in-time snapshot, clone into a new BE, and activate for next boot
-sudo axonwallctl zbm snapshot axonwall-0.11.64 pre-change
-sudo axonwallctl zbm clone axonwall-0.11.64@pre-change axonwall-canary
+sudo axonwallctl zbm snapshot axonwall-0.11.68 pre-change
+sudo axonwallctl zbm clone axonwall-0.11.68@pre-change axonwall-canary
 sudo axonwallctl zbm activate axonwall-canary
 
 # Prune obsolete Boot Environments or snapshots
 sudo axonwallctl zbm delete axonwall-0.11.62
-sudo axonwallctl zbm delete-snapshot axonwall-0.11.64@pre-change
+sudo axonwallctl zbm delete-snapshot axonwall-0.11.68@pre-change
 
 # Stage cryptographically verified OTA firmware update (SHA-256 + OpenSSL .sig
 # verified against /etc/axonwall/release-signing.pub before writing standby slot/BE)
-sudo axonwallctl update --version 0.11.64
-sudo axonwallctl update --version 0.11.64 --slot B
+sudo axonwallctl update --version 0.11.68
+sudo axonwallctl update --version 0.11.68 --slot B
 sudo axonwallctl update --apt   # Rolling single-root APT upgrade mode`}
         />
 
@@ -349,6 +349,37 @@ sudo axonwall-zbm-theme set-splash /root/custom-brand.png
 # Re-embed UKI .splash section and sync EFI/ZBM/VMLINUZ.EFI across all mirrored ESP partitions
 sudo axonwall-zbm-theme apply`}
           />
+        </div>
+      </section>
+
+      {/* Barebones K3s + Storage Edition */}
+      <section id="k3s-storage-edition" className="space-y-6 pt-6 border-t border-slate-800/80">
+        <h2 className="text-2xl font-bold text-white flex items-center gap-2">
+          <Layers className="w-6 h-6 text-cyan-400" /> Barebones K3s + OpenZFS/OpenEBS Storage Host (<code className="font-mono text-cyan-300">k3s-storage</code>)
+        </h2>
+        <p className="text-sm text-slate-300 leading-relaxed">
+          Dedicated compute and storage nodes do not need NGFW, Suricata IDS, or Samba/NFS appliances enabled. Both the Debian 13 and Alpine Linux ISOs expose the{' '}
+          <code className="text-cyan-300 font-mono">k3s-storage</code> profile directly in UEFI GRUB / BIOS ISOLINUX boot menus as well as Step 1 of <code className="text-emerald-400 font-mono">axonwall-console --install</code>.
+        </p>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
+          <div className="p-5 rounded-xl bg-slate-900 border border-cyan-500/30 space-y-2">
+            <div className="font-bold text-cyan-300 text-sm">What Gets Provisioned</div>
+            <ul className="space-y-1.5 text-slate-300 list-disc list-inside">
+              <li><code className="font-mono text-slate-200">core-k3s</code> &amp; <code className="font-mono text-slate-200">core-nas</code> enabled cleanly in host mode (<code className="font-mono">core-firewall=false</code>)</li>
+              <li>Pre-staged OpenZFS ZFS-LocalPV CSI operator (<code className="font-mono">/var/lib/rancher/k3s/server/manifests/zfs-operator.yaml</code>) backed by your selected RAID pool</li>
+              <li>First-boot reconcilers (<code className="font-mono">axonwall-k3s-firstboot</code>, <code className="font-mono">axonwall-k3s-verify</code>, <code className="font-mono">axonwall-k3s-status</code>) plus hardened minimal host <code className="font-mono">nftables.conf</code> &amp; sysctl tuning</li>
+              <li>Alpine Linux OpenRC parity via <code className="font-mono">axonwall-firstboot-alpine</code> + <code className="font-mono">k3s</code> / <code className="font-mono">k3s-agent</code> init scripts</li>
+            </ul>
+          </div>
+
+          <div className="p-5 rounded-xl bg-slate-900 border border-slate-800 space-y-2">
+            <div className="font-bold text-emerald-400 text-sm">Server Control-Plane or Worker Agent Join</div>
+            <p className="text-slate-400 leading-relaxed">
+              During installation (or via unattended <code className="font-mono text-slate-200">k3sStorage.role</code> in YAML / Cloud-Init), designate the host as either an initial control-plane <code className="font-mono text-slate-200">server</code> node or a <code className="font-mono text-slate-200">agent</code> storage worker joining an existing cluster URL with a pre-shared join token. Pair with{' '}
+              <Link href="/docs/custom-kernel" className="text-indigo-400 underline">Custom Hardened Kernels</Link> to lock down ZFS + K3s host kernels further.
+            </p>
+          </div>
         </div>
       </section>
     </div>

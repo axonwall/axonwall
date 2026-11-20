@@ -12,9 +12,15 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/axonwall/axonwall/apps/axonwalld/engine"
 )
 
-var validGwIfaceRegex = regexp.MustCompile(`^[a-zA-Z0-9_.-]+$`)
+var validGwIfaceRegex = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,14}$`)
+
+func isValidGwIface(dev string) bool {
+	return validGwIfaceRegex.MatchString(dev) && !strings.Contains(dev, "..")
+}
 
 type GatewayTarget struct {
 	ID          string `json:"id"`
@@ -256,14 +262,18 @@ func (p *SDWanProber) probeAll(ctx context.Context) {
 			continue
 		}
 		resolvedDev := resolveInterfaceDevice(gw.Interface, devMap)
-		if resolvedDev == "" || !validGwIfaceRegex.MatchString(resolvedDev) {
+		if !isValidGwIface(resolvedDev) {
 			// A-M5: same treatment for an unresolvable device.
 			p.markGatewayOffline(gw.Name, &stateChanged)
 			continue
 		}
 
 		// Basic ICMP ping with a 1-second timeout, sending 2 packets
-		cmd := exec.CommandContext(ctx, "ping", "-c", "2", "-W", "1", "-I", resolvedDev, targetIP)
+		pingArgs := []string{"-c", "2", "-W", "1", "-I", resolvedDev, targetIP}
+		if ip := net.ParseIP(targetIP); ip != nil && ip.To4() == nil {
+			pingArgs = append([]string{"-6"}, pingArgs...)
+		}
+		cmd := exec.CommandContext(ctx, "ping", pingArgs...)
 		err := cmd.Run()
 		if ctx.Err() != nil {
 			return
@@ -357,12 +367,13 @@ func (p *SDWanProber) triggerFailover(gateways []GatewayTarget, groups []Gateway
 		return
 	}
 
-	// Build the multipath route command
-	// Example: ip route replace default nexthop via 192.168.1.1 dev eth0 weight 1 nexthop via 10.0.0.1 dev eth2 weight 1
-	args := []string{"route", "replace", "default"}
+	// Build multipath route commands separated by address family.
+	args4 := []string{"route", "replace", "default"}
+	args6 := []string{"-6", "route", "replace", "default"}
 	for _, gw := range activeTargets {
 		resolvedDev := resolveInterfaceDevice(gw.Interface, devMap)
-		if net.ParseIP(gw.GatewayIP) == nil || resolvedDev == "" || !validGwIfaceRegex.MatchString(resolvedDev) {
+		gwIP := net.ParseIP(gw.GatewayIP)
+		if gwIP == nil || !isValidGwIface(resolvedDev) {
 			continue
 		}
 		weight := gw.Weight
@@ -370,21 +381,20 @@ func (p *SDWanProber) triggerFailover(gateways []GatewayTarget, groups []Gateway
 		if weight > 0 {
 			weightStr = strconv.Itoa(weight)
 		}
-		args = append(args, "nexthop", "via", gw.GatewayIP, "dev", resolvedDev, "weight", weightStr)
+		if gwIP.To4() != nil {
+			args4 = append(args4, "nexthop", "via", gw.GatewayIP, "dev", resolvedDev, "weight", weightStr)
+		} else {
+			args6 = append(args6, "nexthop", "via", gw.GatewayIP, "dev", resolvedDev, "weight", weightStr)
+		}
 	}
 
-	if len(args) == 3 {
+	if len(args4) == 3 && len(args6) == 4 {
 		slog.Error("SD-WAN Prober: No valid IP/interface targets for default route")
 		p.withdrawStaleDefaultRoute()
 		return
 	}
 
-	// L3: re-validate the snapshot before the exec. A ReloadConfig
-	// that landed after the snapshot (and before this point) makes
-	// this failover stale; installing it would put a default route
-	// via a gateway the new config removed, and the new loop's
-	// unconditional evaluateFailover cannot repair that when the
-	// new config has no active gateway at all.
+	// L3: re-validate the snapshot before the exec.
 	p.mu.Lock()
 	stale := p.generation != gen
 	p.mu.Unlock()
@@ -395,24 +405,31 @@ func (p *SDWanProber) triggerFailover(gateways []GatewayTarget, groups []Gateway
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "ip", args...)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		slog.Error("SD-WAN Prober: Failed to update default route", "error", err, "output", string(out))
-	} else {
-		slog.Info("SD-WAN Prober: Default route updated successfully", "active_links", len(activeTargets))
+	if len(args4) > 3 {
+		cmd := exec.CommandContext(ctx, "ip", args4...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			slog.Error("SD-WAN Prober: Failed to update IPv4 default route", "error", err, "output", string(out))
+		} else {
+			slog.Info("SD-WAN Prober: IPv4 default route updated successfully", "active_links", len(activeTargets))
+		}
+	}
+	if len(args6) > 4 {
+		cmd := exec.CommandContext(ctx, "ip", args6...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			slog.Error("SD-WAN Prober: Failed to update IPv6 default route", "error", err, "output", string(out))
+		} else {
+			slog.Info("SD-WAN Prober: IPv6 default route updated successfully", "active_links", len(activeTargets))
+		}
 	}
 }
 
 // withdrawStaleDefaultRoute deletes the kernel default route when it
 // points at a gateway the CURRENT config no longer contains (L3).
-// It runs on the all-offline paths, where triggerFailover otherwise
-// returns without touching the route: a stale default via a removed
-// gateway would persist indefinitely while the prober reports
-// everything down. When every configured gateway is merely down,
-// the route is left alone — its gateway is still configured, so it
-// recovers with the gateway. A multipath default is left alone too:
-// with several nexthops there is no single stale gateway to blame.
+// In host or dev mode, never delete the workstation's default route.
 func (p *SDWanProber) withdrawStaleDefaultRoute() {
+	if currentRuntimeMode != engine.ModeAppliance {
+		return
+	}
 	p.mu.Lock()
 	configured := make(map[string]bool)
 	if p.config != nil {
@@ -424,28 +441,36 @@ func (p *SDWanProber) withdrawStaleDefaultRoute() {
 	}
 	p.mu.Unlock()
 
-	out, err := exec.Command("ip", "route", "show", "default").CombinedOutput()
-	if err != nil {
-		return
-	}
-	for _, line := range strings.Split(string(out), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
+	for _, family := range []struct {
+		showArgs []string
+		delArgs  []string
+	}{
+		{[]string{"route", "show", "default"}, []string{"route", "del", "default"}},
+		{[]string{"-6", "route", "show", "default"}, []string{"-6", "route", "del", "default"}},
+	} {
+		out, err := exec.Command("ip", family.showArgs...).CombinedOutput()
+		if err != nil {
 			continue
 		}
-		var vias []string
-		fields := strings.Fields(line)
-		for i, f := range fields {
-			if f == "via" && i+1 < len(fields) {
-				vias = append(vias, fields[i+1])
+		for _, line := range strings.Split(string(out), "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" {
+				continue
 			}
-		}
-		if len(vias) == 1 && !configured[vias[0]] {
-			slog.Warn("SD-WAN Prober: Withdrawing stale default route via unconfigured gateway", "gateway", vias[0])
-			if delOut, err := exec.Command("ip", "route", "del", "default").CombinedOutput(); err != nil {
-				slog.Error("SD-WAN Prober: Failed to withdraw stale default route", "error", err, "output", string(delOut))
+			var vias []string
+			fields := strings.Fields(line)
+			for i, f := range fields {
+				if f == "via" && i+1 < len(fields) {
+					vias = append(vias, fields[i+1])
+				}
 			}
+			if len(vias) == 1 && !configured[vias[0]] {
+				slog.Warn("SD-WAN Prober: Withdrawing stale default route via unconfigured gateway", "gateway", vias[0])
+				if delOut, err := exec.Command("ip", family.delArgs...).CombinedOutput(); err != nil {
+					slog.Error("SD-WAN Prober: Failed to withdraw stale default route", "error", err, "output", string(delOut))
+				}
+			}
+			break
 		}
-		return
 	}
 }

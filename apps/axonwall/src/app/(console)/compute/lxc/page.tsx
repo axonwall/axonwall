@@ -111,8 +111,10 @@ export default function LxcContainersPage() {
     try {
       const fingerprint = getFingerprint();
       const res = await deleteContainerAction(targetCtid, fingerprint ? { expectedFingerprint: fingerprint } : undefined);
-      setStatusBanner({ type: 'success', message: res.message });
-      await loadData();
+      setStatusBanner({ type: res.success ? 'success' : 'error', message: res.message });
+      if (res.success) {
+        await loadData();
+      }
     } catch (err: any) {
       setStatusBanner({ type: 'error', message: err?.message || 'Failed to delete container' });
     }

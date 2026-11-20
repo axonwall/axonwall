@@ -39,7 +39,7 @@ export async function GET(request: NextRequest) {
     // nonce half.
     response.cookies.set(OIDC_STATE_COOKIE, `${state}.${nonce}`, {
       httpOnly: true,
-      secure: process.env.NODE_ENV === 'production',
+      secure: process.env.NODE_ENV === 'production' && process.env.AXONWALL_INSECURE_HTTP !== '1',
       sameSite: 'lax',
       path: '/api/auth',
       maxAge: 600,

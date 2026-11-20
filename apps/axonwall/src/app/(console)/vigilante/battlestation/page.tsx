@@ -97,14 +97,18 @@ export default function BattleStationPage() {
     if (!blockIpInput.trim()) return;
     setStatusBanner(null);
 
-    const res = await soarBlockIPAction(blockIpInput.trim(), blockTimeout);
-    if (res.success) {
-      setStatusBanner({ type: 'success', message: res.message });
-      setBlockIpInput('');
-      const blocked = await getSoarBlockedIPsAction();
-      setBlockedIPs(blocked);
-    } else {
-      setStatusBanner({ type: 'error', message: res.message });
+    try {
+      const res = await soarBlockIPAction(blockIpInput.trim(), blockTimeout);
+      if (res.success) {
+        setStatusBanner({ type: 'success', message: res.message });
+        setBlockIpInput('');
+        const blocked = await getSoarBlockedIPsAction();
+        setBlockedIPs(blocked);
+      } else {
+        setStatusBanner({ type: 'error', message: res.message });
+      }
+    } catch (err: any) {
+      setStatusBanner({ type: 'error', message: err?.message || 'Failed to block IP' });
     }
   };
 
@@ -112,40 +116,53 @@ export default function BattleStationPage() {
     if (!ip.trim()) return;
     setStatusBanner(null);
 
-    const res = await soarBlockIPAction(ip.trim(), blockTimeout);
-    if (res.success) {
-      setStatusBanner({ type: 'success', message: res.message });
-      const blocked = await getSoarBlockedIPsAction();
-      setBlockedIPs(blocked);
-    } else {
-      setStatusBanner({ type: 'error', message: res.message });
+    try {
+      const res = await soarBlockIPAction(ip.trim(), blockTimeout);
+      if (res.success) {
+        setStatusBanner({ type: 'success', message: res.message });
+        const blocked = await getSoarBlockedIPsAction();
+        setBlockedIPs(blocked);
+      } else {
+        setStatusBanner({ type: 'error', message: res.message });
+      }
+    } catch (err: any) {
+      setStatusBanner({ type: 'error', message: err?.message || 'Failed to contain IP' });
     }
   };
 
   const handleUnblockIP = async (ip: string) => {
     setStatusBanner(null);
-    const res = await soarUnblockIPAction(ip);
-    if (res.success) {
-      setStatusBanner({ type: 'success', message: res.message });
-      const blocked = await getSoarBlockedIPsAction();
-      setBlockedIPs(blocked);
-    } else {
-      setStatusBanner({ type: 'error', message: res.message });
+    try {
+      const res = await soarUnblockIPAction(ip);
+      if (res.success) {
+        setStatusBanner({ type: 'success', message: res.message });
+        const blocked = await getSoarBlockedIPsAction();
+        setBlockedIPs(blocked);
+      } else {
+        setStatusBanner({ type: 'error', message: res.message });
+      }
+    } catch (err: any) {
+      setStatusBanner({ type: 'error', message: err?.message || 'Failed to unblock IP' });
     }
   };
 
   const handleProvisionVault = async () => {
     setIsProvisioning(true);
     setStatusBanner(null);
-    const res = await provisionEvidenceVaultAction(
-      config?.evidenceVault.zfsPool ?? 'tank',
-      config?.evidenceVault.datasetName ?? 'vigilante-evidence'
-    );
-    setIsProvisioning(false);
-    if (res.success) {
-      setStatusBanner({ type: 'success', message: res.message });
-    } else {
-      setStatusBanner({ type: 'error', message: res.message });
+    try {
+      const res = await provisionEvidenceVaultAction(
+        config?.evidenceVault.zfsPool ?? 'tank',
+        config?.evidenceVault.datasetName ?? 'vigilante-evidence'
+      );
+      if (res.success) {
+        setStatusBanner({ type: 'success', message: res.message });
+      } else {
+        setStatusBanner({ type: 'error', message: res.message });
+      }
+    } catch (err: any) {
+      setStatusBanner({ type: 'error', message: err?.message || 'Failed to provision evidence vault' });
+    } finally {
+      setIsProvisioning(false);
     }
   };
 
@@ -155,37 +172,46 @@ export default function BattleStationPage() {
     setIsSnapshotting(true);
     setStatusBanner(null);
 
-    const res = await createIncidentSnapshotAction(
-      config?.evidenceVault.zfsPool ?? 'tank',
-      config?.evidenceVault.datasetName ?? 'vigilante-evidence',
-      incidentIdInput.trim()
-    );
-    setIsSnapshotting(false);
-    if (res.success) {
-      setStatusBanner({
-        type: 'success',
-        message: `Immutable incident snapshot created: ${res.snapshot}`,
-      });
-      setIncidentIdInput('');
-    } else {
-      setStatusBanner({ type: 'error', message: res.error || 'Failed to snapshot' });
+    try {
+      const res = await createIncidentSnapshotAction(
+        config?.evidenceVault.zfsPool ?? 'tank',
+        config?.evidenceVault.datasetName ?? 'vigilante-evidence',
+        incidentIdInput.trim()
+      );
+      if (res.success) {
+        setStatusBanner({
+          type: 'success',
+          message: `Immutable incident snapshot created: ${res.snapshot}`,
+        });
+        setIncidentIdInput('');
+      } else {
+        setStatusBanner({ type: 'error', message: res.error || 'Failed to snapshot' });
+      }
+    } catch (err: any) {
+      setStatusBanner({ type: 'error', message: err?.message || 'Failed to create snapshot' });
+    } finally {
+      setIsSnapshotting(false);
     }
   };
 
   const handleModeChange = async (posture: 'monitoring' | 'enforcing' | 'hybrid') => {
     if (!config) return;
     setStatusBanner(null);
-    const fingerprint = getFingerprint();
-    const res = await saveVigilanteConfigAction(
-      { posture },
-      fingerprint ? { expectedFingerprint: fingerprint } : undefined
-    );
-    if (res.success) {
-      await refreshFingerprint();
-      setConfig({ ...config, posture });
-      setStatusBanner({ type: 'success', message: `Defense posture changed to ${posture.toUpperCase()}` });
-    } else {
-      setStatusBanner({ type: 'error', message: res.message });
+    try {
+      const fingerprint = getFingerprint();
+      const res = await saveVigilanteConfigAction(
+        { posture },
+        fingerprint ? { expectedFingerprint: fingerprint } : undefined
+      );
+      if (res.success) {
+        await refreshFingerprint();
+        setConfig({ ...config, posture });
+        setStatusBanner({ type: 'success', message: `Defense posture changed to ${posture.toUpperCase()}` });
+      } else {
+        setStatusBanner({ type: 'error', message: res.message });
+      }
+    } catch (err: any) {
+      setStatusBanner({ type: 'error', message: err?.message || 'Failed to update defense posture' });
     }
   };
 
@@ -202,20 +228,27 @@ export default function BattleStationPage() {
       syncModuleSso: config.ldapAuth?.syncModuleSso ?? true,
       ...patch,
     };
-    const fingerprint = getFingerprint();
-    const res = await saveVigilanteConfigAction(
-      { ldapAuth: nextLdapAuth },
-      fingerprint ? { expectedFingerprint: fingerprint } : undefined
-    );
-    if (res.success) {
-      await refreshFingerprint();
-      setConfig({ ...config, ldapAuth: nextLdapAuth });
+    try {
+      const fingerprint = getFingerprint();
+      const res = await saveVigilanteConfigAction(
+        { ldapAuth: nextLdapAuth },
+        fingerprint ? { expectedFingerprint: fingerprint } : undefined
+      );
+      if (res.success) {
+        await refreshFingerprint();
+        setConfig({ ...config, ldapAuth: nextLdapAuth });
+        setStatusBanner({
+          type: 'success',
+          message: 'Updated Vigilante OpenLDAP Directory & SOC RBAC integration settings.',
+        });
+      } else {
+        setStatusBanner({ type: 'error', message: res.message });
+      }
+    } catch (err: any) {
       setStatusBanner({
-        type: 'success',
-        message: 'Updated Vigilante OpenLDAP Directory & SOC RBAC integration settings.',
+        type: 'error',
+        message: err?.message || 'Failed to update Vigilante OpenLDAP Directory settings.',
       });
-    } else {
-      setStatusBanner({ type: 'error', message: res.message });
     }
   };
 

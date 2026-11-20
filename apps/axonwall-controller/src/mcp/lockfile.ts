@@ -1,6 +1,7 @@
 import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { isControllerDevRuntime, resolveControllerDirs } from '../dev-paths.js';
 
 // B2-M4: the lockfile path for DesiredState mutation. The lock
 // must be one path for every process sharing the state files (the
@@ -23,6 +24,13 @@ export function desiredStateLockPath(): string {
   const configDir = process.env.AXONWALL_CONFIG_DIR || process.env.AXONWALL_ETC_DIR;
   if (configDir) {
     return path.join(configDir, 'state.json.lock');
+  }
+  const stateDir = process.env.AXONWALL_STATE_DIR?.trim();
+  if (stateDir) {
+    return path.join(stateDir, 'state.json.lock');
+  }
+  if (isControllerDevRuntime()) {
+    return path.join(resolveControllerDirs().etcDir, 'state.json.lock');
   }
   return fs.existsSync('/etc/axonwall') ? '/etc/axonwall/state.json.lock' : '/var/lib/axonwall/state.json.lock';
 }

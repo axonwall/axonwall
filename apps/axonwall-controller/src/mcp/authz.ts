@@ -14,6 +14,7 @@ import {
   type McpScope,
 } from '@axonwall/lib/mcp';
 import { acquireMcpLockFile } from './lockfile.js';
+import { resolveControllerDirs } from '../dev-paths.js';
 
 const rateLimitBuckets = new Map<string, number[]>();
 
@@ -21,7 +22,8 @@ export function resolveMcpKeysPath(): string {
   if (process.env.AXONWALL_MCP_KEYS_PATH) {
     return process.env.AXONWALL_MCP_KEYS_PATH;
   }
-  const primaryDir = '/var/lib/axonwall';
+  const dirs = resolveControllerDirs();
+  const primaryDir = dirs.varDir;
   const primaryFile = path.join(primaryDir, 'mcp-keys.json');
   try {
     if (fs.existsSync(primaryFile)) {
@@ -32,7 +34,10 @@ export function resolveMcpKeysPath(): string {
     fs.accessSync(primaryDir, fs.constants.W_OK);
     return primaryFile;
   } catch {
-    for (const candidate of ['/var/lib/axonwall/etc-axonwall/mcp-keys.json', '/etc/axonwall/mcp-keys.json']) {
+    for (const candidate of [
+      path.join(dirs.persistYamlDir, 'mcp-keys.json'),
+      path.join(dirs.etcDir, 'mcp-keys.json'),
+    ]) {
       if (fs.existsSync(candidate)) {
         return candidate;
       }
@@ -42,14 +47,15 @@ export function resolveMcpKeysPath(): string {
 }
 
 function loadMcpKeysInternal(): McpApiKey[] {
+  const dirs = resolveControllerDirs();
   const candidatePaths = process.env.AXONWALL_MCP_KEYS_PATH
     ? [process.env.AXONWALL_MCP_KEYS_PATH]
     : Array.from(
         new Set([
           resolveMcpKeysPath(),
-          '/var/lib/axonwall/mcp-keys.json',
-          '/var/lib/axonwall/etc-axonwall/mcp-keys.json',
-          '/etc/axonwall/mcp-keys.json',
+          path.join(dirs.varDir, 'mcp-keys.json'),
+          path.join(dirs.persistYamlDir, 'mcp-keys.json'),
+          path.join(dirs.etcDir, 'mcp-keys.json'),
         ]),
       );
 
@@ -75,13 +81,14 @@ function loadMcpKeysInternal(): McpApiKey[] {
 }
 
 function saveMcpKeysInternal(keys: McpApiKey[]): void {
+  const dirs = resolveControllerDirs();
   const serialized = JSON.stringify(keys, null, 2);
   const targetPaths = process.env.AXONWALL_MCP_KEYS_PATH
     ? [process.env.AXONWALL_MCP_KEYS_PATH]
     : [
         resolveMcpKeysPath(),
-        '/var/lib/axonwall/etc-axonwall/mcp-keys.json',
-        '/etc/axonwall/mcp-keys.json',
+        path.join(dirs.persistYamlDir, 'mcp-keys.json'),
+        path.join(dirs.etcDir, 'mcp-keys.json'),
       ];
   for (const keysPath of Array.from(new Set(targetPaths))) {
     try {

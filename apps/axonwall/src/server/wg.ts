@@ -4,7 +4,8 @@ import { execFileSync } from 'node:child_process';
 import QRCode from 'qrcode';
 import { getSession } from './auth';
 import { assertActionPermitted } from './auth-guard';
-import { applyDesiredState, getCurrentDesiredState } from './agent';
+import { applyDesiredState } from './agent';
+import { getDesiredStateInternal } from './desired-state-internal';
 
 /**
  * Derive the X25519 public key for a base64 WireGuard private key.
@@ -44,7 +45,7 @@ export async function deriveWireGuardPublicKey(privateKeyB64: string): Promise<s
 export async function getWireGuardServerPublicKey(): Promise<string | null> {
   const session = await getSession();
   assertActionPermitted(session);
-  const state = await getCurrentDesiredState();
+  const state = await getDesiredStateInternal();
   const wgCfg: any = (state as any).wireguard || (state as any).vpn?.wireguard;
   if (!wgCfg?.privateKey) return null;
   return deriveWireGuardPublicKey(wgCfg.privateKey);
@@ -63,7 +64,7 @@ export async function generateWireGuardProfile(options?: { expectedFingerprint?:
     throw new Error('Forbidden: Insufficient privileges to generate WireGuard profile');
   }
 
-  const state = await getCurrentDesiredState();
+  const state = await getDesiredStateInternal();
   const wgCfg: any = (state as any).wireguard || (state as any).vpn?.wireguard;
 
   // N2: a profile is only useful if the server can actually handshake with

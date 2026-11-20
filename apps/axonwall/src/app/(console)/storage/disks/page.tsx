@@ -42,8 +42,11 @@ export default function StorageDisksPage() {
       setDisks(res.disks || []);
       setInstallSpec(res.installSpec || null);
       setDaemonDown(Boolean(res.daemonDown));
-    } catch {}
-    setLoading(false);
+    } catch (err: any) {
+      setSmartBanner({ ok: false, text: err?.message || 'Failed to load storage disk inventory' });
+    } finally {
+      setLoading(false);
+    }
   };
 
   useEffect(() => {

@@ -16,9 +16,16 @@ import {
 } from '@axonwall/lib/ldap';
 import { type UserSession, DEFAULT_ROLES, type Privilege } from '@axonwall/lib/rbac';
 import { callAgentApi } from './agent-client';
+import {
+  ensureDevRuntimeBootstrapped,
+  getEtcConfigDir,
+  getPersistConfigDir,
+  getStateDir,
+  isDevRuntime,
+} from './dev-paths';
 
 import { SESSION_COOKIE, getJwtSecret } from './auth-constants';
-import { assertActionPermitted } from './auth-guard';
+import { assertActionPermitted, passwordChangeRequiredNow } from './auth-guard';
 import {
   bumpSessionEpoch,
   isSessionRevoked,
@@ -72,7 +79,9 @@ export async function getSession(): Promise<UserSession | null> {
 // file the console's MFA reset removes -- with LOCAL_ADMIN_MFA_SECRET in
 // the process environment as an operator override. Until enrollment
 // actually persisted the secret (audit B-08), MFA could never be on.
-const MFA_ENV_PATHS = ['/var/lib/axonwall/etc-axonwall/mfa.env', '/etc/axonwall/mfa.env'];
+const MFA_ENV_PATHS = Array.from(
+  new Set([path.join(getPersistConfigDir(), 'mfa.env'), path.join(getEtcConfigDir(), 'mfa.env')])
+);
 
 function writeAuthFileSafe(filePath: string, content: string, mode = 0o600): void {
   const dir = path.dirname(filePath);
@@ -191,10 +200,16 @@ async function performAuthenticationInner(
   }
 
   // 1. Check local break-glass admin first
+  if (isDevRuntime()) {
+    ensureDevRuntimeBootstrapped();
+  }
   let localAdminUser = process.env.LOCAL_ADMIN_USER || 'admin';
   let localAdminPass = process.env.LOCAL_ADMIN_PASSWORD || '';
 
-  for (const adminEnvPath of ['/var/lib/axonwall/etc-axonwall/admin.env', '/etc/axonwall/admin.env']) {
+  const adminEnvPaths = Array.from(
+    new Set([path.join(getPersistConfigDir(), 'admin.env'), path.join(getEtcConfigDir(), 'admin.env')])
+  );
+  for (const adminEnvPath of adminEnvPaths) {
     try {
       if (fs.existsSync(adminEnvPath)) {
         const content = fs.readFileSync(adminEnvPath, 'utf-8');
@@ -321,7 +336,7 @@ export async function loginAction(arg1: any, arg2?: any) {
   const cookieStore = await cookies();
   cookieStore.set(SESSION_COOKIE, token, {
     httpOnly: true,
-    secure: process.env.NODE_ENV === 'production',
+    secure: process.env.NODE_ENV === 'production' && process.env.AXONWALL_INSECURE_HTTP !== '1',
     sameSite: 'lax',
     path: '/',
     maxAge: 8 * 3600, // 8 hours
@@ -350,10 +365,11 @@ const pendingMfaEnrollments = new Map<string, { secret: string; expiresAt: numbe
 
 export async function generateMfaSetup() {
   const session = await getSession();
-  assertActionPermitted(session, 'admin');
+  assertActionPermitted(session);
   if (session.source !== 'local_admin') {
-    throw new Error('Forbidden: Only the local break-glass administrator can configure local MFA');
+    return { exempt: true as const, secret: '', qrDataUrl: '' };
   }
+  assertActionPermitted(session, 'admin');
 
   const { generateSecret, generateURI } = require('otplib');
   const plugins = totpPlugins();
@@ -433,25 +449,6 @@ export async function verifyMfaSetup(secret: string, token: string) {
  * the daemon behind it) happily served a session that had never
  * changed the default password.
  */
-function passwordChangeRequiredNow(): boolean {
-  try {
-    if (
-      fs.existsSync('/var/lib/axonwall/.password_changed') ||
-      fs.existsSync('/etc/axonwall/.password_changed') ||
-      fs.existsSync('./.password_changed')
-    ) {
-      return false;
-    }
-  } catch {}
-
-  // In development/test environments, only enforce if explicit or if using default password
-  if (process.env.NODE_ENV !== 'production' && process.env.FORCE_PASSWORD_CHANGE !== 'true') {
-    return false;
-  }
-
-  return true;
-}
-
 export async function isPasswordChangeRequired(): Promise<boolean> {
   const session = await getSession();
   if (!session || session.source !== 'local_admin') {
@@ -490,7 +487,10 @@ export async function changeAdminPasswordAction(formData: FormData) {
   let localAdminUser = process.env.LOCAL_ADMIN_USER || 'admin';
   let localAdminPass = process.env.LOCAL_ADMIN_PASSWORD || '';
 
-  for (const adminEnvPath of ['/var/lib/axonwall/etc-axonwall/admin.env', '/etc/axonwall/admin.env']) {
+  const adminEnvPaths = Array.from(
+    new Set([path.join(getPersistConfigDir(), 'admin.env'), path.join(getEtcConfigDir(), 'admin.env')])
+  );
+  for (const adminEnvPath of adminEnvPaths) {
     try {
       if (fs.existsSync(adminEnvPath)) {
         const content = fs.readFileSync(adminEnvPath, 'utf-8');
@@ -524,29 +524,28 @@ export async function changeAdminPasswordAction(formData: FormData) {
   try {
     const envContent = `LOCAL_ADMIN_USER=${localAdminUser}\nLOCAL_ADMIN_PASSWORD=${hashedSecret}\n`;
     let savedAdminEnv = false;
-    try {
-      writeAuthFileSafe('/etc/axonwall/admin.env', envContent, 0o600);
-      savedAdminEnv = true;
-    } catch {}
-
-    // Mirror to /var/lib/axonwall/etc-axonwall/admin.env for A/B rootfs persistence
-    try {
-      writeAuthFileSafe('/var/lib/axonwall/etc-axonwall/admin.env', envContent, 0o600);
-      savedAdminEnv = true;
-    } catch {}
+    for (const target of Array.from(
+      new Set([path.join(getEtcConfigDir(), 'admin.env'), path.join(getPersistConfigDir(), 'admin.env')])
+    )) {
+      try {
+        writeAuthFileSafe(target, envContent, 0o600);
+        savedAdminEnv = true;
+      } catch {}
+    }
 
     if (!savedAdminEnv) {
-      throw new Error('Unable to write admin.env to /etc/axonwall or /var/lib/axonwall/etc-axonwall');
+      throw new Error('Unable to write admin.env to configured axonwall directory');
     }
     process.env.LOCAL_ADMIN_PASSWORD = hashedSecret;
 
     const now = new Date().toISOString();
-    try { writeAuthFileSafe('/etc/axonwall/.password_changed', now, 0o664); } catch {}
-    try { writeAuthFileSafe('/var/lib/axonwall/.password_changed', now, 0o664); } catch {}
+    try { writeAuthFileSafe(path.join(getEtcConfigDir(), '.password_changed'), now, 0o664); } catch {}
+    try { writeAuthFileSafe(path.join(getStateDir(), '.password_changed'), now, 0o664); } catch {}
 
     try {
-      if (fs.existsSync('/etc/axonwall/initial-admin-password')) {
-        fs.unlinkSync('/etc/axonwall/initial-admin-password');
+      const initPw = path.join(getEtcConfigDir(), 'initial-admin-password');
+      if (fs.existsSync(initPw)) {
+        fs.unlinkSync(initPw);
       }
     } catch {}
 
@@ -561,7 +560,7 @@ export async function changeAdminPasswordAction(formData: FormData) {
       const cookieStore = await cookies();
       cookieStore.set(SESSION_COOKIE, freshToken, {
         httpOnly: true,
-        secure: process.env.NODE_ENV === 'production',
+        secure: process.env.NODE_ENV === 'production' && process.env.AXONWALL_INSECURE_HTTP !== '1',
         sameSite: 'lax',
         maxAge: 8 * 3600,
         path: '/',

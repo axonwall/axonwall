@@ -92,6 +92,7 @@ export const NAV_SECTIONS: NavSection[] = [
       { name: 'High Availability (HA)', href: '/ha', icon: ArrowRightLeft },
       { name: 'Backup & Recovery', href: '/system/backup', icon: HardDrive },
       { name: 'A/B System Updates', href: '/system/updates', icon: RefreshCw },
+      { name: 'Custom Kernel Studio', href: '/system/kernel', icon: Cpu, badge: 'KSPP' },
       { name: 'Service Supervisor', href: '/system/services', icon: Server },
       { name: 'Plugin Store & Roles', href: '/system/plugins', icon: Boxes, badge: 'Core' },
       { name: 'MCP Security AI Control', href: '/system/mcp', icon: KeyRound, badge: 'AuthZ' },
@@ -134,6 +135,7 @@ export const NAV_SECTIONS: NavSection[] = [
       { name: 'TLS Decryption', href: '/security/tls-decryption', icon: Eye },
       { name: 'Identity-Aware Proxy', href: '/security/iap', icon: Lock },
       { name: 'Rootkit & Kernel Hunter', href: '/security/rootkit-hunter', icon: ShieldAlert, badge: 'Ring-0', pluginId: 'host-malware-rootkit' },
+      { name: 'Blackbox Threat Harvester', href: '/security/threat-harvester', icon: Binary, badge: 'eBPF+LLM', pluginId: 'ebpf-threat-harvester' },
     ],
   },
   {
@@ -190,6 +192,7 @@ export const NAV_SECTIONS: NavSection[] = [
     icon: Cpu,
     capability: 'k3s',
     items: [
+      { name: 'K9s Live Explorer', href: '/k3s/explorer', icon: Terminal, badge: 'K9s' },
       { name: 'Cluster & HA Join', href: '/k3s/cluster', icon: Cpu, badge: 'HA' },
       { name: 'OpenEBS Storage', href: '/k3s/storage', icon: Database },
       { name: 'Workloads & Apps', href: '/k3s/workloads', icon: Boxes },
@@ -263,6 +266,7 @@ export const NAV_SECTIONS: NavSection[] = [
       { name: 'Docs Home & Quickstart', href: '/docs', icon: BookOpen },
       { name: 'Architecture & nftables', href: '/docs/architecture', icon: Cpu },
       { name: 'Super-Slim Edge UKI', href: '/docs/edge-uki-ngfw', icon: Cpu, badge: 'PID-1' },
+      { name: 'Custom Hardened Kernels', href: '/docs/custom-kernel', icon: ShieldCheck, badge: 'KSPP' },
       { name: 'Modular Roles (5 Core)', href: '/docs/modular-architecture', icon: Boxes, badge: 'Core' },
       { name: 'Multi-Disk RAID & ZBM', href: '/docs/installer-raid-zfs', icon: HardDrive, badge: 'ZBM' },
       { name: 'High Availability (HA)', href: '/docs/high-availability', icon: ArrowRightLeft },
@@ -599,7 +603,7 @@ export function ConsoleSidebar() {
 
       {/* Footer Info */}
       <div className="p-3 border-t border-slate-800 text-[11px] text-slate-500 flex items-center justify-between shrink-0">
-        <span className="font-mono">Axonwall v0.11.67</span>
+        <span className="font-mono">Axonwall v0.12.3</span>
         <span className="flex items-center gap-1.5 text-emerald-400 font-medium">
           <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
           Active

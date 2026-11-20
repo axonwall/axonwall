@@ -11,26 +11,11 @@ import {
   XCircle,
 } from 'lucide-react';
 import { getAgentStatus, getSystemServicesStatus } from '../../../server/agent';
-import { readFileSync } from 'node:fs';
-
-// C-M12: the OS label used to be the literal "Debian 13 Linux", which is
-// wrong on an Alpine-profile box. Read the real OS from the host the UI
-// runs on; fall back to the unadorned "Linux" when os-release is absent.
-function getOsPrettyName(): string {
-  try {
-    const text = readFileSync('/etc/os-release', 'utf8');
-    const line = text.split('\n').find((l) => l.startsWith('PRETTY_NAME='));
-    const value = line?.slice('PRETTY_NAME='.length).trim().replace(/^"|"$/g, '');
-    if (value) return value;
-  } catch {}
-  return 'Linux';
-}
 
 export default async function LobbyPage() {
   const status = await getAgentStatus();
   const services = await getSystemServicesStatus();
   const arch = process.arch === 'x64' ? 'amd64' : process.arch;
-  const osName = getOsPrettyName();
 
   const runningServicesCount = services.filter((s) => s.status === 'active').length;
   const slapdRunning = services.some((s) => s.unit === 'slapd.service' && s.status === 'active');
@@ -66,7 +51,9 @@ export default async function LobbyPage() {
             <span className="text-lg font-bold text-white mt-1 block">
               {Math.floor(status.uptimeSeconds / 3600)}h {Math.floor((status.uptimeSeconds % 3600) / 60)}m
             </span>
-            <span className="text-[11px] text-slate-400 mt-1 block font-mono">{osName} ({arch})</span>
+            <span className="text-[11px] text-slate-400 mt-1 block font-mono">
+              {status.osName || 'Linux'} ({arch}){status.runtimeMode === 'dev' ? ' · dev' : ''}
+            </span>
           </div>
           <div className="w-10 h-10 rounded-lg bg-cyan-500/10 border border-cyan-500/20 flex items-center justify-center text-cyan-400">
             <Activity className="w-5 h-5" />

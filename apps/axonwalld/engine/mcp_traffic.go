@@ -34,7 +34,11 @@ var unboundMcpSinkholePath = "/etc/unbound/unbound.conf.d/mcp-sinkhole.conf"
 // lease state into a temp dir; the production value is unchanged.
 var mcpStateFilePath = "/var/lib/axonwall/mcp-tactical-state.json"
 
-var safeIfaceRegex = regexp.MustCompile(`^[a-zA-Z0-9_.-]{1,15}$`)
+var safeIfaceRegex = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,14}$`)
+
+func isSafeIfaceName(dev string) bool {
+	return safeIfaceRegex.MatchString(dev) && !strings.Contains(dev, "..")
+}
 
 // McpAuditMeta holds the AI agent justification and threat provenance for an action.
 type McpAuditMeta struct {
@@ -792,6 +796,12 @@ func (m *McpTrafficManager) reconcileDnsSinkholes(leases []*McpTacticalLease) er
 			return fmt.Errorf("failed to write dns sinkhole config %s: %w", unboundMcpSinkholePath, err)
 		}
 	}
+	if _, lookErr := exec.LookPath(unboundControlBinary); lookErr != nil {
+		if out, err := exec.Command("systemctl", "--no-ask-password", "reload", "unbound").CombinedOutput(); err != nil {
+			return fmt.Errorf("unbound reload failed: %v (%s)", err, strings.TrimSpace(string(out)))
+		}
+		return nil
+	}
 	if out, err := exec.Command(unboundControlBinary, "reload").CombinedOutput(); err != nil {
 		return fmt.Errorf("unbound-control reload failed: %v (%s)", err, strings.TrimSpace(string(out)))
 	}
@@ -866,10 +876,23 @@ func (m *McpTrafficManager) cleanupKernelArtifactsForLease(l *McpTacticalLease) 
 	} else if l.Kind == "redirect" {
 		if rType, _ := l.Parameters["redirectType"].(string); rType == "policy_route" && l.FwMark > 0 {
 			markHex := fmt.Sprintf("0x%x", l.FwMark)
+			tableStr := strconv.Itoa(l.ClassID)
 			if l.IsIPv6 {
-				runCleanupCmd("ip", "-6", "rule", "del", "fwmark", markHex, "table", strconv.Itoa(l.ClassID))
+				// A-M6 (round 3): the rule delete is error-checked
+				// via runCleanupCmd, and main's route-table flush
+				// (a648c351) is kept — routed through the same
+				// error-checked helper so a failed flush is
+				// reported and queued for janitor retry instead of
+				// being discarded while enforcement persists.
+				runCleanupCmd("ip", "-6", "rule", "del", "fwmark", markHex, "table", tableStr)
+				if l.ClassID > 0 {
+					runCleanupCmd("ip", "-6", "route", "flush", "table", tableStr)
+				}
 			} else {
-				runCleanupCmd("ip", "rule", "del", "fwmark", markHex, "table", strconv.Itoa(l.ClassID))
+				runCleanupCmd("ip", "rule", "del", "fwmark", markHex, "table", tableStr)
+				if l.ClassID > 0 {
+					runCleanupCmd("ip", "route", "flush", "table", tableStr)
+				}
 			}
 		}
 	}
@@ -946,7 +969,7 @@ func resolveKernelDevice(logicalOrDev string) string {
 		cleaned = "wan"
 	}
 	// Check live interfaces first
-	if _, err := net.InterfaceByName(cleaned); err == nil && safeIfaceRegex.MatchString(cleaned) {
+	if _, err := net.InterfaceByName(cleaned); err == nil && isSafeIfaceName(cleaned) {
 		return cleaned
 	}
 	// Check state.json mapping
@@ -960,14 +983,14 @@ func resolveKernelDevice(logicalOrDev string) string {
 			}
 			if json.Unmarshal(data, &st) == nil {
 				for _, iface := range st.Interfaces {
-					if strings.EqualFold(iface.Name, cleaned) && safeIfaceRegex.MatchString(iface.Device) {
+					if strings.EqualFold(iface.Name, cleaned) && isSafeIfaceName(iface.Device) {
 						return iface.Device
 					}
 				}
 			}
 		}
 	}
-	if safeIfaceRegex.MatchString(cleaned) {
+	if isSafeIfaceName(cleaned) {
 		return cleaned
 	}
 	return ""
@@ -1350,6 +1373,18 @@ func (m *McpTrafficManager) RedirectTraffic(req McpRedirectReq) (*McpTacticalLea
 		return nil, fmt.Errorf("address family mismatch between source (%s) and redirect destination (%s)", normSource, normDest)
 	}
 
+	normOrigDstIP := ""
+	if strings.TrimSpace(req.OriginalDstIP) != "" {
+		_, _, origV6, _, parsedOrigDst, origErr := ParseTargetIPOrCIDR(req.OriginalDstIP)
+		if origErr != nil {
+			return nil, fmt.Errorf("invalid originalDstIp %q: %w", req.OriginalDstIP, origErr)
+		}
+		if origV6 != isV6 {
+			return nil, fmt.Errorf("address family mismatch between source (%s) and originalDstIp (%s)", normSource, parsedOrigDst)
+		}
+		normOrigDstIP = parsedOrigDst
+	}
+
 	if req.TTLSeconds < 10 {
 		req.TTLSeconds = 3600
 	}
@@ -1434,7 +1469,7 @@ func (m *McpTrafficManager) RedirectTraffic(req McpRedirectReq) (*McpTacticalLea
 		IsIPv6:           isV6,
 		Parameters: map[string]interface{}{
 			"source":            normSource,
-			"originalDstIp":     req.OriginalDstIP,
+			"originalDstIp":     normOrigDstIP,
 			"originalDstPort":   req.OriginalDstPort,
 			"protocol":          req.Protocol,
 			"redirectType":      req.RedirectType,
@@ -1855,6 +1890,7 @@ func (m *McpTrafficManager) InspectHostContext(ipStr string) (map[string]interfa
 	if f, err := os.Open("/var/log/suricata/eve.json"); err == nil {
 		var alerts []map[string]interface{}
 		scanner := bufio.NewScanner(f)
+		scanner.Buffer(make([]byte, 64*1024), 1024*1024)
 		for scanner.Scan() {
 			line := scanner.Text()
 			if !strings.Contains(line, canonIP) {

@@ -58,7 +58,48 @@ if [[ ! -d "$CHROOT_SRC" ]]; then
   exit 1
 fi
 
-rm -rf "${WORK_DIR}"
+TARGET="${WORK_DIR}/mnt"
+LOOP_DEV=""
+
+cleanup() {
+  set +e
+  echo "[*] Cleaning up mounts and loop devices..."
+  if [[ -d "${TARGET}" ]]; then
+    for submount in run dev/pts dev sys proc boot/efi var/lib/axonwall; do
+      if mountpoint -q "${TARGET}/${submount}" 2>/dev/null; then
+        umount "${TARGET}/${submount}" 2>/dev/null || umount -l "${TARGET}/${submount}" 2>/dev/null || true
+      fi
+    done
+
+    if mountpoint -q "${TARGET}" 2>/dev/null; then
+      umount "${TARGET}" 2>/dev/null || umount -l "${TARGET}" 2>/dev/null || true
+    fi
+  fi
+
+  if [[ -n "${LOOP_DEV:-}" && -b "${LOOP_DEV}" ]]; then
+    losetup -d "${LOOP_DEV}" 2>/dev/null || true
+  fi
+}
+trap cleanup EXIT INT TERM
+
+# Unmount any leftover mounts and detach stale loops from an interrupted prior run
+if [[ -d "${TARGET}" ]]; then
+  for submount in run dev/pts dev sys proc boot/efi var/lib/axonwall; do
+    if mountpoint -q "${TARGET}/${submount}" 2>/dev/null; then
+      umount "${TARGET}/${submount}" || umount -l "${TARGET}/${submount}"
+    fi
+  done
+  if mountpoint -q "${TARGET}" 2>/dev/null; then
+    umount "${TARGET}" || umount -l "${TARGET}"
+  fi
+fi
+if [[ -f "${RAW_IMAGE}" ]]; then
+  for _stale_loop in $(losetup -j "${RAW_IMAGE}" 2>/dev/null | cut -d: -f1); do
+    [[ -n "${_stale_loop}" ]] && losetup -d "${_stale_loop}" 2>/dev/null || true
+  done
+fi
+
+rm -rf --one-file-system "${WORK_DIR}"
 mkdir -p "${WORK_DIR}" "${OUTPUT_DIR}"
 
 # 1. Allocate 16GB sparse raw disk image
@@ -93,19 +134,9 @@ echo "[+] Attaching loopback device..."
 LOOP_DEV=$(losetup -Pf --show "${RAW_IMAGE}")
 echo "    Assigned loop device: ${LOOP_DEV}"
 
-cleanup() {
-  set +e
-  echo "[*] Cleaning up mounts and loop devices..."
-  umount -R "${WORK_DIR}/mnt" 2>/dev/null || true
-  if [[ -n "${LOOP_DEV:-}" && -b "${LOOP_DEV}" ]]; then
-    losetup -d "${LOOP_DEV}" 2>/dev/null || true
-  fi
-}
-trap cleanup EXIT
-
 # Wait for kernel to register partition table
 partprobe "${LOOP_DEV}" 2>/dev/null || true
-sleep 1
+udevadm settle 2>/dev/null || sleep 1
 
 PART_BIOS="${LOOP_DEV}p1"
 PART_EFI="${LOOP_DEV}p2"
@@ -121,9 +152,9 @@ mkfs.ext4 -F -L "axon_root_a" -m 1 "${PART_ROOT_A}"
 mkfs.ext4 -F -L "axon_root_b" -m 1 "${PART_ROOT_B}"
 mkswap -L "axon_swap" "${PART_SWAP}"
 mkfs.ext4 -F -L "axon_data" -m 1 "${PART_DATA}"
+udevadm settle 2>/dev/null || true
 
 # 5. Mount target filesystems
-TARGET="${WORK_DIR}/mnt"
 mkdir -p "${TARGET}"
 mount "${PART_ROOT_A}" "${TARGET}"
 mkdir -p "${TARGET}/boot/efi" "${TARGET}/var/lib/axonwall"
@@ -141,11 +172,18 @@ if [[ -d "${ROOT_DIR}/packaging/iso/config/includes.chroot" ]]; then
   echo "[+] Applying Axonwall appliance includes and hooks..."
   cp -r "${ROOT_DIR}/packaging/iso/config/includes.chroot/"* "${TARGET}/" 2>/dev/null || true
 fi
+if [[ -f "${TARGET}/etc/sudoers.d/axonwall" ]]; then
+  chmod 0440 "${TARGET}/etc/sudoers.d/axonwall"
+fi
 
 # Ensure critical directories exist
 mkdir -p "${TARGET}/dev" "${TARGET}/proc" "${TARGET}/sys" "${TARGET}/run" "${TARGET}/tmp"
 chmod 1777 "${TARGET}/tmp"
 mkdir -p "${TARGET}/etc/axonwall" "${TARGET}/etc/cloud/cloud.cfg.d" "${TARGET}/etc/ssh/sshd_config.d"
+
+# Record A/B install mode inside both /etc/axonwall and persistent /var/lib/axonwall before cloning Slot B / sanitizing
+printf 'ab\n' > "${TARGET}/etc/axonwall/install-mode"
+printf 'ab\n' > "${TARGET}/var/lib/axonwall/install-mode"
 
 # Configure /etc/fstab with deterministic label mounts
 cat << FSTAB_EOF > "${TARGET}/etc/fstab"
@@ -175,8 +213,10 @@ touch "${TARGET}/etc/axonwall/.firstboot"
 # install time and never carry it.
 touch "${TARGET}/etc/axonwall/.ab-clone-pending"
 
-# Configure cloud-init datasource
-cat << 'CFG_EOF' > "${TARGET}/etc/cloud/cloud.cfg.d/90_axonwall.cfg"
+# Preserve includes.chroot/etc/cloud/cloud.cfg.d/90_axonwall.cfg when copied;
+# only synthesize a fallback 90_axonwall.cfg if absent, and add growpart drop-in for /var/lib/axonwall.
+if [[ ! -f "${TARGET}/etc/cloud/cloud.cfg.d/90_axonwall.cfg" ]]; then
+  cat << 'CFG_EOF' > "${TARGET}/etc/cloud/cloud.cfg.d/90_axonwall.cfg"
 # Axonwall Appliance Cloud-Init Datasource Configuration
 datasource_list: [ NoCloud, ConfigDrive, OpenStack, OVF, Ec2, GCE, Azure, None ]
 
@@ -186,6 +226,14 @@ datasource:
   ConfigDrive:
     dsmode: local
 CFG_EOF
+fi
+cat << 'GROW_EOF' > "${TARGET}/etc/cloud/cloud.cfg.d/91_axonwall_growpart.cfg"
+# Expand /var/lib/axonwall data partition on cloud disk resize
+growpart:
+  mode: auto
+  devices: ['/var/lib/axonwall']
+  ignore_growroot_disabled: false
+GROW_EOF
 
 # Ensure cloud-init services are enabled
 for svc in cloud-init-local.service cloud-init.service cloud-config.service cloud-final.service; do
@@ -203,10 +251,13 @@ done
 
 # Install GRUB bootloader for both BIOS and UEFI
 echo "[+] Installing GRUB bootloader (UEFI + BIOS)..."
-mount --bind /dev "${TARGET}/dev"
-mount --bind /dev/pts "${TARGET}/dev/pts"
-mount --bind /proc "${TARGET}/proc"
-mount --bind /sys "${TARGET}/sys"
+mount -t devtmpfs dev "${TARGET}/dev" 2>/dev/null || mount --bind /dev "${TARGET}/dev"
+mount --make-rslave "${TARGET}/dev" 2>/dev/null || true
+mkdir -p "${TARGET}/dev/pts" "${TARGET}/run"
+mount -t devpts devpts "${TARGET}/dev/pts" -o gid=5,mode=620 2>/dev/null || mount --bind /dev/pts "${TARGET}/dev/pts"
+mount -t proc proc "${TARGET}/proc" 2>/dev/null || mount --bind /proc "${TARGET}/proc"
+mount -t sysfs sys "${TARGET}/sys" 2>/dev/null || mount --bind /sys "${TARGET}/sys"
+mount --bind /run "${TARGET}/run"
 
 # Install GRUB for EFI (removable media target ensures boot on all UEFI firmware)
 # D-H1: a failed bootloader install must fail the build, never ship an
@@ -224,8 +275,16 @@ if [[ -f "${TARGET}/usr/share/grub/unicode.pf2" ]]; then
   cp -n "${TARGET}/usr/share/grub/unicode.pf2" "${TARGET}/boot/grub/themes/axonwall/unicode.pf2" 2>/dev/null || true
 fi
 
-# Update GRUB configuration (D-H1: fail the build if this fails, as above)
+# Configure Axonwall Plymouth boot splash theme
+chroot "${TARGET}" /usr/sbin/plymouth-set-default-theme axonwall 2>/dev/null || true
+
+# Update GRUB configuration & initialize deterministic grubenv A/B state
+# (D-H1: update-grub fails the build on error -- no || true, no silenced stderr.)
 chroot "${TARGET}" update-grub
+if [[ ! -f "${TARGET}/boot/grub/grubenv" ]]; then
+  chroot "${TARGET}" grub-editenv /boot/grub/grubenv create
+fi
+chroot "${TARGET}" grub-editenv /boot/grub/grubenv set active_slot=A bootcount=0 bootlimit=3
 
 # Sanitize image before unmounting: ensure unique machine-id and SSH host keys on VM instantiation
 echo "[+] Sanitizing appliance image (machine-id, host keys, cloud-init state)..."
@@ -235,22 +294,19 @@ rm -f "${TARGET}/etc/ssh/ssh_host_"*
 rm -rf "${TARGET}/var/lib/cloud/data" "${TARGET}/var/lib/cloud/instance" "${TARGET}/var/lib/cloud/instances"
 rm -rf "${TARGET}/tmp/"* "${TARGET}/var/tmp/"*
 
-# Unmount target mounts
-umount "${TARGET}/sys" "${TARGET}/proc" "${TARGET}/dev/pts" "${TARGET}/dev"
+# Unmount target mounts strictly in reverse hierarchical order before qemu-img convert
+sync
+udevadm settle 2>/dev/null || true
 
-# Slot B ships EMPTY: it is formatted above (mkfs.ext4, label axon_root_b)
-# and left unpopulated. The batch-3 fix cloned Slot A to Slot B here so a
-# watchdog fallback would find a bootable standby, but that doubled the
-# image (1.17 GB -> 2.34 GB) and pushed it past GitHub's 2 GiB release
-# asset limit. The clone now happens on the appliance itself: firstboot
-# (axonwall-firstboot, step 1.1) replicates the booted slot to the
-# standby slot once, gated by the .ab-clone-pending marker written above,
-# mirroring the d-i path (10axonwall-ab-setup) which replicates A to B at
-# install time. Until that first-boot clone completes, a watchdog fallback
-# to B finds an empty root -- the same window the d-i path already accepts
-# between install and first boot, and far narrower than shipping B empty
-# with no clone at all.
-umount "${TARGET}/boot/efi" "${TARGET}/var/lib/axonwall" "${TARGET}"
+for sub in run dev/pts dev sys proc boot/efi var/lib/axonwall; do
+  if mountpoint -q "${TARGET}/${sub}" 2>/dev/null; then
+    umount "${TARGET}/${sub}"
+  fi
+done
+
+if mountpoint -q "${TARGET}" 2>/dev/null; then
+  umount "${TARGET}"
+fi
 losetup -d "${LOOP_DEV}"
 LOOP_DEV=""
 

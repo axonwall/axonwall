@@ -1,24 +1,47 @@
 'use client';
 
-import { useActionState } from 'react';
+import { useActionState, useEffect, useState } from 'react';
 import { Shield, Lock, User, AlertCircle, Key, Building2 } from 'lucide-react';
 import { loginAction } from '../../../server/auth';
 import { Logo } from '../../../components/Logo';
 
 export default function LoginPage() {
   const [state, formAction, isPending] = useActionState(loginAction, null);
+  const [queryError, setQueryError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const err = new URLSearchParams(window.location.search).get('error');
+    if (err) {
+      setQueryError(err);
+    }
+  }, []);
+
+  const displayedError = state?.error || queryError;
 
   return (
     <div className="min-h-screen flex items-center justify-center bg-slate-950 p-4">
       <div className="w-full max-w-md bg-slate-900 border border-slate-800 rounded-xl shadow-2xl p-8">
-        <div className="flex flex-col items-center mb-8">
-          <Logo variant="full" size="lg" className="mb-2" />
+        <div className="flex flex-col items-center mb-6 space-y-4">
+          <div className="relative w-full rounded-xl overflow-hidden border border-emerald-500/30 bg-slate-950 shadow-lg shadow-emerald-950/60">
+            <picture>
+              <source srcSet="/hero-axonwall.webp" type="image/webp" />
+              <img
+                src="/hero-axonwall.png"
+                alt="Axonwall Crest — Neural Cyber-Shield on Fortified Brick Wall with Crossed Axes"
+                width={1376}
+                height={768}
+                className="w-full h-36 object-cover object-center"
+              />
+            </picture>
+            <div className="pointer-events-none absolute inset-0 bg-gradient-to-t from-slate-900/90 via-transparent to-transparent" />
+          </div>
+          <Logo variant="full" size="lg" className="mb-1" />
         </div>
 
-        {state?.error && (
+        {displayedError && (
           <div className="mb-6 p-3 bg-red-500/10 border border-red-500/30 rounded-lg flex items-center gap-2 text-sm text-red-400">
             <AlertCircle className="w-4 h-4 shrink-0" />
-            <span>{state.error}</span>
+            <span>{displayedError}</span>
           </div>
         )}
 

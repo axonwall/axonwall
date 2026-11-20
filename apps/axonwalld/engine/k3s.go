@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -48,14 +49,32 @@ type K3sEtcdSnapshotInfo struct {
 	CreatedAt string `json:"createdAt"`
 }
 
+type K3sNodeTaint struct {
+	Key    string `json:"key"`
+	Value  string `json:"value,omitempty"`
+	Effect string `json:"effect"`
+}
+
+type K3sNodeUpdateRequest struct {
+	NodeName      string            `json:"nodeName"`
+	Roles         []string          `json:"roles"`        // adjustable roles: "edge", "worker", "storage"
+	CustomLabels  map[string]string `json:"customLabels"` // optional user/addon labels
+	RemoveLabels  []string          `json:"removeLabels"` // optional user/addon label keys to delete
+	Taints        []K3sNodeTaint    `json:"taints"`       // desired operator-managed taints
+	Unschedulable *bool             `json:"unschedulable,omitempty"`
+}
+
 type K3sNodeInfo struct {
-	Name       string `json:"name"`
-	Role       string `json:"role"`
-	Roles      string `json:"roles"`
-	Status     string `json:"status"`
-	Version    string `json:"version"`
-	IpAddress  string `json:"ipAddress"`
-	InternalIp string `json:"internalIp"`
+	Name          string            `json:"name"`
+	Role          string            `json:"role"`
+	Roles         string            `json:"roles"`
+	Status        string            `json:"status"`
+	Version       string            `json:"version"`
+	IpAddress     string            `json:"ipAddress"`
+	InternalIp    string            `json:"internalIp"`
+	Unschedulable bool              `json:"unschedulable,omitempty"`
+	Labels        map[string]string `json:"labels,omitempty"`
+	Taints        []K3sNodeTaint    `json:"taints,omitempty"`
 }
 
 type OpenEbsVolumeInfo struct {
@@ -157,7 +176,7 @@ func (m *K3sManager) RestartK3sAfterTokenFetch() error {
 	m.mu.Lock()
 	unit := resolveK3sSystemdUnit(m.cfg.K3sConfigYaml)
 	m.mu.Unlock()
-	if out, err := exec.Command("systemctl", "reload-or-restart", unit).CombinedOutput(); err != nil {
+	if out, err := exec.Command("systemctl", "--no-ask-password", "reload-or-restart", unit).CombinedOutput(); err != nil {
 		return fmt.Errorf("failed to reload-or-restart %s after retrieving K3s join token: %v (%s)", unit, err, strings.TrimSpace(string(out)))
 	}
 	return nil
@@ -309,9 +328,9 @@ func (m *K3sManager) ApplyConfig(rawJSON []byte) error {
 	if !bundle.Enabled {
 		slog.Info("K3s plugin is disabled; stopping k3s service")
 		_ = removeFileIfExists(filepath.Join(k3sEtcDir, "config.yaml"))
-		_ = exec.Command("systemctl", "stop", "k3s").Run()
+		_ = exec.Command("systemctl", "--no-ask-password", "stop", "k3s").Run()
 		if hasK3sAgentServiceUnit() || isK3sEditionAgent() {
-			_ = exec.Command("systemctl", "stop", "k3s-agent").Run()
+			_ = exec.Command("systemctl", "--no-ask-password", "stop", "k3s-agent").Run()
 		}
 		// A-H2 (round 3): a disabled cluster must not keep
 		// reporting ClusterJoined. The latch used to survive the
@@ -409,6 +428,8 @@ func (m *K3sManager) ApplyConfig(rawJSON []byte) error {
 			content: bundle.WorkloadsManifestYaml,
 			perm:    0644,
 		})
+	} else {
+		_ = removeFileIfExists(filepath.Join(k3sServerManifestDir, "axonwall-workloads.yaml"))
 	}
 	if bundle.CiliumManifestYaml != "" {
 		writes = append(writes, atomicFileWrite{
@@ -435,7 +456,7 @@ func (m *K3sManager) ApplyConfig(rawJSON []byte) error {
 	// A-M15: a failed k3s restart fails the apply instead of being
 	// discarded while the bundle reports success and the cluster runs
 	// the old manifests or no k3s at all.
-	if out, err := exec.Command("systemctl", "reload-or-restart", k3sServiceUnit).CombinedOutput(); err != nil {
+	if out, err := exec.Command("systemctl", "--no-ask-password", "reload-or-restart", k3sServiceUnit).CombinedOutput(); err != nil {
 		return fmt.Errorf("failed to reload-or-restart %s: %v (%s)", k3sServiceUnit, err, strings.TrimSpace(string(out)))
 	}
 
@@ -563,7 +584,7 @@ func (m *K3sManager) TriggerAutoJoin(peerIp string, syncPort int, authToken stri
 	curConfigYaml := m.cfg.K3sConfigYaml
 	m.mu.Unlock()
 	k3sUnit := resolveK3sSystemdUnit(curConfigYaml)
-	if out, err := exec.Command("systemctl", "reload-or-restart", k3sUnit).CombinedOutput(); err != nil {
+	if out, err := exec.Command("systemctl", "--no-ask-password", "reload-or-restart", k3sUnit).CombinedOutput(); err != nil {
 		return fmt.Errorf("failed to reload-or-restart %s after auto-join: %v (%s)", k3sUnit, err, strings.TrimSpace(string(out)))
 	}
 	m.mu.Lock()
@@ -704,13 +725,15 @@ func (m *K3sManager) GetStatus() K3sClusterStatus {
 		haTopo = "embedded-etcd"
 	}
 
-	// A-L4: GetStatus hardcoded the ZFS local PV pool to "tank" even
-	// though the bundle carries a configurable ZfsLocalPvPool. Report
-	// the configured value; "tank" remains only the default when
-	// nothing is configured.
-	pvPool := cfg.ZfsLocalPvPool
-	if pvPool == "" {
-		pvPool = "tank"
+	// A-L4 (round 3; also fixed on main by fc576368): GetStatus
+	// hardcoded the ZFS local PV pool to "tank" even though the
+	// bundle carries a configurable ZfsLocalPvPool. Report the
+	// configured value; "tank" remains only the default when
+	// nothing is configured. Main's version (with TrimSpace) is
+	// kept as the dedupe.
+	zfsPool := strings.TrimSpace(cfg.ZfsLocalPvPool)
+	if zfsPool == "" {
+		zfsPool = "tank"
 	}
 	return K3sClusterStatus{
 		Enabled:         cfg.Enabled,
@@ -723,7 +746,7 @@ func (m *K3sManager) GetStatus() K3sClusterStatus {
 		HaAutoJoined:    joined,
 		OpenEbsReady:    openEbsReady,
 		OpenEbsHealthy:  openEbsHealthy,
-		ZfsLocalPvPool:  pvPool,
+		ZfsLocalPvPool:  zfsPool,
 		Nodes:           nodes,
 		Volumes:         volumes,
 		LastSyncMessage: lastMsg,
@@ -805,21 +828,22 @@ func (m *K3sManager) RestoreEtcdSnapshot(snapshotName string) error {
 	// failed (stuck/masked unit, systemctl error). Fail before the
 	// reset instead. The unit is resolved the same way as the rest
 	// of this file, so k3s-agent editions stop the right unit.
+	// Main's --no-ask-password flag (a648c351) is kept on the stop.
 	m.mu.Lock()
 	configYaml := m.cfg.K3sConfigYaml
 	m.mu.Unlock()
 	k3sUnit := resolveK3sSystemdUnit(configYaml)
-	if out, err := exec.Command("systemctl", "stop", k3sUnit).CombinedOutput(); err != nil {
+	if out, err := exec.Command("systemctl", "--no-ask-password", "stop", k3sUnit).CombinedOutput(); err != nil {
 		return fmt.Errorf("failed to stop %s before etcd cluster reset: %s (%w)", k3sUnit, strings.TrimSpace(string(out)), err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 	out, err := exec.CommandContext(ctx, k3sBin, "server", "--cluster-reset", "--cluster-reset-restore-path="+fullPath).CombinedOutput()
 	if err != nil {
-		_ = exec.Command("systemctl", "start", k3sUnit).Run()
+		_ = exec.Command("systemctl", "--no-ask-password", "start", k3sUnit).Run()
 		return fmt.Errorf("k3s cluster-reset restore failed: %s (%w)", strings.TrimSpace(string(out)), err)
 	}
-	if startOut, startErr := exec.Command("systemctl", "start", k3sUnit).CombinedOutput(); startErr != nil {
+	if startOut, startErr := exec.Command("systemctl", "--no-ask-password", "start", k3sUnit).CombinedOutput(); startErr != nil {
 		return fmt.Errorf("etcd restored, but failed to restart k3s: %s (%w)", strings.TrimSpace(string(startOut)), startErr)
 	}
 	return nil
@@ -866,8 +890,8 @@ func ensureK3sServiceUnit() {
 		slog.Warn("Could not write /etc/systemd/system/k3s.service", "error", err)
 		return
 	}
-	_ = exec.Command("systemctl", "daemon-reload").Run()
-	_ = exec.Command("systemctl", "enable", "k3s.service").Run()
+	_ = exec.Command("systemctl", "--no-ask-password", "daemon-reload").Run()
+	_ = exec.Command("systemctl", "--no-ask-password", "enable", "k3s.service").Run()
 }
 
 func ensureOpenEbsZfsDataset(replicatedPool string) {
@@ -966,26 +990,80 @@ func runKubectlCmd(ctx context.Context, name string, args []string) ([]byte, err
 	return cmd.Output()
 }
 
+type kubectlNodeItem struct {
+	Metadata struct {
+		Name   string            `json:"name"`
+		Labels map[string]string `json:"labels"`
+	} `json:"metadata"`
+	Spec struct {
+		Unschedulable bool           `json:"unschedulable"`
+		Taints        []K3sNodeTaint `json:"taints"`
+	} `json:"spec"`
+	Status struct {
+		Conditions []struct {
+			Type   string `json:"type"`
+			Status string `json:"status"`
+		} `json:"conditions"`
+		NodeInfo struct {
+			KubeletVersion string `json:"kubeletVersion"`
+		} `json:"nodeInfo"`
+		Addresses []struct {
+			Type    string `json:"type"`
+			Address string `json:"address"`
+		} `json:"addresses"`
+	} `json:"status"`
+}
+
 type kubectlNodeList struct {
-	Items []struct {
-		Metadata struct {
-			Name   string            `json:"name"`
-			Labels map[string]string `json:"labels"`
-		} `json:"metadata"`
-		Status struct {
-			Conditions []struct {
-				Type   string `json:"type"`
-				Status string `json:"status"`
-			} `json:"conditions"`
-			NodeInfo struct {
-				KubeletVersion string `json:"kubeletVersion"`
-			} `json:"nodeInfo"`
-			Addresses []struct {
-				Type    string `json:"type"`
-				Address string `json:"address"`
-			} `json:"addresses"`
-		} `json:"status"`
-	} `json:"items"`
+	Items []kubectlNodeItem `json:"items"`
+}
+
+func parseK3sNodeItem(item kubectlNodeItem) K3sNodeInfo {
+	status := "NotReady"
+	for _, c := range item.Status.Conditions {
+		if c.Type == "Ready" && c.Status == "True" {
+			status = "Ready"
+		}
+	}
+	var roles []string
+	for label := range item.Metadata.Labels {
+		if strings.HasPrefix(label, "node-role.kubernetes.io/") {
+			roles = append(roles, strings.TrimPrefix(label, "node-role.kubernetes.io/"))
+		}
+	}
+	role := "worker"
+	if len(roles) > 0 {
+		sort.Strings(roles)
+		role = strings.Join(roles, ",")
+	}
+	var internalIP string
+	for _, a := range item.Status.Addresses {
+		if a.Type == "InternalIP" {
+			internalIP = a.Address
+		}
+	}
+	var labelsCopy map[string]string
+	if len(item.Metadata.Labels) > 0 {
+		labelsCopy = make(map[string]string, len(item.Metadata.Labels))
+		for k, v := range item.Metadata.Labels {
+			labelsCopy[k] = v
+		}
+	}
+	taintsCopy := make([]K3sNodeTaint, len(item.Spec.Taints))
+	copy(taintsCopy, item.Spec.Taints)
+
+	return K3sNodeInfo{
+		Name:          item.Metadata.Name,
+		Role:          role,
+		Roles:         role,
+		Status:        status,
+		Version:       item.Status.NodeInfo.KubeletVersion,
+		IpAddress:     internalIP,
+		InternalIp:    internalIP,
+		Unschedulable: item.Spec.Unschedulable,
+		Labels:        labelsCopy,
+		Taints:        taintsCopy,
+	}
 }
 
 // probeK3sNodes returns the nodes the Kubernetes API actually reports.
@@ -1000,40 +1078,257 @@ func probeK3sNodes(ctx context.Context) ([]K3sNodeInfo, error) {
 	}
 	nodes := make([]K3sNodeInfo, 0, len(list.Items))
 	for _, item := range list.Items {
-		status := "NotReady"
-		for _, c := range item.Status.Conditions {
-			if c.Type == "Ready" && c.Status == "True" {
-				status = "Ready"
-			}
-		}
-		var roles []string
-		for label := range item.Metadata.Labels {
-			if strings.HasPrefix(label, "node-role.kubernetes.io/") {
-				roles = append(roles, strings.TrimPrefix(label, "node-role.kubernetes.io/"))
-			}
-		}
-		role := "worker"
-		if len(roles) > 0 {
-			sort.Strings(roles)
-			role = strings.Join(roles, ",")
-		}
-		var internalIP string
-		for _, a := range item.Status.Addresses {
-			if a.Type == "InternalIP" {
-				internalIP = a.Address
-			}
-		}
-		nodes = append(nodes, K3sNodeInfo{
-			Name:       item.Metadata.Name,
-			Role:       role,
-			Roles:      role,
-			Status:     status,
-			Version:    item.Status.NodeInfo.KubeletVersion,
-			IpAddress:  internalIP,
-			InternalIp: internalIP,
-		})
+		nodes = append(nodes, parseK3sNodeItem(item))
 	}
 	return nodes, nil
+}
+
+var (
+	k8sSubdomainRegex  = regexp.MustCompile(`^[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?$`)
+	k8sLabelNameRegex  = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9_.-]{0,61}[A-Za-z0-9])?$`)
+	k8sLabelValueRegex = regexp.MustCompile(`^([A-Za-z0-9]([A-Za-z0-9_.-]{0,61}[A-Za-z0-9])?)?$`)
+)
+
+func validK8sNodeName(name string) bool {
+	return len(name) > 0 && len(name) <= 253 && k8sSubdomainRegex.MatchString(name)
+}
+
+func validK8sLabelOrTaintKey(key string) bool {
+	if key == "" {
+		return false
+	}
+	parts := strings.Split(key, "/")
+	if len(parts) > 2 {
+		return false
+	}
+	if len(parts) == 2 {
+		prefix, name := parts[0], parts[1]
+		if len(prefix) == 0 || len(prefix) > 253 || !k8sSubdomainRegex.MatchString(prefix) {
+			return false
+		}
+		return k8sLabelNameRegex.MatchString(name)
+	}
+	return k8sLabelNameRegex.MatchString(parts[0])
+}
+
+func validK8sLabelOrTaintValue(val string) bool {
+	return k8sLabelValueRegex.MatchString(val)
+}
+
+func validK8sTaintEffect(eff string) bool {
+	return eff == "NoSchedule" || eff == "PreferNoSchedule" || eff == "NoExecute"
+}
+
+func isSystemManagedConditionTaintKey(key string) bool {
+	switch key {
+	case "node.kubernetes.io/not-ready",
+		"node.kubernetes.io/unreachable",
+		"node.kubernetes.io/disk-pressure",
+		"node.kubernetes.io/memory-pressure",
+		"node.kubernetes.io/pid-pressure",
+		"node.kubernetes.io/network-unavailable",
+		"node.kubernetes.io/unschedulable",
+		"node.cloudprovider.kubernetes.io/uninitialized":
+		return true
+	default:
+		return false
+	}
+}
+
+func isProtectedSystemLabelKey(key string) bool {
+	if strings.HasPrefix(key, "kubernetes.io/") ||
+		strings.HasPrefix(key, "beta.kubernetes.io/") ||
+		strings.HasPrefix(key, "node.kubernetes.io/") ||
+		strings.HasPrefix(key, "k3s.io/") {
+		return true
+	}
+	switch key {
+	case "node-role.kubernetes.io/control-plane",
+		"node-role.kubernetes.io/master",
+		"node-role.kubernetes.io/etcd",
+		"node-role.kubernetes.io/edge",
+		"node-role.kubernetes.io/worker",
+		"node-role.kubernetes.io/storage",
+		"axonwall.io/role":
+		return true
+	}
+	return false
+}
+
+func buildNodeSchedulingMergePatch(existingLabels map[string]string, existingTaints []K3sNodeTaint, req K3sNodeUpdateRequest) ([]byte, error) {
+	if !validK8sNodeName(req.NodeName) {
+		return nil, fmt.Errorf("invalid kubernetes node name %q", req.NodeName)
+	}
+
+	selectedRoles := make(map[string]bool)
+	for _, r := range req.Roles {
+		norm := strings.ToLower(strings.TrimSpace(r))
+		if norm == "" {
+			continue
+		}
+		if norm != "edge" && norm != "worker" && norm != "storage" {
+			return nil, fmt.Errorf("unsupported adjustable role %q: expected edge, worker, or storage", r)
+		}
+		selectedRoles[norm] = true
+	}
+
+	labelsPatch := make(map[string]any)
+	if selectedRoles["edge"] {
+		labelsPatch["node-role.kubernetes.io/edge"] = "true"
+		labelsPatch["axonwall.io/role"] = "edge"
+	} else {
+		labelsPatch["node-role.kubernetes.io/edge"] = nil
+		if existingLabels["axonwall.io/role"] == "edge" && !selectedRoles["storage"] {
+			labelsPatch["axonwall.io/role"] = nil
+		}
+	}
+
+	if selectedRoles["worker"] {
+		labelsPatch["node-role.kubernetes.io/worker"] = "worker"
+	} else {
+		labelsPatch["node-role.kubernetes.io/worker"] = nil
+	}
+
+	if selectedRoles["storage"] {
+		labelsPatch["node-role.kubernetes.io/storage"] = "storage"
+		if !selectedRoles["edge"] {
+			labelsPatch["axonwall.io/role"] = "k3s-storage"
+		}
+	} else {
+		labelsPatch["node-role.kubernetes.io/storage"] = nil
+		if existingLabels["axonwall.io/role"] == "k3s-storage" && !selectedRoles["edge"] {
+			labelsPatch["axonwall.io/role"] = nil
+		}
+	}
+
+	for _, rk := range req.RemoveLabels {
+		if !validK8sLabelOrTaintKey(rk) {
+			return nil, fmt.Errorf("invalid label key to remove %q", rk)
+		}
+		if isProtectedSystemLabelKey(rk) {
+			return nil, fmt.Errorf("cannot remove protected system label %q", rk)
+		}
+		labelsPatch[rk] = nil
+	}
+
+	for k, v := range req.CustomLabels {
+		if !validK8sLabelOrTaintKey(k) {
+			return nil, fmt.Errorf("invalid custom label key %q", k)
+		}
+		if isProtectedSystemLabelKey(k) {
+			return nil, fmt.Errorf("cannot modify protected system label %q", k)
+		}
+		if !validK8sLabelOrTaintValue(v) {
+			return nil, fmt.Errorf("invalid label value %q for key %q", v, k)
+		}
+		labelsPatch[k] = v
+	}
+
+	mergedTaints := make([]K3sNodeTaint, 0, len(existingTaints)+len(req.Taints))
+	seenTaints := make(map[string]bool)
+	for _, t := range existingTaints {
+		if !isSystemManagedConditionTaintKey(t.Key) {
+			continue
+		}
+		if t.Key == "node.kubernetes.io/unschedulable" && req.Unschedulable != nil && !*req.Unschedulable {
+			continue
+		}
+		dedupeKey := t.Key + "=" + t.Effect
+		if !seenTaints[dedupeKey] {
+			seenTaints[dedupeKey] = true
+			mergedTaints = append(mergedTaints, t)
+		}
+	}
+
+	for _, t := range req.Taints {
+		if isSystemManagedConditionTaintKey(t.Key) {
+			continue
+		}
+		if !validK8sLabelOrTaintKey(t.Key) {
+			return nil, fmt.Errorf("invalid taint key %q", t.Key)
+		}
+		if !validK8sLabelOrTaintValue(t.Value) {
+			return nil, fmt.Errorf("invalid taint value %q for key %q", t.Value, t.Key)
+		}
+		if !validK8sTaintEffect(t.Effect) {
+			return nil, fmt.Errorf("invalid taint effect %q for key %q", t.Effect, t.Key)
+		}
+		dedupeKey := t.Key + "=" + t.Effect
+		if !seenTaints[dedupeKey] {
+			seenTaints[dedupeKey] = true
+			mergedTaints = append(mergedTaints, K3sNodeTaint{
+				Key:    t.Key,
+				Value:  t.Value,
+				Effect: t.Effect,
+			})
+		}
+	}
+
+	specPatch := map[string]any{
+		"taints": mergedTaints,
+	}
+	if req.Unschedulable != nil {
+		specPatch["unschedulable"] = *req.Unschedulable
+	}
+
+	return json.Marshal(map[string]any{
+		"metadata": map[string]any{
+			"labels": labelsPatch,
+		},
+		"spec": specPatch,
+	})
+}
+
+func runKubectlPatch(ctx context.Context, nodeName, patchJSON string) ([]byte, error) {
+	if _, err := exec.LookPath("kubectl"); err == nil {
+		cmd := exec.CommandContext(ctx, "kubectl", "patch", "node", nodeName, "--type=merge", "-p", patchJSON)
+		if _, statErr := os.Stat("/etc/rancher/k3s/k3s.yaml"); statErr == nil {
+			cmd.Env = append(os.Environ(), "KUBECONFIG=/etc/rancher/k3s/k3s.yaml")
+		}
+		if out, runErr := cmd.CombinedOutput(); runErr == nil {
+			return out, nil
+		}
+	}
+	return exec.CommandContext(ctx, "k3s", "kubectl", "patch", "node", nodeName, "--type=merge", "-p", patchJSON).CombinedOutput()
+}
+
+// UpdateNodeScheduling atomically applies adjustable roles, labels, taints, and cordon state to a K3s node.
+func (m *K3sManager) UpdateNodeScheduling(req K3sNodeUpdateRequest) (*K3sNodeInfo, error) {
+	if !validK8sNodeName(req.NodeName) {
+		return nil, fmt.Errorf("invalid kubernetes node name %q", req.NodeName)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	rawNode, err := runKubectlJSON(ctx, "node", req.NodeName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to inspect node %q: %w", req.NodeName, err)
+	}
+	var current kubectlNodeItem
+	if err := json.Unmarshal(rawNode, &current); err != nil {
+		return nil, fmt.Errorf("failed to parse node %q JSON: %w", req.NodeName, err)
+	}
+
+	patchBytes, err := buildNodeSchedulingMergePatch(current.Metadata.Labels, current.Spec.Taints, req)
+	if err != nil {
+		return nil, err
+	}
+
+	if out, err := runKubectlPatch(ctx, req.NodeName, string(patchBytes)); err != nil {
+		return nil, fmt.Errorf("kubectl patch node %q failed: %s (%w)", req.NodeName, strings.TrimSpace(string(out)), err)
+	}
+
+	updatedRaw, err := runKubectlJSON(ctx, "node", req.NodeName)
+	if err != nil {
+		return nil, fmt.Errorf("node %q patched, but re-read failed: %w", req.NodeName, err)
+	}
+	var updated kubectlNodeItem
+	if err := json.Unmarshal(updatedRaw, &updated); err != nil {
+		return nil, fmt.Errorf("failed to parse updated node %q JSON: %w", req.NodeName, err)
+	}
+	info := parseK3sNodeItem(updated)
+	return &info, nil
 }
 
 type kubectlPVCList struct {

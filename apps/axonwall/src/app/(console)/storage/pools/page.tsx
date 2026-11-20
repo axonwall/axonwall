@@ -44,7 +44,10 @@ export default function ZfsPoolsPage() {
       if (selectedDisks.length === 0 && eligible.length > 0) {
         setSelectedDisks(eligible.slice(0, 2));
       }
-    } catch {}
+    } catch (err: any) {
+      setStatusKind('error');
+      setStatusMsg(err?.message || 'Failed to load ZFS pools and disks');
+    }
   };
 
   useEffect(() => {
@@ -139,23 +142,38 @@ export default function ZfsPoolsPage() {
   };
 
   const handleScrub = async (name: string) => {
-    const res = await scrubNasPoolAction(name);
-    setStatusKind(res.success ? 'success' : 'error');
-    setStatusMsg(res.message);
+    try {
+      const res = await scrubNasPoolAction(name);
+      setStatusKind(res.success ? 'success' : 'error');
+      setStatusMsg(res.message);
+    } catch (err: any) {
+      setStatusKind('error');
+      setStatusMsg(err?.message || `Failed to scrub pool '${name}'`);
+    }
   };
 
   const handleTrim = async (name: string) => {
-    const res = await trimNasPoolAction(name);
-    setStatusKind(res.success ? 'success' : 'error');
-    setStatusMsg(res.message);
+    try {
+      const res = await trimNasPoolAction(name);
+      setStatusKind(res.success ? 'success' : 'error');
+      setStatusMsg(res.message);
+    } catch (err: any) {
+      setStatusKind('error');
+      setStatusMsg(err?.message || `Failed to trim pool '${name}'`);
+    }
   };
 
   const handleCheckpoint = async (name: string, discard = false) => {
     if (!discard && !confirm(`Create pool-wide ZFS checkpoint on '${name}'?`)) return;
     if (discard && !confirm(`Discard active ZFS checkpoint on '${name}'?`)) return;
-    const res = await checkpointNasPoolAction(name, discard);
-    setStatusKind(res.success ? 'success' : 'error');
-    setStatusMsg(res.message);
+    try {
+      const res = await checkpointNasPoolAction(name, discard);
+      setStatusKind(res.success ? 'success' : 'error');
+      setStatusMsg(res.message);
+    } catch (err: any) {
+      setStatusKind('error');
+      setStatusMsg(err?.message || `Failed to manage checkpoint on pool '${name}'`);
+    }
   };
 
   const configuredPools = state?.nas?.pools ?? [];

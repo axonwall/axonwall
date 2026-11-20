@@ -11,6 +11,9 @@ if [[ ! -f "$MARKER" ]]; then
 fi
 
 echo "[Axonwall Firstboot] Initializing network appliance..."
+if command -v plymouth >/dev/null 2>&1 && plymouth --ping 2>/dev/null; then
+  plymouth display-message --text="Provisioning Axonwall Security Appliance..." 2>/dev/null || true
+fi
 
 # D-M9 (marker): this IS the axonwall firstboot, so its edition is known
 # by construction. Stamp the canonical edition file (creating it if the

@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/axonwall/axonwall/apps/axonwalld/engine"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
@@ -49,6 +50,71 @@ const (
 	defaultAgentToken  = "/etc/axonwall/agent.token"
 )
 
+var (
+	runtimeSocketGroup string
+	currentRuntimeMode = engine.ModeAppliance
+)
+
+func resolveSocketGroupGID() int {
+	lookupNameOrGID := func(name string) int {
+		if name == "" {
+			return -1
+		}
+		if grp, err := user.LookupGroup(name); err == nil {
+			if gid, err := strconv.Atoi(grp.Gid); err == nil {
+				return gid
+			}
+		}
+		if gid, err := strconv.Atoi(name); err == nil && gid >= 0 {
+			return gid
+		}
+		return -1
+	}
+
+	if explicit := strings.TrimSpace(runtimeSocketGroup); explicit != "" {
+		if gid := lookupNameOrGID(explicit); gid >= 0 {
+			return gid
+		}
+	}
+	if envGroup := strings.TrimSpace(os.Getenv("AXONWALL_SOCKET_GROUP")); envGroup != "" {
+		if gid := lookupNameOrGID(envGroup); gid >= 0 {
+			return gid
+		}
+	}
+	if gid := lookupNameOrGID("axonwall-api"); gid >= 0 {
+		return gid
+	}
+	if gid := lookupNameOrGID("axonwall"); gid >= 0 {
+		return gid
+	}
+	if currentRuntimeMode == engine.ModeHost || currentRuntimeMode == engine.ModeDev {
+		if sudoGidStr := strings.TrimSpace(os.Getenv("SUDO_GID")); sudoGidStr != "" {
+			if gid, err := strconv.Atoi(sudoGidStr); err == nil && gid > 0 {
+				return gid
+			}
+		}
+		if gid := lookupNameOrGID("wheel"); gid >= 0 {
+			return gid
+		}
+		if gid := lookupNameOrGID("sudo"); gid >= 0 {
+			return gid
+		}
+	}
+	return -1
+}
+
+// resolveAgentTokenPath returns the active persistent token path, honoring
+// AXONWALL_AGENT_TOKEN_FILE and AXONWALL_ETC_DIR before /etc/axonwall/agent.token.
+func resolveAgentTokenPath() string {
+	if p := strings.TrimSpace(os.Getenv("AXONWALL_AGENT_TOKEN_FILE")); p != "" {
+		return p
+	}
+	if etcDir := strings.TrimSpace(os.Getenv("AXONWALL_ETC_DIR")); etcDir != "" {
+		return filepath.Join(etcDir, "agent.token")
+	}
+	return defaultAgentToken
+}
+
 // resolveAgentToken returns the daemon's agent API token and a short
 // description of where it came from.
 func resolveAgentToken() (string, string) {
@@ -56,10 +122,7 @@ func resolveAgentToken() (string, string) {
 		return env, "environment"
 	}
 
-	path := os.Getenv("AXONWALL_AGENT_TOKEN_FILE")
-	if path == "" {
-		path = defaultAgentToken
-	}
+	path := resolveAgentTokenPath()
 	if data, err := os.ReadFile(path); err == nil {
 		if tok := strings.TrimSpace(string(data)); tok != "" {
 			return tok, "file " + path
@@ -83,34 +146,34 @@ func persistAgentToken(path, token string) error {
 		return err
 	}
 	perm := os.FileMode(0600)
-	gid := -1
-	if grp, err := user.LookupGroup("axonwall-api"); err == nil {
-		if parsed, err := strconv.Atoi(grp.Gid); err == nil {
-			gid = parsed
-			perm = 0640
-		}
+	gid := resolveSocketGroupGID()
+	if gid >= 0 {
+		perm = 0640
 	}
 	if err := os.WriteFile(path, []byte(token+"\n"), perm); err != nil {
 		return err
 	}
+	_ = os.Chmod(path, perm)
 	if gid >= 0 {
 		_ = os.Chown(path, -1, gid)
 	}
 	return nil
 }
 
+func writeRuntimeTokenCopy(sockDir, token string) {
+	if sockDir == "" || token == "" {
+		return
+	}
+	rtPath := filepath.Join(sockDir, "agent.token")
+	if err := persistAgentToken(rtPath, token); err != nil {
+		log.Printf("[Agent] Warning: could not write runtime token copy to %s: %v", rtPath, err)
+	}
+}
+
 func chownSocketToAPIGroup(path string, mode os.FileMode) {
 	_ = os.Chmod(path, mode)
-	if grp, err := user.LookupGroup("axonwall-api"); err == nil {
-		if gid, err := strconv.Atoi(grp.Gid); err == nil {
-			_ = os.Chown(path, -1, gid)
-			return
-		}
-	}
-	if grp, err := user.LookupGroup("axonwall"); err == nil {
-		if gid, err := strconv.Atoi(grp.Gid); err == nil {
-			_ = os.Chown(path, -1, gid)
-		}
+	if gid := resolveSocketGroupGID(); gid >= 0 {
+		_ = os.Chown(path, -1, gid)
 	}
 }
 

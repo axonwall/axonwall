@@ -209,7 +209,7 @@ function parseProxmoxVm(vmid: number, lines: string[], defaultPool: string, warn
         sizeGb: parseSizeToGb(kv.size, 32),
         bus: busPrefix,
         cache: 'none',
-        discard: kv.discard === 'on' || kv.ssd === '1' || true,
+        discard: kv.discard === 'on' || kv.ssd === '1',
         iopsReadLimit: Number.parseInt(kv.iops_rd || '0', 10) || 0,
         iopsWriteLimit: Number.parseInt(kv.iops_wr || '0', 10) || 0,
         readOnly: kv.ro === '1',
@@ -369,7 +369,7 @@ function parseProxmoxLxc(ctid: number, lines: string[], defaultPool: string): Lx
         mac: kv.hwaddr && /^([0-9a-f]{2}:){5}[0-9a-f]{2}$/i.test(kv.hwaddr) ? kv.hwaddr.toLowerCase() : '',
         bridge: kv.bridge || 'vmbr0',
         vlanTag: kv.tag ? Number.parseInt(kv.tag, 10) : undefined,
-        vnet: kv.ip && kv.ip !== 'dhcp' ? kv.ip : undefined,
+        vnet: kv.name && /^[a-zA-Z0-9_.:-]+$/.test(kv.name) ? kv.name : undefined,
         model: 'virtio',
         firewall: kv.firewall !== '0',
         rateLimitMbps: 0,
@@ -531,7 +531,7 @@ export function importProxmoxConfig(content: string): ImportReport {
             const srcMatch = rest.match(/-source\s+(\S+)/i);
             const dstMatch = rest.match(/-dest\s+(\S+)/i);
             const proto = (protoMatch?.[1]?.toLowerCase() || 'any') as 'any' | 'tcp' | 'udp' | 'icmp';
-            const portSpec = (dportMatch?.[1] || '').replace(':', '-');
+            const portSpec = (dportMatch?.[1] || '').replace(/:/g, '-');
 
             if (activeSg) {
               activeSg.rules.push({

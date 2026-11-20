@@ -10,7 +10,7 @@ WORK_DIR="${SCRIPT_DIR}/build"
 OUTPUT_DIR="${SCRIPT_DIR}/output"
 
 # Extract version from package.json
-VERSION=$(node -p "require('${ROOT_DIR}/package.json').version" 2>/dev/null || echo "0.11.67")
+VERSION=$(node -p "require('${ROOT_DIR}/package.json').version" 2>/dev/null || echo "0.12.3")
 ARCH="amd64"
 
 # D-M9 (round-3): flavor-specific packages. The updater used to fetch the
@@ -85,21 +85,21 @@ mkdir -p "${WORK_DIR}/DEBIAN" "${OUTPUT_DIR}"
 case "${EDITION}" in
   vault)
     PKG_DEPENDS="nftables (>= 1.0.0), iproute2, openssh-server, openssh-client, libpam-modules, chrony, openssl, curl, wget, jq, ca-certificates, rsync, python3, ethtool, pciutils, tcpdump, kmod, procps, iputils-ping, nano, less, binutils, zstd, xz-utils, bzip2, unzip, zsh, zsh-autosuggestions, zsh-syntax-highlighting, vim, neovim, tmux, fzf, ripgrep, fd-find, bat, mtr-tiny, btop, htop, sysstat, iotop, iftop, slurm, net-tools, dnsutils, bind9-host, nmap, kubectl, mkcert, zfsutils-linux, zfs-initramfs, mdadm, gdisk, parted, smartmontools, xfsprogs, cryptsetup, tpm2-tools, etckeeper, git, rkhunter, chkrootkit, yara, unhide, lynis, debsums, bpftool, python3-drgn, linux-perf"
-    PKG_RECOMMENDS="starship, zoxide"
+    PKG_RECOMMENDS="starship, zoxide, plymouth, plymouth-label"
     PKG_CONFLICTS="axonwall, axonwall-k3s-storage"
     PKG_DESC="Axonwall Vault Edition — Immutable S3 Backup Vault"
     PKG_DESC_LONG=$' SeaweedFS-backed immutable backup vault with S3 Object Lock.\n No firewall daemon, web console, or controller — the NGFW payload\n is absent, not disabled.'
     ;;
   k3s-storage)
     PKG_DEPENDS="nftables (>= 1.0.0), iproute2, wireguard-tools, iptables, bridge-utils, openssh-server, openssh-client, libpam-modules, chrony, openssl, curl, wget, jq, ca-certificates, rsync, python3, ethtool, pciutils, tcpdump, kmod, procps, iputils-ping, nano, less, binutils, zstd, xz-utils, bzip2, unzip, zsh, zsh-autosuggestions, zsh-syntax-highlighting, vim, neovim, tmux, fzf, ripgrep, fd-find, bat, mtr-tiny, btop, htop, sysstat, iotop, iftop, slurm, net-tools, dnsutils, bind9-host, nmap, kubectl, mkcert, zfsutils-linux, zfs-initramfs, mdadm, gdisk, parted, smartmontools, xfsprogs, cryptsetup, tpm2-tools, etckeeper, git, rkhunter, chkrootkit, yara, unhide, lynis, debsums, bpftool, python3-drgn, linux-perf"
-    PKG_RECOMMENDS="starship, zoxide"
+    PKG_RECOMMENDS="starship, zoxide, plymouth, plymouth-label"
     PKG_CONFLICTS="axonwall, axonwall-vault"
     PKG_DESC="Axonwall K3s-Storage Edition — Barebones K3s + OpenZFS Storage Host"
     PKG_DESC_LONG=$' Lean K3s + OpenZFS + OpenEBS storage host.\n No firewall daemon, web console, or controller — the NGFW payload\n is absent, not disabled.'
     ;;
   *)
-    PKG_DEPENDS="nftables (>= 1.0.0), iproute2, wireguard-tools, keepalived, conntrack, conntrackd, nodejs (>= 20.0.0), openssh-server, openssh-client, slapd, ldap-utils, sssd-ldap, sssd-tools, libnss-sss, libpam-sss, libpam-modules, chrony, openssl, curl, wget, jq, ca-certificates, rsync, python3, sqlite3, ethtool, pciutils, tcpdump, kmod, procps, iputils-ping, nano, less, binutils, zstd, xz-utils, bzip2, unzip, zsh, zsh-autosuggestions, zsh-syntax-highlighting, vim, neovim, tmux, fzf, ripgrep, fd-find, bat, mtr-tiny, btop, htop, sysstat, iotop, iftop, slurm, net-tools, dnsutils, bind9-host, nmap, kubectl, mkcert"
-    PKG_RECOMMENDS="starship, zoxide, unbound, kea-dhcp4-server, frr, suricata, strongswan, openvpn, etckeeper, git, qemu-system-x86, qemu-utils, ovmf, xorriso, bridge-utils, libvirt-clients, lxc, zfsutils-linux, zfs-initramfs, mdadm, gdisk, parted, smartmontools, xfsprogs, cryptsetup, tpm2-tools, samba, nfs-kernel-server, open-iscsi, tgt, cloud-init, cloud-guest-utils, rkhunter, chkrootkit, yara, unhide, lynis, debsums, bpftool, python3-drgn, linux-perf"
+    PKG_DEPENDS="nftables (>= 1.1.0), iproute2, wireguard-tools, keepalived, conntrack, conntrackd, nodejs (>= 22.0.0), openssh-server, openssh-client, slapd, ldap-utils, sssd-ldap, sssd-tools, libnss-sss, libpam-sss, libpam-modules, chrony, openssl, curl, wget, jq, ca-certificates, rsync, python3, sqlite3, ethtool, pciutils, tcpdump, kmod, procps, iputils-ping, nano, less, binutils, zstd, xz-utils, bzip2, unzip, zsh, zsh-autosuggestions, zsh-syntax-highlighting, vim, neovim, tmux, fzf, ripgrep, fd-find, bat, mtr-tiny, btop, htop, sysstat, iotop, iftop, slurm, net-tools, dnsutils, bind9-host, nmap, kubectl, mkcert"
+    PKG_RECOMMENDS="starship, zoxide, unbound, kea-dhcp4-server, frr, suricata, strongswan, openvpn, etckeeper, git, qemu-system-x86, qemu-utils, ovmf, xorriso, bridge-utils, libvirt-clients, lxc, zfsutils-linux, zfs-initramfs, mdadm, gdisk, parted, smartmontools, xfsprogs, cryptsetup, tpm2-tools, samba, nfs-kernel-server, open-iscsi, tgt, cloud-init, cloud-guest-utils, rkhunter, chkrootkit, yara, unhide, lynis, debsums, bpftool, python3-drgn, linux-perf, plymouth, plymouth-label"
     PKG_CONFLICTS="axonwall-vault, axonwall-k3s-storage"
     PKG_DESC="Modern Linux Router & Next-Gen Firewall"
     PKG_DESC_LONG=$' Axonwall replaces legacy BSD/PHP firewalls with a\n modern reactive architecture built on Linux nftables, Next.js, OpenLDAP,\n and a privileged Go daemon with commit-confirm transaction safety.'
@@ -315,6 +315,19 @@ if [[ ! -f "${WORK_DIR}/usr/sbin/weed" ]]; then
 fi
 fi
 
+# Fetch K9s v0.51.0 binary if absent (ensures .deb installs & axonwall-update include k9s CLI)
+K9S_VERSION="0.51.0"
+K9S_SHA256="c3752ad51a5a4015a113819c4eeb6e55a4d0e4b8e652494797532f6fc8161dd7"
+if [[ ! -f "${WORK_DIR}/usr/local/bin/k9s" ]]; then
+  echo "[+] Downloading K9s v${K9S_VERSION} binary..."
+  K9S_TAR="$(mktemp -t k9s-XXXXXX.tar.gz)"
+  curl -fsSL -o "${K9S_TAR}" "https://github.com/derailed/k9s/releases/download/v${K9S_VERSION}/k9s_Linux_amd64.tar.gz"
+  echo "${K9S_SHA256}  ${K9S_TAR}" | sha256sum -c -
+  tar -xzf "${K9S_TAR}" -C "${WORK_DIR}/usr/local/bin/" k9s
+  chmod 755 "${WORK_DIR}/usr/local/bin/k9s"
+  rm -f "${K9S_TAR}"
+fi
+
 # 5. Copy System Scripts & Terminal Configs
 CHROOT_SRC="${ROOT_DIR}/packaging/iso/config/includes.chroot"
 # D-M9: the script set is edition-gated against build-iso.sh, which
@@ -323,11 +336,14 @@ CHROOT_SRC="${ROOT_DIR}/packaging/iso/config/includes.chroot"
 # flavor trees. axonwall-opshell and axonwall-config ship in all
 # editions on main (both builders copy them unconditionally — the
 # vault-branch Alpine gate is a branch divergence, not main's rule).
+# axonwall-kubeconfig (main, fc576368) is shared too: it lives in
+# includes.chroot and neither builder strips it for any flavor.
 BIN_SCRIPTS=(
   axonwall-update
   axonwall-opshell
   axonwall-config
   axonwall-install
+  axonwall-kubeconfig
   axonwall-zbm-theme
   axonwall-hunt-rootkits
   hunt-io-uring-implants.sh
@@ -540,6 +556,19 @@ elif [[ "${EDITION}" == "k3s-storage" ]]; then
   done
 fi
 
+if [[ -d "${CHROOT_SRC}/usr/share/plymouth/themes/axonwall" ]]; then
+  mkdir -p "${WORK_DIR}/usr/share/plymouth/themes/axonwall"
+  cp -a "${CHROOT_SRC}/usr/share/plymouth/themes/axonwall/." "${WORK_DIR}/usr/share/plymouth/themes/axonwall/"
+  chmod -R a+rX "${WORK_DIR}/usr/share/plymouth/themes/axonwall"
+fi
+for dropin_dir in plymouth-quit.service.d plymouth-quit-wait.service.d; do
+  if [[ -d "${CHROOT_SRC}/etc/systemd/system/${dropin_dir}" ]]; then
+    mkdir -p "${WORK_DIR}/lib/systemd/system/${dropin_dir}"
+    cp -a "${CHROOT_SRC}/etc/systemd/system/${dropin_dir}/." "${WORK_DIR}/lib/systemd/system/${dropin_dir}/"
+    chmod -R a+rX "${WORK_DIR}/lib/systemd/system/${dropin_dir}"
+  fi
+done
+
 if [[ -f "${CHROOT_SRC}/usr/lib/sysusers.d/axonwall.conf" ]]; then
   cp "${CHROOT_SRC}/usr/lib/sysusers.d/axonwall.conf" "${WORK_DIR}/usr/lib/sysusers.d/"
 fi
@@ -624,8 +653,10 @@ fi # EDITION == axonwall: end of Next.js + controller bundle
 # operator. Listing them as conffiles lets an upgrade with
 # --force-confold (as the updater's apt path uses) keep a stale version
 # string / stale trust anchor instead of the shipped ones.
+# (Main's fc576368 excludes the same two files; the grep -vE form below
+# is its equivalent implementation.)
 if [[ -d "${WORK_DIR}/etc" ]]; then
-  (cd "${WORK_DIR}" && find etc -type f | sed 's|^|/|' | LC_ALL=C sort | grep -v -e '^/etc/axonwall/version$' -e '^/etc/axonwall/release-signing.pub$') > "${WORK_DIR}/DEBIAN/conffiles"
+  (cd "${WORK_DIR}" && find etc -type f | sed 's|^|/|' | grep -vE '^/etc/axonwall/(version|release-signing\.pub)$' | LC_ALL=C sort) > "${WORK_DIR}/DEBIAN/conffiles"
   chmod 0644 "${WORK_DIR}/DEBIAN/conffiles"
 fi
 

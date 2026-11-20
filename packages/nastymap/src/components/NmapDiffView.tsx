@@ -1,3 +1,5 @@
+'use client';
+
 import React, { useState, useEffect } from 'react';
 import type { NmapRun, NmapScanDiff } from '../types/nmap';
 import { compareNmapScans } from '../diff/scan-diff';

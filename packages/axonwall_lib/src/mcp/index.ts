@@ -409,7 +409,7 @@ export function validateVirtWorkloadSafety(
   hostedEdgeEnabled?: boolean,
   workloadId?: number | string,
 ): McpValidationResult {
-  const destructiveActions = new Set(['stop', 'pause']);
+  const destructiveActions = new Set(['stop', 'pause', 'reboot', 'restore', 'rollback', 'live_migrate']);
   if (!destructiveActions.has(action)) {
     return { valid: true };
   }
@@ -896,11 +896,76 @@ export function validateRedirectTargetAllowlist(
 // 7. Master Kill-Switch / Disable Management
 // ============================================================================
 
+function findMcpDevWorkspaceRoot(): string | null {
+  let cur = process.cwd();
+  for (;;) {
+    if (fs.existsSync(path.join(cur, 'pnpm-workspace.yaml'))) {
+      return cur;
+    }
+    const parent = path.dirname(cur);
+    if (parent === cur) {
+      return null;
+    }
+    cur = parent;
+  }
+}
+
+function isMcpDevFallback(): boolean {
+  try {
+    if (fs.existsSync('/etc/axonwall/.axonwall-os')) {
+      return false;
+    }
+  } catch {
+    return false;
+  }
+  if (process.env.NODE_ENV === 'test') {
+    return false;
+  }
+  if (
+    Boolean(process.env.AXONWALL_DEV_DIR) ||
+    process.env.AXONWALL_DEV === '1' ||
+    process.env.AXONWALL_DEV_MODE === '1'
+  ) {
+    return true;
+  }
+  if (process.env.NODE_ENV === 'production') {
+    return false;
+  }
+  const wsRoot = findMcpDevWorkspaceRoot();
+  if (!wsRoot) {
+    return false;
+  }
+  return fs.existsSync(path.join(wsRoot, '.axonwall-dev')) || !fs.existsSync('/etc/axonwall');
+}
+
+function resolveMcpStateDirs(): { stateDir: string; persistDir: string; etcDir: string } {
+  const devFallback = isMcpDevFallback();
+  let devRoot = '';
+  if (devFallback) {
+    if (process.env.AXONWALL_DEV_DIR?.trim()) {
+      devRoot = path.resolve(process.env.AXONWALL_DEV_DIR.trim());
+    } else {
+      const wsRoot = findMcpDevWorkspaceRoot();
+      devRoot = wsRoot ? path.join(wsRoot, '.axonwall-dev') : path.resolve('.axonwall-dev');
+    }
+  }
+  const stateDir =
+    process.env.AXONWALL_STATE_DIR?.trim() || (devFallback ? path.join(devRoot, 'var') : '/var/lib/axonwall');
+  const persistDir =
+    process.env.AXONWALL_PERSIST_YAML_DIR?.trim() || path.join(stateDir, 'etc-axonwall');
+  const etcDir =
+    process.env.AXONWALL_CONFIG_DIR?.trim() ||
+    process.env.AXONWALL_ETC_DIR?.trim() ||
+    (devFallback ? path.join(devRoot, 'etc') : '/etc/axonwall');
+  return { stateDir, persistDir, etcDir };
+}
+
 export function resolveMcpSettingsPath(): string {
   if (process.env.AXONWALL_MCP_SETTINGS_PATH) {
     return process.env.AXONWALL_MCP_SETTINGS_PATH;
   }
-  const primaryDir = '/var/lib/axonwall';
+  const { stateDir, persistDir, etcDir } = resolveMcpStateDirs();
+  const primaryDir = stateDir;
   const primaryFile = path.join(primaryDir, 'mcp-settings.json');
   try {
     if (fs.existsSync(primaryFile)) {
@@ -911,7 +976,7 @@ export function resolveMcpSettingsPath(): string {
     fs.accessSync(primaryDir, fs.constants.W_OK);
     return primaryFile;
   } catch {
-    for (const candidate of ['/var/lib/axonwall/etc-axonwall/mcp-settings.json', '/etc/axonwall/mcp-settings.json']) {
+    for (const candidate of [path.join(persistDir, 'mcp-settings.json'), path.join(etcDir, 'mcp-settings.json')]) {
       if (fs.existsSync(candidate)) {
         return candidate;
       }
@@ -958,14 +1023,15 @@ export function getMcpServerStatus(settingsPath?: string): McpServerStatus {
   }
 
   // 2. Check persistent configuration file(s)
+  const { stateDir, persistDir, etcDir } = resolveMcpStateDirs();
   const candidatePaths = settingsPath
     ? [settingsPath]
     : Array.from(
         new Set([
           resolveMcpSettingsPath(),
-          '/var/lib/axonwall/mcp-settings.json',
-          '/var/lib/axonwall/etc-axonwall/mcp-settings.json',
-          '/etc/axonwall/mcp-settings.json',
+          path.join(stateDir, 'mcp-settings.json'),
+          path.join(persistDir, 'mcp-settings.json'),
+          path.join(etcDir, 'mcp-settings.json'),
         ]),
       );
 

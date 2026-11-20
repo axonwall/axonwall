@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { parseNmapXml } from '../src/parser/nmap-xml-parser.js';
+import { mergeScanResults } from '../src/mutation/scan-mutator.js';
 import { ENTERPRISE_NETWORK_XML, GLOBAL_PERIMETER_XML, SECURITY_BREACH_BEFORE_XML, SECURITY_BREACH_AFTER_XML } from '../src/data/sample-scans.js';
 import { compareNmapScans } from '../src/diff/scan-diff.js';
 import { generateTopology } from '../src/topology/topology-engine.js';
@@ -104,5 +105,56 @@ describe('NastyMap Topology Generator', () => {
     expect(graph.scannerNode.id).toBe('scanner-origin');
     expect(graph.nodes.length).toBeGreaterThan(scan.hosts.length); // Includes intermediate hops
     expect(graph.links.length).toBeGreaterThan(0);
+  });
+
+  it('preserves string versions like "3.10" without numeric trailing-zero stripping', () => {
+    const xml = `<?xml version="1.0"?>
+    <nmaprun scanner="nmap" args="nmap -sV 192.168.1.50">
+      <host>
+        <status state="up"/>
+        <address addr="192.168.1.50" addrtype="ipv4"/>
+        <ports>
+          <port protocol="tcp" portid="80">
+            <state state="open"/>
+            <service name="http" product="Apache httpd" version="3.10"/>
+          </port>
+        </ports>
+      </host>
+    </nmaprun>`;
+    const scan = parseNmapXml(xml);
+    expect(scan.hosts[0].ports[0].service?.version).toBe('3.10');
+  });
+
+  it('merges IPv6-only hosts without collapsing and preserves prior OS/hostname metadata', () => {
+    const scan1 = parseNmapXml(`<?xml version="1.0"?>
+    <nmaprun scanner="nmap" args="nmap -O -6 2001:db8::10 2001:db8::20">
+      <host>
+        <status state="up"/>
+        <address addr="2001:db8::10" addrtype="ipv6"/>
+        <hostnames><hostname name="edge-v6.local" type="PTR"/></hostnames>
+        <os><osmatch name="Linux 6.8" accuracy="98"/></os>
+        <ports><port protocol="tcp" portid="22"><state state="open"/><service name="ssh"/></port></ports>
+      </host>
+      <host>
+        <status state="up"/>
+        <address addr="2001:db8::20" addrtype="ipv6"/>
+      </host>
+    </nmaprun>`);
+
+    const scan2 = parseNmapXml(`<?xml version="1.0"?>
+    <nmaprun scanner="nmap" args="nmap -p 443 -6 2001:db8::10">
+      <host>
+        <status state="up"/>
+        <address addr="2001:db8::10" addrtype="ipv6"/>
+        <ports><port protocol="tcp" portid="443"><state state="open"/><service name="https"/></port></ports>
+      </host>
+    </nmaprun>`);
+
+    const merged = mergeScanResults(scan1, scan2);
+    expect(merged.hosts.length).toBe(2);
+    const v6Host = merged.hosts.find((h) => h.ipv6 === '2001:db8::10');
+    expect(v6Host?.primaryHostname).toBe('edge-v6.local');
+    expect(v6Host?.primaryOs).toBe('Linux 6.8');
+    expect(v6Host?.ports.map((p) => p.portid)).toEqual([22, 443]);
   });
 });

@@ -299,10 +299,12 @@ export default function InterfacesPage() {
         mtu: Number(editForm.mtu) || 1500,
       });
 
-      setFeedback({ type: 'success', message: res.message });
-      setEditingIface(null);
-      setIsCreatingNew(false);
-      loadData();
+      setFeedback({ type: res.success ? 'success' : 'error', message: res.message });
+      if (res.success) {
+        setEditingIface(null);
+        setIsCreatingNew(false);
+      }
+      await loadData();
     } catch (err: any) {
       setFeedback({ type: 'error', message: err.message || 'Failed to save interface configuration' });
     } finally {
@@ -318,11 +320,11 @@ export default function InterfacesPage() {
     setFeedback(null);
     try {
       const res = await deleteInterfaceAssignment(iface.name);
-      setFeedback({ type: 'success', message: res.message });
-      if (editingIface?.name === iface.name) {
+      setFeedback({ type: res.success ? 'success' : 'error', message: res.message });
+      if (res.success && editingIface?.name === iface.name) {
         setEditingIface(null);
       }
-      loadData();
+      await loadData();
     } catch (err: any) {
       setFeedback({ type: 'error', message: err.message || 'Failed to remove interface' });
     } finally {

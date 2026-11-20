@@ -12,10 +12,14 @@ import {
   RefreshCw,
   Search,
   Filter,
+  Globe,
+  Save,
 } from 'lucide-react';
 import {
   listSecurityModulesAction,
   toggleSecurityModuleAction,
+  getVigilanteConfigAction,
+  updateVigilanteDomainAction,
   type SecurityModuleStatus,
 } from '@/server/vigilante';
 import { useDesiredStateApply } from '@/lib/use-desired-state-apply';
@@ -28,6 +32,9 @@ export default function SecurityModulesPage() {
   const [modules, setModules] = useState<SecurityModuleStatus[]>([]);
   const [loading, setLoading] = useState(true);
   const [togglingId, setTogglingId] = useState<string | null>(null);
+  const [domain, setDomain] = useState<string>('vigilante.local');
+  const [domainInput, setDomainInput] = useState<string>('vigilante.local');
+  const [savingDomain, setSavingDomain] = useState(false);
   const [categoryFilter, setCategoryFilter] = useState<string>('all');
   const [search, setSearch] = useState('');
   const [statusBanner, setStatusBanner] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
@@ -35,12 +42,43 @@ export default function SecurityModulesPage() {
   const loadData = async () => {
     try {
       setLoading(true);
-      const res = await listSecurityModulesAction();
+      const [res, cfg] = await Promise.all([
+        listSecurityModulesAction(),
+        getVigilanteConfigAction(),
+      ]);
       setModules(res);
+      const d = cfg?.domain || 'vigilante.local';
+      setDomain(d);
+      setDomainInput(d);
     } catch (err: any) {
       setStatusBanner({ type: 'error', message: err?.message || 'Failed to load security modules' });
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleSaveDomain = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setSavingDomain(true);
+    setStatusBanner(null);
+    try {
+      const fingerprint = getFingerprint();
+      const res = await updateVigilanteDomainAction(
+        domainInput,
+        fingerprint ? { expectedFingerprint: fingerprint } : undefined
+      );
+      if (res.success && res.domain) {
+        await refreshFingerprint();
+        setDomain(res.domain);
+        setDomainInput(res.domain);
+        setStatusBanner({ type: 'success', message: `Vigilante base domain updated to ${res.domain}` });
+      } else {
+        setStatusBanner({ type: 'error', message: res.message });
+      }
+    } catch (err: any) {
+      setStatusBanner({ type: 'error', message: err?.message || 'Failed to update Vigilante domain' });
+    } finally {
+      setSavingDomain(false);
     }
   };
 
@@ -51,24 +89,29 @@ export default function SecurityModulesPage() {
   const handleToggle = async (id: string, currentEnabled: boolean) => {
     setTogglingId(id);
     setStatusBanner(null);
-    const fingerprint = getFingerprint();
-    const res = await toggleSecurityModuleAction(
-      id,
-      !currentEnabled,
-      fingerprint ? { expectedFingerprint: fingerprint } : undefined
-    );
-    setTogglingId(null);
-
-    if (res.success) {
-      await refreshFingerprint();
-      setStatusBanner({ type: 'success', message: `${id} ${!currentEnabled ? 'enabled' : 'disabled'}` });
-      // D15: enabling a module does not prove it healthy — nothing probes
-      // it — so the optimistic state is "unknown", never "healthy".
-      setModules((prev) =>
-        prev.map((m) => (m.id === id ? { ...m, enabled: !currentEnabled, health: !currentEnabled ? 'unknown' : 'offline' } : m))
+    try {
+      const fingerprint = getFingerprint();
+      const res = await toggleSecurityModuleAction(
+        id,
+        !currentEnabled,
+        fingerprint ? { expectedFingerprint: fingerprint } : undefined
       );
-    } else {
-      setStatusBanner({ type: 'error', message: res.message });
+
+      if (res.success) {
+        await refreshFingerprint();
+        setStatusBanner({ type: 'success', message: `${id} ${!currentEnabled ? 'enabled' : 'disabled'}` });
+        // D15: enabling a module does not prove it healthy — nothing probes
+        // it — so the optimistic state is "unknown", never "healthy".
+        setModules((prev) =>
+          prev.map((m) => (m.id === id ? { ...m, enabled: !currentEnabled, health: !currentEnabled ? 'unknown' : 'offline' } : m))
+        );
+      } else {
+        setStatusBanner({ type: 'error', message: res.message });
+      }
+    } catch (err: any) {
+      setStatusBanner({ type: 'error', message: err?.message || `Failed to toggle ${id}` });
+    } finally {
+      setTogglingId(null);
     }
   };
 
@@ -125,6 +168,41 @@ export default function SecurityModulesPage() {
           </button>
         </div>
       </div>
+
+      {/* Base Domain Configuration */}
+      <form
+        onSubmit={handleSaveDomain}
+        className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 p-4 rounded-2xl bg-slate-900/60 border border-slate-800"
+      >
+        <div className="flex items-center gap-3">
+          <div className="w-9 h-9 rounded-xl bg-cyan-500/10 border border-cyan-500/20 flex items-center justify-center text-cyan-400">
+            <Globe className="w-4 h-4" />
+          </div>
+          <div>
+            <h2 className="text-sm font-semibold text-white">Vigilante Base Domain</h2>
+            <p className="text-xs text-slate-400">
+              All Vigilante modules (including <span className="font-mono text-slate-300">soc.{domain}</span>) are exposed under this domain.
+            </p>
+          </div>
+        </div>
+        <div className="flex items-center gap-2">
+          <input
+            type="text"
+            value={domainInput}
+            onChange={(e) => setDomainInput(e.target.value)}
+            placeholder="vigilante.local"
+            className="px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-xs font-mono text-white placeholder-slate-500 focus:outline-none focus:border-cyan-500 w-56"
+          />
+          <button
+            type="submit"
+            disabled={savingDomain || domainInput.trim() === domain}
+            className="px-3.5 py-2 rounded-xl text-xs font-semibold bg-cyan-600 hover:bg-cyan-500 disabled:opacity-50 disabled:cursor-not-allowed text-white flex items-center gap-1.5 transition-colors"
+          >
+            <Save className="w-3.5 h-3.5" />
+            {savingDomain ? 'Saving...' : 'Save Domain'}
+          </button>
+        </div>
+      </form>
 
       {statusBanner && (
         <div
@@ -192,6 +270,24 @@ export default function SecurityModulesPage() {
               <p className="text-xs text-slate-400 leading-relaxed">{mod.description}</p>
 
               <div className="grid grid-cols-2 gap-2 text-xs pt-2 border-t border-slate-800/80">
+                <div className="col-span-2">
+                  <span className="text-[10px] text-slate-500 uppercase block">Endpoint URL</span>
+                  {mod.enabled ? (
+                    <a
+                      href={`https://${mod.subdomain}.${domain}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="font-mono text-cyan-400 hover:text-cyan-300 text-[11px] inline-flex items-center gap-1 truncate max-w-full"
+                    >
+                      https://{mod.subdomain}.{domain}
+                      <ExternalLink className="w-3 h-3 shrink-0" />
+                    </a>
+                  ) : (
+                    <span className="font-mono text-slate-500 text-[11px] truncate block">
+                      https://{mod.subdomain}.{domain}
+                    </span>
+                  )}
+                </div>
                 <div>
                   <span className="text-[10px] text-slate-500 uppercase block">Port</span>
                   <span className="font-mono text-slate-300 font-medium">:{mod.port}</span>

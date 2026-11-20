@@ -10,8 +10,7 @@ fi
 
 # Fallback path if axonwallctl is not in PATH
 for candidate in \
-  "/opt/axonwall/apps/axonwall-controller/dist/axonwallctl.js" \
-  "/home/djehauti/git/axonwall/apps/axonwall-controller/dist/axonwallctl.js"
+  "/opt/axonwall/apps/axonwall-controller/dist/axonwallctl.js"
 do
   if [[ -f "$candidate" ]]; then
     exec node "$candidate" cloudinit "$@"

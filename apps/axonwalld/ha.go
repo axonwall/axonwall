@@ -2,12 +2,14 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -88,16 +90,23 @@ func (e *HAEngine) SetDirectoryManager(dm *engine.DirectoryManager) {
 }
 
 func (e *HAEngine) StartSocketListener() error {
+	e.mu.Lock()
+	if e.listener != nil {
+		_ = e.listener.Close()
+		e.listener = nil
+	}
 	_ = os.MkdirAll(filepath.Dir(e.sockPath), 0755)
 	_ = os.Remove(e.sockPath)
 
 	l, err := net.Listen("unix", e.sockPath)
 	if err != nil {
+		e.mu.Unlock()
 		return fmt.Errorf("failed to listen on ha socket %s: %w", e.sockPath, err)
 	}
 	_ = os.Chown(e.sockPath, 0, 0)
 	_ = os.Chmod(e.sockPath, 0600)
 	e.listener = l
+	e.mu.Unlock()
 
 	slog.Info("HA Engine state transition socket listening", "path", e.sockPath)
 
@@ -174,6 +183,26 @@ func (e *HAEngine) OnTransition(state string) {
 	} else if state == "MASTER" {
 		if err := engine.SetEdgeWanPortGate("tap-edge-wan", true); err != nil {
 			slog.Debug("HA WAN port gate enable skipped or failed", "error", err)
+		}
+	}
+
+	if e.config.Enabled {
+		if _, err := exec.LookPath("conntrackd"); err == nil {
+			ctCtx, ctCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer ctCancel()
+			if state == "MASTER" {
+				for _, arg := range []string{"-c", "-f", "-R"} {
+					if err := exec.CommandContext(ctCtx, "conntrackd", arg).Run(); err != nil {
+						slog.Debug("conntrackd master transition skipped or failed", "flag", arg, "error", err)
+					}
+				}
+			} else if state == "BACKUP" || state == "FAULT" {
+				for _, arg := range []string{"-t", "-n"} {
+					if err := exec.CommandContext(ctCtx, "conntrackd", arg).Run(); err != nil {
+						slog.Debug("conntrackd backup transition skipped or failed", "flag", arg, "error", err)
+					}
+				}
+			}
 		}
 	}
 
@@ -319,9 +348,15 @@ func (e *HAEngine) Apply(cfg HAConfig) error {
 
 	// Configure Chrony NTP peering with HA peer to keep CSN clocks strictly synchronized
 	if cfg.PeerIp != "" {
-		_ = os.MkdirAll("/etc/chrony/conf.d", 0755)
+		chronyDir := "/etc/chrony/conf.d"
+		if _, err := os.Stat(chronyDir); os.IsNotExist(err) {
+			if st, err2 := os.Stat("/etc/chrony.d"); err2 == nil && st.IsDir() {
+				chronyDir = "/etc/chrony.d"
+			}
+		}
+		_ = os.MkdirAll(chronyDir, 0755)
 		chronyPeerConf := fmt.Sprintf("# Managed by Axonwall HA Engine\npeer %s iburst\nallow %s\n", cfg.PeerIp, cfg.PeerIp)
-		_ = os.WriteFile("/etc/chrony/conf.d/axonwall-ha.conf", []byte(chronyPeerConf), 0644)
+		_ = os.WriteFile(filepath.Join(chronyDir, "axonwall-ha.conf"), []byte(chronyPeerConf), 0644)
 		_, _ = reloadOrRestartService("chrony")
 	}
 
@@ -472,7 +507,13 @@ func (e *HAEngine) generateKeepalived(cfg HAConfig) error {
 	for _, name := range groupInstances {
 		conf.WriteString(fmt.Sprintf("        %s\n", name))
 	}
-	conf.WriteString("    }\n}\n\n")
+	conf.WriteString(`    }
+    notify_master "/usr/local/bin/axonwall-ha-notify MASTER"
+    notify_backup "/usr/local/bin/axonwall-ha-notify BACKUP"
+    notify_fault  "/usr/local/bin/axonwall-ha-notify FAULT"
+}
+
+`)
 
 	for i, inst := range instances {
 		instName := groupInstances[i]
@@ -522,11 +563,10 @@ func (e *HAEngine) generateKeepalived(cfg HAConfig) error {
         auth_type PASS
         auth_pass %s
     }
-
-    virtual_ipaddress {
 `, instName, state, iface, vrid, prio, pass))
 
-		validKeepalivedDevRe := regexp.MustCompile(`^[a-zA-Z0-9_.:-]+$`)
+		validKeepalivedDevRe := regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,14}$`)
+		var vipLines []string
 		for _, vip := range vips {
 			vip = strings.TrimSpace(vip)
 			if vip == "" || strings.ContainsAny(vip, "\n\r\"'{};#") {
@@ -541,22 +581,22 @@ func (e *HAEngine) generateKeepalived(cfg HAConfig) error {
 				continue
 			}
 			targetDev := iface
-			if len(fields) == 3 && fields[1] == "dev" && validKeepalivedDevRe.MatchString(fields[2]) {
+			if len(fields) == 3 && fields[1] == "dev" && validKeepalivedDevRe.MatchString(fields[2]) && !strings.Contains(fields[2], "..") {
 				targetDev = fields[2]
 			} else if len(fields) != 1 {
 				continue
 			}
-			conf.WriteString(fmt.Sprintf("        %s dev %s\n", addrToken, targetDev))
+			vipLines = append(vipLines, fmt.Sprintf("        %s dev %s\n", addrToken, targetDev))
+		}
+		if len(vipLines) > 0 {
+			conf.WriteString("\n    virtual_ipaddress {\n")
+			for _, line := range vipLines {
+				conf.WriteString(line)
+			}
+			conf.WriteString("    }\n")
 		}
 
-		conf.WriteString(fmt.Sprintf(`    }
-
-    notify_master "/usr/local/bin/axonwall-ha-notify MASTER"
-    notify_backup "/usr/local/bin/axonwall-ha-notify BACKUP"
-    notify_fault  "/usr/local/bin/axonwall-ha-notify FAULT"
-}
-
-`))
+		conf.WriteString("}\n\n")
 	}
 
 	if err := os.MkdirAll(filepath.Dir(keepalivedConfPath), 0755); err != nil {

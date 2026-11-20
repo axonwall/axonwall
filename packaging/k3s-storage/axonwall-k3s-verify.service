@@ -1,6 +1,6 @@
 [Unit]
 Description=Axonwall K3s + ZFS Storage Host Readiness Verification
-After=k3s.service k3s-agent.service network-online.target
+After=axonwall-k3s-firstboot.service k3s.service k3s-agent.service network-online.target
 Wants=network-online.target
 ConditionPathExists=/etc/axonwall/.k3s-firstboot
 ConditionKernelCommandLine=!axonwall_install=1

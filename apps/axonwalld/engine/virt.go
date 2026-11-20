@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -93,6 +94,10 @@ type VirtManager struct {
 	// nothing checked the port was free (round-3 A-M4).
 	migMu    sync.Mutex
 	migPorts map[int]bool
+	// virtiofsMu / virtiofsPids are main's (fc576368) virtiofs
+	// daemon tracking; kept alongside the A-M4 migration fields.
+	virtiofsMu   sync.Mutex
+	virtiofsPids map[int][]int
 }
 
 // liveMigratePollInterval / liveMigrateTimeout bound how long
@@ -120,9 +125,9 @@ type QgaInterfaceInfo struct {
 }
 
 type CompiledVmNicSpec struct {
-	Bridge   string `json:"bridge"`
-	VlanTag  int    `json:"vlanTag,omitempty"`
-	TapName  string `json:"tapName"`
+	Bridge  string `json:"bridge"`
+	VlanTag int    `json:"vlanTag,omitempty"`
+	TapName string `json:"tapName"`
 }
 
 type CompiledFwCfgFileSpec struct {
@@ -213,9 +218,15 @@ func NewVirtManager(taskMgr *TaskManager, nasMgr *NasManager) *VirtManager {
 		defaultPool:  "tank",
 		startingVMs:  make(map[int]bool),
 		migPorts:     make(map[int]bool),
+		virtiofsPids: make(map[int][]int),
 	}
 	m.loadPersistedSpecs()
 	return m
+}
+
+type persistedVirtSpecsFile struct {
+	VMs map[int]CompiledVmSpec `json:"vms"`
+	CTs map[int]CompiledCtSpec `json:"cts"`
 }
 
 func (m *VirtManager) savePersistedSpecsLocked() {
@@ -223,7 +234,11 @@ func (m *VirtManager) savePersistedSpecsLocked() {
 		return
 	}
 	_ = os.MkdirAll(filepath.Dir(VirtSpecsPath), 0755)
-	data, err := json.MarshalIndent(m.vmSpecs, "", "  ")
+	payload := persistedVirtSpecsFile{
+		VMs: m.vmSpecs,
+		CTs: m.ctSpecs,
+	}
+	data, err := json.MarshalIndent(payload, "", "  ")
 	if err != nil {
 		return
 	}
@@ -236,6 +251,18 @@ func (m *VirtManager) loadPersistedSpecs() {
 	}
 	data, err := os.ReadFile(VirtSpecsPath)
 	if err != nil || len(data) == 0 {
+		return
+	}
+	var wrapped persistedVirtSpecsFile
+	if err := json.Unmarshal(data, &wrapped); err == nil && (wrapped.VMs != nil || wrapped.CTs != nil) {
+		m.mu.Lock()
+		for id, spec := range wrapped.VMs {
+			m.vmSpecs[id] = spec
+		}
+		for id, spec := range wrapped.CTs {
+			m.ctSpecs[id] = spec
+		}
+		m.mu.Unlock()
 		return
 	}
 	var loaded map[int]CompiledVmSpec
@@ -314,10 +341,10 @@ func validateSafeQemuArgs(args []string) error {
 // ApplyVirtBundleJSON reconciles `/etc/axonwall/managed/virt_config.json` into VirtManager.
 func (m *VirtManager) ApplyVirtBundleJSON(rawJSON []byte) error {
 	var payload struct {
-		Enabled           bool             `json:"enabled"`
-		DefaultPool       string           `json:"defaultPool"`
-		VMs               []CompiledVmSpec `json:"vms"`
-		Containers        []CompiledCtSpec `json:"containers"`
+		Enabled           bool              `json:"enabled"`
+		DefaultPool       string            `json:"defaultPool"`
+		VMs               []CompiledVmSpec  `json:"vms"`
+		Containers        []CompiledCtSpec  `json:"containers"`
 		LibvirtDomainsXml map[string]string `json:"libvirtDomainsXml"`
 	}
 	if err := json.Unmarshal(rawJSON, &payload); err != nil {
@@ -328,6 +355,7 @@ func (m *VirtManager) ApplyVirtBundleJSON(rawJSON []byte) error {
 		m.defaultPool = payload.DefaultPool
 		m.mu.Unlock()
 	}
+	keepVMs := make(map[int]bool, len(payload.VMs))
 	for _, vm := range payload.VMs {
 		if vm.Binary == "" && vm.QemuBinary != "" {
 			vm.Binary = vm.QemuBinary
@@ -378,13 +406,29 @@ func (m *VirtManager) ApplyVirtBundleJSON(rawJSON []byte) error {
 		if err := m.RegisterVMSpec(vm); err != nil {
 			return fmt.Errorf("VM %d spec rejected: %w", vm.VMID, err)
 		}
+		keepVMs[vm.VMID] = true
 	}
+	keepCTs := make(map[int]bool, len(payload.Containers))
 	for _, ct := range payload.Containers {
 		if ct.Hostname == "" && ct.Name != "" {
 			ct.Hostname = ct.Name
 		}
 		m.RegisterCTSpec(ct)
+		keepCTs[ct.CTID] = true
 	}
+	m.mu.Lock()
+	for id := range m.vmSpecs {
+		if !keepVMs[id] {
+			delete(m.vmSpecs, id)
+		}
+	}
+	for id := range m.ctSpecs {
+		if !keepCTs[id] {
+			delete(m.ctSpecs, id)
+		}
+	}
+	m.savePersistedSpecsLocked()
+	m.mu.Unlock()
 	return nil
 }
 
@@ -553,6 +597,7 @@ func (m *VirtManager) RegisterCTSpec(spec CompiledCtSpec) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.ctSpecs[spec.CTID] = spec
+	m.savePersistedSpecsLocked()
 }
 
 func isPidRunning(pid int) bool {
@@ -762,7 +807,7 @@ func (m *VirtManager) StartVM(vmid int, user string) (string, error) {
 			if metaYaml == "" {
 				metaYaml = fmt.Sprintf("instance-id: vm-%d\nlocal-hostname: %s\n", vmid, sanitizeCloudInitScalar(spec.Name))
 			}
-			_ = os.WriteFile(filepath.Join(ciDir, "meta-data"), []byte(metaYaml), 0644)
+			_ = os.WriteFile(filepath.Join(ciDir, "meta-data"), []byte(metaYaml), 0600)
 
 			var userYaml string
 			if spec.CloudInit.UserData != "" {
@@ -789,7 +834,7 @@ func (m *VirtManager) StartVM(vmid int, user string) (string, error) {
 					userYaml += "\n" + spec.CloudInit.CustomPayload + "\n"
 				}
 			}
-			_ = os.WriteFile(filepath.Join(ciDir, "user-data"), []byte(userYaml), 0644)
+			_ = os.WriteFile(filepath.Join(ciDir, "user-data"), []byte(userYaml), 0600)
 
 			netYaml := spec.CloudInit.NetworkConfig
 			if netYaml == "" {
@@ -801,7 +846,7 @@ func (m *VirtManager) StartVM(vmid int, user string) (string, error) {
 					}
 				}
 			}
-			_ = os.WriteFile(filepath.Join(ciDir, "network-config"), []byte(netYaml), 0644)
+			_ = os.WriteFile(filepath.Join(ciDir, "network-config"), []byte(netYaml), 0600)
 
 			isoPath := fmt.Sprintf("/var/lib/axonwall/cloudinit/vm-%d-cidata.iso", vmid)
 			logger("Generating Cloud-Init NoCloud ISO %s...", isoPath)
@@ -813,7 +858,11 @@ func (m *VirtManager) StartVM(vmid int, user string) (string, error) {
 					filepath.Join(ciDir, "meta-data"), filepath.Join(ciDir, "user-data"), filepath.Join(ciDir, "network-config"))
 				if outX, errX := cmdXorriso.CombinedOutput(); errX != nil {
 					logger("Warning: ISO generator unavailable (genisoimage/xorriso): %s / %s", string(out), string(outX))
+				} else {
+					_ = os.Chmod(isoPath, 0600)
 				}
+			} else {
+				_ = os.Chmod(isoPath, 0600)
 			}
 		}
 
@@ -848,6 +897,13 @@ func (m *VirtManager) StartVM(vmid int, user string) (string, error) {
 			}
 		}
 
+		startSucceeded := false
+		defer func() {
+			if !startSucceeded {
+				m.stopVirtiofsForVM(vmid)
+			}
+		}()
+
 		// 2e. Spawn virtiofsd helper daemons for ZFS host dataset VirtioFS shares
 		if len(spec.VirtioFsShares) > 0 {
 			if vfsBin, lookErr := exec.LookPath("virtiofsd"); lookErr == nil {
@@ -866,7 +922,12 @@ func (m *VirtManager) StartVM(vmid int, user string) (string, error) {
 					vfsSock := fmt.Sprintf("/run/axonwall/virtiofs/vm-%d-%s.sock", vmid, safeTag)
 					_ = os.Remove(vfsSock)
 					vfsCmd := exec.Command(vfsBin, "--socket-path="+vfsSock, "--shared-dir="+cleanHost, "--sandbox=namespace")
-					_ = vfsCmd.Start()
+					if startErr := vfsCmd.Start(); startErr == nil {
+						if vfsCmd.Process != nil {
+							m.recordVirtiofsPid(vmid, vfsCmd.Process.Pid)
+						}
+						go func(c *exec.Cmd) { _ = c.Wait() }(vfsCmd)
+					}
 				}
 			}
 		}
@@ -938,6 +999,7 @@ func (m *VirtManager) StartVM(vmid int, user string) (string, error) {
 			logger("VM %d failed to start: %v", vmid, err)
 			return err
 		}
+		startSucceeded = true
 		logger("VM %d launched successfully. QMP & VNC sockets online.", vmid)
 		m.mu.Lock()
 		m.vmStartTimes[vmid] = time.Now().Unix()
@@ -961,6 +1023,7 @@ func (m *VirtManager) StopVM(vmid int, force bool, user string) (string, error) 
 			if pid > 0 {
 				_ = syscall.Kill(pid, syscall.SIGKILL)
 			}
+			m.stopVirtiofsForVM(vmid)
 			_ = os.Remove(pidFile)
 			_ = os.Remove(qmpSock)
 			logger("VM %d force killed.", vmid)
@@ -980,6 +1043,7 @@ func (m *VirtManager) StopVM(vmid int, force bool, user string) (string, error) 
 			time.Sleep(500 * time.Millisecond)
 			if pid > 0 && !isPidRunning(pid) {
 				logger("VM %d shut down cleanly.", vmid)
+				m.stopVirtiofsForVM(vmid)
 				_ = os.Remove(pidFile)
 				_ = os.Remove(qmpSock)
 				return nil
@@ -991,6 +1055,7 @@ func (m *VirtManager) StopVM(vmid int, force bool, user string) (string, error) 
 		if pid > 0 {
 			_ = syscall.Kill(pid, syscall.SIGKILL)
 		}
+		m.stopVirtiofsForVM(vmid)
 		_ = os.Remove(pidFile)
 		_ = os.Remove(qmpSock)
 		logger("VM %d stopped.", vmid)
@@ -1822,6 +1887,33 @@ func (m *VirtManager) ListWorkloadSnapshots(targetType string, targetID int) []Z
 	return filtered
 }
 
+func (m *VirtManager) recordVirtiofsPid(vmid, pid int) {
+	if pid <= 0 {
+		return
+	}
+	m.virtiofsMu.Lock()
+	m.virtiofsPids[vmid] = append(m.virtiofsPids[vmid], pid)
+	m.virtiofsMu.Unlock()
+}
+
+func (m *VirtManager) stopVirtiofsForVM(vmid int) {
+	m.virtiofsMu.Lock()
+	pids := append([]int(nil), m.virtiofsPids[vmid]...)
+	delete(m.virtiofsPids, vmid)
+	m.virtiofsMu.Unlock()
+	for _, pid := range pids {
+		if pid > 0 {
+			_ = syscall.Kill(pid, syscall.SIGTERM)
+		}
+	}
+}
+
+func deterministicCloneMac(vmid, nicIdx int) string {
+	return fmt.Sprintf("52:54:00:%02x:%02x:%02x", (vmid>>8)&0xff, vmid&0xff, nicIdx&0xff)
+}
+
+var qemuMacParamRe = regexp.MustCompile(`(?i)\bmac=([0-9a-f]{2}:){5}[0-9a-f]{2}`)
+
 // CloneVM creates either an instant Zero-Copy ZFS Linked Clone (`zfs clone`) or an independent
 // Full Clone (`zfs send | zfs receive`) from a registered VM or Template.
 func (m *VirtManager) CloneVM(sourceVMID, newVMID int, newName string, linked bool) (CompiledVmSpec, error) {
@@ -1867,6 +1959,16 @@ func (m *VirtManager) CloneVM(sourceVMID, newVMID int, newName string, linked bo
 			srcZvol = fmt.Sprintf("%s/vms/vm-%d-disk-%d", pool, sourceVMID, idx)
 		}
 		dstZvol := fmt.Sprintf("%s/vms/vm-%d-disk-%d", pool, newVMID, idx)
+		// Main's path validation (fc576368) is kept first; the
+		// existence check below is A-M2 (round 3). Main's
+		// `hasZfs == nil` guard cannot be kept as written: the
+		// branch's early return removed the `hasZfs` declaration
+		// (zfs absence already fails the clone above), so the
+		// guard's only remaining purpose — skip when the zvol is
+		// missing — is exactly what A-M2 turns into an error.
+		if !validZfsPath(srcZvol, true) {
+			return CompiledVmSpec{}, fmt.Errorf("invalid source ZFS zvol path %q", srcZvol)
+		}
 		if err := exec.Command("zfs", "list", "-H", srcZvol).Run(); err != nil {
 			// A-M2 (round 3): a missing source zvol (pool not
 			// imported, disk never provisioned) used to be skipped
@@ -1898,16 +2000,46 @@ func (m *VirtManager) CloneVM(sourceVMID, newVMID int, newName string, linked bo
 		})
 	}
 
-	// Rewrite VMID-specific paths in QEMU args
-	oldPrefix := fmt.Sprintf("vm-%d", sourceVMID)
-	newPrefix := fmt.Sprintf("vm-%d", newVMID)
-	oldTapPrefix := fmt.Sprintf("tap%di", sourceVMID)
-	newTapPrefix := fmt.Sprintf("tap%di", newVMID)
+	// Rewrite VMID-specific paths and tap/MAC identifiers in QEMU args without prefix collisions (e.g., vm-100 vs vm-1000)
+	reVmToken := regexp.MustCompile(fmt.Sprintf(`vm-%d(\b|[^0-9])`, sourceVMID))
+	reTapToken := regexp.MustCompile(fmt.Sprintf(`tap%di([0-9]+)\b`, sourceVMID))
 	newArgs := make([]string, len(srcSpec.Args))
+	macIdx := 0
 	for i, a := range srcSpec.Args {
-		replaced := strings.ReplaceAll(a, oldPrefix, newPrefix)
-		replaced = strings.ReplaceAll(replaced, oldTapPrefix, newTapPrefix)
+		replaced := reVmToken.ReplaceAllString(a, fmt.Sprintf("vm-%d${1}", newVMID))
+		replaced = reTapToken.ReplaceAllString(replaced, fmt.Sprintf("tap%di${1}", newVMID))
+		replaced = qemuMacParamRe.ReplaceAllStringFunc(replaced, func(_ string) string {
+			mac := deterministicCloneMac(newVMID, macIdx)
+			macIdx++
+			return "mac=" + mac
+		})
 		newArgs[i] = replaced
+	}
+
+	clonedBridges := make(map[string]string, len(srcSpec.Bridges))
+	for tapKey, brName := range srcSpec.Bridges {
+		newKey := reTapToken.ReplaceAllString(tapKey, fmt.Sprintf("tap%di${1}", newVMID))
+		clonedBridges[newKey] = brName
+	}
+	clonedVlanTags := make(map[string]int, len(srcSpec.VlanTags))
+	for tapKey, vid := range srcSpec.VlanTags {
+		newKey := reTapToken.ReplaceAllString(tapKey, fmt.Sprintf("tap%di${1}", newVMID))
+		clonedVlanTags[newKey] = vid
+	}
+	clonedFwCfg := make(map[string]string, len(srcSpec.FwCfg))
+	for k, v := range srcSpec.FwCfg {
+		clonedFwCfg[reVmToken.ReplaceAllString(k, fmt.Sprintf("vm-%d${1}", newVMID))] = v
+	}
+	var clonedNics []CompiledVmNicSpec
+	if len(srcSpec.Nics) > 0 {
+		clonedNics = make([]CompiledVmNicSpec, len(srcSpec.Nics))
+		for idx, nic := range srcSpec.Nics {
+			nicCopy := nic
+			if nicCopy.TapName != "" {
+				nicCopy.TapName = reTapToken.ReplaceAllString(nicCopy.TapName, fmt.Sprintf("tap%di${1}", newVMID))
+			}
+			clonedNics[idx] = nicCopy
+		}
 	}
 
 	clonedSpec := srcSpec
@@ -1916,6 +2048,10 @@ func (m *VirtManager) CloneVM(sourceVMID, newVMID int, newName string, linked bo
 	clonedSpec.IsTemplate = false
 	clonedSpec.Args = newArgs
 	clonedSpec.Disks = clonedDisks
+	clonedSpec.Bridges = clonedBridges
+	clonedSpec.VlanTags = clonedVlanTags
+	clonedSpec.FwCfg = clonedFwCfg
+	clonedSpec.Nics = clonedNics
 
 	if err := m.RegisterVMSpec(clonedSpec); err != nil {
 		return CompiledVmSpec{}, err
@@ -1925,6 +2061,9 @@ func (m *VirtManager) CloneVM(sourceVMID, newVMID int, newName string, linked bo
 
 // RestoreBackup streams a compressed `.vma.zst` ZFS archive back into the target VM or LXC dataset.
 func (m *VirtManager) RestoreBackup(archiveName string, targetType string, targetID int, pool string, user string) (string, error) {
+	if targetID <= 0 {
+		return "", fmt.Errorf("invalid targetID %d: must be positive", targetID)
+	}
 	if pool == "" {
 		pool = m.defaultPool
 	}

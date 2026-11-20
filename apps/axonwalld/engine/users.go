@@ -167,10 +167,37 @@ func ResolveApplianceRole(groups []string, username string) string {
 
 // RoleToGroups returns the required POSIX groups for an appliance role
 func RoleToGroups(role string) []string {
+	return roleToGroupsFromFile(role, "/etc/group")
+}
+
+func roleToGroupsFromFile(role, groupPath string) []string {
 	switch role {
 	case "admin":
-		// Provide axonwall-admin and sudo/wheel
-		return []string{"axonwall-admin", "sudo", "adm"}
+		groups := []string{"axonwall-admin"}
+		hasWheel, hasSudo, hasAdm := false, false, false
+		if data, err := os.ReadFile(groupPath); err == nil {
+			for _, line := range strings.Split(string(data), "\n") {
+				name, _, _ := strings.Cut(strings.TrimSpace(line), ":")
+				switch name {
+				case "wheel":
+					hasWheel = true
+				case "sudo":
+					hasSudo = true
+				case "adm":
+					hasAdm = true
+				}
+			}
+		}
+		if hasWheel {
+			groups = append(groups, "wheel")
+		}
+		if hasSudo || !hasWheel {
+			groups = append(groups, "sudo")
+		}
+		if hasAdm || !hasWheel {
+			groups = append(groups, "adm")
+		}
+		return groups
 	case "operator":
 		return []string{"axonwall-operator", "adm"}
 	case "readonly":
@@ -893,9 +920,21 @@ sys.exit(0 if res == h else 1)`
 		return AuthUserResponse{Success: false, Message: "Invalid credentials"}
 	}
 
-	// Resolve user groups and role
-	_, userGroups, _ := m.parseGroupsInternal()
-	groups := userGroups[username]
+	// Resolve user groups and role (including primary GID from passwd)
+	gidToName, userGroups, _ := m.parseGroupsInternal()
+	groups := append([]string(nil), userGroups[username]...)
+	if primaryGroup := m.lookupPrimaryGroup(username, gidToName); primaryGroup != "" {
+		found := false
+		for _, g := range groups {
+			if g == primaryGroup {
+				found = true
+				break
+			}
+		}
+		if !found {
+			groups = append([]string{primaryGroup}, groups...)
+		}
+	}
 	role := ResolveApplianceRole(groups, username)
 
 	return AuthUserResponse{
@@ -904,4 +943,25 @@ sys.exit(0 if res == h else 1)`
 		ApplianceRole: role,
 		Groups:        groups,
 	}
+}
+
+func (m *UserManager) lookupPrimaryGroup(username string, gidToName map[int]string) string {
+	data, err := os.ReadFile(m.passwdPath)
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		parts := strings.Split(line, ":")
+		if len(parts) >= 4 && parts[0] == username {
+			if gid, err := strconv.Atoi(parts[3]); err == nil {
+				return gidToName[gid]
+			}
+			return ""
+		}
+	}
+	return ""
 }

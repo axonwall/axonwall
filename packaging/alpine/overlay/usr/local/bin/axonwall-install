@@ -133,6 +133,285 @@ is_mounted() {
   grep -qE "[[:space:]]${1%/}[[:space:]]" /proc/mounts 2>/dev/null
 }
 
+is_booted_installed_system() {
+  if [ -f /proc/cmdline ] && grep -qE '(^|[[:space:]])(slot=A|slot=B|root=LABEL=axon_root|root=ZFS=)' /proc/cmdline 2>/dev/null; then
+    return 0
+  fi
+  if [ -f /proc/cmdline ] && grep -qE '(^|[[:space:]])(boot=live|axonwall_install=1|axonwall\.install=1|axonwall\.unattended=1)([[:space:]]|$)' /proc/cmdline 2>/dev/null; then
+    return 1
+  fi
+  if [ -d /run/live/medium ]; then
+    return 1
+  fi
+  if [ -f /etc/axonwall/install-mode ] || [ -f /var/lib/axonwall/install-mode ]; then
+    return 0
+  fi
+  return 1
+}
+
+probe_disk_content() {
+  _pd="${1:-}"
+  PROBE_KIND="empty"
+  PROBE_SUMMARY="Empty Disk"
+  [ -n "$_pd" ] || return 0
+  _base="$(basename "$_pd")"
+
+  _blkid_all="$(blkid 2>/dev/null || true)"
+  _devs="$_pd"
+  _part_count=0
+  for _sp in "/sys/block/${_base}/${_base}"*; do
+    [ -e "$_sp" ] || continue
+    _sn="$(basename "$_sp")"
+    case "${_sn#"${_base}"}" in
+      [0-9]*|p[0-9]*)
+        _devs="${_devs} /dev/${_sn}"
+        _part_count=$(( _part_count + 1 ))
+        ;;
+    esac
+  done
+
+  _labels=""
+  _fstypes=""
+  _parttypes=""
+  _pttype=""
+
+  for _dnode in $_devs; do
+    _bline="$(printf '%s\n' "$_blkid_all" | awk -v d="${_dnode}:" 'index($0, d) == 1 {print; exit}' || true)"
+    if [ -z "$_bline" ]; then
+      _bline="$(blkid "$_dnode" 2>/dev/null || true)"
+    fi
+    if [ -n "$_bline" ]; then
+      _t="$(printf '%s\n' "$_bline" | sed -nE 's/.*[[:space:]]TYPE="([^"]+)".*/\1/p' || true)"
+      _l="$(printf '%s\n' "$_bline" | sed -nE 's/.*[[:space:]]LABEL="([^"]+)".*/\1/p' || true)"
+      _pl="$(printf '%s\n' "$_bline" | sed -nE 's/.*[[:space:]]PARTLABEL="([^"]+)".*/\1/p' || true)"
+      _pt="$(printf '%s\n' "$_bline" | sed -nE 's/.*[[:space:]]PARTTYPE="([^"]+)".*/\1/p' || true)"
+      _ptt="$(printf '%s\n' "$_bline" | sed -nE 's/.*[[:space:]]PTTYPE="([^"]+)".*/\1/p' || true)"
+      if [ -n "$_t" ]; then
+        _tl="$(printf '%s' "$_t" | tr '[:upper:]' '[:lower:]')"
+        _fstypes="${_fstypes} ${_tl}"
+      fi
+      if [ -n "$_l" ]; then
+        _ll="$(printf '%s' "$_l" | tr '[:upper:]' '[:lower:]')"
+        _labels="${_labels}
+${_ll}"
+      fi
+      if [ -n "$_pl" ]; then
+        _pll="$(printf '%s' "$_pl" | tr '[:upper:]' '[:lower:]')"
+        _labels="${_labels}
+${_pll}"
+      fi
+      if [ -n "$_pt" ]; then
+        _ptl="$(printf '%s' "$_pt" | tr '[:upper:]' '[:lower:]')"
+        _parttypes="${_parttypes} ${_ptl}"
+      fi
+      if [ -n "$_ptt" ]; then
+        _pttype="$(printf '%s' "$_ptt" | tr '[:upper:]' '[:lower:]')"
+      fi
+    fi
+  done
+
+  for _ldir in /dev/disk/by-label /dev/disk/by-partlabel; do
+    [ -d "$_ldir" ] || continue
+    for _lpath in "$_ldir"/*; do
+      [ -e "$_lpath" ] || continue
+      _resolved="$(readlink -f "$_lpath" 2>/dev/null || true)"
+      [ -n "$_resolved" ] || continue
+      case "$_resolved" in
+        "$_pd"|"$_pd"[0-9]*|"$_pd"p[0-9]*)
+          _lname="$(basename "$_lpath" | sed 's/\\x20/ /g' | tr '[:upper:]' '[:lower:]' || true)"
+          if [ -n "$_lname" ]; then
+            _labels="${_labels}
+${_lname}"
+          fi
+          ;;
+      esac
+    done
+  done
+
+  if command -v sgdisk >/dev/null 2>&1; then
+    _sg="$(sgdisk -p "$_pd" 2>/dev/null || true)"
+    if printf '%s\n' "$_sg" | grep -qiE 'GPT: present|Disk .*: [0-9]+ sectors' 2>/dev/null; then
+      _sg_parts="$(printf '%s\n' "$_sg" | awk '$1 ~ /^[0-9]+$/ {c++} END {print c+0}' || echo 0)"
+      if [ "${_sg_parts:-0}" -gt "$_part_count" ]; then
+        _part_count="$_sg_parts"
+      fi
+      _sg_names="$(printf '%s\n' "$_sg" | awk '$1 ~ /^[0-9]+$/ {for(i=7;i<=NF;i++) printf "%s%s", (i>7?" ":""), $i; print ""}' | tr '[:upper:]' '[:lower:]' || true)"
+      if [ -n "$_sg_names" ]; then
+        _labels="${_labels}
+${_sg_names}"
+      fi
+      if [ -z "$_pttype" ] && printf '%s\n' "$_sg" | grep -qi 'GPT: present' 2>/dev/null; then
+        _pttype="gpt"
+      fi
+    fi
+  elif command -v parted >/dev/null 2>&1; then
+    _pa="$(parted -s "$_pd" print 2>/dev/null || true)"
+    _pt_line="$(printf '%s\n' "$_pa" | sed -nE 's/^Partition Table:[[:space:]]*([a-zA-Z0-9]+).*/\1/p' | head -n1 | tr '[:upper:]' '[:lower:]' || true)"
+    if [ -n "$_pt_line" ] && [ "$_pt_line" != "unknown" ]; then
+      [ -z "$_pttype" ] && _pttype="$_pt_line"
+      _pa_parts="$(printf '%s\n' "$_pa" | awk '$1 ~ /^[0-9]+$/ {c++} END {print c+0}' || echo 0)"
+      [ "${_pa_parts:-0}" -gt "$_part_count" ] && _part_count="$_pa_parts"
+    fi
+  fi
+
+  _fs_pad=" ${_fstypes} "
+  _pt_pad=" ${_parttypes} "
+
+  # Priority 1: Existing Axonwall Installation
+  _axon_hit=0
+  if printf '%s\n' "$_labels" | grep -qE '^(axon_|zbm_esp)' 2>/dev/null; then
+    _axon_hit=1
+  fi
+  if [ "$_axon_hit" -eq 1 ]; then
+    PROBE_KIND="axonwall"
+    _arch="Axonwall Storage/Data Layout"
+    if printf '%s\n' "$_labels" | grep -qE '^axon_root_(a|b)' 2>/dev/null; then
+      _arch="Dual-Root A/B"
+    elif printf '%s\n' "$_labels" | grep -qE '^(zbm_esp|zroot)$' 2>/dev/null; then
+      _arch="ZFSBootMenu Root-on-ZFS"
+    elif printf '%s\n' "$_labels" | grep -qE '^axon_root($|_[0-9]+$)' 2>/dev/null; then
+      _arch="Rolling Single-Root"
+    fi
+    case "$_fs_pad" in
+      *" linux_raid_member "*) _arch="${_arch} + RAID-1" ;;
+      *)
+        if printf '%s\n' "$_labels" | grep -qE '^axon_(root_a|root_b|root|data)_[0-9]+$' 2>/dev/null; then
+          _arch="${_arch} + RAID-1"
+        fi
+        ;;
+    esac
+    case "$_fs_pad" in
+      *" crypto_luks "*) _arch="${_arch} + LUKS2" ;;
+      *)
+        if printf '%s\n' "$_labels" | grep -qE '^axon_crypt' 2>/dev/null; then
+          _arch="${_arch} + LUKS2"
+        fi
+        ;;
+    esac
+    PROBE_SUMMARY="Axonwall Installation (${_arch})"
+    return 0
+  fi
+
+  # Priority 2: Other Operating Systems
+  case "$_fs_pad" in
+    *" bitlocker "*)
+      PROBE_KIND="other_os"
+      PROBE_SUMMARY="Windows OS (BitLocker)"
+      return 0
+      ;;
+  esac
+  case "$_pt_pad" in
+    *" e3c9e316-0b5c-4db8-817d-f92df00215ae "*|*" de94bba4-06d1-4d40-a16a-bfd50179d6ac "*)
+      PROBE_KIND="other_os"
+      PROBE_SUMMARY="Windows OS (NTFS/Boot)"
+      return 0
+      ;;
+  esac
+  case "$_fs_pad" in
+    *" ntfs "*)
+      _win_match=0
+      case "$_fs_pad $_pt_pad" in
+        *" vfat "*|*" c12a7328-f81f-11d2-ba4b-00a0c93ec93b "*|*" 0xef "*|*" 0x07 "*) _win_match=1 ;;
+      esac
+      [ "$_pttype" = "dos" ] && _win_match=1
+      printf '%s\n' "$_labels" | grep -qE 'windows|microsoft|winre|system reserved|recovery' 2>/dev/null && _win_match=1
+      if [ "$_win_match" -eq 1 ]; then
+        PROBE_KIND="other_os"
+        PROBE_SUMMARY="Windows OS (NTFS/Boot)"
+        return 0
+      fi
+      ;;
+  esac
+
+  case "$_fs_pad $_pt_pad" in
+    *" apfs "*|*" hfsplus "*|*" hfs+ "*|*" 7c3457ef-0000-11aa-aa11-00306543ecac "*|*" 48465300-0000-11aa-aa11-00306543ecac "*)
+      PROBE_KIND="other_os"
+      PROBE_SUMMARY="macOS Installation (APFS/HFS+)"
+      return 0
+      ;;
+  esac
+
+  case "$_fs_pad $_pt_pad" in
+    *" ufs "*|*" 516e7cb4-6ecf-11d6-8ff8-00022d09712b "*|*" 516e7cb6-6ecf-11d6-8ff8-00022d09712b "*|*" 516e7cba-6ecf-11d6-8ff8-00022d09712b "*)
+      PROBE_KIND="other_os"
+      PROBE_SUMMARY="BSD / TrueNAS OS"
+      return 0
+      ;;
+  esac
+  if printf '%s\n' "$_labels" | grep -qE 'freebsd|pfsense|opnsense|truenas|^boot-pool$' 2>/dev/null; then
+    PROBE_KIND="other_os"
+    PROBE_SUMMARY="BSD / TrueNAS OS"
+    return 0
+  fi
+
+  case "$_fs_pad $_pt_pad" in
+    *" vmfs_volume_member "*|*" aa31e02a-400f-11db-9590-000c2911d1b8 "*)
+      PROBE_KIND="other_os"
+      PROBE_SUMMARY="VMware ESXi (VMFS)"
+      return 0
+      ;;
+  esac
+
+  case "$_fs_pad" in
+    *" zfs_member "*)
+      if printf '%s\n' "$_labels" | grep -qE '^(rpool|bpool|zroot)$' 2>/dev/null; then
+        PROBE_KIND="other_os"
+        PROBE_SUMMARY="ZFS Root OS"
+        return 0
+      fi
+      ;;
+  esac
+
+  _has_linux_boot=0
+  case "$_fs_pad $_pt_pad" in
+    *" vfat "*|*" swap "*|*" c12a7328-f81f-11d2-ba4b-00a0c93ec93b "*|*" 21686148-6449-6e6f-744e-656564454649 "*|*" bc13c2ff-59e6-4262-a352-b275fd6f7172 "*|*" 4f68bce3-e8cd-4db1-96e7-fbcaf984b709 "*|*" b921b045-1df0-41c3-af44-4c6f280d3fae "*|*" 0xef "*|*" 0x83 "*)
+      _has_linux_boot=1
+      ;;
+  esac
+  if [ "$_has_linux_boot" -eq 1 ]; then
+    case "$_fs_pad $_pt_pad" in
+      *" ext4 "*|*" ext3 "*|*" ext2 "*|*" xfs "*|*" btrfs "*|*" f2fs "*|*" lvm2_member "*|*" crypto_luks "*|*" linux_raid_member "*|*" squashfs "*|*" 4f68bce3-e8cd-4db1-96e7-fbcaf984b709 "*|*" b921b045-1df0-41c3-af44-4c6f280d3fae "*)
+        PROBE_KIND="other_os"
+        PROBE_SUMMARY="Linux OS Installation"
+        return 0
+        ;;
+    esac
+  fi
+
+  # Priority 3: Any other non-empty partition / filesystem / raw header data
+  _nz_bytes=0
+  if [ -b "$_pd" ]; then
+    _nz_bytes="$(dd if="$_pd" bs=512 count=64 2>/dev/null | tr -d '\0' | wc -c | tr -d ' ' || echo 0)"
+  fi
+
+  if [ "$_part_count" -gt 0 ] || [ -n "$_fstypes" ] || [ -n "$_pttype" ] || [ "${_nz_bytes:-0}" -gt 0 ]; then
+    PROBE_KIND="data"
+    case "$_fs_pad" in
+      *" zfs_member "*)
+        _zname="$(printf '%s\n' "$_labels" | grep -v '^$' | head -n1 || true)"
+        if [ -n "$_zname" ]; then
+          PROBE_SUMMARY="Existing ZFS Pool (${_zname})"
+        else
+          PROBE_SUMMARY="Existing ZFS Pool"
+        fi
+        ;;
+      *)
+        if [ "$_part_count" -gt 0 ]; then
+          PROBE_SUMMARY="Existing Partitions / Data (${_part_count} partition(s))"
+        elif [ -n "$_pttype" ]; then
+          PROBE_SUMMARY="Existing Partition Table (${_pttype})"
+        else
+          PROBE_SUMMARY="Non-Empty Disk (Existing Filesystem / Data)"
+        fi
+        ;;
+    esac
+    return 0
+  fi
+
+  PROBE_KIND="empty"
+  PROBE_SUMMARY="Empty Disk"
+}
+
 # Detect OS Family (debian vs alpine) and Edition (axonwall vs vault vs k3s-storage)
 OS_FAMILY="debian"
 if [ -f /etc/alpine-release ]; then
@@ -464,6 +743,21 @@ else
   echo "================================================================================"
   echo "  ${EDITION_LABEL} Installer (${OS_FAMILY} — Hardware-Evaluated Setup)"
   echo "================================================================================"
+  if [ "${AXONWALL_INSTALL_BACKEND:-0}" != "1" ] && [ "${AXONWALL_REINSTALL_CONFIRMED:-0}" != "1" ] && is_booted_installed_system; then
+    echo ""
+    echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+    echo "  WARNING: THIS SYSTEM IS CURRENTLY BOOTED INTO AN ACTIVE AXONWALL INSTALLATION"
+    echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+    echo "  Installing onto active or previously configured disks can overwrite live"
+    echo "  partitions, keys, and ZFS pools."
+    echo ""
+    printf "  Type 'yes' to continue entering the installer (or Enter to abort): "
+    read -r REINSTALL_CONFIRM
+    if [ "$REINSTALL_CONFIRM" != "yes" ] && [ "$REINSTALL_CONFIRM" != "YES" ]; then
+      echo "Aborted."
+      exit 0
+    fi
+  fi
   echo ""
   echo "Available block devices:"
   lsblk -d -n -o NAME,SIZE,MODEL,TYPE 2>/dev/null | grep "disk" || fdisk -l 2>/dev/null | grep "^Disk /dev/" || true
@@ -651,11 +945,61 @@ else
     done
   fi
 
-  printf "WARNING: All data on %s %s will be erased! Proceed? (y/N): " "$SYSTEM_DISKS" "$ZFS_EXTRA_DISKS"
-  read -r CONFIRM
-  if [ "$CONFIRM" != "y" ] && [ "$CONFIRM" != "Y" ]; then
-    echo "Aborted."
-    exit 0
+  SYSTEM_DISKS=$(echo "${SYSTEM_DISKS:-}" | tr ',' ' ' | tr -s ' ' | sed 's/^ *//;s/ *$//')
+  ZFS_EXTRA_DISKS=$(echo "${ZFS_EXTRA_DISKS:-}" | tr ',' ' ' | tr -s ' ' | sed 's/^ *//;s/ *$//')
+  ZFS_SLOG_DISKS=$(echo "${ZFS_SLOG_DISKS:-}" | tr ',' ' ' | tr -s ' ' | sed 's/^ *//;s/ *$//')
+  ZFS_L2ARC_DISKS=$(echo "${ZFS_L2ARC_DISKS:-}" | tr ',' ' ' | tr -s ' ' | sed 's/^ *//;s/ *$//')
+  ZFS_SPARE_DISKS=$(echo "${ZFS_SPARE_DISKS:-}" | tr ',' ' ' | tr -s ' ' | sed 's/^ *//;s/ *$//')
+
+  _target_report=""
+  _has_non_empty=0
+  _has_axonwall=0
+  _has_other_os=0
+  _seen_disks=" "
+  for _td in $SYSTEM_DISKS $ZFS_EXTRA_DISKS $ZFS_SLOG_DISKS $ZFS_L2ARC_DISKS $ZFS_SPARE_DISKS; do
+    [ -b "$_td" ] || continue
+    case "$_seen_disks" in
+      *" ${_td} "*) continue ;;
+    esac
+    _seen_disks="${_seen_disks}${_td} "
+    probe_disk_content "$_td"
+    if [ "$PROBE_KIND" != "empty" ]; then
+      _has_non_empty=1
+      [ "$PROBE_KIND" = "axonwall" ] && _has_axonwall=1
+      [ "$PROBE_KIND" = "other_os" ] && _has_other_os=1
+    fi
+    _target_report="${_target_report}
+  * ${_td}: ${PROBE_SUMMARY}"
+  done
+
+  if [ "$_has_non_empty" -eq 1 ]; then
+    echo ""
+    echo "================================================================================"
+    if [ "$_has_axonwall" -eq 1 ]; then
+      echo "  [!] EXISTING AXONWALL INSTALLATION DETECTED ON TARGET DISK(S)!"
+      echo "      We detected an existing Axonwall installation; proceeding will overwrite it."
+    elif [ "$_has_other_os" -eq 1 ]; then
+      echo "  [!] EXISTING OPERATING SYSTEM DETECTED ON TARGET DISK(S)!"
+      echo "      Proceeding will permanently erase the existing operating system below."
+    else
+      echo "  [!] NON-EMPTY TARGET DISK(S) DETECTED!"
+      echo "      Existing partitions, ZFS pools, or data volumes were found on target disks."
+    fi
+    printf '%s\n' "$_target_report"
+    echo "================================================================================"
+    printf "Type 'yes' to confirm overwriting target disk(s) and proceed (or Enter to abort): "
+    read -r CONFIRM
+    if [ "$CONFIRM" != "yes" ] && [ "$CONFIRM" != "YES" ]; then
+      echo "Aborted."
+      exit 0
+    fi
+  else
+    printf "All target disks appear EMPTY (%s %s). Proceed? (y/N): " "$SYSTEM_DISKS" "$ZFS_EXTRA_DISKS"
+    read -r CONFIRM
+    if [ "$CONFIRM" != "y" ] && [ "$CONFIRM" != "Y" ]; then
+      echo "Aborted."
+      exit 0
+    fi
   fi
 fi
 
@@ -686,6 +1030,18 @@ if [ -z "$PRIMARY_DISK" ]; then
   ui_echo "[!] Error: No target system disk specified or discovered."
   exit 1
 fi
+
+for _log_d in $SYSTEM_DISKS $ZFS_EXTRA_DISKS $ZFS_SLOG_DISKS $ZFS_L2ARC_DISKS $ZFS_SPARE_DISKS; do
+  [ -b "$_log_d" ] || continue
+  probe_disk_content "$_log_d"
+  if [ "$PROBE_KIND" = "axonwall" ]; then
+    ui_echo "[!] Target disk check: ${_log_d} -> EXISTING AXONWALL DETECTED (${PROBE_SUMMARY})"
+  elif [ "$PROBE_KIND" = "other_os" ]; then
+    ui_echo "[!] Target disk check: ${_log_d} -> EXISTING OS DETECTED (${PROBE_SUMMARY})"
+  else
+    printf '[+] Target disk check: %s -> %s\n' "$_log_d" "$PROBE_SUMMARY" >> "$INSTALL_LOG" 2>/dev/null || true
+  fi
+done
 
 SYSTEM_RAID_MODE="single"
 if [ "$SYS_DISK_COUNT" -ge 2 ]; then
@@ -1252,16 +1608,49 @@ if [ "$INSTALL_MODE" = "zbm" ]; then
     ZPOOL_ACCEL_ARGS="${ZPOOL_ACCEL_ARGS} spare ${SPARE_VDEVS}"
   fi
 
-  ZROOT_CNT=$(echo "$SYS_ZFS_VDEVS" | wc -w | tr -d ' ')
-  ZROOT_TOPO="stripe"
-  if [ "$ZROOT_CNT" -eq 2 ]; then
-    ZROOT_TOPO="mirror"
-  elif [ "$ZROOT_CNT" -ge 3 ]; then
-    case "${ZFS_RAID_TOPOLOGY:-auto}" in
-      stripe|mirror|raidz1|raidz2|raidz3) ZROOT_TOPO="$ZFS_RAID_TOPOLOGY" ;;
-      *) ZROOT_TOPO="raidz1" ;;
-    esac
+resolve_zfs_topology() {
+  _req="$1"
+  _cnt="$2"
+  case "${_cnt:-0}" in
+    ''|*[!0-9]*) _cnt=1 ;;
+  esac
+  if [ "$_cnt" -le 1 ]; then
+    echo "stripe"
+    return 0
   fi
+  if [ "$_req" = "auto" ] || [ -z "$_req" ]; then
+    if [ "$_cnt" -eq 2 ]; then
+      echo "mirror"
+    elif [ "$_cnt" -le 4 ]; then
+      echo "raidz1"
+    else
+      echo "raidz2"
+    fi
+    return 0
+  fi
+  case "$_req" in
+    stripe) echo "stripe" ;;
+    mirror) echo "mirror" ;;
+    raidz1)
+      if [ "$_cnt" -ge 3 ]; then echo "raidz1"; else echo "mirror"; fi
+      ;;
+    raidz2)
+      if [ "$_cnt" -ge 4 ]; then echo "raidz2"
+      elif [ "$_cnt" -eq 3 ]; then echo "raidz1"
+      else echo "mirror"; fi
+      ;;
+    raidz3)
+      if [ "$_cnt" -ge 5 ]; then echo "raidz3"
+      elif [ "$_cnt" -eq 4 ]; then echo "raidz2"
+      elif [ "$_cnt" -eq 3 ]; then echo "raidz1"
+      else echo "mirror"; fi
+      ;;
+    *) echo "$_req" ;;
+  esac
+}
+
+  ZROOT_CNT=$(echo "$SYS_ZFS_VDEVS" | wc -w | tr -d ' ')
+  ZROOT_TOPO=$(resolve_zfs_topology "${ZFS_RAID_TOPOLOGY:-auto}" "$ZROOT_CNT")
   ZROOT_ARGS=""
   [ "$ZROOT_TOPO" != "stripe" ] && ZROOT_ARGS="$ZROOT_TOPO"
 
@@ -1296,7 +1685,7 @@ if [ "$INSTALL_MODE" = "zbm" ]; then
   if [ "$OS_FAMILY" = "alpine" ]; then
     ZBM_CMDLINE="ro rootfstype=zfs modules=sd-mod,usb-storage,virtio_blk,nvme,zfs quiet console=tty0 console=ttyS0,115200"
   else
-    ZBM_CMDLINE="ro quiet console=tty0 console=ttyS0,115200"
+    ZBM_CMDLINE="ro quiet splash plymouth.ignore-serial-consoles lsm=landlock,lockdown,yama,integrity,apparmor,bpf console=ttyS0,115200 console=tty0"
   fi
   zfs set "org.zfsbootmenu:commandline=${ZBM_CMDLINE}" zroot/ROOT
   zfs set "org.axonwall:active_be=${INIT_BE}" zroot/ROOT
@@ -1790,6 +2179,19 @@ deb https://deb.debian.org/debian trixie-updates main contrib non-free non-free-
 APT_EOF
 fi
 
+# Replace live-mode MOTD on Alpine installed targets so booted appliances do not advertise axonwall-install
+if [ "$OS_FAMILY" = "alpine" ] && [ -d /mnt/slot_a/etc ]; then
+  cat > /mnt/slot_a/etc/motd << 'MOTD_EOF'
+
+================================================================================
+  Welcome to Axonwall Appliance
+================================================================================
+  To launch the Axonwall Interactive Console Menu, run:
+      axonwall-console
+================================================================================
+MOTD_EOF
+fi
+
 # Configure Admin & Root Credentials
 CUSTOM_PW_SET=1
 if [ -z "$ADMIN_PASSWORD" ]; then
@@ -1818,30 +2220,47 @@ if [ -n "$ADMIN_PASSWORD" ]; then
             console.log("scrypt$" + salt + "$" + hash);
           } catch (e) { process.exit(1); }
         ' "$PW_TMP" 2>/dev/null || true)"
+      elif command -v python3 >/dev/null 2>&1; then
+        SCRYPT_HASH="$(python3 -c '
+import hashlib, os, sys
+try:
+    with open(sys.argv[1], "r", encoding="utf-8") as f:
+        pw = f.read().rstrip("\r\n")
+    salt = os.urandom(16)
+    h = hashlib.scrypt(pw.encode("utf-8"), salt=salt, n=16384, r=8, p=1, maxmem=0, dklen=64)
+    print("scrypt$" + salt.hex() + "$" + h.hex())
+except Exception:
+    sys.exit(1)
+' "$PW_TMP" 2>/dev/null || true)"
       fi
       ;;
   esac
   rm -f "$PW_TMP"
 
-  if [ "${INSTALL_EDITION:-axonwall}" = "axonwall" ] && [ -n "$SCRYPT_HASH" ]; then
+  # Provision admin credentials for ALL editions (axonwall, k3s-storage, vault)
+  mkdir -p /mnt/slot_a/etc/axonwall /mnt/data/etc-axonwall 2>/dev/null || true
+  if [ -n "$SCRYPT_HASH" ]; then
     printf 'LOCAL_ADMIN_USER=%s\nLOCAL_ADMIN_PASSWORD=%s\n' "${ADMIN_USER:-admin}" "$SCRYPT_HASH" > /mnt/slot_a/etc/axonwall/admin.env
-    chmod 0600 /mnt/slot_a/etc/axonwall/admin.env
-    cp -a /mnt/slot_a/etc/axonwall/admin.env /mnt/data/etc-axonwall/admin.env 2>/dev/null || true
-    chmod 0600 /mnt/data/etc-axonwall/admin.env 2>/dev/null || true
-    if [ "$CUSTOM_PW_SET" -eq 1 ]; then
-      rm -f /mnt/slot_a/etc/axonwall/initial-admin-password /mnt/data/etc-axonwall/initial-admin-password
-      NOW_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "installed")"
-      printf '%s\n' "$NOW_TS" > /mnt/slot_a/etc/axonwall/.password_changed
-      printf '%s\n' "$NOW_TS" > /mnt/data/.password_changed
-      ui_echo "[+] Provisioned custom scrypt administrator credentials for '${ADMIN_USER:-admin}'."
-    else
-      rm -f /mnt/slot_a/etc/axonwall/.password_changed /mnt/data/.password_changed
-      printf '%s\n' "$ADMIN_PASSWORD" > /mnt/slot_a/etc/axonwall/initial-admin-password
-      chmod 0600 /mnt/slot_a/etc/axonwall/initial-admin-password
-      printf '%s\n' "$ADMIN_PASSWORD" > /mnt/data/etc-axonwall/initial-admin-password 2>/dev/null || true
-      chmod 0600 /mnt/data/etc-axonwall/initial-admin-password 2>/dev/null || true
-      ui_echo "[+] Provisioned default factory credentials (${ADMIN_USER:-admin} / axonwall — password change required on first web login)."
-    fi
+  else
+    printf 'LOCAL_ADMIN_USER=%s\nLOCAL_ADMIN_PASSWORD=%s\n' "${ADMIN_USER:-admin}" "$ADMIN_PASSWORD" > /mnt/slot_a/etc/axonwall/admin.env
+  fi
+  chmod 0600 /mnt/slot_a/etc/axonwall/admin.env 2>/dev/null || true
+  cp -a /mnt/slot_a/etc/axonwall/admin.env /mnt/data/etc-axonwall/admin.env 2>/dev/null || true
+  chmod 0600 /mnt/data/etc-axonwall/admin.env 2>/dev/null || true
+
+  if [ "$CUSTOM_PW_SET" -eq 1 ]; then
+    rm -f /mnt/slot_a/etc/axonwall/initial-admin-password /mnt/data/etc-axonwall/initial-admin-password
+    NOW_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "installed")"
+    printf '%s\n' "$NOW_TS" > /mnt/slot_a/etc/axonwall/.password_changed
+    printf '%s\n' "$NOW_TS" > /mnt/data/.password_changed
+    ui_echo "[+] Provisioned custom administrator credentials for '${ADMIN_USER:-admin}'."
+  else
+    rm -f /mnt/slot_a/etc/axonwall/.password_changed /mnt/data/.password_changed
+    printf '%s\n' "$ADMIN_PASSWORD" > /mnt/slot_a/etc/axonwall/initial-admin-password
+    chmod 0600 /mnt/slot_a/etc/axonwall/initial-admin-password
+    printf '%s\n' "$ADMIN_PASSWORD" > /mnt/data/etc-axonwall/initial-admin-password 2>/dev/null || true
+    chmod 0600 /mnt/data/etc-axonwall/initial-admin-password 2>/dev/null || true
+    ui_echo "[+] Provisioned default factory credentials (${ADMIN_USER:-admin} / axonwall — password change required on first login)."
   fi
 
   case "$ADMIN_PASSWORD" in
@@ -1861,12 +2280,14 @@ if [ -n "$ADMIN_PASSWORD" ]; then
       fi
       ;;
     *)
-      printf 'root:%s\n' "$ADMIN_PASSWORD" | chroot /mnt/slot_a /usr/sbin/chpasswd 2>/dev/null || true
+      _chpw_bin="$(chroot /mnt/slot_a which chpasswd 2>/dev/null || true)"
+      [ -z "$_chpw_bin" ] && _chpw_bin="/usr/sbin/chpasswd"
+      printf 'root:%s\n' "$ADMIN_PASSWORD" | chroot /mnt/slot_a "$_chpw_bin" 2>/dev/null || true
       if grep -q '^admin:' /mnt/slot_a/etc/passwd 2>/dev/null; then
-        printf 'admin:%s\n' "$ADMIN_PASSWORD" | chroot /mnt/slot_a /usr/sbin/chpasswd 2>/dev/null || true
+        printf 'admin:%s\n' "$ADMIN_PASSWORD" | chroot /mnt/slot_a "$_chpw_bin" 2>/dev/null || true
       fi
       if grep -q '^axonwall:' /mnt/slot_a/etc/passwd 2>/dev/null; then
-        printf 'axonwall:%s\n' "$ADMIN_PASSWORD" | chroot /mnt/slot_a /usr/sbin/chpasswd 2>/dev/null || true
+        printf 'axonwall:%s\n' "$ADMIN_PASSWORD" | chroot /mnt/slot_a "$_chpw_bin" 2>/dev/null || true
       fi
       ;;
   esac
@@ -2204,6 +2625,8 @@ ZBM_SYSLINUX_EOF
     mount --bind "/$m" "/mnt/slot_a/$m" 2>/dev/null || true
   done
   if [ "$OS_FAMILY" = "debian" ]; then
+    # D-H2: update-initramfs fails loudly under set -eu (no || true); the Plymouth theme line stays best-effort.
+    chroot /mnt/slot_a /usr/sbin/plymouth-set-default-theme axonwall 2>/dev/null || true
     chroot /mnt/slot_a update-initramfs -u -k all
   elif [ "$OS_FAMILY" = "alpine" ] && [ -x /mnt/slot_a/sbin/mkinitfs ]; then
     if [ -f /mnt/slot_a/etc/mkinitfs/mkinitfs.conf ] && ! grep -q 'zfs' /mnt/slot_a/etc/mkinitfs/mkinitfs.conf 2>/dev/null; then
@@ -2348,8 +2771,10 @@ THEME_EOF
 
   if [ "$OS_FAMILY" = "alpine" ]; then
     EXTRA_KARGS="modules=sd-mod,usb-storage,ext4,xfs,virtio_blk,nvme,raid1,md-mod"
+    CONSOLE_KARGS="quiet console=tty0 console=ttyS0,115200"
   else
     EXTRA_KARGS=""
+    CONSOLE_KARGS="quiet splash plymouth.ignore-serial-consoles lsm=landlock,lockdown,yama,integrity,apparmor,bpf console=ttyS0,115200 console=tty0"
   fi
 
   cat << GRUB_EOF > /mnt/slot_a/boot/grub/grub.cfg
@@ -2444,29 +2869,31 @@ if [ "${INSTALL_MODE}" = "ab" ]; then
 
   menuentry "Axonwall OS (Slot A - Primary)" {
     search --no-floppy --label --set=root axon_root_a
-    linux /boot/vmlinuz root=LABEL=axon_root_a ro rootfstype=${ROOT_FSTYPE} slot=A ${EXTRA_KARGS} quiet console=tty0 console=ttyS0,115200
+    linux /boot/vmlinuz root=LABEL=axon_root_a ro rootfstype=${ROOT_FSTYPE} slot=A ${EXTRA_KARGS} ${CONSOLE_KARGS}
     initrd /boot/initrd.img
   }
 
   menuentry "Axonwall OS (Slot B - Standby)" {
     search --no-floppy --label --set=root axon_root_b
-    linux /boot/vmlinuz root=LABEL=axon_root_b ro rootfstype=${ROOT_FSTYPE} slot=B ${EXTRA_KARGS} quiet console=tty0 console=ttyS0,115200
+    linux /boot/vmlinuz root=LABEL=axon_root_b ro rootfstype=${ROOT_FSTYPE} slot=B ${EXTRA_KARGS} ${CONSOLE_KARGS}
     initrd /boot/initrd.img
   }
 else
   menuentry "${EDITION_LABEL} (${INSTALL_MODE})" {
     search --no-floppy --label --set=root ${ROOT_A_LABEL}
-    linux /boot/vmlinuz root=LABEL=${ROOT_A_LABEL} ro rootfstype=${ROOT_FSTYPE} ${EXTRA_KARGS} quiet console=tty0 console=ttyS0,115200
+    linux /boot/vmlinuz root=LABEL=${ROOT_A_LABEL} ro rootfstype=${ROOT_FSTYPE} ${EXTRA_KARGS} ${CONSOLE_KARGS}
     initrd /boot/initrd.img
   }
 fi
 GRUB_EOF
 
-  # On Debian or Alpine, if initramfs refresh is needed for mdadm RAID-1 or LUKS2, rebuild inside chroot
-  if [ "$OS_FAMILY" = "debian" ] && { [ "$SYSTEM_RAID_MODE" = "mirror" ] || [ "${LUKS_ENABLED:-0}" = "1" ]; }; then
+  # On Debian, ensure axonwall Plymouth splash theme + mdadm/LUKS2 hooks are embedded in initramfs; on Alpine, refresh mkinitfs when RAID/LUKS2 is enabled
+  if [ "$OS_FAMILY" = "debian" ]; then
     for m in dev proc sys run; do
       mount --bind "/$m" "/mnt/slot_a/$m" 2>/dev/null || true
     done
+    # D-H2: update-initramfs fails loudly under set -eu (no || true); the Plymouth theme line stays best-effort.
+    chroot /mnt/slot_a /usr/sbin/plymouth-set-default-theme axonwall 2>/dev/null || true
     chroot /mnt/slot_a update-initramfs -u -k all
     for m in run sys proc dev; do
       umount "/mnt/slot_a/$m" 2>/dev/null || true
@@ -2583,24 +3010,6 @@ to_json_array() {
     fi
   done
   echo "$_out"
-}
-
-resolve_zfs_topology() {
-  _req="$1"
-  _cnt="$2"
-  if [ "$_req" = "auto" ] || [ -z "$_req" ]; then
-    if [ "$_cnt" -le 1 ]; then
-      echo "stripe"
-    elif [ "$_cnt" -eq 2 ]; then
-      echo "mirror"
-    elif [ "$_cnt" -le 4 ]; then
-      echo "raidz1"
-    else
-      echo "raidz2"
-    fi
-  else
-    echo "$_req"
-  fi
 }
 
 if [ "$INSTALL_MODE" = "zbm" ]; then

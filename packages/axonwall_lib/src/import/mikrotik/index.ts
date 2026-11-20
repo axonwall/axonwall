@@ -30,7 +30,9 @@ function parseLineKeyValue(line: string): Record<string, string> {
 export function importMikrotikConfig(rscContent: string): ImportReport {
   const warnings: string[] = [];
   const reviewItems: ImportReviewItem[] = [];
-  const lines = rscContent.split('\n');
+  // Join RouterOS multiline exports ending with a trailing backslash
+  const unfoldedContent = rscContent.replace(/\\\r?\n\s*/g, ' ');
+  const lines = unfoldedContent.split(/\r?\n/);
 
   let currentSection = '';
   let hostname = 'axonwall';

@@ -23,15 +23,16 @@ import {
 } from '@axonwall/lib';
 import { getMcpServerStatus, resolveMcpSettingsPath, validateVirtWorkloadSafety } from '@axonwall/lib/mcp';
 import { acquireMcpLockFile, desiredStateLockPath } from './mcp/lockfile.js';
+import { readAgentToken, resolveControllerDirs } from './dev-paths.js';
 import type { DesiredState } from '@axonwall/lib/schemas';
 import { App as NastyMapApp } from './tui/nastymap/App.js';
 
-const ETC_CONFIG_DIR = process.env.AXONWALL_CONFIG_DIR || '/etc/axonwall';
-const VAR_ETC_CONFIG_DIR = process.env.AXONWALL_PERSIST_YAML_DIR || '/var/lib/axonwall/etc-axonwall';
-const STATE_JSON_PATH = process.env.AXONWALL_STATE_FILE || '/var/lib/axonwall/state.json';
-const AGENT_API_SOCKET =
-  process.env.AXONWALL_AGENT_API_SOCK || process.env.AGENT_API_SOCKET || '/run/axonwall/agent-api.sock';
-const AGENT_TOKEN_PATH = process.env.AXONWALL_AGENT_TOKEN_FILE || '/etc/axonwall/agent.token';
+const CONTROLLER_DIRS = resolveControllerDirs();
+const ETC_CONFIG_DIR = CONTROLLER_DIRS.etcDir;
+const VAR_ETC_CONFIG_DIR = CONTROLLER_DIRS.persistYamlDir;
+const STATE_JSON_PATH = CONTROLLER_DIRS.stateFile;
+const AGENT_API_SOCKET = CONTROLLER_DIRS.agentSock;
+const AGENT_TOKEN_PATH = CONTROLLER_DIRS.agentTokenPaths[0] || path.join(ETC_CONFIG_DIR, 'agent.token');
 
 export type TopTab =
   | 'dashboard'
@@ -47,7 +48,7 @@ export type TopTab =
   | 'cli_ops';
 
 function detectLocalInstallMode(): 'zbm' | 'rolling' | 'ab' {
-  for (const p of [path.join(ETC_CONFIG_DIR, 'install-mode'), '/var/lib/axonwall/install-mode']) {
+  for (const p of [path.join(ETC_CONFIG_DIR, 'install-mode'), path.join(CONTROLLER_DIRS.varDir, 'install-mode')]) {
     try {
       if (fs.existsSync(p)) {
         const raw = fs.readFileSync(p, 'utf-8').trim().toLowerCase();
@@ -281,7 +282,6 @@ export function saveStateToDisk(state: DesiredState): { daemonFiles: Record<stri
     const daemonFiles: Record<string, string> = {};
     for (const [fn, content] of Object.entries(serialized)) {
       daemonFiles[path.join(ETC_CONFIG_DIR, fn)] = content;
-      daemonFiles[path.join(VAR_ETC_CONFIG_DIR, fn)] = content;
     }
     // B-M4: the save used to return non-null even when every write
     // failed (each `catch {}` swallowed the error), so callers
@@ -308,6 +308,7 @@ export function saveStateToDisk(state: DesiredState): { daemonFiles: Record<stri
       } catch {}
     }
     const serializedJson = JSON.stringify(state, null, 2);
+    daemonFiles[path.join(ETC_CONFIG_DIR, 'state.json')] = serializedJson;
     for (const jsonTarget of [STATE_JSON_PATH, path.join(VAR_ETC_CONFIG_DIR, 'state.json'), path.join(ETC_CONFIG_DIR, 'state.json')]) {
       try {
         fs.mkdirSync(path.dirname(jsonTarget), { recursive: true, mode: 0o775 });
@@ -358,11 +359,7 @@ function callDaemon(
     const body = payload ? JSON.stringify(payload) : '';
     let token = process.env.AXONWALL_AGENT_TOKEN || '';
     if (!token) {
-      for (const candidate of [
-        AGENT_TOKEN_PATH,
-        '/var/lib/axonwall/etc-axonwall/agent.token',
-        '/run/axonwall/agent.token',
-      ]) {
+      for (const candidate of Array.from(new Set([AGENT_TOKEN_PATH, ...CONTROLLER_DIRS.agentTokenPaths]))) {
         try {
           if (fs.existsSync(candidate)) {
             token = fs.readFileSync(candidate, 'utf-8').trim();
@@ -691,7 +688,7 @@ export function AxonwallTuiApp({
         confirmTimeoutSeconds: 120,
         confirm_timeout_seconds: 120,
       },
-      20000
+      120_000
     );
 
     // B2-M6: a timeout is neither a rejection nor an offline save
@@ -1149,7 +1146,7 @@ export function AxonwallTuiApp({
       return;
     }
 
-    if (input === 'q' || input === 'Q') {
+    if ((input === 'q' || input === 'Q') && activeTab !== 'nastymap') {
       exit();
       return;
     }
@@ -1841,21 +1838,39 @@ export function AxonwallTuiApp({
                 }),
           };
           const serialized = JSON.stringify(settingsObj, null, 2);
-          for (const p of Array.from(
-            new Set([
-              resolveMcpSettingsPath(),
-              '/var/lib/axonwall/mcp-settings.json',
-              '/var/lib/axonwall/etc-axonwall/mcp-settings.json',
-              '/etc/axonwall/mcp-settings.json',
-            ])
-          )) {
-            try {
-              fs.mkdirSync(path.dirname(p), { recursive: true, mode: 0o775 });
-              fs.writeFileSync(p, serialized, { mode: 0o660 });
-            } catch {}
-          }
           if (!nextEnabled) {
-            callDaemon('/v1/mcp/flush', 'POST', {}).catch(() => {});
+            callDaemon('/v1/mcp/flush', 'POST', {})
+              .catch(() => {})
+              .finally(() => {
+                callDaemon('/v1/ebpf/xdp/block', 'DELETE', { clearAll: true }).catch(() => {});
+                for (const p of Array.from(
+                  new Set([
+                    resolveMcpSettingsPath(),
+                    path.join(CONTROLLER_DIRS.varDir, 'mcp-settings.json'),
+                    path.join(VAR_ETC_CONFIG_DIR, 'mcp-settings.json'),
+                    path.join(ETC_CONFIG_DIR, 'mcp-settings.json'),
+                  ])
+                )) {
+                  try {
+                    fs.mkdirSync(path.dirname(p), { recursive: true, mode: 0o775 });
+                    fs.writeFileSync(p, serialized, { mode: 0o660 });
+                  } catch {}
+                }
+              });
+          } else {
+            for (const p of Array.from(
+              new Set([
+                resolveMcpSettingsPath(),
+                path.join(CONTROLLER_DIRS.varDir, 'mcp-settings.json'),
+                path.join(VAR_ETC_CONFIG_DIR, 'mcp-settings.json'),
+                path.join(ETC_CONFIG_DIR, 'mcp-settings.json'),
+              ])
+            )) {
+              try {
+                fs.mkdirSync(path.dirname(p), { recursive: true, mode: 0o775 });
+                fs.writeFileSync(p, serialized, { mode: 0o660 });
+              } catch {}
+            }
           }
           setMcpStatus({
             masterEnabled: nextEnabled,

@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef } from 'react';
 import {
-  applyDesiredState,
+  applyDesiredStateAction,
   getDesiredStateFingerprint,
 } from '@/server/agent';
 import type { DesiredState } from '@axonwall/lib/schemas';
@@ -55,13 +55,19 @@ export function useDesiredStateApply() {
       state: DesiredState,
       confirmTimeoutSeconds = 120
     ): Promise<ApplyDesiredStateResult> => {
-      const res = await applyDesiredState(
+      const rpc = await applyDesiredStateAction(
         state,
         confirmTimeoutSeconds,
         fingerprintRef.current ? { expectedFingerprint: fingerprintRef.current } : undefined
       );
+      if (!rpc.ok) {
+        throw new Error(rpc.error);
+      }
       await refreshFingerprint();
-      return res;
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new Event('axonwall:status-refresh'));
+      }
+      return rpc.result;
     },
     [refreshFingerprint]
   );

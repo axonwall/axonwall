@@ -1,4 +1,4 @@
-import { PluginManifestSchema, VowConfigSchema, VigilanteConfigSchema, HostMalwareDefenseConfigSchema, EluvixConfigSchema, type PluginManifest, type DesiredState, type CoreCapabilities } from '../schemas/index.js';
+import { PluginManifestSchema, VowConfigSchema, VigilanteConfigSchema, HostMalwareDefenseConfigSchema, ThreatHarvesterConfigSchema, EluvixConfigSchema, type PluginManifest, type DesiredState, type CoreCapabilities } from '../schemas/index.js';
 export type { PluginManifest };
 
 export const CORE_ROLE_PLUGIN_IDS = new Set([
@@ -19,13 +19,18 @@ export const BUILTIN_PLUGINS: PluginManifest[] = [
     author: 'Axonwall Core',
     systemdUnits: ['nftables.service', 'suricata.service', 'frr.service', 'kea-dhcp4-server.service', 'conntrackd.service'],
     privileges: ['firewall.rules', 'network.routing', 'vpn.admin'],
+    packages: {
+      debian: ['nftables', 'suricata', 'frr', 'kea-dhcp4-server', 'conntrackd', 'unbound'],
+      alpine: ['nftables', 'suricata', 'frr', 'kea-dhcp4', 'conntrack-tools', 'unbound'],
+      arch: ['nftables', 'suricata', 'frr', 'kea', 'conntrack-tools', 'unbound'],
+    },
     nftHooks: [
       { table: 'inet axonwall', chain: 'forward', priority: 0 },
       { table: 'ip axonwall_nat', chain: 'postrouting', priority: 100 },
     ],
     menuEntry: {
       title: 'Firewall Rules',
-      path: '/firewall/rules',
+      path: '/firewall',
       icon: 'Shield',
     },
   },
@@ -38,6 +43,11 @@ export const BUILTIN_PLUGINS: PluginManifest[] = [
     author: 'Axonwall Core',
     systemdUnits: ['zfs-import.target', 'zfs-mount.service', 'smbd.service', 'nfs-server.service', 'iscsid.service'],
     privileges: ['storage.zfs', 'storage.shares', 'system.hardware'],
+    packages: {
+      debian: ['zfsutils-linux', 'samba', 'nfs-kernel-server', 'open-iscsi'],
+      alpine: ['zfs', 'samba', 'nfs-utils', 'open-iscsi'],
+      arch: ['zfs-utils', 'samba', 'nfs-utils', 'open-iscsi'],
+    },
     nftHooks: [
       { table: 'inet axonwall', chain: 'input', priority: 0 },
     ],
@@ -56,6 +66,11 @@ export const BUILTIN_PLUGINS: PluginManifest[] = [
     author: 'CNCF / OpenEBS / Axonwall Core',
     systemdUnits: ['k3s.service'],
     privileges: ['k3s.cluster', 'storage.openebs'],
+    packages: {
+      debian: ['curl', 'iptables', 'open-iscsi'],
+      alpine: ['curl', 'iptables', 'open-iscsi'],
+      arch: ['curl', 'iptables-nft', 'open-iscsi'],
+    },
     nftHooks: [
       { table: 'inet axonwall', chain: 'input', priority: 0 },
     ],
@@ -72,8 +87,13 @@ export const BUILTIN_PLUGINS: PluginManifest[] = [
     category: 'core_role',
     description: 'Proxmox VE parity hypervisor with KVM hardware virtualization, Cloud-Init, LXC system containers, PCIe VFIO passthrough, and deduplicated backup engine.',
     author: 'Axonwall Core',
-    systemdUnits: ['qemu-kvm.service', 'lxc.service'],
+    systemdUnits: ['lxc.service'],
     privileges: ['virt.vms', 'virt.containers', 'system.hardware'],
+    packages: {
+      debian: ['qemu-system-x86', 'ovmf', 'swtpm', 'lxc', 'dnsmasq-base'],
+      alpine: ['qemu-system-x86_64', 'ovmf', 'swtpm', 'lxc', 'dnsmasq'],
+      arch: ['qemu-full', 'edk2-ovmf', 'swtpm', 'lxc', 'dnsmasq'],
+    },
     nftHooks: [
       { table: 'inet axonwall', chain: 'forward', priority: 0 },
     ],
@@ -141,6 +161,7 @@ export const BUILTIN_PLUGINS: PluginManifest[] = [
     packages: {
       debian: ['haproxy'],
       alpine: ['haproxy'],
+      arch: ['haproxy'],
     },
     cliBinaries: ['haproxy'],
     nftHooks: [
@@ -148,7 +169,7 @@ export const BUILTIN_PLUGINS: PluginManifest[] = [
     ],
     menuEntry: {
       title: 'HAProxy Reverse Proxy',
-      path: '/services/haproxy',
+      path: '/system/services',
       icon: 'Network',
     },
   },
@@ -164,6 +185,7 @@ export const BUILTIN_PLUGINS: PluginManifest[] = [
     packages: {
       debian: ['freeradius', 'freeradius-ldap', 'freeradius-utils'],
       alpine: ['freeradius', 'freeradius-ldap'],
+      arch: ['freeradius'],
     },
     cliBinaries: ['freeradius', 'radtest'],
     ldapIntegration: {
@@ -182,7 +204,7 @@ export const BUILTIN_PLUGINS: PluginManifest[] = [
     },
     menuEntry: {
       title: 'FreeRADIUS Server',
-      path: '/services/freeradius',
+      path: '/system/services',
       icon: 'ShieldCheck',
     },
   },
@@ -198,11 +220,12 @@ export const BUILTIN_PLUGINS: PluginManifest[] = [
     packages: {
       debian: ['snmpd', 'snmp'],
       alpine: ['net-snmp', 'net-snmp-tools'],
+      arch: ['net-snmp'],
     },
     cliBinaries: ['snmpd', 'snmpwalk'],
     menuEntry: {
       title: 'SNMP Monitoring',
-      path: '/services/snmp',
+      path: '/system/services',
       icon: 'Radio',
     },
   },
@@ -218,6 +241,7 @@ export const BUILTIN_PLUGINS: PluginManifest[] = [
     packages: {
       debian: ['nut', 'nut-server', 'nut-client'],
       alpine: ['nut'],
+      arch: ['nut'],
     },
     cliBinaries: ['upsc', 'upsd', 'upsmon'],
     menuEntry: {
@@ -238,6 +262,7 @@ export const BUILTIN_PLUGINS: PluginManifest[] = [
     packages: {
       debian: ['wireguard-tools', 'sqlite3'],
       alpine: ['wireguard-tools', 'sqlite'],
+      arch: ['headscale', 'wireguard-tools', 'sqlite'],
     },
     cliBinaries: ['headscale', 'wg'],
     menuEntry: {
@@ -258,11 +283,12 @@ export const BUILTIN_PLUGINS: PluginManifest[] = [
     packages: {
       debian: ['wireguard-tools', 'ca-certificates', 'curl'],
       alpine: ['tailscale', 'wireguard-tools'],
+      arch: ['tailscale', 'wireguard-tools', 'ca-certificates', 'curl'],
     },
     cliBinaries: ['tailscale', 'tailscaled'],
     menuEntry: {
       title: 'Tailscale Mesh',
-      path: '/vpn/tailscale',
+      path: '/vpn/mesh',
       icon: 'Globe',
     },
   },
@@ -278,11 +304,12 @@ export const BUILTIN_PLUGINS: PluginManifest[] = [
     packages: {
       debian: ['tcpdump', 'ethtool'],
       alpine: ['tcpdump', 'ethtool'],
+      arch: ['tcpdump', 'ethtool'],
     },
     cliBinaries: ['ntopng', 'tcpdump'],
     menuEntry: {
       title: 'ntopng Flow Analyzer',
-      path: '/reporting/ntopng',
+      path: '/reporting/flows',
       icon: 'Activity',
     },
   },
@@ -328,6 +355,22 @@ export const BUILTIN_PLUGINS: PluginManifest[] = [
         'git',
         'kubectl',
       ],
+      arch: [
+        'zsh',
+        'vim',
+        'neovim',
+        'starship',
+        'tmux',
+        'zsh-autosuggestions',
+        'zsh-syntax-highlighting',
+        'fzf',
+        'zoxide',
+        'bat',
+        'ripgrep',
+        'fd',
+        'git',
+        'kubectl',
+      ],
     },
     cliBinaries: ['zsh', 'vim', 'nvim', 'starship', 'tmux', 'kubectl', 'helm'],
   },
@@ -343,6 +386,7 @@ export const BUILTIN_PLUGINS: PluginManifest[] = [
     packages: {
       debian: ['nmap', 'dnsutils', 'net-tools', 'btop', 'htop', 'iftop', 'iotop', 'slurm', 'sysstat'],
       alpine: ['nmap', 'bind-tools', 'net-tools', 'btop', 'htop', 'iftop', 'sysstat'],
+      arch: ['nmap', 'bind', 'net-tools', 'btop', 'htop', 'iftop', 'iotop-c', 'sysstat'],
     },
     cliBinaries: ['nmap', 'dig', 'netstat', 'btop', 'htop', 'iftop', 'iostat', 'mpstat'],
     menuEntry: {
@@ -365,6 +409,7 @@ export const BUILTIN_PLUGINS: PluginManifest[] = [
     packages: {
       debian: ['wireguard-tools'],
       alpine: ['rosenpass', 'wireguard-tools'],
+      arch: ['rosenpass', 'wireguard-tools'],
     },
     cliBinaries: ['rosenpass', 'wg'],
     menuEntry: {
@@ -393,6 +438,7 @@ export const BUILTIN_PLUGINS: PluginManifest[] = [
     packages: {
       debian: ['kubectl', 'mkcert', 'libnss3-tools', 'gettext-base', 'git', 'curl', 'jq'],
       alpine: ['mkcert', 'nss-tools', 'gettext', 'git', 'curl', 'jq'],
+      arch: ['kubectl', 'mkcert', 'nss', 'gettext', 'git', 'curl', 'jq'],
     },
     cliBinaries: ['vow', 'kubectl', 'helm', 'mkcert'],
     ldapIntegration: {
@@ -465,6 +511,17 @@ export const BUILTIN_PLUGINS: PluginManifest[] = [
         'bpftrace',
         'perf',
       ],
+      arch: [
+        'rkhunter',
+        'clamav',
+        'lynis',
+        'aide',
+        'yara',
+        'bpf',
+        'bpftrace',
+        'drgn',
+        'perf',
+      ],
     },
     cliBinaries: [
       'rkhunter',
@@ -531,6 +588,7 @@ export const BUILTIN_PLUGINS: PluginManifest[] = [
     packages: {
       debian: ['nodejs', 'git', 'curl', 'jq', 'sqlite3'],
       alpine: ['nodejs', 'git', 'curl', 'jq', 'sqlite'],
+      arch: ['nodejs', 'git', 'curl', 'jq', 'sqlite'],
     },
     cliBinaries: ['eluvix', 'opencode', 'agy'],
   },
@@ -548,6 +606,7 @@ export const BUILTIN_PLUGINS: PluginManifest[] = [
     packages: {
       debian: ['bpftool', 'linux-perf'],
       alpine: ['bpftool', 'perf'],
+      arch: ['bpf', 'perf'],
     },
     cliBinaries: ['coroot-node-agent', 'bpftool', 'perf'],
     menuEntry: {
@@ -555,6 +614,32 @@ export const BUILTIN_PLUGINS: PluginManifest[] = [
       path: '/reporting/ebpf',
       icon: 'Cpu',
     },
+  },
+  {
+    id: 'ebpf-threat-harvester',
+    name: 'Axonwall Blackbox: Extreme eBPF Threat-LLM Harvester',
+    version: '0.3.1',
+    category: 'extension',
+    defaultEnabled: false,
+    description:
+      'Opt-in Ring-0 eBPF flight recorder & dataset harvester capturing correlated wire flows (TCX), execve/memfd_create process lineage, and guarded TLS uprobes into Causal Episode SFT/RLVR JSONL + Apache Parquet corpora for training threat-detection LLMs.',
+    author: 'Axonwall Core',
+    systemdUnits: [],
+    privileges: ['firewall.rules', 'system.monitoring', 'reporting.flows'],
+    nftHooks: [
+      { table: 'inet axonwall', chain: 'forward', priority: 0 },
+    ],
+    menuEntry: {
+      title: 'Blackbox Harvester',
+      path: '/security/threat-harvester',
+      icon: 'Binary',
+    },
+    packages: {
+      debian: ['bpftool', 'zstd'],
+      alpine: ['bpftool', 'zstd'],
+      arch: ['bpf', 'zstd'],
+    },
+    cliBinaries: ['axonwallctl'],
   },
 ];
 
@@ -674,7 +759,8 @@ export function isPluginEnabled(pluginId: string, state?: Partial<DesiredState> 
     return (
       pluginId === 'core-firewall' ||
       pluginId === 'cli-workstation' ||
-      pluginId === 'host-malware-rootkit'
+      pluginId === 'host-malware-rootkit' ||
+      pluginId === 'coroot-ebpf-apm'
     );
   }
 
@@ -718,9 +804,20 @@ export function isPluginEnabled(pluginId: string, state?: Partial<DesiredState> 
     return entry ? entry.enabled !== false : true;
   }
 
+  // Axonwall Blackbox: Extreme eBPF Threat-LLM Harvester is strictly opt-in
+  if (pluginId === 'ebpf-threat-harvester') {
+    if (state.threatHarvester?.enabled !== undefined) {
+      return state.threatHarvester.enabled;
+    }
+    return Boolean(state.plugins?.some((p) => p.id === 'ebpf-threat-harvester' && p.enabled));
+  }
+
   // Check specific service/extension plugins
   if (pluginId === 'vigilant-octo-waffle') {
-    return Boolean(state.vow?.enabled) || Boolean(state.plugins?.some((p) => p.id === 'vigilant-octo-waffle' && p.enabled));
+    if (state.vow?.enabled !== undefined) {
+      return state.vow.enabled;
+    }
+    return Boolean(state.plugins?.some((p) => p.id === 'vigilant-octo-waffle' && p.enabled));
   }
   if (pluginId === 'eluvix') {
     return Boolean(state.eluvix?.enabled) || Boolean(state.plugins?.some((p) => p.id === 'eluvix' && p.enabled));
@@ -742,6 +839,13 @@ export function isPluginEnabled(pluginId: string, state?: Partial<DesiredState> 
   }
   if (pluginId === 'snmp') {
     return Boolean(state.snmp?.enabled) || Boolean(state.plugins?.some((p) => p.id === 'snmp' && p.enabled));
+  }
+  if (pluginId === 'coroot-ebpf-apm') {
+    const pluginEntry = state.plugins?.find((p) => p.id === 'coroot-ebpf-apm');
+    if (state.observability?.ebpfApm?.enabled !== undefined) {
+      return state.observability.ebpfApm.enabled && (pluginEntry ? pluginEntry.enabled !== false : true);
+    }
+    return pluginEntry ? pluginEntry.enabled !== false : true;
   }
 
   // Generic extension plugin check
@@ -817,6 +921,10 @@ export function enablePluginWithDependencies(
       next.hostDefense = next.hostDefense
         ? { ...next.hostDefense, enabled: true }
         : HostMalwareDefenseConfigSchema.parse({ enabled: true });
+    } else if (id === 'ebpf-threat-harvester') {
+      next.threatHarvester = next.threatHarvester
+        ? { ...next.threatHarvester, enabled: true }
+        : ThreatHarvesterConfigSchema.parse({ enabled: true });
     } else if (id === 'eluvix') {
       next.eluvix = next.eluvix
         ? { ...next.eluvix, enabled: true }
@@ -863,7 +971,25 @@ export function disablePluginWithDependents(
       autoDisabledDependents.push(id);
     }
 
-    if (id === 'core-k3s') {
+    if (id === 'core-firewall') {
+      if (next.capabilities) {
+        next.capabilities.firewallEnabled = false;
+      }
+    } else if (id === 'core-nas') {
+      if (next.capabilities) {
+        next.capabilities.nasEnabled = false;
+      }
+      if (next.nas) {
+        next.nas.enabled = false;
+      }
+    } else if (id === 'core-virt') {
+      if (next.capabilities) {
+        next.capabilities.virtEnabled = false;
+      }
+      if (next.virt) {
+        next.virt.enabled = false;
+      }
+    } else if (id === 'core-k3s') {
       if (next.capabilities) {
         next.capabilities.k3sEnabled = false;
       }
@@ -885,9 +1011,41 @@ export function disablePluginWithDependents(
       if (next.hostDefense) {
         next.hostDefense.enabled = false;
       }
+    } else if (id === 'ebpf-threat-harvester') {
+      if (next.threatHarvester) {
+        next.threatHarvester.enabled = false;
+      }
     } else if (id === 'eluvix') {
       if (next.eluvix) {
         next.eluvix.enabled = false;
+      }
+    } else if (id === 'haproxy') {
+      if (next.haproxy) {
+        next.haproxy.enabled = false;
+      }
+    } else if (id === 'rosenpass') {
+      if (next.rosenpass) {
+        next.rosenpass.enabled = false;
+      }
+    } else if (id === 'freeradius') {
+      if (next.freeradius) {
+        next.freeradius.enabled = false;
+      }
+    } else if (id === 'snmp') {
+      if (next.snmp) {
+        next.snmp.enabled = false;
+      }
+    } else if (id === 'nut-ups') {
+      if (next.ups) {
+        next.ups.enabled = false;
+      }
+    } else if (id === 'headscale') {
+      if (next.headscale) {
+        next.headscale.enabled = false;
+      }
+    } else if (id === 'coroot-ebpf-apm') {
+      if (next.observability?.ebpfApm) {
+        next.observability.ebpfApm.enabled = false;
       }
     }
 
