@@ -1,33 +1,44 @@
 package engine
 
 import (
+	"archive/tar"
+	"archive/zip"
+	"compress/gzip"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
+	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 )
 
 type PluginDefinition struct {
-	ID               string          `json:"id"`
-	Name             string          `json:"name"`
-	Version          string          `json:"version"`
-	Category         string          `json:"category"`
-	Description      string          `json:"description"`
-	Author           string          `json:"author"`
-	DefaultEnabled   bool            `json:"defaultEnabled"`
-	Dependencies     []string        `json:"dependencies,omitempty"`
-	SystemdUnits     []string        `json:"systemdUnits"`
-	Privileges       []string        `json:"privileges"`
-	DebianPackages   []string        `json:"debianPackages"`
-	AlpinePackages   []string        `json:"alpinePackages"`
-	ArchPackages     []string        `json:"archPackages"`
-	RequiredBinaries []string        `json:"requiredBinaries"`
+	ID               string   `json:"id"`
+	Name             string   `json:"name"`
+	Version          string   `json:"version"`
+	Category         string   `json:"category"`
+	Description      string   `json:"description"`
+	Author           string   `json:"author"`
+	DefaultEnabled   bool     `json:"defaultEnabled"`
+	Dependencies     []string `json:"dependencies,omitempty"`
+	SystemdUnits     []string `json:"systemdUnits"`
+	Privileges       []string `json:"privileges"`
+	DebianPackages   []string `json:"debianPackages"`
+	AlpinePackages   []string `json:"alpinePackages"`
+	ArchPackages     []string `json:"archPackages"`
+	RequiredBinaries []string `json:"requiredBinaries"`
 
 	// Binaries are binaries shipped with the plugin: downloaded into
 	// the plugin's own directory, sha256-verified, and extracted
@@ -45,10 +56,10 @@ type PluginDefinition struct {
 	// names ([A-Za-z_][A-Za-z0-9_]*). Values may reference the plugin's
 	// own directory via the ${PLUGIN_DIR} placeholder, expanded by the
 	// daemon/shell integration to the per-plugin directory.
-	Binaries         []PluginBundledBinary `json:"binaries,omitempty"`
-	BinDirs          []string              `json:"binDirs,omitempty"`
-	Env              map[string]string     `json:"env,omitempty"`
-	LdapIntegration  *PluginLDAPSpec       `json:"ldapIntegration,omitempty"`
+	Binaries        []PluginBundledBinary `json:"binaries,omitempty"`
+	BinDirs         []string              `json:"binDirs,omitempty"`
+	Env             map[string]string     `json:"env,omitempty"`
+	LdapIntegration *PluginLDAPSpec       `json:"ldapIntegration,omitempty"`
 }
 
 // PluginBundledBinary declares one binary artifact bundled with a
@@ -96,23 +107,30 @@ type PluginBundledBinary struct {
 }
 
 type PluginStatus struct {
-	ID               string          `json:"id"`
-	Name             string          `json:"name"`
-	Version          string          `json:"version"`
-	Category         string          `json:"category"`
-	Description      string          `json:"description"`
-	Author           string          `json:"author"`
-	Enabled          bool            `json:"enabled"`
-	DefaultEnabled   bool            `json:"defaultEnabled"`
-	Dependencies     []string        `json:"dependencies,omitempty"`
-	Installed        bool            `json:"installed"`
-	Bundled          bool            `json:"bundled"`
-	RequiredBinaries []string        `json:"requiredBinaries"`
-	MissingBinaries  []string        `json:"missingBinaries"`
-	Packages         []string        `json:"packages"`
-	InstalledAt      string          `json:"installedAt,omitempty"`
-	SystemdUnits     []string        `json:"systemdUnits"`
-	LdapIntegration  *PluginLDAPSpec `json:"ldapIntegration,omitempty"`
+	ID               string   `json:"id"`
+	Name             string   `json:"name"`
+	Version          string   `json:"version"`
+	Category         string   `json:"category"`
+	Description      string   `json:"description"`
+	Author           string   `json:"author"`
+	Enabled          bool     `json:"enabled"`
+	DefaultEnabled   bool     `json:"defaultEnabled"`
+	Dependencies     []string `json:"dependencies,omitempty"`
+	Installed        bool     `json:"installed"`
+	Bundled          bool     `json:"bundled"`
+	RequiredBinaries []string `json:"requiredBinaries"`
+	MissingBinaries  []string `json:"missingBinaries"`
+	// BundledBinaries names the bundled binaries that verified
+	// present under this plugin's own directory (archive entry
+	// names, plus required binaries found under BinDirs for
+	// distroPackage entries). Empty when the plugin declares no
+	// Binaries, or when verification failed — a failed verification
+	// must never be reported as a verified bundled binary.
+	BundledBinaries []string        `json:"bundledBinaries,omitempty"`
+	Packages        []string        `json:"packages"`
+	InstalledAt     string          `json:"installedAt,omitempty"`
+	SystemdUnits    []string        `json:"systemdUnits"`
+	LdapIntegration *PluginLDAPSpec `json:"ldapIntegration,omitempty"`
 }
 
 type PluginActionRequest struct {
@@ -330,7 +348,7 @@ func GetExtensionPluginDefinitions() []PluginDefinition {
 			AlpinePackages:   []string{},
 			ArchPackages:     []string{},
 			RequiredBinaries: []string{"emacs"},
-			Binaries:         []PluginBundledBinary{
+			Binaries: []PluginBundledBinary{
 				{
 					Kind:    "distroPackage",
 					Name:    "emacs-nox",
@@ -359,8 +377,8 @@ func GetExtensionPluginDefinitions() []PluginDefinition {
 					Arch:    "all",
 				},
 			},
-			BinDirs:         []string{"usr/bin"},
-			Env:             map[string]string{
+			BinDirs: []string{"usr/bin"},
+			Env: map[string]string{
 				"EMACSDATA": "${PLUGIN_DIR}/usr/share/emacs/30.1",
 			},
 		},
@@ -744,6 +762,865 @@ func hasPluginBinary(osFamily, bin string) bool {
 	return false
 }
 
+// ---------------------------------------------------------------------------
+// Plugin-bundled binaries (daemon runtime)
+//
+// Layout: every plugin that declares Binaries owns one directory,
+// <baseDataDir>/<pluginID>/ ("plugin dir"). distroPackage entries are
+// extracted merged into it with `dpkg-deb -x`, so a .deb's usr/bin,
+// usr/share/... land directly under the plugin dir. Archive entries
+// extract into <plugindir>/bin/, their declared binary landing at
+// <plugindir>/bin/<name> unless PathInArchive says otherwise.
+// BinDirs are relative to the plugin dir (e.g. "usr/bin") and are
+// prepended to PATH for daemon invocations of that plugin's commands.
+//
+// Trust model: nothing under a plugin dir is trusted on the strength
+// of having been downloaded once. Install sha256-verifies every
+// artifact before extraction and writes bundled.json (one record per
+// installed file); every later use re-verifies bundled.json and the
+// manifest's expected binaries before exec, and ListPlugins reports
+// the plugin uninstalled while verification fails. A plugin whose
+// manifest still carries SHA256_TODO_* placeholders can never
+// install: validation rejects non-hex digests outright.
+// ---------------------------------------------------------------------------
+
+var (
+	pluginIDPattern   = regexp.MustCompile(`^[a-z0-9-]+$`)
+	sha256HexPattern  = regexp.MustCompile(`^[0-9a-fA-F]{64}$`)
+	envKeyPattern     = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+	debNamePattern    = regexp.MustCompile(`^[a-z0-9][a-z0-9+.-]*$`)
+	debVersionPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9.+~:-]*$`)
+	debArchPattern    = regexp.MustCompile(`^[a-z0-9]+$`)
+)
+
+// pluginDir returns the per-plugin directory for pluginID. The id is
+// validated first: an unvalidated id joined onto baseDataDir would let
+// a caller escape the plugins tree ("../..."), so anything outside
+// ^[a-z0-9-]+$ is refused, never cleaned up silently.
+func (pm *PluginManager) pluginDir(pluginID string) (string, error) {
+	if !pluginIDPattern.MatchString(pluginID) {
+		return "", fmt.Errorf("invalid plugin id %q: must match ^[a-z0-9-]+$", pluginID)
+	}
+	return filepath.Join(pm.baseDataDir, pluginID), nil
+}
+
+// validBinDir reports whether a BinDirs entry is safe to join onto a
+// plugin dir: relative, non-empty, no ".." segment, no backslash
+// (a Windows separator smuggled into a Unix path).
+func validBinDir(dir string) bool {
+	if dir == "" || filepath.IsAbs(dir) || strings.Contains(dir, "\\") {
+		return false
+	}
+	for _, seg := range strings.Split(filepath.ToSlash(dir), "/") {
+		if seg == ".." || seg == "" {
+			return false
+		}
+	}
+	return true
+}
+
+// validateBundledBinaries checks a plugin definition's Binaries,
+// BinDirs and Env and fails closed on the first problem, naming the
+// offending entry. It runs at install time, before anything is
+// downloaded: a SHA256_TODO_* placeholder, an unknown kind, a
+// non-http(s) archive URL, or a distroPackage entry for a distro
+// other than this host's all refuse the install rather than
+// proceeding with an unverified or wrong-distro artifact.
+func (pm *PluginManager) validateBundledBinaries(def PluginDefinition) error {
+	seenNames := make(map[string]bool, len(def.Binaries))
+	for _, b := range def.Binaries {
+		if b.Name == "" {
+			return fmt.Errorf("bundled binary entry has an empty name (kind %q)", b.Kind)
+		}
+		if strings.ContainsAny(b.Name, `/\`) || b.Name == "." || b.Name == ".." {
+			return fmt.Errorf("bundled binary %q: name must be a plain file name, not a path", b.Name)
+		}
+		if seenNames[b.Name] {
+			return fmt.Errorf("bundled binary %q: duplicate binary name", b.Name)
+		}
+		seenNames[b.Name] = true
+		// SHA256 must be exactly 64 hex chars. This rejects the
+		// SHA256_TODO_* placeholders by construction: an install
+		// of a plugin whose hashes are not yet resolved must fail
+		// here, never download an unverifiable artifact.
+		if !sha256HexPattern.MatchString(b.SHA256) {
+			return fmt.Errorf("bundled binary %q: sha256 must be a 64-char hex digest (placeholders are not installable)", b.Name)
+		}
+		switch b.Kind {
+		case "archive":
+			if b.URL == "" {
+				return fmt.Errorf("bundled binary %q (archive): url is required", b.Name)
+			}
+			u, err := url.Parse(b.URL)
+			if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+				return fmt.Errorf("bundled binary %q (archive): url %q must be an http(s) URL", b.Name, b.URL)
+			}
+			if b.Distro != "" || b.Package != "" || b.Version != "" || b.Arch != "" {
+				return fmt.Errorf("bundled binary %q (archive): distro/package/version/arch must be empty for kind archive", b.Name)
+			}
+			switch strings.ToLower(strings.TrimSpace(b.Format)) {
+			case "", "tar", "tar.gz", "tgz", "zip":
+			default:
+				return fmt.Errorf("bundled binary %q (archive): unsupported format %q (want tar, tar.gz, tgz or zip)", b.Name, b.Format)
+			}
+			if b.PathInArchive != "" {
+				if filepath.IsAbs(b.PathInArchive) || strings.Contains(b.PathInArchive, "\\") {
+					return fmt.Errorf("bundled binary %q (archive): pathInArchive %q must be a relative path", b.Name, b.PathInArchive)
+				}
+				for _, seg := range strings.Split(filepath.ToSlash(b.PathInArchive), "/") {
+					if seg == ".." {
+						return fmt.Errorf("bundled binary %q (archive): pathInArchive %q must not contain ..", b.Name, b.PathInArchive)
+					}
+				}
+			}
+		case "distroPackage":
+			if b.URL != "" {
+				return fmt.Errorf("bundled binary %q (distroPackage): url must be empty for kind distroPackage", b.Name)
+			}
+			if b.Distro == "" || b.Package == "" || b.Version == "" || b.Arch == "" {
+				return fmt.Errorf("bundled binary %q (distroPackage): distro, package, version and arch are all required", b.Name)
+			}
+			// Debian-only for now, and only for this host's distro:
+			// a non-matching distro is an error at install, not a
+			// silent skip — silently skipping would leave the
+			// plugin "installed" without the binary it needs.
+			if b.Distro != "debian" {
+				return fmt.Errorf("bundled binary %q (distroPackage): distro %q is not supported (debian only)", b.Name, b.Distro)
+			}
+			if pm.osFamily != "debian" {
+				return fmt.Errorf("bundled binary %q (distroPackage): host osFamily is %q, not debian; distroPackage entries cannot install here", b.Name, pm.osFamily)
+			}
+			if !debNamePattern.MatchString(b.Package) {
+				return fmt.Errorf("bundled binary %q (distroPackage): package %q is not a valid Debian package name", b.Name, b.Package)
+			}
+			if !debVersionPattern.MatchString(b.Version) || strings.ContainsAny(b.Version, `/\`) {
+				return fmt.Errorf("bundled binary %q (distroPackage): version %q is not a valid Debian version", b.Name, b.Version)
+			}
+			if !debArchPattern.MatchString(b.Arch) {
+				return fmt.Errorf("bundled binary %q (distroPackage): arch %q is not valid", b.Name, b.Arch)
+			}
+		default:
+			return fmt.Errorf("bundled binary %q: unknown kind %q (want archive or distroPackage)", b.Name, b.Kind)
+		}
+	}
+	for _, dir := range def.BinDirs {
+		if !validBinDir(dir) {
+			return fmt.Errorf("plugin %q: binDir %q must be a non-empty relative path with no .., no backslash and no leading /", def.ID, dir)
+		}
+	}
+	for key := range def.Env {
+		if !envKeyPattern.MatchString(key) {
+			return fmt.Errorf("plugin %q: env key %q is not a valid environment variable name", def.ID, key)
+		}
+	}
+	return nil
+}
+
+// bundledBinaryRecord is one row of <plugindir>/bundled.json: the
+// installed file (relative to the plugin dir), the sha256 of the
+// bytes actually on disk after extraction, and the manifest entry it
+// came from. It is the record verifyBundledBinaries checks on use.
+type bundledBinaryRecord struct {
+	Path   string `json:"path"`
+	SHA256 string `json:"sha256"`
+	Entry  string `json:"entry"`
+	Kind   string `json:"kind"`
+}
+
+type bundledBinariesFile struct {
+	PluginID string                `json:"pluginId"`
+	Files    []bundledBinaryRecord `json:"files"`
+}
+
+func bundledRecordPath(pluginDir string) string {
+	return filepath.Join(pluginDir, "bundled.json")
+}
+
+// sha256File returns the lowercase hex sha256 of a file's contents.
+func sha256File(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// downloadVerified fetches rawURL with a timeout, streams it to a
+// temp file under tmpDir while hashing, and fails closed unless the
+// bytes' sha256 equals wantSHA256. The temp file is returned on
+// success; the caller removes it. No shell curl: pure net/http.
+func downloadVerified(rawURL, wantSHA256, tmpDir string) (string, error) {
+	client := &http.Client{Timeout: 5 * time.Minute}
+	resp, err := client.Get(rawURL)
+	if err != nil {
+		return "", fmt.Errorf("download %s: %w", rawURL, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("download %s: unexpected HTTP status %s", rawURL, resp.Status)
+	}
+	tmp, err := os.CreateTemp(tmpDir, "axonwall-plugin-download-*")
+	if err != nil {
+		return "", err
+	}
+	tmpPath := tmp.Name()
+	// Cap the download so a malicious or misconfigured upstream
+	// cannot fill the disk: bundled binaries are small artifacts.
+	h := sha256.New()
+	if _, err := io.Copy(tmp, io.TeeReader(io.LimitReader(resp.Body, 1<<30), h)); err != nil {
+		tmp.Close()
+		os.Remove(tmpPath)
+		return "", fmt.Errorf("download %s: %w", rawURL, err)
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpPath)
+		return "", fmt.Errorf("download %s: %w", rawURL, err)
+	}
+	if got := hex.EncodeToString(h.Sum(nil)); got != strings.ToLower(wantSHA256) {
+		os.Remove(tmpPath)
+		return "", fmt.Errorf("download %s: sha256 mismatch: got %s, want %s; refusing to use unverified bytes", rawURL, got, wantSHA256)
+	}
+	return tmpPath, nil
+}
+
+// debianPoolURL builds the download URL for a distroPackage entry
+// from the Debian pool convention:
+//
+//	http://deb.debian.org/debian/pool/main/<dir>/<source>/<pkg>_<version-no-epoch>_<arch>.deb
+//
+// where <dir> is the source package's first letter ("lib" + first
+// letter for lib* sources, per the pool layout) and the epoch
+// ("1:" in "1:30.1+1-6") is dropped from the filename.
+//
+// LIMITATION: the manifest schema has no source-package field, so
+// this assumes source == package name (the source directory is the
+// package name). That holds for emacs-nox/emacs-bin-common/
+// emacs-common (source package "emacs") and for most binary
+// packages, but NOT for packages built from a differently-named
+// source (e.g. a binary whose source package differs). Such an
+// entry would 404 at download time and fail closed; a source field
+// must be added to the schema before those packages can be bundled.
+func debianPoolURL(b PluginBundledBinary) (string, error) {
+	source := b.Package // see LIMITATION above: source == package name
+	if source == "" {
+		return "", fmt.Errorf("bundled binary %q: package is empty", b.Name)
+	}
+	dir := source[:1]
+	if strings.HasPrefix(source, "lib") && len(source) >= 4 {
+		dir = source[:4]
+	}
+	ver := b.Version
+	if i := strings.Index(ver, ":"); i >= 0 {
+		ver = ver[i+1:]
+	}
+	if ver == "" {
+		return "", fmt.Errorf("bundled binary %q: version %q has no version after the epoch", b.Name, b.Version)
+	}
+	file := fmt.Sprintf("%s_%s_%s.deb", b.Package, ver, b.Arch)
+	return fmt.Sprintf("http://deb.debian.org/debian/pool/main/%s/%s/%s", dir, source, file), nil
+}
+
+// safeArchiveName cleans an archive member name and rejects anything
+// that could escape the destination: absolute paths, ".." segments,
+// backslashes, and non-regular entries (symlinks/hardlinks/devices
+// are refused, never followed — a crafted archive must not be able
+// to plant a symlink pointing outside the plugin dir).
+func safeArchiveName(name string) (string, bool) {
+	cleaned := filepath.ToSlash(filepath.Clean("/" + strings.TrimPrefix(name, "./")))
+	cleaned = strings.TrimPrefix(cleaned, "/")
+	if cleaned == "" || cleaned == "." {
+		return "", false
+	}
+	for _, seg := range strings.Split(cleaned, "/") {
+		if seg == ".." {
+			return "", false
+		}
+	}
+	return cleaned, true
+}
+
+// archiveMemberMatches reports whether archive member name matches
+// the declared PathInArchive (default: the binary Name). An exact
+// cleaned-path match wins; a bare file name also matches a member
+// whose base name is that file, so release tarballs that wrap the
+// binary in a top-level directory still resolve.
+func archiveMemberMatches(member, want string) bool {
+	cleaned, ok := safeArchiveName(member)
+	if !ok {
+		return false
+	}
+	if cleaned == want {
+		return true
+	}
+	if !strings.Contains(want, "/") && filepath.Base(cleaned) == want {
+		return true
+	}
+	return false
+}
+
+// extractArchiveBinary extracts exactly one file — the declared
+// binary — from archivePath into <pluginDir>/bin/<name> and returns
+// its relative path. Only that file is written; every other member
+// is ignored, and a symlink/hardlink member or a second member
+// matching the wanted file fails the install.
+func extractArchiveBinary(archivePath, format, want, name, pluginDir string) (string, error) {
+	binDir := filepath.Join(pluginDir, "bin")
+	if err := os.MkdirAll(binDir, 0755); err != nil {
+		return "", err
+	}
+	dest := filepath.Join(binDir, name)
+	relDest := filepath.Join("bin", name)
+
+	writeMember := func(r io.Reader) error {
+		f, err := os.OpenFile(dest, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0755)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		if _, err := io.Copy(f, r); err != nil {
+			os.Remove(dest)
+			return err
+		}
+		return nil
+	}
+
+	format = strings.ToLower(strings.TrimSpace(format))
+	if format == "" {
+		format = "tar"
+	}
+	found := false
+	switch format {
+	case "zip":
+		zr, err := zip.OpenReader(archivePath)
+		if err != nil {
+			return "", fmt.Errorf("extract archive: %w", err)
+		}
+		defer zr.Close()
+		for _, member := range zr.File {
+			if member.FileInfo().IsDir() {
+				continue
+			}
+			if member.FileInfo().Mode()&os.ModeSymlink != 0 || !member.FileInfo().Mode().IsRegular() {
+				return "", fmt.Errorf("extract archive: refusing non-regular member %q", member.Name)
+			}
+			if !archiveMemberMatches(member.Name, want) {
+				continue
+			}
+			if found {
+				return "", fmt.Errorf("extract archive: multiple members match %q; refusing ambiguous archive", want)
+			}
+			rc, err := member.Open()
+			if err != nil {
+				return "", fmt.Errorf("extract archive: %w", err)
+			}
+			err = writeMember(rc)
+			rc.Close()
+			if err != nil {
+				return "", err
+			}
+			found = true
+		}
+	case "tar", "tar.gz", "tgz":
+		f, err := os.Open(archivePath)
+		if err != nil {
+			return "", err
+		}
+		defer f.Close()
+		var tr *tar.Reader
+		if format == "tar" {
+			tr = tar.NewReader(f)
+		} else {
+			gz, err := gzip.NewReader(f)
+			if err != nil {
+				return "", fmt.Errorf("extract archive: %w", err)
+			}
+			defer gz.Close()
+			tr = tar.NewReader(gz)
+		}
+		for {
+			hdr, err := tr.Next()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				return "", fmt.Errorf("extract archive: %w", err)
+			}
+			if hdr.Typeflag != tar.TypeReg {
+				// Symlinks, hardlinks, devices, dirs: never
+				// follow or create them from an untrusted archive.
+				if hdr.Typeflag == tar.TypeSymlink || hdr.Typeflag == tar.TypeLink {
+					return "", fmt.Errorf("extract archive: refusing link member %q", hdr.Name)
+				}
+				continue
+			}
+			if !archiveMemberMatches(hdr.Name, want) {
+				continue
+			}
+			if found {
+				return "", fmt.Errorf("extract archive: multiple members match %q; refusing ambiguous archive", want)
+			}
+			if err := writeMember(tr); err != nil {
+				return "", err
+			}
+			found = true
+		}
+	default:
+		return "", fmt.Errorf("extract archive: unsupported format %q", format)
+	}
+	if !found {
+		return "", fmt.Errorf("extract archive: no member %q found in archive", want)
+	}
+	if err := os.Chmod(dest, 0755); err != nil {
+		return "", err
+	}
+	return relDest, nil
+}
+
+// recordInstalledFiles walks pluginDir after an entry was extracted
+// and records every regular file not yet recorded, attributed to
+// that entry, hashing the bytes on disk. It runs per entry, so files
+// from an earlier entry are already recorded and the new ones belong
+// to the entry just extracted. bundled.json itself is excluded.
+func recordInstalledFiles(pluginDir string, entry PluginBundledBinary, seen map[string]bool, records *[]bundledBinaryRecord) error {
+	return filepath.WalkDir(pluginDir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() || !d.Type().IsRegular() {
+			return nil
+		}
+		rel, err := filepath.Rel(pluginDir, path)
+		if err != nil {
+			return err
+		}
+		rel = filepath.ToSlash(rel)
+		if rel == "bundled.json" || seen[rel] {
+			return nil
+		}
+		sum, err := sha256File(path)
+		if err != nil {
+			return err
+		}
+		seen[rel] = true
+		*records = append(*records, bundledBinaryRecord{Path: rel, SHA256: sum, Entry: entry.Name, Kind: entry.Kind})
+		return nil
+	})
+}
+
+// installBundledBinaries downloads, sha256-verifies and extracts
+// every Binaries entry of def into the plugin dir. Archive entries
+// land in <plugindir>/bin/; distroPackage entries are extracted
+// merged into the plugin dir with `dpkg-deb -x` (the one shell-out
+// allowed here — dpkg-deb itself is the format's extractor, and a
+// missing dpkg-deb fails closed). On any error the install aborts
+// and bundled.json is NOT written, so a half-extracted tree can
+// never pass verifyBundledBinaries. Callers must validate first.
+func (pm *PluginManager) installBundledBinaries(def PluginDefinition) error {
+	pluginDir, err := pm.pluginDir(def.ID)
+	if err != nil {
+		return err
+	}
+	// Start from a clean tree: files left over from a previous
+	// version of the plugin must not linger and get recorded as if
+	// the new manifest installed them. (A failed install leaves no
+	// bundled.json, so the cleaned tree still fails verification.)
+	if err := os.RemoveAll(pluginDir); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(pluginDir, 0755); err != nil {
+		return err
+	}
+	tmpDir, err := os.MkdirTemp("", "axonwall-plugin-bundled-*")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(tmpDir)
+
+	var records []bundledBinaryRecord
+	seen := make(map[string]bool)
+	for _, b := range def.Binaries {
+		switch b.Kind {
+		case "archive":
+			want := b.PathInArchive
+			if want == "" {
+				want = b.Name
+			}
+			tmpPath, err := downloadVerified(b.URL, b.SHA256, tmpDir)
+			if err != nil {
+				return fmt.Errorf("bundled binary %q: %w", b.Name, err)
+			}
+			rel, err := extractArchiveBinary(tmpPath, b.Format, want, b.Name, pluginDir)
+			os.Remove(tmpPath)
+			if err != nil {
+				return fmt.Errorf("bundled binary %q: %w", b.Name, err)
+			}
+			sum, err := sha256File(filepath.Join(pluginDir, rel))
+			if err != nil {
+				return fmt.Errorf("bundled binary %q: %w", b.Name, err)
+			}
+			seen[filepath.ToSlash(rel)] = true
+			records = append(records, bundledBinaryRecord{Path: filepath.ToSlash(rel), SHA256: sum, Entry: b.Name, Kind: b.Kind})
+		case "distroPackage":
+			if pm.osFamily != "debian" {
+				return fmt.Errorf("bundled binary %q (distroPackage): host osFamily is %q, not debian", b.Name, pm.osFamily)
+			}
+			dpkgDeb, err := exec.LookPath("dpkg-deb")
+			if err != nil {
+				return fmt.Errorf("bundled binary %q (distroPackage): dpkg-deb is not available on this host; cannot extract .deb packages", b.Name)
+			}
+			poolURL, err := debianPoolURL(b)
+			if err != nil {
+				return fmt.Errorf("bundled binary %q: %w", b.Name, err)
+			}
+			tmpPath, err := downloadVerified(poolURL, b.SHA256, tmpDir)
+			if err != nil {
+				return fmt.Errorf("bundled binary %q: %w", b.Name, err)
+			}
+			// dpkg-deb -x extracts only; nothing is installed
+			// into the system and no maintainer scripts run.
+			cmd := exec.Command(dpkgDeb, "-x", tmpPath, pluginDir)
+			if out, err := cmd.CombinedOutput(); err != nil {
+				os.Remove(tmpPath)
+				return fmt.Errorf("bundled binary %q: dpkg-deb -x failed: %w (output: %s)", b.Name, err, strings.TrimSpace(string(out)))
+			}
+			os.Remove(tmpPath)
+			if err := recordInstalledFiles(pluginDir, b, seen, &records); err != nil {
+				return fmt.Errorf("bundled binary %q: %w", b.Name, err)
+			}
+		default:
+			return fmt.Errorf("bundled binary %q: unknown kind %q", b.Name, b.Kind)
+		}
+	}
+
+	// Executable bits on everything under the declared BinDirs:
+	// extracted .deb trees carry their own modes, but an archive
+	// entry's binary and any helper under a bin dir must be
+	// runnable by the daemon without relying on archive modes.
+	for _, binDir := range def.BinDirs {
+		root := filepath.Join(pluginDir, filepath.FromSlash(binDir))
+		_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+			if err != nil || d.IsDir() || !d.Type().IsRegular() {
+				return nil
+			}
+			_ = os.Chmod(path, 0755)
+			return nil
+		})
+	}
+
+	// Only now, with every entry extracted and hashed, is the
+	// verification record written: a failed install leaves no
+	// bundled.json, so verify can never bless a partial tree.
+	sort.Slice(records, func(i, j int) bool { return records[i].Path < records[j].Path })
+	data, err := json.MarshalIndent(bundledBinariesFile{PluginID: def.ID, Files: records}, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(bundledRecordPath(pluginDir), data, 0644); err != nil {
+		return err
+	}
+	return nil
+}
+
+// expectedBundledBinary returns the on-disk location of the binary a
+// manifest entry provides, and whether that location is meaningful
+// to check. Archive entries provide <plugindir>/bin/<name> directly.
+// A distroPackage entry provides no single binary by name — its
+// package name (e.g. "emacs-nox") is not a file — so its expected
+// binaries are the plugin's RequiredBinaries under its BinDirs
+// (for cli-emacs: usr/bin/emacs). That is what verify checks for
+// distroPackage entries.
+func (pm *PluginManager) expectedBundledBinaries(def PluginDefinition) []string {
+	pluginDir, err := pm.pluginDir(def.ID)
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, b := range def.Binaries {
+		switch b.Kind {
+		case "archive":
+			out = append(out, filepath.Join(pluginDir, "bin", b.Name))
+		case "distroPackage":
+			for _, bin := range def.RequiredBinaries {
+				for _, binDir := range def.BinDirs {
+					out = append(out, filepath.Join(pluginDir, filepath.FromSlash(binDir), bin))
+				}
+			}
+		}
+	}
+	return out
+}
+
+// bundledBinariesVerifiedNames lists the bundled binaries that are
+// present and executable, for PluginStatus.BundledBinaries: archive
+// entry names, plus required binaries found under a BinDir for
+// distroPackage entries.
+func (pm *PluginManager) bundledBinariesVerifiedNames(def PluginDefinition) []string {
+	pluginDir, err := pm.pluginDir(def.ID)
+	if err != nil {
+		return nil
+	}
+	seen := make(map[string]bool)
+	var out []string
+	add := func(name string) {
+		if !seen[name] {
+			seen[name] = true
+			out = append(out, name)
+		}
+	}
+	for _, b := range def.Binaries {
+		switch b.Kind {
+		case "archive":
+			if isExecutableFile(filepath.Join(pluginDir, "bin", b.Name)) {
+				add(b.Name)
+			}
+		case "distroPackage":
+			for _, bin := range def.RequiredBinaries {
+				for _, binDir := range def.BinDirs {
+					if isExecutableFile(filepath.Join(pluginDir, filepath.FromSlash(binDir), bin)) {
+						add(bin)
+					}
+				}
+			}
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+func isExecutableFile(path string) bool {
+	info, err := os.Stat(path)
+	if err != nil || info.IsDir() {
+		return false
+	}
+	return info.Mode().Perm()&0111 != 0
+}
+
+// verifyBundledBinaries re-verifies a plugin's bundled binaries
+// before use and fails closed on any discrepancy. It re-reads
+// <plugindir>/bundled.json and requires every listed file to exist
+// with a matching sha256, and requires every manifest entry's
+// expected binary to be present and executable at its expected
+// location. A missing bundled.json, a missing or tampered file, or
+// a missing expected binary is an error — never a warning — so a
+// caller can never exec a binary it has not just verified.
+func (pm *PluginManager) verifyBundledBinaries(def PluginDefinition) error {
+	if len(def.Binaries) == 0 {
+		return nil
+	}
+	pluginDir, err := pm.pluginDir(def.ID)
+	if err != nil {
+		return err
+	}
+	data, err := os.ReadFile(bundledRecordPath(pluginDir))
+	if err != nil {
+		return fmt.Errorf("plugin %q: bundled verification record %s is missing or unreadable: %w; refusing to use unverified bundled binaries", def.ID, bundledRecordPath(pluginDir), err)
+	}
+	var rec bundledBinariesFile
+	if err := json.Unmarshal(data, &rec); err != nil {
+		return fmt.Errorf("plugin %q: bundled verification record is corrupt: %w", def.ID, err)
+	}
+	if rec.PluginID != "" && rec.PluginID != def.ID {
+		return fmt.Errorf("plugin %q: bundled verification record belongs to plugin %q", def.ID, rec.PluginID)
+	}
+	if len(rec.Files) == 0 {
+		return fmt.Errorf("plugin %q: bundled verification record lists no files", def.ID)
+	}
+	for _, r := range rec.Files {
+		if r.Path == "" || filepath.IsAbs(r.Path) || strings.Contains(r.Path, "..") {
+			return fmt.Errorf("plugin %q: bundled verification record has unsafe path %q", def.ID, r.Path)
+		}
+		full := filepath.Join(pluginDir, filepath.FromSlash(r.Path))
+		sum, err := sha256File(full)
+		if err != nil {
+			return fmt.Errorf("plugin %q: bundled file %q is missing or unreadable: %w", def.ID, r.Path, err)
+		}
+		if sum != strings.ToLower(r.SHA256) {
+			return fmt.Errorf("plugin %q: bundled file %q sha256 mismatch: got %s, want %s; refusing to use tampered bundled binaries", def.ID, r.Path, sum, r.SHA256)
+		}
+	}
+	for _, expected := range pm.expectedBundledBinaries(def) {
+		if !isExecutableFile(expected) {
+			rel, _ := filepath.Rel(pluginDir, expected)
+			return fmt.Errorf("plugin %q: expected bundled binary %q is missing or not executable", def.ID, filepath.ToSlash(rel))
+		}
+	}
+	return nil
+}
+
+// hasPluginBinaryForPlugin checks the system PATH first (including
+// the freeradius/radiusd alias), then the plugin's own BinDirs under
+// its plugin dir, for an executable file named bin. A bundled
+// binary therefore counts as present without ever being installed
+// into the system.
+func (pm *PluginManager) hasPluginBinaryForPlugin(def PluginDefinition, bin string) bool {
+	if hasPluginBinary(pm.osFamily, bin) {
+		return true
+	}
+	pluginDir, err := pm.pluginDir(def.ID)
+	if err != nil {
+		return false
+	}
+	for _, binDir := range def.BinDirs {
+		if !validBinDir(binDir) {
+			continue
+		}
+		if isExecutableFile(filepath.Join(pluginDir, filepath.FromSlash(binDir), bin)) {
+			return true
+		}
+	}
+	// Archive entries live in <plugindir>/bin/ even when the
+	// manifest declares no BinDirs.
+	if isExecutableFile(filepath.Join(pluginDir, "bin", bin)) {
+		return true
+	}
+	return false
+}
+
+// PluginEnv returns the environment for invoking a plugin's
+// commands, as KEY=value strings: the full current environment,
+// with PATH rebuilt as the plugin's BinDirs (absolute paths, in
+// declared order) prepended to the current PATH, and the plugin's
+// Env map overlaid with ${PLUGIN_DIR} expanded to the plugin dir.
+// Binaries are resolved through this PATH by CommandForPlugin, so a
+// bundled binary shadows any same-named system binary — which is
+// the point of bundling it.
+func (pm *PluginManager) PluginEnv(pluginID string) ([]string, error) {
+	def, ok := findExtensionPluginDefinition(pluginID)
+	if !ok {
+		return nil, fmt.Errorf("unknown plugin ID %q", pluginID)
+	}
+	pluginDir, err := pm.pluginDir(pluginID)
+	if err != nil {
+		return nil, err
+	}
+	pathParts := make([]string, 0, len(def.BinDirs)+1)
+	for _, binDir := range def.BinDirs {
+		if !validBinDir(binDir) {
+			continue
+		}
+		pathParts = append(pathParts, filepath.Join(pluginDir, filepath.FromSlash(binDir)))
+	}
+	if cur := os.Getenv("PATH"); cur != "" {
+		pathParts = append(pathParts, cur)
+	}
+	env := os.Environ()
+	out := make([]string, 0, len(env)+len(def.Env)+1)
+	replacedPath := false
+	for _, kv := range env {
+		if strings.HasPrefix(kv, "PATH=") {
+			out = append(out, "PATH="+strings.Join(pathParts, string(os.PathListSeparator)))
+			replacedPath = true
+			continue
+		}
+		out = append(out, kv)
+	}
+	if !replacedPath {
+		out = append(out, "PATH="+strings.Join(pathParts, string(os.PathListSeparator)))
+	}
+	keys := make([]string, 0, len(def.Env))
+	for k := range def.Env {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	expanded := make(map[string]string, len(def.Env))
+	for _, k := range keys {
+		expanded[k] = strings.ReplaceAll(def.Env[k], "${PLUGIN_DIR}", pluginDir)
+	}
+	for i, kv := range out {
+		if k, _, ok := strings.Cut(kv, "="); ok {
+			if v, exists := expanded[k]; exists {
+				out[i] = k + "=" + v
+				delete(expanded, k)
+			}
+		}
+	}
+	for _, k := range keys {
+		if v, ok := expanded[k]; ok {
+			out = append(out, k+"="+v)
+		}
+	}
+	return out, nil
+}
+
+// failingPluginCommand returns a command that fails with a
+// descriptive error instead of silently running the wrong binary
+// (or nothing at all). CommandForPlugin uses it when the binary
+// cannot be resolved or the bundled binaries fail verification.
+func failingPluginCommand(msg string) *exec.Cmd {
+	return exec.Command("sh", "-c", "printf '%s\\n' "+strconv.Quote(msg)+" >&2; exit 127")
+}
+
+// CommandForPlugin builds a command to run a plugin's binary with
+// that plugin's environment (see PluginEnv). The binary is resolved
+// through the plugin's BinDirs first, then the system PATH, so a
+// bundled binary is preferred over a system one of the same name.
+// For plugins that declare Binaries, the bundled tree is
+// re-verified before exec and any failure yields a command that
+// fails descriptively rather than running an unverified binary.
+func (pm *PluginManager) CommandForPlugin(pluginID, name string, args ...string) *exec.Cmd {
+	def, ok := findExtensionPluginDefinition(pluginID)
+	if !ok {
+		return failingPluginCommand(fmt.Sprintf("axonwall: unknown plugin %q", pluginID))
+	}
+	if name == "" || strings.Contains(name, "..") || filepath.IsAbs(name) {
+		return failingPluginCommand(fmt.Sprintf("axonwall: plugin %q: refusing to run binary name %q", pluginID, name))
+	}
+	if len(def.Binaries) > 0 {
+		if err := pm.verifyBundledBinaries(def); err != nil {
+			return failingPluginCommand(fmt.Sprintf("axonwall: plugin %q: %v", pluginID, err))
+		}
+	}
+	pluginDir, err := pm.pluginDir(pluginID)
+	if err != nil {
+		return failingPluginCommand(fmt.Sprintf("axonwall: plugin %q: %v", pluginID, err))
+	}
+	var resolved string
+	if !strings.ContainsRune(name, '/') {
+		for _, binDir := range def.BinDirs {
+			if !validBinDir(binDir) {
+				continue
+			}
+			candidate := filepath.Join(pluginDir, filepath.FromSlash(binDir), name)
+			if isExecutableFile(candidate) {
+				resolved = candidate
+				break
+			}
+		}
+		if resolved == "" {
+			if candidate := filepath.Join(pluginDir, "bin", name); isExecutableFile(candidate) {
+				resolved = candidate
+			}
+		}
+	} else {
+		// A relative path such as "usr/bin/emacs": resolve it
+		// under the plugin dir only, never the system.
+		candidate := filepath.Join(pluginDir, filepath.FromSlash(name))
+		if isExecutableFile(candidate) {
+			resolved = candidate
+		}
+	}
+	if resolved == "" {
+		if found, err := exec.LookPath(name); err == nil {
+			resolved = found
+		}
+	}
+	if resolved == "" {
+		return failingPluginCommand(fmt.Sprintf("axonwall: plugin %q: binary %q not found in plugin directories or system PATH", pluginID, name))
+	}
+	env, err := pm.PluginEnv(pluginID)
+	if err != nil {
+		return failingPluginCommand(fmt.Sprintf("axonwall: plugin %q: %v", pluginID, err))
+	}
+	cmd := exec.Command(resolved, args...)
+	cmd.Env = env
+	return cmd
+}
+
 func (pm *PluginManager) ListPlugins() []PluginStatus {
 	pm.mu.RLock()
 	defer pm.mu.RUnlock()
@@ -757,8 +1634,35 @@ func (pm *PluginManager) ListPlugins() []PluginStatus {
 			if bin == "debsums" && pm.osFamily != "debian" {
 				continue
 			}
-			if !hasPluginBinary(pm.osFamily, bin) {
+			if !pm.hasPluginBinaryForPlugin(d, bin) {
 				missing = append(missing, bin)
+			}
+		}
+
+		// Bundled binaries: a plugin whose binaries are all
+		// bundled and verified reads as installed with zero
+		// missing binaries even when the system has none of them
+		// — but only while verification passes. A failed
+		// verification counts every required binary as missing
+		// and the plugin is not reported installed, so the UI can
+		// never show a plugin installed on an unverified tree.
+		var bundledBinaries []string
+		if len(d.Binaries) > 0 {
+			if err := pm.verifyBundledBinaries(d); err != nil {
+				for _, bin := range d.RequiredBinaries {
+					found := false
+					for _, m := range missing {
+						if m == bin {
+							found = true
+							break
+						}
+					}
+					if !found {
+						missing = append(missing, bin)
+					}
+				}
+			} else {
+				bundledBinaries = pm.bundledBinariesVerifiedNames(d)
 			}
 		}
 
@@ -796,6 +1700,7 @@ func (pm *PluginManager) ListPlugins() []PluginStatus {
 			Bundled:          bundled,
 			RequiredBinaries: d.RequiredBinaries,
 			MissingBinaries:  missing,
+			BundledBinaries:  bundledBinaries,
 			Packages:         pkgs,
 			InstalledAt:      installedAt,
 			SystemdUnits:     d.SystemdUnits,
@@ -1134,6 +2039,28 @@ func (pm *PluginManager) InstallPlugin(pluginID string) PluginActionResponse {
 		}
 	}
 
+	// Bundled binaries: validate then download/verify/extract into
+	// the plugin's own directory, before any post-install hook runs.
+	// Any failure aborts the install — the plugin is NOT recorded
+	// installed and hooks do not run — so a half-bundled plugin can
+	// never be reported installed.
+	if len(target.Binaries) > 0 {
+		if err := pm.validateBundledBinaries(*target); err != nil {
+			return PluginActionResponse{
+				Success: false,
+				Message: fmt.Sprintf("Bundled binary validation failed for plugin %s: %v", pluginID, err),
+				Output:  output.String(),
+			}
+		}
+		if err := pm.installBundledBinaries(*target); err != nil {
+			return PluginActionResponse{
+				Success: false,
+				Message: fmt.Sprintf("Bundled binary installation failed for plugin %s: %v", pluginID, err),
+				Output:  output.String(),
+			}
+		}
+	}
+
 	// Post-install configuration hooks
 	if pluginID == "cli-workstation" || pluginID == "vigilant-octo-waffle" {
 		if _, err := exec.LookPath("kubectl"); err != nil {
@@ -1289,6 +2216,31 @@ func (pm *PluginManager) UninstallPlugin(pluginID string) PluginActionResponse {
 				Success: false,
 				Message: fmt.Sprintf("Package removal failed: %v", err),
 				Output:  output.String(),
+			}
+		}
+	}
+
+	// Bundled binaries: remove the plugin's own directory, but only
+	// for plugins that declare Binaries — never delete a directory
+	// for a plugin that never had one. The id was validated by
+	// pluginDir, so the joined path cannot escape baseDataDir; a
+	// symlink at that path is removed as a link, never followed
+	// (os.RemoveAll does not follow the root symlink, and the Lstat
+	// check makes that explicit). A removal failure is logged, not
+	// fatal: the packages are already gone and the plugin record is
+	// cleared below either way. Core-role plugins never reach here.
+	if len(target.Binaries) > 0 {
+		if dir, err := pm.pluginDir(pluginID); err == nil {
+			if info, err := os.Lstat(dir); err == nil {
+				var rmErr error
+				if info.Mode()&os.ModeSymlink != 0 {
+					rmErr = os.Remove(dir)
+				} else {
+					rmErr = os.RemoveAll(dir)
+				}
+				if rmErr != nil {
+					log.Printf("[PluginManager] Warning: failed to remove bundled-binary directory %s for plugin %s: %v", dir, pluginID, rmErr)
+				}
 			}
 		}
 	}

@@ -20,6 +20,7 @@ export interface ExtensionPluginLiveStatus {
   dependencies?: string[];
   requiredBinaries: string[];
   missingBinaries: string[];
+  bundledBinaries?: string[];
   packages: string[];
   installedAt?: string;
   systemdUnits?: string[];
