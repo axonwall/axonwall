@@ -217,11 +217,16 @@ func TestBatch9RollbackArmsStandbyNotRunningFallback(t *testing.T) {
 			"org.axonwall:bootcount":   "0",
 			"org.axonwall:bootlimit":   "3",
 		},
-		// 0.11.61 is armed for next boot in this mock list (the
-		// standby); the running BE is 0.11.62. Note the sandbox's
-		// /proc/mounts never marks a BE ActiveNow, so the test models
-		// the standby via ActiveNext, as the batch-16 tests do.
-		bootfs:     "zroot/ROOT/axonwall-0.11.61",
+		// 0.11.61 is a plain, non-staged standby in this mock list
+		// (bootfs names the running BE, so nothing is ActiveNext);
+		// the running BE is 0.11.62. R4-E-L2: rollback means "last
+		// verified-good BE", so a staged BE must never be a rollback
+		// candidate — the standby is modelled as verified-good, not
+		// as an armed-for-next-boot staging. Note the sandbox's
+		// /proc/mounts never marks a BE ActiveNow, so the running BE
+		// is identified from ActiveRootDevice, as the batch-16
+		// tests do.
+		bootfs:     "zroot/ROOT/axonwall-0.11.62",
 		listOutput: batch9ListTwoBEs,
 	}
 	engine.runZfsCmd = zx.runZfs
@@ -270,7 +275,11 @@ func TestBatch9RollbackIgnoresDanglingFallbackPointer(t *testing.T) {
 			"org.axonwall:bootcount":   "0",
 			"org.axonwall:bootlimit":   "3",
 		},
-		bootfs:     "zroot/ROOT/axonwall-0.11.61",
+		// bootfs names the running BE, so 0.11.61 is a plain,
+		// non-staged standby (see the note in
+		// TestBatch9RollbackArmsStandbyNotRunningFallback: R4-E-L2
+		// forbids rollback onto a staged BE).
+		bootfs:     "zroot/ROOT/axonwall-0.11.62",
 		listOutput: batch9ListTwoBEs,
 	}
 	engine.runZfsCmd = zx.runZfs
