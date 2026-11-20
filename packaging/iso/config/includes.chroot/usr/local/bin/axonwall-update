@@ -641,6 +641,20 @@ if [ "$ZBM_MODE" = "1" ]; then
 
     if ! umount "${ZBM_STAGE_MNT}"; then
       echo "[-] ERROR: Failed to cleanly unmount ${ZBM_STAGE_MNT}; refusing to rename staged Boot Environment." >&2
+      # R4-E-L1: the strict unmount correctly refuses to arm the BE,
+      # but must not leave the staged temp BE mounted: the next run
+      # destroys the stale tmp dataset first, which fails while it is
+      # still mounted, and the update then fails until an operator
+      # cleans up by hand. Best-effort cleanup (lazy unmount, rmdir,
+      # destroy the temp BE — mirroring the extract/apply failure
+      # paths just above) so the next update starts clean. The
+      # original error still fails the update; the BE is still not
+      # armed. The `zfs destroy` of a still-mounted dataset is
+      # best-effort and silent (mirroring the neighbouring paths);
+      # its failure must not mask the original error.
+      umount -l "${ZBM_STAGE_MNT}" 2>/dev/null || true
+      rmdir "${ZBM_STAGE_MNT}" 2>/dev/null || true
+      zfs destroy -r "$TARGET_BE_TMP_DS" 2>/dev/null || true
       exit 1
     fi
     rmdir "${ZBM_STAGE_MNT}" 2>/dev/null || true
@@ -1000,8 +1014,20 @@ else
   if [ "$APT_UPGRADE" = "1" ] || [ "${AXONWALL_APT_UPGRADE:-0}" = "1" ]; then
     if command -v apt-get >/dev/null 2>&1; then
       echo "[+] Updating Debian APT repositories and upgrading system packages..."
-      DEBIAN_FRONTEND=noninteractive apt-get update -y || true
-      DEBIAN_FRONTEND=noninteractive apt-get -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" upgrade -y || true
+      # R4-E-M1: in the --apt-only flow the apt upgrade IS the update,
+      # so a failed update or upgrade must fail the update, not fall
+      # through to the success echo. The old `|| true` form discarded
+      # both statuses. A failed update aborts before the upgrade (no
+      # upgrading from stale lists); either failure exits 1 with no
+      # version stamp and no success message.
+      if ! DEBIAN_FRONTEND=noninteractive apt-get update -y; then
+        echo "[-] ERROR: apt-get update failed; system packages were NOT upgraded." >&2
+        exit 1
+      fi
+      if ! DEBIAN_FRONTEND=noninteractive apt-get -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" upgrade -y; then
+        echo "[-] ERROR: apt-get upgrade failed; system packages were NOT upgraded." >&2
+        exit 1
+      fi
     fi
   fi
 
