@@ -28,7 +28,71 @@ type PluginDefinition struct {
 	AlpinePackages   []string        `json:"alpinePackages"`
 	ArchPackages     []string        `json:"archPackages"`
 	RequiredBinaries []string        `json:"requiredBinaries"`
-	LdapIntegration  *PluginLDAPSpec `json:"ldapIntegration,omitempty"`
+
+	// Binaries are binaries shipped with the plugin: downloaded into
+	// the plugin's own directory, sha256-verified, and extracted
+	// there — never installed into the system. Additive alongside
+	// RequiredBinaries, which keeps working as-is. See
+	// PluginBundledBinary.
+	// BinDirs are plugin-owned directories (relative to the per-plugin
+	// directory, e.g. "usr/bin" for a tree extracted from .debs) added
+	// to PATH for daemon invocations and interactive shells. Guard
+	// rules (enforced by the TS schema; the daemon must enforce them
+	// too before use): relative only — no absolute paths, no ".."
+	// segments, no empty entries.
+	// Env holds extra per-plugin environment variables (e.g. EMACSDATA
+	// pointing at a bundled data tree). Keys must be valid env-var
+	// names ([A-Za-z_][A-Za-z0-9_]*). Values may reference the plugin's
+	// own directory via the ${PLUGIN_DIR} placeholder, expanded by the
+	// daemon/shell integration to the per-plugin directory.
+	Binaries         []PluginBundledBinary `json:"binaries,omitempty"`
+	BinDirs          []string              `json:"binDirs,omitempty"`
+	Env              map[string]string     `json:"env,omitempty"`
+	LdapIntegration  *PluginLDAPSpec       `json:"ldapIntegration,omitempty"`
+}
+
+// PluginBundledBinary declares one binary artifact bundled with a
+// plugin. Kind discriminates the two source kinds unambiguously:
+//
+//   - "archive": a downloadable archive. URL is required; Distro /
+//     Package / Version / Arch must be empty. Name is the binary the
+//     archive provides (e.g. "rosenpass", fetched from
+//     https://github.com/rosenpass/rosenpass/releases/download/v0.2.3/rosenpass-x86_64-linux-0.2.3.tar).
+//     Format is the container ("tar", "tar.gz"/"tgz", "zip"; default
+//     "tar"). PathInArchive is the binary's path inside the archive,
+//     relative with no ".."; it defaults to Name.
+//   - "distroPackage": a distro package to download and extract
+//     (never install). URL must be empty; Distro / Package / Version /
+//     Arch are required. Name is the package name (e.g. "emacs-nox");
+//     the binaries it contributes are found via BinDirs after
+//     extraction. Version is the full version including epoch where
+//     the distro uses one (e.g. "1:30.1+1-6"); the daemon derives the
+//     file name from Package + Version + Arch (Debian filenames drop
+//     the epoch, e.g. "emacs-nox_30.1+1-6_amd64.deb" under
+//     pool/main/e/emacs/).
+//
+// SHA256 is REQUIRED on every entry. It must be a 64-char hex digest,
+// except for temporary "SHA256_TODO_<name>" markers used while a hash
+// is still being resolved from the upstream index — those MUST be
+// replaced with the real digest before install, and the daemon MUST
+// fail closed (refuse to download/extract) on any entry whose SHA256
+// is still a SHA256_TODO_* marker or is not 64 hex chars. The Go
+// struct itself cannot enforce this; the TS PluginManifestSchema
+// enforces the shape and the daemon must validate before use.
+// Kind is "archive" (URL, Format, PathInArchive set; distro fields
+// empty) or "distroPackage" (Distro, Package, Version, Arch set; URL
+// empty).
+type PluginBundledBinary struct {
+	Kind          string `json:"kind"`
+	Name          string `json:"name"`
+	SHA256        string `json:"sha256"`
+	URL           string `json:"url,omitempty"`
+	Format        string `json:"format,omitempty"`
+	PathInArchive string `json:"pathInArchive,omitempty"`
+	Distro        string `json:"distro,omitempty"`
+	Package       string `json:"package,omitempty"`
+	Version       string `json:"version,omitempty"`
+	Arch          string `json:"arch,omitempty"`
 }
 
 type PluginStatus struct {
@@ -232,6 +296,73 @@ func GetExtensionPluginDefinitions() []PluginDefinition {
 				"helm",
 			},
 			RequiredBinaries: []string{"zsh", "vim", "nvim", "starship", "tmux", "kubectl", "helm"},
+		},
+		{
+			// GNU Emacs, bundled — not system-installed. The three
+			// trixie amd64 .debs are downloaded, sha256-verified, and
+			// extracted (dpkg-deb -x layout) into the plugin's own
+			// directory; nothing is installed into the system, so
+			// DebianPackages/AlpinePackages/ArchPackages are
+			// deliberately empty (ArchPackages is an empty slice, not
+			// nil, per TestArchPluginPackagesAndRootkitScannerSlot).
+			// SHA256 values are SHA256_TODO_* placeholders: a later
+			// worker replaces them with the real digests from the
+			// Debian Packages index; the daemon must fail closed on
+			// them until then. Expected files (epoch dropped from the
+			// filename, per Debian convention) under
+			// pool/main/e/emacs/:
+			//   emacs-nox_30.1+1-6_amd64.deb
+			//   emacs-bin-common_30.1+1-6_amd64.deb
+			//   emacs-common_30.1+1-6_all.deb
+			// UNCERTAIN: live trixie now serves 1:30.1+1-6+deb13u1
+			// (security update, same pool path, filenames with the
+			// +deb13u1 suffix), not the 1:30.1+1-6 pinned here — the
+			// resolving worker must confirm the exact version and
+			// hashes against the Packages index before install.
+			ID:               "cli-emacs",
+			Name:             "Emacs Editor (GNU Emacs, no-X) for /etc/axonwall",
+			Version:          "0.1.0",
+			Category:         "extension",
+			Description:      "GNU Emacs (no-X) for editing /etc/axonwall configuration files, bundled with the plugin: the Debian emacs-nox 30.1 tree is downloaded, checksum-verified, and extracted into the plugin's own directory, and its bin directory is added to PATH for daemon invocations and interactive shells. Nothing is installed into the system.",
+			Author:           "Axonwall Core",
+			Privileges:       []string{"system.users", "system.config.write"},
+			DebianPackages:   []string{},
+			AlpinePackages:   []string{},
+			ArchPackages:     []string{},
+			RequiredBinaries: []string{"emacs"},
+			Binaries:         []PluginBundledBinary{
+				{
+					Kind:    "distroPackage",
+					Name:    "emacs-nox",
+					SHA256:  "SHA256_TODO_emacs-nox",
+					Distro:  "debian",
+					Package: "emacs-nox",
+					Version: "1:30.1+1-6",
+					Arch:    "amd64",
+				},
+				{
+					Kind:    "distroPackage",
+					Name:    "emacs-bin-common",
+					SHA256:  "SHA256_TODO_emacs-bin-common",
+					Distro:  "debian",
+					Package: "emacs-bin-common",
+					Version: "1:30.1+1-6",
+					Arch:    "amd64",
+				},
+				{
+					Kind:    "distroPackage",
+					Name:    "emacs-common",
+					SHA256:  "SHA256_TODO_emacs-common",
+					Distro:  "debian",
+					Package: "emacs-common",
+					Version: "1:30.1+1-6",
+					Arch:    "all",
+				},
+			},
+			BinDirs:         []string{"usr/bin"},
+			Env:             map[string]string{
+				"EMACSDATA": "${PLUGIN_DIR}/usr/share/emacs/30.1",
+			},
 		},
 		{
 			ID:               "cli-diagnostics-nastymap",

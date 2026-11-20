@@ -1041,6 +1041,114 @@ export const PluginLdapIntegrationSpecSchema = z.object({
 });
 export type PluginLdapIntegrationSpec = z.infer<typeof PluginLdapIntegrationSpecSchema>;
 
+// Plugin-bundled binaries: a general capability (not emacs-only) for
+// shipping a binary with a plugin instead of installing it system-wide.
+// The daemon downloads each entry into the plugin's own directory
+// (<baseDataDir>/<plugin-id>/), verifies its sha256, and extracts it
+// there; it never installs anything into the system. `binDirs` (below)
+// then puts the extracted tree's bin directories on PATH, for both
+// daemon invocations and interactive shells.
+//
+// `name` is the artifact identifier: for `kind: 'archive'` it is the
+// binary the archive provides (e.g. 'rosenpass'); for
+// `kind: 'distroPackage'` it is the distro package name (e.g.
+// 'emacs-nox') — the binaries it contributes are found via `binDirs`
+// after extraction, not via `name`.
+// The `kind` discriminator is what lets the daemon tell the two source
+// kinds apart unambiguously: an archive entry MUST carry `url` and
+// MUST NOT carry distro fields; a distro-package entry MUST carry
+// `distro`/`package`/`version`/`arch` and MUST NOT carry `url`.
+//
+// sha256 is REQUIRED on every entry (never optional). It must be a
+// 64-char lowercase/uppercase hex digest, except for the temporary
+// `SHA256_TODO_<name>` markers used while a hash is still being
+// resolved from the upstream index — those markers MUST be replaced
+// with the real digest before install, and the daemon MUST fail
+// closed (refuse to download/extract) on any entry whose sha256 is
+// still a SHA256_TODO_* marker or is not 64 hex chars.
+export const PluginBundledBinarySha256Schema = z
+  .string()
+  .regex(
+    /^(?:[0-9a-fA-F]{64}|SHA256_TODO_[A-Za-z0-9_-]+)$/,
+    'sha256 must be a 64-char hex digest, or a temporary SHA256_TODO_<name> marker to be replaced before install',
+  );
+
+export const PluginBundledArchiveBinarySchema = z.object({
+  kind: z.literal('archive'),
+  name: z.string().min(1),
+  url: z
+    .string()
+    .min(1)
+    .regex(/^https?:\/\//, 'archive url must be an http(s) URL'),
+  sha256: PluginBundledBinarySha256Schema,
+  // Archive container: 'tar' (uncompressed tar, e.g. the rosenpass
+  // v0.2.3 release tarball), 'tar.gz'/'tgz', or 'zip'. Defaults to
+  // 'tar' when omitted.
+  format: z.enum(['tar', 'tar.gz', 'tgz', 'zip']).optional(),
+  // Path of the binary inside the archive, relative, no '..'. Defaults
+  // to `name` when omitted.
+  pathInArchive: z.string().min(1).optional(),
+});
+export type PluginBundledArchiveBinary = z.infer<typeof PluginBundledArchiveBinarySchema>;
+
+export const PluginBundledDistroPackageBinarySchema = z.object({
+  kind: z.literal('distroPackage'),
+  name: z.string().min(1),
+  sha256: PluginBundledBinarySha256Schema,
+  distro: z.enum(['debian', 'alpine', 'arch']),
+  // Distro package name, e.g. 'emacs-nox'. The .deb/.apk filename is
+  // derived from package + version + arch by the daemon (Debian
+  // filenames drop the epoch, e.g. version '1:30.1+1-6' becomes
+  // 'emacs-nox_30.1+1-6_amd64.deb' under pool/main/e/emacs/).
+  package: z.string().min(1),
+  // Full version including epoch where the distro uses one, e.g.
+  // '1:30.1+1-6' for Debian trixie emacs-nox.
+  version: z.string().min(1),
+  // Target architecture, e.g. 'amd64' — or 'all' for
+  // architecture-independent packages such as emacs-common.
+  arch: z.string().min(1),
+});
+export type PluginBundledDistroPackageBinary = z.infer<typeof PluginBundledDistroPackageBinarySchema>;
+
+export const PluginBundledBinarySchema = z.discriminatedUnion('kind', [
+  PluginBundledArchiveBinarySchema,
+  PluginBundledDistroPackageBinarySchema,
+]);
+export type PluginBundledBinary = z.infer<typeof PluginBundledBinarySchema>;
+
+// Directories the plugin owns that go on PATH, relative to the
+// per-plugin directory (e.g. 'usr/bin' for a tree extracted from
+// .debs with dpkg-deb -x, or 'bin' for an archive extracted at the
+// plugin root). Guard rules, enforced here: relative only — no
+// absolute paths, no '..' segments (no escaping the plugin dir), no
+// empty segments, no backslashes, no empty string.
+export const PluginBinDirSchema = z
+  .string()
+  .min(1)
+  .refine(
+    (v) =>
+      !v.startsWith('/') &&
+      !v.includes('\\') &&
+      !v.split('/').some((seg) => seg === '' || seg === '..'),
+    'binDirs entries must be relative paths with no ".." and no absolute paths',
+  );
+export type PluginBinDir = z.infer<typeof PluginBinDirSchema>;
+
+// Extra environment variables the plugin's processes (and interactive
+// shells) get, on top of PATH. Keys MUST be valid env-var names
+// ([A-Za-z_][A-Za-z0-9_]*), enforced below. Values may reference the
+// plugin's own directory via the ${PLUGIN_DIR} placeholder, which the
+// daemon/shell integration expands to the per-plugin directory
+// (e.g. EMACSDATA='${PLUGIN_DIR}/usr/share/emacs/30.1' points at the
+// bundled Emacs data tree). Values are otherwise taken literally.
+export const PluginEnvSchema = z
+  .record(z.string(), z.string())
+  .refine(
+    (env) => Object.keys(env).every((k) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(k)),
+    'env keys must be valid environment variable names ([A-Za-z_][A-Za-z0-9_]*)',
+  );
+export type PluginEnv = z.infer<typeof PluginEnvSchema>;
+
 export const PluginManifestSchema = z.object({
   id: z.string().min(1),
   name: z.string().min(1),
@@ -1069,6 +1177,16 @@ export const PluginManifestSchema = z.object({
     arch: z.array(z.string()).default([]),
   }).optional(),
   cliBinaries: z.array(z.string()).optional(),
+  // Bundled binaries shipped with the plugin (downloaded + verified +
+  // extracted into the plugin's own directory, never installed into
+  // the system). Additive alongside cliBinaries/RequiredBinaries,
+  // which keep working as-is.
+  binaries: z.array(PluginBundledBinarySchema).optional(),
+  // Plugin-owned directories (relative to the per-plugin directory)
+  // added to PATH for daemon invocations and interactive shells.
+  binDirs: z.array(PluginBinDirSchema).optional(),
+  // Extra per-plugin environment variables (see PluginEnvSchema).
+  env: PluginEnvSchema.optional(),
 });
 export type PluginManifest = z.infer<typeof PluginManifestSchema>;
 

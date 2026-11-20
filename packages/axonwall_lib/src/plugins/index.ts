@@ -375,6 +375,69 @@ export const BUILTIN_PLUGINS: PluginManifest[] = [
     cliBinaries: ['zsh', 'vim', 'nvim', 'starship', 'tmux', 'kubectl', 'helm'],
   },
   {
+    // GNU Emacs, bundled — not system-installed. The three trixie
+    // amd64 .debs are downloaded, sha256-verified, and extracted
+    // (dpkg-deb -x layout) into the plugin's own directory; nothing
+    // is installed into the system, so `packages` is deliberately
+    // OMITTED here (the os_and_fixes test requires any present
+    // packages.arch to be non-empty, and an empty packages block
+    // would also invite InstallPlugin to apt-get install it).
+    // SHA256 values are SHA256_TODO_* placeholders: a later worker
+    // replaces them with the real digests from the Debian Packages
+    // index; the daemon must fail closed on them until then.
+    // Expected files (epoch dropped from the filename) under
+    // pool/main/e/emacs/: emacs-nox_30.1+1-6_amd64.deb,
+    // emacs-bin-common_30.1+1-6_amd64.deb,
+    // emacs-common_30.1+1-6_all.deb. UNCERTAIN: live trixie now
+    // serves 1:30.1+1-6+deb13u1 (security update, same pool path,
+    // filenames with the +deb13u1 suffix), not the 1:30.1+1-6 pinned
+    // here — the resolving worker must confirm the exact version and
+    // hashes against the Packages index before install.
+    id: 'cli-emacs',
+    name: 'Emacs Editor (GNU Emacs, no-X) for /etc/axonwall',
+    version: '0.1.0',
+    category: 'extension',
+    description:
+      'GNU Emacs (no-X) for editing /etc/axonwall configuration files, bundled with the plugin: the Debian emacs-nox 30.1 tree is downloaded, checksum-verified, and extracted into the plugin\'s own directory, and its bin directory is added to PATH for daemon invocations and interactive shells. Nothing is installed into the system.',
+    author: 'Axonwall Core',
+    systemdUnits: [],
+    privileges: ['system.users', 'system.config.write'],
+    cliBinaries: ['emacs'],
+    binaries: [
+      {
+        kind: 'distroPackage',
+        name: 'emacs-nox',
+        sha256: 'SHA256_TODO_emacs-nox',
+        distro: 'debian',
+        package: 'emacs-nox',
+        version: '1:30.1+1-6',
+        arch: 'amd64',
+      },
+      {
+        kind: 'distroPackage',
+        name: 'emacs-bin-common',
+        sha256: 'SHA256_TODO_emacs-bin-common',
+        distro: 'debian',
+        package: 'emacs-bin-common',
+        version: '1:30.1+1-6',
+        arch: 'amd64',
+      },
+      {
+        kind: 'distroPackage',
+        name: 'emacs-common',
+        sha256: 'SHA256_TODO_emacs-common',
+        distro: 'debian',
+        package: 'emacs-common',
+        version: '1:30.1+1-6',
+        arch: 'all',
+      },
+    ],
+    binDirs: ['usr/bin'],
+    env: {
+      EMACSDATA: '${PLUGIN_DIR}/usr/share/emacs/30.1',
+    },
+  },
+  {
     id: 'cli-diagnostics-nastymap',
     name: 'NastyMap & Live CLI Telemetry Suite',
     version: '1.0.0',
