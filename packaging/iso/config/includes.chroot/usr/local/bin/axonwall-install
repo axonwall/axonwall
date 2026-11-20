@@ -26,6 +26,11 @@ kill -55 1 2>/dev/null || true
 MODE="interactive"
 CONFIG_FILE=""
 CLI_DISKS=""
+# R4-D-H1: explicit wipe opt-in for the unattended / --apply-config paths.
+# 0 = fail closed (abort on a non-empty target disk); 1 = the operator has
+# deliberately authorised wiping (seed key `allow_wipe_existing: true`,
+# ALLOW_WIPE_EXISTING=1 in an --apply-config file, or --force-wipe).
+ALLOW_WIPE_EXISTING="${ALLOW_WIPE_EXISTING:-0}"
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -38,12 +43,23 @@ while [ $# -gt 0 ]; do
       MODE="unattended"
       shift
       ;;
+    --force-wipe)
+      # R4-D-H1: explicit operator opt-in to wipe non-empty target disks on
+      # the unattended / --apply-config paths. Never the default.
+      ALLOW_WIPE_EXISTING=1
+      shift
+      ;;
     --shell-wizard)
       MODE="shell"
       shift
       ;;
     --help|-h)
-      echo "Usage: axonwall-install [--apply-config <file> | --unattended | --shell-wizard | /dev/disk...]"
+      echo "Usage: axonwall-install [--apply-config <file> | --unattended | --shell-wizard | /dev/disk...] [--force-wipe]"
+      echo "  --force-wipe  Authorise wiping non-empty target disks on the unattended /"
+      echo "                --apply-config paths (also: 'allow_wipe_existing: true' in the"
+      echo "                cloud-init seed, or ALLOW_WIPE_EXISTING=1 in the config file)."
+      echo "                Without it, an unattended install aborts instead of wiping a"
+      echo "                disk that holds an Axonwall install, another OS, or any data."
       exit 0
       ;;
     *)
@@ -664,6 +680,14 @@ elif [ "$MODE" = "unattended" ]; then
       SYSTEM_DISKS="$ci_disk"
     fi
 
+    # R4-D-H1: the wipe opt-in must be explicit in the seed. A seed that
+    # merely names a disk never authorises wiping it; only
+    # `allow_wipe_existing: true` (also accepted: 1 / yes) does.
+    ci_wipe="$(grep -E '^[[:space:]]*allow_wipe_existing:' "$CI_FILE" 2>/dev/null | head -n1 | awk -F: '{print $2}' | tr -d ' "'"'"'\r' || true)"
+    case "$ci_wipe" in
+      true|1|yes|YES) ALLOW_WIPE_EXISTING=1 ;;
+    esac
+
     ci_raid_disks="$(grep -E '^[[:space:]]*system_raid_disks:' "$CI_FILE" 2>/dev/null | head -n1 | cut -d: -f2- | tr -d '[]"'"'"'\r' | tr ',' ' ' || true)"
     if [ -n "$ci_raid_disks" ] && [ "$ci_raid_disks" != "none" ]; then
       SYSTEM_DISKS="$ci_raid_disks"
@@ -920,6 +944,8 @@ else
   if [ ! -f /etc/axonwall/.vault-edition ]; then
     echo ""
     PW_ATTEMPT=0
+    PW_MATCHED=0
+    PW_EMPTY=0
     while [ $PW_ATTEMPT -lt 3 ]; do
       PW_ATTEMPT=$((PW_ATTEMPT + 1))
       printf "Set a new admin password for the installed system (leave empty to keep default): "
@@ -928,6 +954,8 @@ else
       stty echo 2>/dev/null || true
       echo ""
       if [ -z "$PW_FIRST" ]; then
+        # Explicit empty input: the operator chose to keep the default.
+        PW_EMPTY=1
         break
       fi
       printf "Confirm the new admin password: "
@@ -938,11 +966,27 @@ else
       if [ "$PW_FIRST" = "$PW_SECOND" ]; then
         ADMIN_PASSWORD="$PW_FIRST"
         PW_FIRST=""; PW_SECOND=""
+        PW_MATCHED=1
         break
       fi
       PW_FIRST=""; PW_SECOND=""
       echo "[!] Passwords do not match -- please try again."
     done
+    # R4-D-M1: three mismatches must never silently fall back to the
+    # well-known default password. Abort the install; the operator can
+    # re-run it and either type the same password twice or leave the
+    # prompt empty to keep the default explicitly.
+    if [ "$PW_MATCHED" -eq 0 ] && [ "$PW_EMPTY" -eq 0 ]; then
+      echo ""
+      echo "[!] Error: admin password confirmation failed 3 times. Aborting the install"
+      echo "    rather than proceeding with the default admin password."
+      echo "    Re-run the installer and enter the same password twice, or leave the"
+      echo "    prompt empty to keep the default explicitly."
+      exit 1
+    fi
+    if [ "$PW_EMPTY" -eq 1 ]; then
+      echo "[+] Keeping the default admin password (empty input); change it at first login."
+    fi
   fi
 
   SYSTEM_DISKS=$(echo "${SYSTEM_DISKS:-}" | tr ',' ' ' | tr -s ' ' | sed 's/^ *//;s/ *$//')
@@ -1029,6 +1073,42 @@ done
 if [ -z "$PRIMARY_DISK" ]; then
   ui_echo "[!] Error: No target system disk specified or discovered."
   exit 1
+fi
+
+# R4-D-H1: the unattended / --apply-config paths previously skipped the
+# existing-OS / reinstall guard entirely (no probe, no confirmation) and
+# could silently wipe a live Axonwall install or another OS. Apply the
+# same guard here, before any destructive partitioning: probe every
+# target disk and check whether the system is booted into an installed
+# system, and ABORT (fail closed) unless the operator explicitly opted in
+# to wiping with ALLOW_WIPE_EXISTING=1 (seed key
+# `allow_wipe_existing: true`, ALLOW_WIPE_EXISTING=1 in an --apply-config
+# file, or --force-wipe). A bare seed that merely names a disk never
+# authorises a wipe. The post-hoc logging loop below only logs; this
+# check is the gate.
+if [ "$MODE" = "unattended" ] || [ "$MODE" = "apply-config" ]; then
+  if [ "${AXONWALL_REINSTALL_CONFIRMED:-0}" != "1" ] && is_booted_installed_system; then
+    if [ "${ALLOW_WIPE_EXISTING:-0}" != "1" ]; then
+      ui_echo "[!] Aborting: this system is booted into an installed Axonwall system."
+      ui_echo "    Unattended install refuses to wipe a live install without an explicit opt-in:"
+      ui_echo "    set 'allow_wipe_existing: true' in the cloud-init seed, ALLOW_WIPE_EXISTING=1 in the --apply-config file, or pass --force-wipe."
+      exit 1
+    fi
+    ui_echo "[!] WARNING: proceeding on a booted installed system because wiping was explicitly authorised (allow_wipe_existing)."
+  fi
+  for _gd in $SYSTEM_DISKS $ZFS_EXTRA_DISKS $ZFS_SLOG_DISKS $ZFS_L2ARC_DISKS $ZFS_SPARE_DISKS; do
+    [ -b "$_gd" ] || continue
+    probe_disk_content "$_gd"
+    if [ "$PROBE_KIND" != "empty" ]; then
+      if [ "${ALLOW_WIPE_EXISTING:-0}" != "1" ]; then
+        ui_echo "[!] Aborting: target disk ${_gd} contains ${PROBE_SUMMARY}."
+        ui_echo "    Unattended install refuses to overwrite a non-empty disk without an explicit opt-in:"
+        ui_echo "    set 'allow_wipe_existing: true' in the cloud-init seed, ALLOW_WIPE_EXISTING=1 in the --apply-config file, or pass --force-wipe."
+        exit 1
+      fi
+      ui_echo "[!] WARNING: overwriting ${_gd} (${PROBE_SUMMARY}) because wiping was explicitly authorised (allow_wipe_existing)."
+    fi
+  done
 fi
 
 for _log_d in $SYSTEM_DISKS $ZFS_EXTRA_DISKS $ZFS_SLOG_DISKS $ZFS_L2ARC_DISKS $ZFS_SPARE_DISKS; do

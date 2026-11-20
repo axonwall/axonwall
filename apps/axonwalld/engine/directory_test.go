@@ -1,10 +1,19 @@
 package engine
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
+	"math/big"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestDeriveBaseDN(t *testing.T) {
@@ -400,7 +409,10 @@ func TestDeriveSSSDBindPassword(t *testing.T) {
 }
 
 func TestBuildSSSDConfigWithBind(t *testing.T) {
-	withBind := BuildSSSDConfigWithBind("dc=axonwall,dc=local", "", "cn=svc-sssd,ou=services,dc=axonwall,dc=local", "secret123")
+	withBind, err := BuildSSSDConfigWithBind("dc=axonwall,dc=local", "", "cn=svc-sssd,ou=services,dc=axonwall,dc=local", "secret123")
+	if err != nil {
+		t.Fatalf("loopback-only BuildSSSDConfigWithBind should not fail: %v", err)
+	}
 	for _, want := range []string{
 		"ldap_default_bind_dn = cn=svc-sssd,ou=services,dc=axonwall,dc=local",
 		"ldap_default_authtok_type = password",
@@ -411,7 +423,10 @@ func TestBuildSSSDConfigWithBind(t *testing.T) {
 		}
 	}
 
-	withoutBind := BuildSSSDConfigWithBind("dc=axonwall,dc=local", "", "", "")
+	withoutBind, err := BuildSSSDConfigWithBind("dc=axonwall,dc=local", "", "", "")
+	if err != nil {
+		t.Fatalf("loopback-only bindless BuildSSSDConfigWithBind should not fail: %v", err)
+	}
 	for _, unwanted := range []string{
 		"ldap_default_bind_dn",
 		"ldap_default_authtok_type",
@@ -434,4 +449,118 @@ func TestBuildSlapdBootstrapConfigLDIF_ACLs(t *testing.T) {
 			t.Fatalf("missing expected ACL rule %q in LDIF:\n%s", want, ldif)
 		}
 	}
+}
+
+// R4-A-M1: an expired HA node leaf cert must be regenerated (normal
+// path), and an expired CSR-enrolled leaf must fail loudly telling
+// the operator to re-enroll (this node holds no CA key, so it cannot
+// reissue). The old code only checked CA expiry, so a leaf past
+// NotAfter was kept forever and mTLS broke permanently.
+func TestHAPKIExpiredNodeCertRegenerated(t *testing.T) {
+	setup := func(t *testing.T) (dir, caPath, caKeyPath, nodeCertPath, nodeKeyPath string) {
+		t.Helper()
+		dir = t.TempDir()
+		caPath = filepath.Join(dir, "ca.crt")
+		caKeyPath = filepath.Join(dir, "ca.key")
+		nodeCertPath = filepath.Join(dir, "node.crt")
+		nodeKeyPath = filepath.Join(dir, "node.key")
+		if err := EnsureHAPKICertsInDir(dir, caPath, caKeyPath, nodeCertPath, nodeKeyPath, "fw-01", "10.80.0.113", "10.80.0.114"); err != nil {
+			t.Fatalf("setup EnsureHAPKICertsInDir failed: %v", err)
+		}
+		return dir, caPath, caKeyPath, nodeCertPath, nodeKeyPath
+	}
+	// Replace the node cert with an expired leaf signed by the same CA.
+	expireNodeCert := func(t *testing.T, caPath, caKeyPath, nodeCertPath, nodeKeyPath string) {
+		t.Helper()
+		caCertBytes, err := os.ReadFile(caPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		caBlock, _ := pem.Decode(caCertBytes)
+		caCert, err := x509.ParseCertificate(caBlock.Bytes)
+		if err != nil {
+			t.Fatal(err)
+		}
+		caKeyBytes, err := os.ReadFile(caKeyPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		caKeyBlock, _ := pem.Decode(caKeyBytes)
+		caKey, err := x509.ParseECPrivateKey(caKeyBlock.Bytes)
+		if err != nil {
+			t.Fatal(err)
+		}
+		nodeKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		serial, _ := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+		tmpl := &x509.Certificate{
+			SerialNumber: serial,
+			Subject:      pkix.Name{CommonName: "fw-01"},
+			NotBefore:    time.Now().Add(-2 * time.Hour),
+			NotAfter:     time.Now().Add(-1 * time.Hour),
+			DNSNames:     []string{"fw-01"},
+			IPAddresses:  []net.IP{net.ParseIP("10.80.0.113"), net.ParseIP("10.80.0.114")},
+			KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+			ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth},
+		}
+		der, err := x509.CreateCertificate(rand.Reader, tmpl, caCert, &nodeKey.PublicKey, caKey)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(nodeCertPath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0644); err != nil {
+			t.Fatal(err)
+		}
+		keyDER, err := x509.MarshalECPrivateKey(nodeKey)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(nodeKeyPath, pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	parseNodeCert := func(t *testing.T, nodeCertPath string) *x509.Certificate {
+		t.Helper()
+		b, err := os.ReadFile(nodeCertPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		block, _ := pem.Decode(b)
+		cert, err := x509.ParseCertificate(block.Bytes)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return cert
+	}
+
+	t.Run("normal path regenerates expired leaf", func(t *testing.T) {
+		dir, caPath, caKeyPath, nodeCertPath, nodeKeyPath := setup(t)
+		expireNodeCert(t, caPath, caKeyPath, nodeCertPath, nodeKeyPath)
+		if got := parseNodeCert(t, nodeCertPath); !time.Now().After(got.NotAfter) {
+			t.Fatalf("test setup: node cert should be expired, NotAfter=%s", got.NotAfter)
+		}
+		if err := EnsureHAPKICertsInDir(dir, caPath, caKeyPath, nodeCertPath, nodeKeyPath, "fw-01", "10.80.0.113", "10.80.0.114"); err != nil {
+			t.Fatalf("EnsureHAPKICertsInDir with expired leaf failed: %v", err)
+		}
+		if got := parseNodeCert(t, nodeCertPath); time.Now().After(got.NotAfter) {
+			t.Fatalf("expired node cert was not regenerated, NotAfter=%s", got.NotAfter)
+		}
+	})
+
+	t.Run("CSR-enrolled expired leaf fails loudly", func(t *testing.T) {
+		dir, caPath, caKeyPath, nodeCertPath, nodeKeyPath := setup(t)
+		expireNodeCert(t, caPath, caKeyPath, nodeCertPath, nodeKeyPath)
+		// Simulate CSR enrollment: CA cert without the CA key.
+		if err := os.Remove(caKeyPath); err != nil {
+			t.Fatal(err)
+		}
+		err := EnsureHAPKICertsInDir(dir, caPath, caKeyPath, nodeCertPath, nodeKeyPath, "fw-01", "10.80.0.113", "10.80.0.114")
+		if err == nil {
+			t.Fatal("expected an error for an expired CSR-enrolled node cert, got nil")
+		}
+		if !strings.Contains(err.Error(), "re-enroll") {
+			t.Fatalf("expected the error to direct the operator to re-enroll, got: %v", err)
+		}
+	})
 }

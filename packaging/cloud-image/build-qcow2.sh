@@ -170,7 +170,16 @@ rsync -aHAX --exclude='/proc/*' --exclude='/sys/*' --exclude='/dev/*' \
 # Copy Axonwall chroot overrides and configurations
 if [[ -d "${ROOT_DIR}/packaging/iso/config/includes.chroot" ]]; then
   echo "[+] Applying Axonwall appliance includes and hooks..."
-  cp -r "${ROOT_DIR}/packaging/iso/config/includes.chroot/"* "${TARGET}/" 2>/dev/null || true
+  cp -r "${ROOT_DIR}/packaging/iso/config/includes.chroot/"* "${TARGET}/"
+  # R4-D-L2: this overlay copy supplies firstboot, the updater, the
+  # installer and the service units. A failed or partial copy must fail
+  # the build loudly, not ship a qcow2 missing them as success. The
+  # preceding rsync is already checked; this copy is now checked too,
+  # and the target is verified to contain the expected payload.
+  if [[ ! -x "${TARGET}/usr/local/bin/axonwall-firstboot" ]] || [[ ! -x "${TARGET}/usr/local/bin/axonwall-update" ]]; then
+    echo "[!] ERROR: includes.chroot overlay copy incomplete: axonwall-firstboot and/or axonwall-update missing from ${TARGET}/usr/local/bin/." >&2
+    exit 1
+  fi
 fi
 if [[ -f "${TARGET}/etc/sudoers.d/axonwall" ]]; then
   chmod 0440 "${TARGET}/etc/sudoers.d/axonwall"

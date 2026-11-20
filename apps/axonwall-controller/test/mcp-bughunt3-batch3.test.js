@@ -122,6 +122,17 @@ const fakeDaemon = http.createServer((req, res) => {
       res.end(JSON.stringify({ success: true, clearedCount: 2 }));
       return;
     }
+    // R4-B-M2 (round-4 merge): the merged mcp_emergency_clear_all
+    // checks the XDP fast-drop clear-all and denies when it fails,
+    // so the fake daemon must model a daemon that supports the
+    // endpoint — an unhandled route 404s and the tool denies before
+    // the fleet unblock below. The deny-on-failure path itself is
+    // covered by round4-batch2.test.js.
+    if (req.url === '/v1/ebpf/xdp/block' && req.method === 'DELETE') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: true }));
+      return;
+    }
     if (req.url === '/v1/mcp/posture') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ posture: {}, leases: [] }));

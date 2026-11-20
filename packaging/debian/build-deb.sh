@@ -364,6 +364,13 @@ for bin_script in "${BIN_SCRIPTS[@]}"; do
   if [[ -f "${CHROOT_SRC}/usr/local/bin/${bin_script}" ]]; then
     cp "${CHROOT_SRC}/usr/local/bin/${bin_script}" "${WORK_DIR}/usr/local/bin/"
     chmod 755 "${WORK_DIR}/usr/local/bin/${bin_script}"
+  else
+    # R4-D-M6: fail closed, like the core binaries above. A .deb built
+    # without firstboot, the updater, axonwallctl or the installer used to
+    # print "[✓] Successfully built" and only be discovered broken on the
+    # target. A missing listed script aborts the build instead.
+    echo "[!] ERROR: ${CHROOT_SRC}/usr/local/bin/${bin_script} is missing; cannot build deb without ${bin_script}." >&2
+    exit 1
   fi
 done
 # D-M9: flavor tools, mirroring build-iso.sh's flavor units section.

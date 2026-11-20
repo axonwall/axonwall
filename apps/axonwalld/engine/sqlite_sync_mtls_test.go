@@ -167,3 +167,65 @@ func TestPeerClientFallsBackToHTTPWithoutPKI(t *testing.T) {
 		t.Fatal("mtlsRequested should be false for explicit transport 'token-http'")
 	}
 }
+
+// R4-A-H2: HA PKI enrollment must use verified HTTPS against the peer
+// CA and never downgrade to plaintext HTTP or skip verification. The
+// old code tried HTTPS with InsecureSkipVerify and fell back to plain
+// HTTP on any error, leaking the LDAP replication secret. This pins
+// the enrollment client: no CA -> fail closed; foreign CA -> TLS
+// handshake failure with no request reaching the server; matching CA
+// -> verified HTTPS succeeds. (The full enroll path also installs the
+// CSR response to hardcoded on-disk paths, so it is not exercised
+// here; only the client/verification layer is.)
+func TestEnrollPKIClientVerifiedHTTPSOnly(t *testing.T) {
+	// No CA material at all: fail closed, naming the refusal.
+	if _, err := enrollPKIClient([]string{filepath.Join(t.TempDir(), "nope.crt")}); err == nil {
+		t.Fatal("enrollPKIClient must fail closed with no CA certificate")
+	} else if !strings.Contains(err.Error(), "never falls back to plaintext HTTP") {
+		t.Fatalf("fail-closed error should state the no-downgrade rule, got: %v", err)
+	}
+
+	pki := makeTestPKI(t)
+	hits := 0
+	srvCfg := pki.tlsConfig(t)
+	// Enrollment is pre-PKI: the node has no client cert yet, so the
+	// enroll endpoint authenticates by token, not mTLS. Drop the
+	// client-cert requirement for this test server; the property
+	// under test is the client's verification of the server.
+	srvCfg.ClientAuth = tls.NoClientCert
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		w.WriteHeader(http.StatusOK)
+	}))
+	srv.TLS = srvCfg
+	srv.StartTLS()
+	defer srv.Close()
+
+	// Foreign CA: the handshake must fail and no request — plain or
+	// otherwise — may reach the server.
+	foreign := makeTestPKI(t)
+	foreignClient, err := enrollPKIClient([]string{foreign.caCert})
+	if err != nil {
+		t.Fatalf("enrollPKIClient with a foreign CA file should build: %v", err)
+	}
+	if _, err := foreignClient.Get(srv.URL + "/api/v1/sync/pki-enroll"); err == nil {
+		t.Fatal("enrollment client must reject a peer presenting a foreign-CA certificate")
+	}
+	if hits != 0 {
+		t.Fatalf("foreign-CA attempt reached the server handler %d times; nothing may be sent without verification", hits)
+	}
+
+	// Matching CA: verified HTTPS succeeds.
+	client, err := enrollPKIClient([]string{pki.caCert})
+	if err != nil {
+		t.Fatalf("enrollPKIClient with the matching CA should build: %v", err)
+	}
+	resp, err := client.Get(srv.URL + "/api/v1/sync/pki-enroll")
+	if err != nil {
+		t.Fatalf("enrollment client with the matching CA should complete verified HTTPS: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || hits != 1 {
+		t.Fatalf("expected one verified HTTPS request, got status=%d hits=%d", resp.StatusCode, hits)
+	}
+}

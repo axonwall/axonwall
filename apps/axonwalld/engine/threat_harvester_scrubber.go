@@ -17,15 +17,30 @@ import (
 )
 
 var (
-	reAuthHeader = regexp.MustCompile(`(?i)(Authorization:\s*(?:Bearer|Basic|Token)\s+)([A-Za-z0-9._~+/=-]{6,})`)
+	// R4-A-M6: the scheme group is optional so a schemeless
+	// `Authorization: <token>` is redacted too. A bare token is
+	// still a credential; the old pattern only matched Bearer /
+	// Basic / Token and let raw tokens through to the spool, the
+	// teacher LLM, and the S3 export.
+	reAuthHeader = regexp.MustCompile(`(?i)(Authorization:\s*(?:(?:Bearer|Basic|Token)\s+)?)([A-Za-z0-9._~+/=-]{6,})`)
 	reJwtToken   = regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{6,}\b`)
 	reApiKey     = regexp.MustCompile(`\b(?:AKIA[0-9A-Z]{16}|sk-[A-Za-z0-9_-]{20,}|ghp_[A-Za-z0-9]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}|AIza[0-9A-Za-z_-]{35})\b`)
-	reSecretKV   = regexp.MustCompile(`(?i)\b(password|passwd|pwd|secret|api_key|apikey|access_token|refresh_token|session_id|sid)(\s*[=:]\s*)([^\s&"';,}{<>]+)`)
-	rePemPrivKey = regexp.MustCompile(`(?s)-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?-----END [A-Z0-9 ]*PRIVATE KEY-----`)
-	reEmailAddr  = regexp.MustCompile(`\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,12}\b`)
-	reCardCand   = regexp.MustCompile(`\b(?:\d[ -]*?){13,19}\b`)
-	reEmbeddedV4 = regexp.MustCompile(`\b(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)\b`)
-	reEmbeddedV6 = regexp.MustCompile(`(?i)(?:[a-f0-9]{0,4}:){2,7}[a-f0-9]{0,4}`)
+	// R4-A-M6: `sessionid` and `session` are secret keys too — the
+	// old set only had `session_id` / `sid`, so `Cookie:
+	// sessionid=...` and `session=...` leaked. `sessionid` must
+	// precede `session` in the alternation or `sessionid=...`
+	// would match `session` and leave `id=...` behind.
+	reSecretKV = regexp.MustCompile(`(?i)\b(password|passwd|pwd|secret|api_key|apikey|access_token|refresh_token|sessionid|session|session_id|sid)(\s*[=:]\s*)([^\s&"';,}{<>]+)`)
+	// R4-A-M6: Cookie / Set-Cookie header values are redacted as a
+	// whole — a session cookie is a credential regardless of the
+	// key name inside it.
+	reCookieHeader    = regexp.MustCompile(`(?im)^(Cookie:[ \t]*)[^\r\n]*`)
+	reSetCookieHeader = regexp.MustCompile(`(?im)^(Set-Cookie:[ \t]*)[^\r\n]*`)
+	rePemPrivKey      = regexp.MustCompile(`(?s)-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?-----END [A-Z0-9 ]*PRIVATE KEY-----`)
+	reEmailAddr       = regexp.MustCompile(`\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,12}\b`)
+	reCardCand        = regexp.MustCompile(`\b(?:\d[ -]*?){13,19}\b`)
+	reEmbeddedV4      = regexp.MustCompile(`\b(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)\b`)
+	reEmbeddedV6      = regexp.MustCompile(`(?i)(?:[a-f0-9]{0,4}:){2,7}[a-f0-9]{0,4}`)
 )
 
 func passesLuhnCheck(digits string) bool {
@@ -78,6 +93,28 @@ func ScrubThreatPayload(raw string) (string, int) {
 	out = reJwtToken.ReplaceAllStringFunc(out, func(_ string) string {
 		count++
 		return "<REDACTED:JWT>"
+	})
+
+	// R4-A-M6: Cookie / Set-Cookie header values are credentials
+	// regardless of the key names inside them. Redact the whole
+	// header value (before the KV pass, so a `sessionid=...` inside
+	// a Cookie line is not double-counted as a secret param).
+	out = reCookieHeader.ReplaceAllStringFunc(out, func(m string) string {
+		sub := reCookieHeader.FindStringSubmatch(m)
+		if len(sub) < 2 {
+			return m
+		}
+		count++
+		return sub[1] + "<REDACTED:COOKIE>"
+	})
+
+	out = reSetCookieHeader.ReplaceAllStringFunc(out, func(m string) string {
+		sub := reSetCookieHeader.FindStringSubmatch(m)
+		if len(sub) < 2 {
+			return m
+		}
+		count++
+		return sub[1] + "<REDACTED:COOKIE>"
 	})
 
 	out = reApiKey.ReplaceAllStringFunc(out, func(_ string) string {

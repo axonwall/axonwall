@@ -488,6 +488,25 @@ if [ "${INSTALL_EDITION:-axonwall}" = "vault" ] || [ -f /target/etc/axonwall/.va
     done
   fi
 
+  # R4-D-L3: verify the edition payload actually landed in /target. Each
+  # staged copy above is a silent `if [ -f ... ]`, so an incomplete
+  # staged payload used to install "successfully" as a Vault box with no
+  # weed binary. Check the /target destinations (not the staging dir, so
+  # flavour ISOs whose payload is already in /target still pass) and
+  # abort loudly before the firewall units are removed below.
+  _vault_missing=""
+  [ -x /target/usr/sbin/weed ] || _vault_missing="${_vault_missing} /target/usr/sbin/weed"
+  for vunit in seaweedfs.service axonwall-vault-firstboot.service axonwall-vault-provision.service; do
+    [ -f "/target/etc/systemd/system/${vunit}" ] || _vault_missing="${_vault_missing} /target/etc/systemd/system/${vunit}"
+  done
+  for vbin in axonwall-vault-provision axonwall-vault-status axonwall-vault-firstboot; do
+    [ -x "/target/usr/local/bin/${vbin}" ] || _vault_missing="${_vault_missing} /target/usr/local/bin/${vbin}"
+  done
+  if [ -n "$_vault_missing" ]; then
+    echo "[-] ERROR: Vault Edition payload incomplete in /target; missing:${_vault_missing} -- aborting the install."
+    exit 1
+  fi
+
   if [ -f /target/etc/axonwall/certs/hub.key ]; then
     in-target chown root:axonwall-vault /etc/axonwall/certs/hub.key 2>/dev/null || true
     in-target chmod 0640 /etc/axonwall/certs/hub.key 2>/dev/null || true
@@ -571,6 +590,24 @@ if [ "${INSTALL_EDITION:-axonwall}" = "k3s-storage" ] || [ -f /target/etc/axonwa
     done
   fi
 
+  # R4-D-L3: verify the edition payload actually landed in /target (same
+  # shape as the Vault check above). An incomplete staged payload used
+  # to install "successfully" as a k3s-storage box with no k3s binary.
+  # Check the /target destinations so flavour ISOs whose payload is
+  # already in /target still pass; abort loudly on anything missing.
+  _k3s_missing=""
+  [ -x /target/usr/local/bin/k3s ] || _k3s_missing="${_k3s_missing} /target/usr/local/bin/k3s"
+  for kunit in k3s.service k3s-agent.service axonwall-k3s-firstboot.service axonwall-k3s-verify.service; do
+    [ -f "/target/etc/systemd/system/${kunit}" ] || _k3s_missing="${_k3s_missing} /target/etc/systemd/system/${kunit}"
+  done
+  for kbin in axonwall-k3s-firstboot axonwall-k3s-verify axonwall-k3s-status; do
+    [ -x "/target/usr/local/bin/${kbin}" ] || _k3s_missing="${_k3s_missing} /target/usr/local/bin/${kbin}"
+  done
+  if [ -n "$_k3s_missing" ]; then
+    echo "[-] ERROR: K3s Storage payload incomplete in /target; missing:${_k3s_missing} -- aborting the install."
+    exit 1
+  fi
+
   if [ -x /target/usr/local/bin/k3s ]; then
     for _klink in kubectl crictl ctr; do
       if [ ! -e "/target/usr/local/bin/${_klink}" ] && [ ! -e "/target/usr/bin/${_klink}" ]; then
@@ -623,7 +660,10 @@ if [ "${INSTALL_EDITION:-axonwall}" = "k3s-storage" ] || [ -f /target/etc/axonwa
     echo "axonwall-storage" > /target/etc/hostname
   fi
 
-  in-target update-initramfs -u -k all >/dev/null 2>&1 || true
+  # R4-D-L3: a failed initramfs regen here used to be swallowed, leaving
+  # the replicated Slot B / ZBM BE with a stale initramfs. It now aborts
+  # the install instead of replicating a stale initramfs.
+  in-target update-initramfs -u -k all >/dev/null 2>&1 || { echo "[-] ERROR: update-initramfs failed during K3s Storage staging; aborting the install rather than replicating a stale initramfs."; exit 1; }
 fi
 rm -rf /target/usr/share/axonwall/vault /target/usr/share/axonwall/k3s-storage
 if [ "${INSTALL_EDITION:-axonwall}" = "vault" ]; then
@@ -649,8 +689,14 @@ deb https://deb.debian.org/debian trixie-updates main contrib non-free non-free-
 APT_EOF
 
 # Ensure Axonwall Plymouth graphical boot theme is active in /target initramfs before Slot B / ZBM BE replication
-in-target /usr/sbin/plymouth-set-default-theme axonwall >/dev/null 2>&1 || true
-in-target update-initramfs -u -k all >/dev/null 2>&1 || true
+# R4-D-L3: the theme regen only warns loudly (a cosmetic theme miss must
+# not fail an otherwise good install), but a failed initramfs regen must
+# abort -- it runs right before Slot B / ZBM replication, and a swallowed
+# failure would replicate a stale initramfs to the standby slot / BE.
+if ! in-target /usr/sbin/plymouth-set-default-theme axonwall >/dev/null 2>&1; then
+  echo "[-] WARNING: plymouth-set-default-theme failed; continuing with the default boot theme."
+fi
+in-target update-initramfs -u -k all >/dev/null 2>&1 || { echo "[-] ERROR: update-initramfs failed before Slot B / ZBM replication; aborting the install rather than replicating a stale initramfs."; exit 1; }
 
 # Ensure stable /boot/vmlinuz and /boot/initrd.img symlinks exist on Slot A before replication
 if [ -d /target/boot ]; then

@@ -50,6 +50,7 @@ import * as fs from 'node:fs';
 import * as net from 'node:net';
 import * as path from 'node:path';
 import { resolveControllerDirs } from './dev-paths.js';
+import { readCanonicalConfig, writeCanonicalConfig } from './atomic-config.js';
 import * as os from 'node:os';
 import * as child_process from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -58,7 +59,10 @@ import { authenticateMcpToken, createMcpApiKeyRecord, listMcpApiKeys, revokeMcpA
 import { processMcpJsonRpcMessage, MCP_RESOURCES_CATALOG, MCP_TOOLS_CATALOG, newMcpApplyJobId, insertMcpRuleIntoState, desiredStateLockPath, type JsonRpcRequest } from './mcp/server.js';
 import { acquireMcpLockFile } from './mcp/lockfile.js';
 import { recordMcpAuditEntry, verifyMcpAuditChain, queryMcpAuditEntries } from './mcp/audit.js';
-import { isMcpServerEnabled, getMcpServerStatus } from '@axonwall/lib/mcp';
+import { isMcpServerEnabled, getMcpServerStatus, saveMcpSettings } from '@axonwall/lib/mcp';
+// R4-B-M1: canonical-config helpers, exported for tests (the
+// DesiredState / keys / settings loads all go through them).
+export { readCanonicalConfig, writeCanonicalConfig, writeFileAtomicSync } from './atomic-config.js';
 
 export interface ControllerTlsConfig {
   cert: Buffer | string;
@@ -448,6 +452,7 @@ export {
   queryMcpAuditEntries,
   isMcpServerEnabled,
   getMcpServerStatus,
+  saveMcpSettings,
 };
 
 // ========================================================================
@@ -793,52 +798,75 @@ export function computeRoutesToDelete(previous: SyncedRoute[], current: SyncedRo
 export type PersistedSyncedRoutes = Record<string, SyncedRoute[]>;
 
 export function loadPersistedSyncedRoutes(): PersistedSyncedRoutes | null {
+  // R4-B-M1 / R4-B-L4: the synced-routes record used to load
+  // first-existing-wins across the mirror paths, so a stale mirror
+  // could resurrect routes that were already deleted. It now loads
+  // from the canonical path only (first path: env override, else
+  // <varDir>/synced-routes.json), adopting the newest mirror only
+  // when the canonical file is missing entirely.
   const paths = process.env.AXONWALL_SYNCED_ROUTES_PATH
     ? [process.env.AXONWALL_SYNCED_ROUTES_PATH]
     : resolveControllerDirs().syncedRoutesStatePaths;
-  for (const p of paths) {
-    try {
-      if (fs.existsSync(p)) {
-        const raw = JSON.parse(fs.readFileSync(p, 'utf8'));
-        if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
-          const out: PersistedSyncedRoutes = {};
-          for (const [satId, routes] of Object.entries(raw)) {
-            if (!Array.isArray(routes)) continue;
-            out[satId] = (routes as unknown[])
-              .filter(
-                (r): r is SyncedRoute =>
-                  !!r &&
-                  typeof r === 'object' &&
-                  typeof (r as SyncedRoute).destination === 'string' &&
-                  typeof (r as SyncedRoute).gateway === 'string' &&
-                  ((r as SyncedRoute).device === undefined || typeof (r as SyncedRoute).device === 'string'),
-              )
-              .map((r) => ({ destination: r.destination, gateway: r.gateway, ...(r.device ? { device: r.device } : {}) }));
-          }
-          return out;
+  const canonicalPath = paths[0]!;
+  return readCanonicalConfig({
+    canonicalPath,
+    mirrorPaths: paths.slice(1),
+    parse: (raw) => {
+      try {
+        const parsed = JSON.parse(raw);
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+        const out: PersistedSyncedRoutes = {};
+        for (const [satId, routes] of Object.entries(parsed)) {
+          if (!Array.isArray(routes)) continue;
+          out[satId] = (routes as unknown[])
+            .filter(
+              (r): r is SyncedRoute =>
+                !!r &&
+                typeof r === 'object' &&
+                typeof (r as SyncedRoute).destination === 'string' &&
+                typeof (r as SyncedRoute).gateway === 'string' &&
+                ((r as SyncedRoute).device === undefined || typeof (r as SyncedRoute).device === 'string'),
+            )
+            .map((r) => ({ destination: r.destination, gateway: r.gateway, ...(r.device ? { device: r.device } : {}) }));
         }
+        return out;
+      } catch {
+        return null;
       }
-    } catch {
-      // Ignore unreadable/corrupt state; the controller proceeds
-      // with no recorded routes (a first sync then has no deletions).
-    }
-  }
-  return null;
+    },
+    label: 'synced-routes.json',
+  });
 }
 
-export function persistSyncedRoutes(routes: PersistedSyncedRoutes): void {
+export function persistSyncedRoutes(routes: PersistedSyncedRoutes): boolean {
+  // R4-B-L4: every path write used to be try/catch with no log, no
+  // return value, no flag — a failed persist was invisible, and
+  // after a controller restart the route-deletion record was gone
+  // and removed routes lingered in edge kernels forever. The
+  // canonical write is now atomic and its failure is returned (and
+  // logged loudly); mirrors are best-effort after it. Callers must
+  // check the return value.
   const paths = process.env.AXONWALL_SYNCED_ROUTES_PATH
     ? [process.env.AXONWALL_SYNCED_ROUTES_PATH]
     : resolveControllerDirs().syncedRoutesStatePaths;
   const payload = JSON.stringify(routes, null, 2);
-  for (const p of paths) {
-    try {
-      fs.mkdirSync(path.dirname(p), { recursive: true, mode: 0o775 });
-      fs.writeFileSync(p, payload, { mode: 0o600 });
-    } catch {
-      // Best effort: the in-memory record is still authoritative
-      // for this process lifetime.
-    }
+  try {
+    // Mirror failures are already logged loudly inside
+    // writeCanonicalConfig; only the canonical result is returned.
+    writeCanonicalConfig({
+      canonicalPath: paths[0]!,
+      mirrorPaths: paths.slice(1),
+      serialized: payload,
+      mode: 0o600,
+      label: 'synced-routes.json',
+    });
+    return true;
+  } catch (err: any) {
+    console.error(
+      `[Fleet Manager] FAILED to persist synced-routes record (${err?.message || err}). ` +
+        `The in-memory record is authoritative only for this process lifetime; after a controller restart, routes removed while the record was unpersisted will NOT be deleted from edge kernels and will linger there.`
+    );
+    return false;
   }
 }
 
@@ -852,6 +880,39 @@ export function persistSyncedRoutes(routes: PersistedSyncedRoutes): void {
 // the staleness rule for acks that never arrive, and the
 // last-failure bookkeeping surfaced in /fleet/satellites.
 export const PENDING_COMMAND_STALE_MS = 5 * 60 * 1000;
+
+// R4-B-M3: HA-transition and block commands are safety-critical —
+// a promotion or block that never lands must not sit unnoticed for
+// five minutes. These expire after 60 s (still far above the
+// satellite's 15 s telemetry cadence, so a slow-but-live apply is
+// not misreported; a later successful ack clears the recorded
+// error via recordCommandAck). All other commands keep the 5 min
+// threshold.
+export const PENDING_COMMAND_SHORT_STALE_MS = 60 * 1000;
+
+const SHORT_STALE_COMMANDS = new Set(['PROMOTE', 'DEMOTE', 'BLOCK_TARGET', 'UNBLOCK_TARGET']);
+
+export function pendingCommandStaleMsFor(command: string): number {
+  return SHORT_STALE_COMMANDS.has(command) ? PENDING_COMMAND_SHORT_STALE_MS : PENDING_COMMAND_STALE_MS;
+}
+
+/**
+ * The lastApplyError recorded when a satellite never acks a command
+ * (pure, testable): command, what was sent, and that no ack arrived
+ * within the threshold. Surfaced in /fleet/satellites via
+ * recordCommandAck, so a "notified" HA transition or block that
+ * silently never happened is visible instead of a healthy satellite.
+ */
+export function missingCommandAckError(
+  command: string,
+  commandId: string,
+  sentAtMs: number,
+  nowMs: number,
+  staleMs: number = pendingCommandStaleMsFor(command)
+): string {
+  const waitedSec = Math.round((nowMs - sentAtMs) / 1000);
+  return `${command}: no COMMAND_ACK received within ${Math.round(staleMs / 1000)}s of sending ${command} (${commandId}); sent ${waitedSec}s ago — the command may never have been applied`;
+}
 
 export interface SatelliteCommandAck {
   command: string;
@@ -1298,19 +1359,27 @@ async function main() {
   };
 
   function loadLocalDesiredState(): DesiredState | null {
-    const candidates = resolveControllerDirs().desiredStateCandidates;
-    for (const p of candidates) {
-      try {
-        if (fs.existsSync(p)) {
-          const raw = JSON.parse(fs.readFileSync(p, 'utf8'));
-          const parsed = DesiredStateSchema.safeParse(raw);
-          if (parsed.success) return parsed.data;
+    // R4-B-M1: DesiredState used to load first-existing-wins across
+    // [custom, etcDir/state.json, varDir/state.json], so a stale
+    // mirror could defeat a state load (or resurrect a revoked
+    // change). The canonical path is dirs.stateFile
+    // (<varDir>/state.json, env override wins); mirrors are adopted
+    // only when the canonical file is missing entirely, and a
+    // corrupt canonical fails closed instead of falling back.
+    const dirs = resolveControllerDirs();
+    return readCanonicalConfig({
+      canonicalPath: dirs.stateFile,
+      mirrorPaths: [path.join(dirs.etcDir, 'state.json')],
+      parse: (raw) => {
+        try {
+          const parsed = DesiredStateSchema.safeParse(JSON.parse(raw));
+          return parsed.success ? parsed.data : null;
+        } catch {
+          return null;
         }
-      } catch {
-        // Ignore parse/read error
-      }
-    }
-    return null;
+      },
+      label: 'state.json',
+    });
   }
 
   // B-H1: the fleet-sync body is validated by parseFleetSyncBody
@@ -1460,8 +1529,15 @@ async function main() {
         // restart still knows what was pushed and can delete routes
         // removed while it was down. Best-effort disk write; the
         // in-memory record is authoritative for this lifetime.
+        // R4-B-L4: a failed persist is now loud (console.error
+        // inside persistSyncedRoutes) and visible here: the
+        // in-memory record still holds, but the next controller
+        // restart will NOT know these routes were pushed, so
+        // deletions of routes removed while down will not happen.
         persistedSyncedRoutes[sat.id] = enabledRoutes;
-        persistSyncedRoutes(persistedSyncedRoutes);
+        if (!persistSyncedRoutes(persistedSyncedRoutes)) {
+          console.error(`[Fleet Manager] Synced-routes record for satellite ${sat.id} was NOT persisted to disk; route deletions for this satellite will be lost on controller restart.`);
+        }
       }
     }
     return nftSent;
@@ -2380,10 +2456,26 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
     // B2-M1: drop outbound commands whose COMMAND_ACK never
     // arrived (a satellite too old to ack, or an ack lost with a
     // dead socket) instead of leaking the entry forever.
+    // R4-B-M3: the expiry used to be only a log line, so
+    // /fleet/satellites showed the satellite as healthy while a
+    // "notified" HA transition or block had silently never
+    // happened. Record the missing ack as the satellite's
+    // lastApplyError (with the command id, what was sent, and the
+    // wait) so it surfaces in /fleet/satellites. HA-transition and
+    // block commands expire on the shorter threshold.
     for (const [commandId, pending] of pendingCommands.entries()) {
-      if (isPendingCommandStale(pending.sentAt, now)) {
+      if (isPendingCommandStale(pending.sentAt, now, pendingCommandStaleMsFor(pending.command))) {
         pendingCommands.delete(commandId);
-        console.warn(`[Fleet Manager] No COMMAND_ACK from ${pending.satId} for ${pending.command} (${commandId}) sent ${Math.round((now - pending.sentAt) / 1000)}s ago`);
+        const sat = activeSatellites.get(pending.satId);
+        if (sat) {
+          recordCommandAck(sat, {
+            command: pending.command,
+            commandId,
+            success: false,
+            error: missingCommandAckError(pending.command, commandId, pending.sentAt, now),
+          });
+        }
+        console.warn(`[Fleet Manager] No COMMAND_ACK from ${pending.satId} for ${pending.command} (${commandId}) sent ${Math.round((now - pending.sentAt) / 1000)}s ago; recorded as lastApplyError for that satellite`);
       }
     }
     for (const [id, sat] of activeSatellites.entries()) {

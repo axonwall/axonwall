@@ -8,7 +8,8 @@
     "dev": "next dev -p 3000",
     "build": "next build",
     "start": "next start -p 3000",
-    "lint": "next lint"
+    "lint": "next lint",
+    "test": "vitest run"
   },
   "dependencies": {
     "@axonwall/lib": "workspace:*",
@@ -37,6 +38,7 @@
     "@types/react-dom": "^19.3.0",
     "postcss": "^8.5.32",
     "tailwindcss": "^4.0.9",
-    "typescript": "^6"
+    "typescript": "^6",
+    "vitest": "^5.0.5"
   }
 }

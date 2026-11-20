@@ -11,6 +11,7 @@ import (
 	"encoding/base64"
 	"encoding/pem"
 	"fmt"
+	"log"
 	"math/big"
 	"net"
 	"os"
@@ -116,7 +117,14 @@ func EnsureHAPKICertsInDir(dir, caCertPath, caKeyPath, nodeCertPath, nodeKeyPath
 		if nodeBytes, errNode := os.ReadFile(nodeCertPath); errNode == nil {
 			if _, errNodeKey := os.Stat(nodeKeyPath); errNodeKey == nil {
 				if block, _ := pem.Decode(nodeBytes); block != nil {
-					if _, parseErr := x509.ParseCertificate(block.Bytes); parseErr == nil {
+					if parsed, parseErr := x509.ParseCertificate(block.Bytes); parseErr == nil {
+						// R4-A-M1: an expired CSR-enrolled node
+						// cert must not be kept either — this node
+						// holds no CA key so it cannot reissue;
+						// re-enrollment is the only recovery.
+						if time.Now().After(parsed.NotAfter) {
+							return fmt.Errorf("node is CSR-enrolled (CA certificate present without CA key) but its node certificate expired on %s; re-enroll via CSR instead of minting a new CA", parsed.NotAfter.Format(time.RFC3339))
+						}
 						return nil
 					}
 				}
@@ -178,6 +186,14 @@ func EnsureHAPKICertsInDir(dir, caCertPath, caKeyPath, nodeCertPath, nodeKeyPath
 		needNodeCert = true
 	} else if block, _ := pem.Decode(nodeBytes); block != nil {
 		if parsed, err := x509.ParseCertificate(block.Bytes); err == nil {
+			// R4-A-M1: a parseable node cert with all required
+			// SANs but past NotAfter used to be kept forever, so
+			// mTLS broke permanently at the 5-year horizon until
+			// manual intervention. An expired leaf must be
+			// regenerated like a missing one.
+			if time.Now().After(parsed.NotAfter) {
+				needNodeCert = true
+			}
 			for _, ip := range parsed.IPAddresses {
 				existingIPs = append(existingIPs, ip.String())
 			}
@@ -832,8 +848,11 @@ olcMultiProvider: TRUE
 		}
 	}
 
-	// Also update SSSD failover URI
-	_ = EnsureSSSDConfiguredWithPeer(baseDN, peerURI)
+	// Also update SSSD failover URI. R4-A-M2: the error is no longer
+	// discarded — a refused insecure config must be loud, not silent.
+	if err := EnsureSSSDConfiguredWithPeer(baseDN, peerURI); err != nil {
+		log.Printf("[HA] Warning: SSSD peer failover config not updated: %v", err)
+	}
 	return nil
 }
 

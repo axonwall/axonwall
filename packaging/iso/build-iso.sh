@@ -236,28 +236,32 @@ if [[ -f config/includes.chroot/etc/systemd/system/axonwall-firstboot.service ]]
 fi
 
 # Copy systemd units for the flavor
+# R4-D-L1: these are core payloads, not optional ones -- a failed copy
+# must fail the build, not ship an ISO with a dangling enable symlink.
+# Each copy below is bare (no `|| true`); the enable symlink that
+# follows it is only created when its target file actually landed.
 mkdir -p config/includes.chroot/etc/systemd/system/multi-user.target.wants/
 # Appliance console & Next-Gen TUI Installer unit ships in BOTH flavors
-cp "${SCRIPT_DIR}/../debian/axonwall-console.service" config/includes.chroot/etc/systemd/system/ || true
+cp "${SCRIPT_DIR}/../debian/axonwall-console.service" config/includes.chroot/etc/systemd/system/
 ln -sf /etc/systemd/system/axonwall-console.service config/includes.chroot/etc/systemd/system/multi-user.target.wants/axonwall-console.service
 if [[ "${FLAVOR}" == "axonwall" ]]; then
-  cp "${SCRIPT_DIR}/../debian/axonwalld.service" config/includes.chroot/etc/systemd/system/ || true
+  cp "${SCRIPT_DIR}/../debian/axonwalld.service" config/includes.chroot/etc/systemd/system/
   ln -sf /etc/systemd/system/axonwalld.service config/includes.chroot/etc/systemd/system/multi-user.target.wants/axonwalld.service
-  cp "${SCRIPT_DIR}/../debian/axonwall-controller.service" config/includes.chroot/etc/systemd/system/ || true
+  cp "${SCRIPT_DIR}/../debian/axonwall-controller.service" config/includes.chroot/etc/systemd/system/
   ln -sf /etc/systemd/system/axonwall-controller.service config/includes.chroot/etc/systemd/system/multi-user.target.wants/axonwall-controller.service
-  cp "${SCRIPT_DIR}/../debian/axonwall-ui.service" config/includes.chroot/etc/systemd/system/ || true
+  cp "${SCRIPT_DIR}/../debian/axonwall-ui.service" config/includes.chroot/etc/systemd/system/
   ln -sf /etc/systemd/system/axonwall-ui.service config/includes.chroot/etc/systemd/system/multi-user.target.wants/axonwall-ui.service
-  cp "${SCRIPT_DIR}/../debian/headscale.service" config/includes.chroot/etc/systemd/system/ || true
+  cp "${SCRIPT_DIR}/../debian/headscale.service" config/includes.chroot/etc/systemd/system/
   ln -sf /etc/systemd/system/headscale.service config/includes.chroot/etc/systemd/system/multi-user.target.wants/headscale.service
-  cp "${SCRIPT_DIR}/../debian/k3s.service" config/includes.chroot/etc/systemd/system/ || true
+  cp "${SCRIPT_DIR}/../debian/k3s.service" config/includes.chroot/etc/systemd/system/
   ln -sf /etc/systemd/system/k3s.service config/includes.chroot/etc/systemd/system/multi-user.target.wants/k3s.service
 
   mkdir -p config/includes.chroot/etc/headscale
-  cp "${SCRIPT_DIR}/../debian/headscale-config.yaml" config/includes.chroot/etc/headscale/config.yaml || true
+  cp "${SCRIPT_DIR}/../debian/headscale-config.yaml" config/includes.chroot/etc/headscale/config.yaml
 
   # Copy default baseline lockdown ruleset
   mkdir -p config/includes.chroot/usr/share/axonwall/
-  cp "${SCRIPT_DIR}/../debian/lockdown.nft" config/includes.chroot/usr/share/axonwall/ || true
+  cp "${SCRIPT_DIR}/../debian/lockdown.nft" config/includes.chroot/usr/share/axonwall/
 elif [[ "${FLAVOR}" == "k3s-storage" ]]; then
   # K3s + OpenZFS Storage Host units & CLI helpers
   for kunit in k3s.service k3s-agent.service axonwall-k3s-firstboot.service axonwall-k3s-verify.service; do
@@ -296,8 +300,9 @@ fi
 
 # Hub certificate renewal (B-14) ships in BOTH flavors: the vault's S3
 # endpoint serves the same CA-issued hub leaf and renews it the same way.
-cp "${SCRIPT_DIR}/../debian/axonwall-hub-cert-renew.service" config/includes.chroot/etc/systemd/system/ || true
-cp "${SCRIPT_DIR}/../debian/axonwall-hub-cert-renew.timer" config/includes.chroot/etc/systemd/system/ || true
+# R4-D-L1: core payloads -- a failed copy fails the build (no `|| true`).
+cp "${SCRIPT_DIR}/../debian/axonwall-hub-cert-renew.service" config/includes.chroot/etc/systemd/system/
+cp "${SCRIPT_DIR}/../debian/axonwall-hub-cert-renew.timer" config/includes.chroot/etc/systemd/system/
 mkdir -p config/includes.chroot/etc/systemd/system/timers.target.wants/
 ln -sf /etc/systemd/system/axonwall-hub-cert-renew.timer config/includes.chroot/etc/systemd/system/timers.target.wants/axonwall-hub-cert-renew.timer
 
@@ -677,16 +682,22 @@ find config/includes.installer/ -type f -path "*.d/*" -exec chmod +x {} + 2>/dev
 chmod +x config/includes.installer/usr/lib/axonwall/* 2>/dev/null || true
 
 # Pre-cache bootloader packages so debian-installer offline installations succeed without network/disc prompts
+# R4-D-M5: this block exists so offline d-i installs have GRUB cached. A
+# failed apt-get or an empty copy used to be swallowed (`|| true` +
+# stderr to /dev/null), so the ISO still printed "[✓] Successfully
+# built…" with no cached GRUB packages and the failure only surfaced at
+# install time. Fail the build loudly instead, and verify the expected
+# bootloader .debs actually landed before continuing.
 echo "[+] Pre-caching offline bootloader packages for BIOS & UEFI..."
 mkdir -p config/includes.chroot/var/cache/apt/archives/
-apt-get update -qq || true
+apt-get update -qq || { echo "[!] ERROR: apt-get update failed; cannot pre-cache offline bootloader packages." >&2; exit 1; }
 apt-get install -d -y --no-install-recommends \
   grub-pc \
   grub-pc-bin \
   grub2-common \
   grub-common \
   ucf \
-  os-prober 2>/dev/null || true
+  os-prober || { echo "[!] ERROR: failed to download BIOS bootloader packages (grub-pc set) for the offline pre-cache." >&2; exit 1; }
 apt-get install -d -y --no-install-recommends \
   grub-efi-amd64 \
   grub-efi-amd64-bin \
@@ -694,8 +705,14 @@ apt-get install -d -y --no-install-recommends \
   shim-signed \
   shim-helpers-amd64-signed \
   shim-unsigned \
-  efibootmgr 2>/dev/null || true
-cp /var/cache/apt/archives/*.deb config/includes.chroot/var/cache/apt/archives/ 2>/dev/null || true
+  efibootmgr || { echo "[!] ERROR: failed to download UEFI bootloader packages (grub-efi-amd64 set) for the offline pre-cache." >&2; exit 1; }
+cp /var/cache/apt/archives/*.deb config/includes.chroot/var/cache/apt/archives/ || { echo "[!] ERROR: failed to copy downloaded bootloader .debs into config/includes.chroot/var/cache/apt/archives/." >&2; exit 1; }
+for _req_boot_deb in "grub-pc_" "grub-efi-amd64_"; do
+  if ! compgen -G "config/includes.chroot/var/cache/apt/archives/${_req_boot_deb}*.deb" >/dev/null; then
+    echo "[!] ERROR: expected bootloader package '${_req_boot_deb}*.deb' is missing from config/includes.chroot/var/cache/apt/archives/ -- offline d-i installs would have no GRUB cached." >&2
+    exit 1
+  fi
+done
 
 if [[ "${FLAVOR}" == "axonwall" ]]; then
 # Preseed slapd in live-build chroot so package installation does not prompt or create unconfigured DB
@@ -1107,6 +1124,14 @@ if [[ "${FLAVOR}" == "axonwall" || "${FLAVOR}" == "k3s-storage" ]]; then
 fi
 
 # Include prebuilt Axonwall custom hardened kernel .deb packages when available
+# R4-D-M3: refuse to stage a host-CPU-locked (--march native) kernel .deb.
+# build-kernel.sh refuses --march native outright; this is the second line
+# of defence for a .deb built by an older builder version, whose manifest
+# records "march": "native".
+if [[ -f "${SCRIPT_DIR}/../kernel/output/build-manifest.json" ]] && grep -q '"march": "native"' "${SCRIPT_DIR}/../kernel/output/build-manifest.json"; then
+  echo "[!] ERROR: packaging/kernel/output/build-manifest.json records \"march\": \"native\" -- the prebuilt kernel .deb is locked to the build host's CPU and must not be staged into the ISO. Rebuild it with a named baseline (e.g. --march x86-64-v3)." >&2
+  exit 1
+fi
 if compgen -G "${SCRIPT_DIR}/../kernel/output/linux-image-*axonwall*.deb" >/dev/null; then
   echo "[+] Installing prebuilt Axonwall custom hardened kernel .deb packages into chroot..."
   mkdir -p config/packages.chroot

@@ -43,6 +43,7 @@ export function acquireMcpLockFile(lockPath: string, timeoutMs = 10000): () => v
   if (!fs.existsSync(lockDir)) {
     fs.mkdirSync(lockDir, { recursive: true, mode: 0o775 });
   }
+  let warnedLiveHolder = false;
   for (;;) {
     try {
       const fd = fs.openSync(lockPath, 'wx', 0o660);
@@ -62,9 +63,39 @@ export function acquireMcpLockFile(lockPath: string, timeoutMs = 10000): () => v
         // Lock content is diagnostic only.
       }
       let released = false;
+      // R4-B-L6: the lock used to infer staleness from file mtime
+      // alone, and mtime only advanced at acquisition — so a
+      // live-but-slow holder (large state.json, slow disk) past the
+      // threshold looked exactly like a dead holder, and a waiter
+      // unlinked the lock and admitted a second holder. The holder
+      // now heartbeats: it refreshes the lockfile mtime while it
+      // holds the lock, so a live holder never looks stale. The
+      // beat stops (and never throws) if the file no longer carries
+      // our token, i.e. we no longer own the lock.
+      const heartbeatMs = Math.max(250, Math.min(2000, Math.floor(staleThresholdMs / 3)));
+      const heartbeat = setInterval(() => {
+        try {
+          const raw = fs.readFileSync(lockPath, 'utf8');
+          if (JSON.parse(raw)?.token !== token) {
+            clearInterval(heartbeat);
+            return;
+          }
+          fs.utimesSync(lockPath, new Date(), new Date());
+        } catch {
+          // A failed beat must never throw out of the holder; the
+          // next beat retries, and the waiter still needs the pid
+          // to be dead before breaking (see below).
+        }
+      }, heartbeatMs);
+      if (typeof heartbeat === 'object' && heartbeat !== null && typeof (heartbeat as any).unref === 'function') {
+        (heartbeat as any).unref();
+      }
       return () => {
         if (released) return;
         released = true;
+        try {
+          clearInterval(heartbeat);
+        } catch {}
         try {
           fs.closeSync(fd);
         } catch {}
@@ -86,27 +117,48 @@ export function acquireMcpLockFile(lockPath: string, timeoutMs = 10000): () => v
       };
     } catch (err: any) {
       if (err?.code !== 'EEXIST') throw err;
-      // Lock is held. Break it if the holder died holding it or exceeded staleThresholdMs.
+      // Lock is held. Break it only when the holder is actually
+      // gone: R4-B-L6 — mtime staleness alone is NOT enough, because
+      // a live-but-slow holder (or one whose heartbeat is briefly
+      // delayed) has a stale mtime while still holding the lock.
+      // A live holder pid vetoes the break; the waiter keeps waiting
+      // until its own deadline and then fails closed (timeout)
+      // instead of admitting a second holder. A pid that cannot be
+      // determined (empty/unparseable lock file) still breaks on
+      // mtime alone, as before.
       let stale = false;
       let holderPid: number | null = null;
+      let holderPidAlive: boolean | null = null;
       let observedMtimeMs = 0;
       try {
         const stat = fs.statSync(lockPath);
         observedMtimeMs = stat.mtimeMs;
-        stale = Date.now() - stat.mtimeMs > staleThresholdMs;
-        if (!stale && stat.size > 0) {
+        const mtimeStale = Date.now() - stat.mtimeMs > staleThresholdMs;
+        if (stat.size > 0) {
           const raw = fs.readFileSync(lockPath, 'utf8');
           const parsed = JSON.parse(raw);
           if (typeof parsed?.pid === 'number' && parsed.pid > 0 && parsed.pid !== process.pid) {
             holderPid = parsed.pid;
             try {
               process.kill(parsed.pid, 0);
+              holderPidAlive = true;
             } catch (killErr: any) {
               if (killErr?.code === 'ESRCH') {
-                stale = true;
+                holderPidAlive = false;
+              } else {
+                // EPERM (or any other error): the process exists
+                // but cannot be signalled — treat it as alive.
+                holderPidAlive = true;
               }
             }
           }
+        }
+        stale = mtimeStale && (holderPid === null || holderPidAlive === false);
+        if (mtimeStale && holderPid !== null && holderPidAlive === true && !warnedLiveHolder) {
+          warnedLiveHolder = true;
+          console.warn(
+            `[MCP Lock] Lock ${lockPath} looks mtime-stale (${Math.round((Date.now() - observedMtimeMs) / 1000)}s old) but holder pid ${holderPid} is still alive; not breaking it.`
+          );
         }
       } catch {
         // Lock vanished or unreadable between attempts; retry below.
@@ -114,7 +166,9 @@ export function acquireMcpLockFile(lockPath: string, timeoutMs = 10000): () => v
       if (stale) {
         // B2-L8: re-verify the lock is still the same stale one
         // before breaking it — a fresh holder may have acquired it
-        // since we read it.
+        // since we read it. Re-check the pid liveness too: a holder
+        // that came alive (or a new holder with a live pid) since
+        // the first read vetoes the break.
         let stillStale = true;
         try {
           const restat = fs.statSync(lockPath);
@@ -123,6 +177,14 @@ export function acquireMcpLockFile(lockPath: string, timeoutMs = 10000): () => v
             const raw = fs.readFileSync(lockPath, 'utf8');
             const parsed = JSON.parse(raw);
             if (parsed?.pid !== holderPid) stillStale = false;
+            if (stillStale && typeof parsed?.pid === 'number' && parsed.pid > 0 && parsed.pid !== process.pid) {
+              try {
+                process.kill(parsed.pid, 0);
+                stillStale = false;
+              } catch (killErr: any) {
+                if (killErr?.code !== 'ESRCH') stillStale = false;
+              }
+            }
           }
         } catch {
           // Lock vanished; retry below.

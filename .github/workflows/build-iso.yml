@@ -235,7 +235,7 @@ jobs:
             packaging/debian/output/*.deb.sha256.sig
           retention-days: 7
 
-      - name: Check vault preseeds agree (D-M8)
+      - name: Check preseeds agree (D-M8, D-L4)
         run: |
           # The d-i installer preseed (preseed-vault.cfg, used for
           # config/includes.installer/preseed.cfg) and the live-image
@@ -245,6 +245,11 @@ jobs:
           # cloud-init services. Compare the package lists and the
           # enabled-service lists, not whole files -- the files
           # differ legitimately elsewhere.
+          # R4-D-L4: the NGFW pair (includes.installer/preseed.cfg vs
+          # includes.binary/preseed.cfg) was never compared. It is now,
+          # with the same extractors. Package lists are sorted before
+          # comparing, so the known sqlite3 ordering drift between the
+          # two NGFW files does not fail the check; a real drift does.
           extract_pkgs() {
             awk '/d-i pkgsel\/include string/{flag=1; next} flag{print; if ($0 !~ /\\$/) exit}' "$1" \
               | sed 's/\\$//; s/^[[:space:]]*//; s/[[:space:]]*$//' | sort
@@ -268,6 +273,14 @@ jobs:
           fi
           if ! diff -u <(extract_services packaging/k3s-storage/preseed-k3s-storage.cfg) <(extract_services packaging/k3s-storage/preseed-k3s-storage-binary.cfg); then
             echo "::error::k3s-storage preseed enabled-service lists differ"
+            fail=1
+          fi
+          if ! diff -u <(extract_pkgs packaging/iso/config/includes.installer/preseed.cfg) <(extract_pkgs packaging/iso/config/includes.binary/preseed.cfg); then
+            echo "::error::NGFW preseed package lists differ"
+            fail=1
+          fi
+          if ! diff -u <(extract_services packaging/iso/config/includes.installer/preseed.cfg) <(extract_services packaging/iso/config/includes.binary/preseed.cfg); then
+            echo "::error::NGFW preseed enabled-service lists differ"
             fail=1
           fi
           if ! diff -u packaging/iso/config/includes.chroot/usr/local/bin/axonwall-install packaging/alpine/overlay/usr/local/bin/axonwall-install; then
@@ -306,6 +319,31 @@ jobs:
       - name: Build Hybrid Appliance ISO (Unified NGFW, Vault & K3s Storage Editions)
         run: |
           sudo ./packaging/iso/build-iso.sh
+
+      - name: Build Alpine Linux Appliance ISO
+        # R4-D-M4: the job is named "Build Debian 13 & Alpine Linux
+        # Appliance ISOs" but no step used to build the Alpine ISO at
+        # all -- the Alpine surface shipped with syntax-check-only
+        # verification. This step runs the real builder
+        # (packaging/alpine/build-alpine-iso.sh, default profile virt,
+        # minimal). On a non-Alpine host the builder delegates to an
+        # alpine:3.21 Docker container, which the ubuntu-24.04 runner
+        # provides, so the real build runs in CI -- not a smoke check.
+        # The builder verifies the pinned base-ISO SHA-256 and fails
+        # closed on any step, so a successful step means a real ISO was
+        # produced; the artifact-existence check below is the backstop.
+        run: |
+          ./packaging/alpine/build-alpine-iso.sh
+          found=0
+          for iso in packaging/alpine/output/*.iso; do
+            [ -e "$iso" ] || continue
+            found=1
+            echo "Alpine ISO $iso: $(stat -c%s "$iso") bytes"
+          done
+          if [ "$found" -eq 0 ]; then
+            echo "::error::No Alpine ISO produced in packaging/alpine/output/ -- the Alpine build produced nothing."
+            exit 1
+          fi
 
       - name: Build Cloud Appliance Image (QCOW2)
         run: |
@@ -380,7 +418,7 @@ jobs:
         run: |
           sudo bash -c 'cd packaging/iso/output && sha256sum axonwall-debian13-amd64.iso > axonwall-debian13-amd64.iso.sha256 && chmod 644 axonwall-debian13-amd64.iso.sha256'
           sudo bash -c 'if [ -d packaging/cloud-image/output ]; then cd packaging/cloud-image/output && sha256sum axonwall-debian13-amd64-cloud.qcow2 > axonwall-debian13-amd64-cloud.qcow2.sha256 && chmod 644 axonwall-debian13-amd64-cloud.qcow2.sha256; fi'
-          sudo chown -R $USER:$USER packaging/iso/output packaging/debian/output packaging/cloud-image/output packaging/edge-uki/output 2>/dev/null || true
+          sudo chown -R $USER:$USER packaging/iso/output packaging/debian/output packaging/cloud-image/output packaging/edge-uki/output packaging/alpine/output 2>/dev/null || true
 
       - name: Sign ISO, Cloud Image & Edge UKI Checksums (if signing key configured)
         env:
@@ -424,6 +462,15 @@ jobs:
             packaging/iso/output/axonwall-debian13-amd64.iso
             packaging/iso/output/axonwall-debian13-amd64.iso.sha256
             packaging/iso/output/axonwall-debian13-amd64.iso.sha256.sig
+          retention-days: 1
+
+      - name: Upload Alpine ISO Artifact (release handoff)
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: axonwall-alpine-iso
+          path: |
+            packaging/alpine/output/*.iso
+            packaging/alpine/output/*.iso.sha256
           retention-days: 1
 
       - name: Upload Cloud Appliance QCOW2 Artifact (release handoff)

@@ -1,5 +1,7 @@
+import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
 import { FirewallRuleSchema, FORBIDDEN_RING0_BPF_PROGS } from '../schemas/index.js';
 import { HOSTED_EDGE_VM_ID, HOSTED_EDGE_VMID, HOSTED_EDGE_VM_NAME } from '../compile/virt/index.js';
@@ -896,7 +898,31 @@ export function validateRedirectTargetAllowlist(
 // 7. Master Kill-Switch / Disable Management
 // ============================================================================
 
-function findMcpDevWorkspaceRoot(): string | null {
+// R4-B-L5: dev-mode path resolution must not depend on the
+// process working directory. The anchor is the module's own file:
+// walk up from it looking for pnpm-workspace.yaml. The cwd walk
+// stays only as a fallback (e.g. a test harness loading the module
+// from a copied location). When the two disagree, the module
+// anchor wins and a loud warning names both roots, so two processes
+// started from different directories never silently use different
+// state roots. Warned once per process.
+let warnedDevRootMismatch = false;
+
+function findWorkspaceRootFromModule(): string | null {
+  let cur = path.dirname(fileURLToPath(import.meta.url));
+  for (;;) {
+    if (fs.existsSync(path.join(cur, 'pnpm-workspace.yaml'))) {
+      return cur;
+    }
+    const parent = path.dirname(cur);
+    if (parent === cur) {
+      return null;
+    }
+    cur = parent;
+  }
+}
+
+function findWorkspaceRootFromCwd(): string | null {
   let cur = process.cwd();
   for (;;) {
     if (fs.existsSync(path.join(cur, 'pnpm-workspace.yaml'))) {
@@ -908,6 +934,19 @@ function findMcpDevWorkspaceRoot(): string | null {
     }
     cur = parent;
   }
+}
+
+function findMcpDevWorkspaceRoot(): string | null {
+  const fromModule = findWorkspaceRootFromModule();
+  const fromCwd = findWorkspaceRootFromCwd();
+  if (fromModule && fromCwd && fromModule !== fromCwd && !warnedDevRootMismatch) {
+    warnedDevRootMismatch = true;
+    console.warn(
+      `[MCP Dev] Working directory resolves to a different workspace root (${fromCwd}) than this module's own location (${fromModule}). ` +
+        `Using the module-anchored root so every controller process shares one dev state root regardless of where it was started.`
+    );
+  }
+  return fromModule ?? fromCwd;
 }
 
 function isMcpDevFallback(): boolean {
@@ -960,29 +999,161 @@ function resolveMcpStateDirs(): { stateDir: string; persistDir: string; etcDir: 
   return { stateDir, persistDir, etcDir };
 }
 
+// R4-B-M1: the canonical mcp-settings.json path. There is exactly
+// one: the env override when set, otherwise
+// <stateDir>/mcp-settings.json. The old resolver returned a mirror
+// copy (persistDir / etcDir) whenever the primary was unreadable,
+// and getMcpServerStatus took the first candidate that parsed — so
+// a stale `enabled: true` mirror could defeat an MCP disable. Reads
+// and writes now go through this path only. This lib stays
+// self-contained (it cannot import the controller's atomic-config
+// helper), so the canonical read/write below mirrors that helper's
+// semantics: atomic write, loud failure, newest-mirror adoption
+// only when the canonical file is missing entirely.
 export function resolveMcpSettingsPath(): string {
   if (process.env.AXONWALL_MCP_SETTINGS_PATH) {
     return process.env.AXONWALL_MCP_SETTINGS_PATH;
   }
+  const { stateDir } = resolveMcpStateDirs();
+  return path.join(stateDir, 'mcp-settings.json');
+}
+
+/** Mirror copies, written best-effort after the canonical write. Never read. */
+export function mcpSettingsMirrorPaths(): string[] {
+  if (process.env.AXONWALL_MCP_SETTINGS_PATH) return [];
   const { stateDir, persistDir, etcDir } = resolveMcpStateDirs();
-  const primaryDir = stateDir;
-  const primaryFile = path.join(primaryDir, 'mcp-settings.json');
+  return Array.from(
+    new Set([
+      path.join(stateDir, 'mcp-settings.json'),
+      path.join(persistDir, 'mcp-settings.json'),
+      path.join(etcDir, 'mcp-settings.json'),
+    ])
+  ).filter((p) => p !== resolveMcpSettingsPath());
+}
+
+function writeFileAtomicSync(filePath: string, data: string, mode = 0o660): void {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true, mode: 0o775 });
+  const tmpPath = `${filePath}.tmp.${process.pid}.${crypto.randomUUID()}`;
   try {
-    if (fs.existsSync(primaryFile)) {
-      fs.accessSync(primaryFile, fs.constants.R_OK);
-      return primaryFile;
-    }
-    fs.mkdirSync(primaryDir, { recursive: true, mode: 0o775 });
-    fs.accessSync(primaryDir, fs.constants.W_OK);
-    return primaryFile;
-  } catch {
-    for (const candidate of [path.join(persistDir, 'mcp-settings.json'), path.join(etcDir, 'mcp-settings.json')]) {
-      if (fs.existsSync(candidate)) {
-        return candidate;
-      }
-    }
-    return primaryFile;
+    fs.writeFileSync(tmpPath, data, { mode });
+    try {
+      fs.chmodSync(tmpPath, mode);
+    } catch {}
+    fs.renameSync(tmpPath, filePath);
+  } catch (err) {
+    try {
+      fs.unlinkSync(tmpPath);
+    } catch {}
+    throw err;
   }
+}
+
+function parseMcpSettingsFile(raw: string): McpSettings | null {
+  try {
+    const validated = McpSettingsSchema.safeParse(JSON.parse(raw));
+    return validated.success ? validated.data : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Read the settings from the canonical path only. When the canonical
+ * file is missing, adopt the newest parseable mirror into it (loud
+ * warning). When it exists but is unusable, fail closed (null) —
+ * never fall back to a mirror.
+ */
+function readCanonicalMcpSettings(): McpSettings | null {
+  const canonicalPath = resolveMcpSettingsPath();
+  if (fs.existsSync(canonicalPath)) {
+    try {
+      const parsed = parseMcpSettingsFile(fs.readFileSync(canonicalPath, 'utf8'));
+      if (parsed !== null) return parsed;
+      console.error(
+        `[MCP Settings] Canonical file ${canonicalPath} is present but unusable; refusing to fall back to a mirror (a stale mirror must never defeat an MCP disable).`
+      );
+      return null;
+    } catch (err: any) {
+      console.error(
+        `[MCP Settings] Cannot read canonical file ${canonicalPath} (${err?.message || err}); refusing to fall back to a mirror.`
+      );
+      return null;
+    }
+  }
+  let newest: { raw: string; mtimeMs: number; source: string } | null = null;
+  for (const mirror of mcpSettingsMirrorPaths()) {
+    try {
+      if (!fs.existsSync(mirror)) continue;
+      const raw = fs.readFileSync(mirror, 'utf8');
+      if (parseMcpSettingsFile(raw) === null) continue;
+      const mtimeMs = fs.statSync(mirror).mtimeMs;
+      if (!newest || mtimeMs > newest.mtimeMs) newest = { raw, mtimeMs, source: mirror };
+    } catch {}
+  }
+  if (!newest) return null;
+  console.warn(
+    `[MCP Settings] Canonical file ${canonicalPath} is missing; adopting the newest mirror copy (${newest.source}) as the canonical file. ` +
+      `Mirror copies are migration-only from here on.`
+  );
+  try {
+    writeFileAtomicSync(canonicalPath, newest.raw, 0o660);
+  } catch (err: any) {
+    console.error(
+      `[MCP Settings] Could not adopt mirror ${newest.source} into canonical path ${canonicalPath} (${err?.message || err}); using the mirror content for this read only.`
+    );
+  }
+  return parseMcpSettingsFile(newest.raw);
+}
+
+export interface SaveMcpSettingsResult {
+  ok: boolean;
+  error?: string;
+  failedMirrors?: string[];
+}
+
+/**
+ * Persist MCP master-switch settings through the canonical path
+ * (atomic write), then best-effort to the mirrors. Returns ok:false
+ * (never throws) when the canonical write fails or when a re-read
+ * of the canonical file does not show the requested state, so a
+ * disable that did not land is reported as a failure, not a success.
+ */
+export function saveMcpSettings(settings: McpSettings): SaveMcpSettingsResult {
+  const parsed = McpSettingsSchema.safeParse(settings);
+  if (!parsed.success) {
+    return { ok: false, error: `Invalid MCP settings: ${parsed.error.message}` };
+  }
+  const canonicalPath = resolveMcpSettingsPath();
+  const serialized = JSON.stringify(parsed.data, null, 2);
+  try {
+    writeFileAtomicSync(canonicalPath, serialized, 0o660);
+  } catch (err: any) {
+    return {
+      ok: false,
+      error: `Failed to persist mcp-settings.json to canonical path ${canonicalPath}: ${err?.message || err}. The change did NOT land.`,
+    };
+  }
+  const failedMirrors: string[] = [];
+  for (const mirror of mcpSettingsMirrorPaths()) {
+    try {
+      writeFileAtomicSync(mirror, serialized, 0o660);
+    } catch (err: any) {
+      failedMirrors.push(mirror);
+      console.warn(
+        `[MCP Settings] Mirror write to ${mirror} failed (${err?.message || err}) after the canonical write succeeded. The canonical file is authoritative; repair or remove the stale mirror.`
+      );
+    }
+  }
+  // Verify the change landed: re-read the canonical file and confirm.
+  const reloaded = readCanonicalMcpSettings();
+  if (!reloaded || reloaded.enabled !== parsed.data.enabled) {
+    return {
+      ok: false,
+      error: `mcp-settings.json write did not land on re-read of the canonical file (${canonicalPath}): enabled is ${reloaded?.enabled ?? 'unknown'}, expected ${parsed.data.enabled}. Treat the change as NOT applied.`,
+      failedMirrors,
+    };
+  }
+  return { ok: true, failedMirrors };
 }
 
 export interface McpServerStatus {
@@ -1022,43 +1193,35 @@ export function getMcpServerStatus(settingsPath?: string): McpServerStatus {
     }
   }
 
-  // 2. Check persistent configuration file(s)
-  const { stateDir, persistDir, etcDir } = resolveMcpStateDirs();
-  const candidatePaths = settingsPath
-    ? [settingsPath]
-    : Array.from(
-        new Set([
-          resolveMcpSettingsPath(),
-          path.join(stateDir, 'mcp-settings.json'),
-          path.join(persistDir, 'mcp-settings.json'),
-          path.join(etcDir, 'mcp-settings.json'),
-        ]),
-      );
-
-  for (const filePath of candidatePaths) {
-    if (!fs.existsSync(filePath)) continue;
-    try {
-      const raw = fs.readFileSync(filePath, 'utf8');
-      const parsed = JSON.parse(raw);
-      const validated = McpSettingsSchema.safeParse(parsed);
-      if (validated.success) {
-        if (!validated.data.enabled) {
-          return {
-            enabled: false,
-            disabledReason: validated.data.disabledReason || 'Disabled by administrator policy',
-            disabledAt: validated.data.disabledAt,
-            disabledBy: validated.data.disabledBy,
-            source: 'settings_file',
-          };
+  // 2. Check the persistent configuration file. An explicit path
+  // reads that path only; otherwise the canonical path only (R4-B-M1:
+  // first-existing-wins across mirror copies let a stale mirror
+  // defeat a disable, and a corrupt canonical must fail closed to
+  // "disabled by default" rather than fall back to a mirror).
+  const settings = settingsPath
+    ? (() => {
+        try {
+          if (!fs.existsSync(settingsPath)) return null;
+          return parseMcpSettingsFile(fs.readFileSync(settingsPath, 'utf8'));
+        } catch {
+          return null;
         }
-        return {
-          enabled: true,
-          source: 'settings_file',
-        };
-      }
-    } catch {
-      // In case of read/parse failure, try next candidate
+      })()
+    : readCanonicalMcpSettings();
+  if (settings) {
+    if (!settings.enabled) {
+      return {
+        enabled: false,
+        disabledReason: settings.disabledReason || 'Disabled by administrator policy',
+        disabledAt: settings.disabledAt,
+        disabledBy: settings.disabledBy,
+        source: 'settings_file',
+      };
     }
+    return {
+      enabled: true,
+      source: 'settings_file',
+    };
   }
 
   return {

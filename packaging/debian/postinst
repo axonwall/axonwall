@@ -499,20 +499,47 @@ ENV_EOF
         # nothing on either flavor; the D-M9 lists below are kept —
         # they enable each flavor's own units and restart the shared
         # services, matching the pre-existing NGFW behaviour.)
+        # R4-D-L5 (re-applied at the round-4 / PR #136 reconcile):
+        # enable/restart failures used to be swallowed (`|| true`)
+        # while dpkg still reported the package configured. Every
+        # service in each edition's lists below is deliberately
+        # started on that edition, so there is no "not started on
+        # this edition" exception to apply here: an enable or restart
+        # failure now fails the configure step (exit 1) in all three
+        # branches. (The openssl self-signed fallback half of D-L5
+        # is the round-3 D-L4 area; main already fails closed there.)
         if [ -d /run/systemd/system ]; then
             systemctl daemon-reload || true
             case "${AXONWALL_EDITION}" in
                 vault)
-                    systemctl enable seaweedfs.service axonwall-vault-firstboot.service axonwall-vault-provision.service axonwall-console.service axonwall-hub-cert-renew.timer ssh.service chrony.service sysstat.service || true
-                    systemctl restart --no-block seaweedfs.service axonwall-console.service ssh.service chrony.service sysstat.service || true
+                    if ! systemctl enable seaweedfs.service axonwall-vault-firstboot.service axonwall-vault-provision.service axonwall-console.service axonwall-hub-cert-renew.timer ssh.service chrony.service sysstat.service; then
+                        echo "Error: failed to enable Vault Edition services; dpkg configure failed. Fix systemd and re-run dpkg --configure." >&2
+                        exit 1
+                    fi
+                    if ! systemctl restart --no-block seaweedfs.service axonwall-console.service ssh.service chrony.service sysstat.service; then
+                        echo "Error: failed to restart Vault Edition services; dpkg configure failed. Fix systemd and re-run dpkg --configure." >&2
+                        exit 1
+                    fi
                     ;;
                 k3s-storage)
-                    systemctl enable k3s.service k3s-agent.service axonwall-k3s-firstboot.service axonwall-k3s-verify.service axonwall-console.service axonwall-hub-cert-renew.timer ssh.service chrony.service sysstat.service || true
-                    systemctl restart --no-block axonwall-console.service ssh.service chrony.service sysstat.service || true
+                    if ! systemctl enable k3s.service k3s-agent.service axonwall-k3s-firstboot.service axonwall-k3s-verify.service axonwall-console.service axonwall-hub-cert-renew.timer ssh.service chrony.service sysstat.service; then
+                        echo "Error: failed to enable K3s Storage Edition services; dpkg configure failed. Fix systemd and re-run dpkg --configure." >&2
+                        exit 1
+                    fi
+                    if ! systemctl restart --no-block axonwall-console.service ssh.service chrony.service sysstat.service; then
+                        echo "Error: failed to restart K3s Storage Edition services; dpkg configure failed. Fix systemd and re-run dpkg --configure." >&2
+                        exit 1
+                    fi
                     ;;
                 *)
-                    systemctl enable axonwalld.service axonwall-controller.service axonwall-ui.service headscale.service k3s.service axonwall-console.service axonwall-hub-cert-renew.timer ssh.service chrony.service sysstat.service || true
-                    systemctl restart --no-block axonwalld.service axonwall-controller.service axonwall-ui.service headscale.service ssh.service chrony.service sysstat.service || true
+                    if ! systemctl enable axonwalld.service axonwall-controller.service axonwall-ui.service headscale.service k3s.service axonwall-console.service axonwall-hub-cert-renew.timer ssh.service chrony.service sysstat.service; then
+                        echo "Error: failed to enable Axonwall services; dpkg configure failed. Fix systemd and re-run dpkg --configure." >&2
+                        exit 1
+                    fi
+                    if ! systemctl restart --no-block axonwalld.service axonwall-controller.service axonwall-ui.service headscale.service ssh.service chrony.service sysstat.service; then
+                        echo "Error: failed to restart Axonwall services; dpkg configure failed. Fix systemd and re-run dpkg --configure." >&2
+                        exit 1
+                    fi
                     ;;
             esac
         fi

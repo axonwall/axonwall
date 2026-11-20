@@ -20,7 +20,8 @@ import { authenticateMcpToken, createMcpApiKeyRecord, listMcpApiKeys, revokeMcpA
 import { processMcpJsonRpcMessage, MCP_RESOURCES_CATALOG, MCP_TOOLS_CATALOG, newMcpApplyJobId, insertMcpRuleIntoState, desiredStateLockPath } from './mcp/server.js';
 import { acquireMcpLockFile } from './mcp/lockfile.js';
 import { recordMcpAuditEntry, verifyMcpAuditChain, queryMcpAuditEntries } from './mcp/audit.js';
-import { isMcpServerEnabled, getMcpServerStatus } from '@axonwall/lib/mcp';
+import { isMcpServerEnabled, getMcpServerStatus, saveMcpSettings } from '@axonwall/lib/mcp';
+export { readCanonicalConfig, writeCanonicalConfig, writeFileAtomicSync } from './atomic-config.js';
 export interface ControllerTlsConfig {
     cert: Buffer | string;
     key: Buffer | string;
@@ -30,7 +31,7 @@ export interface ControllerTlsConfig {
 export declare function certKeyPairMatches(certPath: string, keyPath: string): boolean | null;
 export declare function verifyFreshLeafOrThrow(certPath: string, caPath: string): void;
 export declare function ensureControllerTls(certPath?: string, keyPath?: string, caPath?: string, caKeyPath?: string): ControllerTlsConfig | null;
-export { authenticateMcpToken, createMcpApiKeyRecord, listMcpApiKeys, revokeMcpApiKeyRecord, processMcpJsonRpcMessage, MCP_RESOURCES_CATALOG, MCP_TOOLS_CATALOG, newMcpApplyJobId, insertMcpRuleIntoState, desiredStateLockPath, acquireMcpLockFile, recordMcpAuditEntry, verifyMcpAuditChain, queryMcpAuditEntries, isMcpServerEnabled, getMcpServerStatus, };
+export { authenticateMcpToken, createMcpApiKeyRecord, listMcpApiKeys, revokeMcpApiKeyRecord, processMcpJsonRpcMessage, MCP_RESOURCES_CATALOG, MCP_TOOLS_CATALOG, newMcpApplyJobId, insertMcpRuleIntoState, desiredStateLockPath, acquireMcpLockFile, recordMcpAuditEntry, verifyMcpAuditChain, queryMcpAuditEntries, isMcpServerEnabled, getMcpServerStatus, saveMcpSettings, };
 export declare function isValidMacAddress(value: unknown): boolean;
 export declare function normalizeMacAddress(value: string): string;
 export declare function isValidCidr(value: unknown): boolean;
@@ -94,8 +95,18 @@ export interface SyncedRoute {
 export declare function computeRoutesToDelete(previous: SyncedRoute[], current: SyncedRoute[]): SyncedRoute[];
 export type PersistedSyncedRoutes = Record<string, SyncedRoute[]>;
 export declare function loadPersistedSyncedRoutes(): PersistedSyncedRoutes | null;
-export declare function persistSyncedRoutes(routes: PersistedSyncedRoutes): void;
+export declare function persistSyncedRoutes(routes: PersistedSyncedRoutes): boolean;
 export declare const PENDING_COMMAND_STALE_MS: number;
+export declare const PENDING_COMMAND_SHORT_STALE_MS: number;
+export declare function pendingCommandStaleMsFor(command: string): number;
+/**
+ * The lastApplyError recorded when a satellite never acks a command
+ * (pure, testable): command, what was sent, and that no ack arrived
+ * within the threshold. Surfaced in /fleet/satellites via
+ * recordCommandAck, so a "notified" HA transition or block that
+ * silently never happened is visible instead of a healthy satellite.
+ */
+export declare function missingCommandAckError(command: string, commandId: string, sentAtMs: number, nowMs: number, staleMs?: number): string;
 export interface SatelliteCommandAck {
     command: string;
     commandId?: string;

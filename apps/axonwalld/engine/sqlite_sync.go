@@ -405,9 +405,11 @@ func (m *SqliteSyncManager) verifyPeerPayload(what string, digest []byte, sigHea
 // PKI material is present, the client presents the node certificate and
 // verifies the peer against the shared HA CA. Otherwise it falls back to
 // the plain token-authenticated client: a not-yet-enrolled node has no
-// certificate to present, and enrollment itself (always plain HTTP) is
-// how it gets one. The k3s-token and state/db fetchers use this client;
-// enrollment never does.
+// certificate to present. Enrollment itself (EnrollPKIFromPeer) never
+// uses this client: it requires verified HTTPS against the peer CA
+// provisioned locally and fails closed without one (R4-A-H2).
+// The k3s-token and state/db fetchers use this client; enrollment
+// never does.
 func (m *SqliteSyncManager) peerClient(timeout time.Duration) (*http.Client, string) {
 	if m.mtlsRequested() {
 		if tlsCfg, err := LoadHAPKITLSConfig(); err == nil {
@@ -544,9 +546,56 @@ func (m *SqliteSyncManager) handlePkiEnroll(w http.ResponseWriter, r *http.Reque
 	_ = json.NewEncoder(w).Encode(bundle)
 }
 
+// peerEnrollmentCAPaths are the local files that may hold the peer HA CA
+// certificate used to verify the enrollment endpoint. The CA is
+// provisioned out of band (HA PKI bundle import, or a previous
+// enrollment); enrollment never trusts a CA received over the same
+// connection it is trying to verify.
+var peerEnrollmentCAPaths = []string{HAPKICACertPath, "/etc/axonwall/pki/ca.crt"}
+
+// enrollPKIClient builds the HTTPS client for HA PKI enrollment. It
+// verifies the peer against the locally provisioned HA CA and fails
+// closed when no CA material exists: enrollment must never downgrade
+// to plaintext HTTP or skip verification, because the CSR response
+// carries the LDAP replication secret (which deterministically derives
+// the SSSD bind password).
+func enrollPKIClient(caCertPaths []string) (*http.Client, error) {
+	pool := x509.NewCertPool()
+	found := false
+	for _, p := range caCertPaths {
+		pemBytes, err := os.ReadFile(p)
+		if err != nil {
+			continue
+		}
+		if pool.AppendCertsFromPEM(pemBytes) {
+			found = true
+		}
+	}
+	if !found {
+		return nil, fmt.Errorf("refusing HA PKI enrollment: no peer HA CA certificate found in %v; import the HA PKI bundle (peer CA) before enrolling — enrollment never falls back to plaintext HTTP or unverified TLS", caCertPaths)
+	}
+	return &http.Client{
+		Timeout: 10 * time.Second,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12},
+		},
+	}, nil
+}
+
 // EnrollPKIFromPeer generates a local HA node CSR, submits it to the primary peer's
 // /api/v1/sync/pki-enroll endpoint, and installs the returned certificates and LDAP secret.
+//
+// R4-A-H2: enrollment is verified HTTPS only, against the peer CA
+// provisioned locally. The old code tried HTTPS with
+// InsecureSkipVerify and fell back to plain HTTP on any error, so
+// anyone who could make the HTTPS attempt fail harvested the LDAP
+// replication secret in cleartext. If no CA can be established the
+// enrollment fails closed instead of downgrading.
 func EnrollPKIFromPeer(peerAddr string, peerPort int, authToken string) (*HAPKICSRResponse, error) {
+	return enrollPKIFromPeerWithCA(peerAddr, peerPort, authToken, peerEnrollmentCAPaths)
+}
+
+func enrollPKIFromPeerWithCA(peerAddr string, peerPort int, authToken string, caCertPaths []string) (*HAPKICSRResponse, error) {
 	csrPEM, err := GenerateHAPKICSR(nil)
 	if err != nil {
 		return nil, err
@@ -555,50 +604,35 @@ func EnrollPKIFromPeer(peerAddr string, peerPort int, authToken string) (*HAPKIC
 	if err != nil {
 		return nil, err
 	}
-	hostPort := net.JoinHostPort(peerAddr, strconv.Itoa(peerPort))
-	tryScheme := func(scheme string, client *http.Client) (*HAPKICSRResponse, error) {
-		enrollUrl := fmt.Sprintf("%s://%s/api/v1/sync/pki-enroll", scheme, hostPort)
-		req, err := http.NewRequest(http.MethodPost, enrollUrl, bytes.NewReader(payload))
-		if err != nil {
-			return nil, err
-		}
-		req.Header.Set("Content-Type", "application/json")
-		if authToken != "" {
-			req.Header.Set("X-Axonwall-Sync-Token", authToken)
-		}
-		resp, err := client.Do(req)
-		if err != nil {
-			return nil, err
-		}
-		defer resp.Body.Close()
-		if resp.StatusCode != http.StatusOK {
-			return nil, fmt.Errorf("pki-enroll (%s) returned status %d", scheme, resp.StatusCode)
-		}
-		var csrResp HAPKICSRResponse
-		if err := json.NewDecoder(io.LimitReader(resp.Body, 256*1024)).Decode(&csrResp); err != nil {
-			return nil, err
-		}
-		return &csrResp, nil
-	}
-
-	tlsBootstrapClient := &http.Client{
-		Timeout: 10 * time.Second,
-		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-		},
-	}
-	csrResp, err := tryScheme("https", tlsBootstrapClient)
+	client, err := enrollPKIClient(caCertPaths)
 	if err != nil {
-		plainClient := &http.Client{Timeout: 10 * time.Second}
-		csrResp, err = tryScheme("http", plainClient)
-		if err != nil {
-			return nil, err
-		}
-	}
-	if err := InstallHAPKICSRResponse(csrResp); err != nil {
 		return nil, err
 	}
-	return csrResp, nil
+	enrollURL := fmt.Sprintf("https://%s/api/v1/sync/pki-enroll", net.JoinHostPort(peerAddr, strconv.Itoa(peerPort)))
+	req, err := http.NewRequest(http.MethodPost, enrollURL, bytes.NewReader(payload))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if authToken != "" {
+		req.Header.Set("X-Axonwall-Sync-Token", authToken)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("pki-enroll (https) failed: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("pki-enroll (https) returned status %d", resp.StatusCode)
+	}
+	var csrResp HAPKICSRResponse
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 256*1024)).Decode(&csrResp); err != nil {
+		return nil, err
+	}
+	if err := InstallHAPKICSRResponse(&csrResp); err != nil {
+		return nil, err
+	}
+	return &csrResp, nil
 }
 
 func (m *SqliteSyncManager) handleStatus(w http.ResponseWriter, r *http.Request) {
@@ -1312,6 +1346,18 @@ func mergePeerReplicaPreservingLocalIdentity(localBytes, replicaBytes []byte) ([
 				}
 				if repIfaces, ok := replicaMap["interfaces"].([]any); ok {
 					preservedKeys := []string{"device", "ipv4Address", "ipv6Address", "address", "gateway", "ipv6Gateway", "macAddress"}
+					// R4-A-L4: a replica interface with no local
+					// match must never be adopted wholesale — the
+					// peer's IPs/MACs would land on this node
+					// (renamed NIC, extra interface). When the
+					// local node has an interface set of its own,
+					// unmatched replica interfaces are dropped
+					// from the merged list. When the local node has
+					// no interfaces at all there is no local
+					// identity to preserve and the replica stands
+					// as the bootstrap config.
+					hasLocalIfaces := len(localByName) > 0 || len(localByDev) > 0
+					kept := make([]any, 0, len(repIfaces))
 					for _, item := range repIfaces {
 						rm, ok := item.(map[string]any)
 						if !ok {
@@ -1327,15 +1373,33 @@ func mergePeerReplicaPreservingLocalIdentity(localBytes, replicaBytes []byte) ([
 							}
 						}
 						if lm == nil {
+							if hasLocalIfaces {
+								continue
+							}
+							kept = append(kept, rm)
 							continue
 						}
 						for _, k := range preservedKeys {
+							// R4-A-L4: only overwrite keys the
+							// local interface actually has.
+							// Deleting a key the local interface
+							// lacks used to drop the peer's gateway
+							// from the merged config; keep the
+							// peer's value instead.
 							if v, exists := lm[k]; exists {
 								rm[k] = v
-							} else {
-								delete(rm, k)
 							}
 						}
+						preserved = true
+						kept = append(kept, rm)
+					}
+					if hasLocalIfaces {
+						// The interface set was reconciled against
+						// local identity even if every replica
+						// interface was dropped; without this the
+						// function below would return the raw
+						// replica bytes and adopt them wholesale.
+						replicaMap["interfaces"] = kept
 						preserved = true
 					}
 				}

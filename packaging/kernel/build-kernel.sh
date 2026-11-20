@@ -26,7 +26,9 @@ ARCH_ARG="$(uname -m)"
 case "${ARCH_ARG}" in
   x86_64|amd64) TARGET_ARCH="amd64" ;;
   aarch64|arm64) TARGET_ARCH="arm64" ;;
-  *) TARGET_ARCH="amd64" ;;
+  # R4-D-L6: fail fast on an unrecognised host arch instead of silently
+  # defaulting to amd64 and building (or shipping) a wrong-arch kernel.
+  *) echo "[!] Unsupported host architecture '${ARCH_ARG}' (expected x86_64/amd64 or aarch64/arm64)" >&2; exit 1 ;;
 esac
 
 CAPABILITIES="k3s,zfs,nftables,ebpf,kvm,ipsec,usb,iscsi_nfs"
@@ -51,7 +53,10 @@ Options:
   --capabilities <csv>        Comma-separated packs (default: ${CAPABILITIES})
                               Valid: k3s, zfs, nftables, ebpf, kvm, ipsec, usb, iscsi_nfs
   --lockdown <tier>           Lockdown LSM mode: 'integrity' (default) or 'confidentiality'
-  --march <target>            CPU microarchitecture: x86-64, x86-64-v2, x86-64-v3, x86-64-v4, native, armv8-a
+  --march <target>            CPU microarchitecture: x86-64, x86-64-v2, x86-64-v3, x86-64-v4, armv8-a
+                              (a named, auditable baseline; '--march native' is refused --
+                              it would produce a host-CPU-locked .deb that must not be
+                              distributed, see R4-D-M3)
   --lsmod-file <path>         Host lsmod / /proc/modules file for 'make localmodconfig' (stripped mode)
   --hardware-fragment <path>  Optional hardware Kconfig fragment to merge
   --disable-ia32              Disable IA-32 32-bit x86 emulation (CONFIG_IA32_EMULATION=n)
@@ -163,6 +168,26 @@ case "${TARGET_ARCH}" in
     ;;
 esac
 
+# R4-D-M2: cross-compile setup for --arch arm64 on a non-arm64 host (the
+# round-3 D-M10 pattern from build-edge-uki.sh). Set CROSS_COMPILE and
+# fail fast when the aarch64 toolchain is absent -- before the tarball is
+# downloaded, so a dead --arch arm64 path fails in seconds, not after a
+# long download + a confusing host-gcc failure. The toolchain check is
+# skipped for --mode config-only, which only exports fragments and never
+# compiles. CROSS_COMPILE is exported so every make invocation below
+# (defconfig, localmodconfig, olddefconfig, bindeb-pkg) honours it.
+CROSS_COMPILE=""
+if [[ "${TARGET_ARCH}" == "arm64" ]] && [[ "$(uname -m)" != "aarch64" && "$(uname -m)" != "arm64" ]]; then
+  CROSS_COMPILE="aarch64-linux-gnu-"
+  if [[ "${MODE}" != "config-only" ]] && ! command -v "${CROSS_COMPILE}gcc" >/dev/null 2>&1; then
+    echo "[!] --arch arm64 on an $(uname -m) host needs the aarch64 cross toolchain (${CROSS_COMPILE}gcc), which is not installed." >&2
+    echo "    Install it (Debian: apt-get install -y gcc-aarch64-linux-gnu) and retry." >&2
+    exit 1
+  fi
+  export CROSS_COMPILE
+  echo "[+] Cross-compiling for arm64 with CROSS_COMPILE=${CROSS_COMPILE}"
+fi
+
 case "${LOCKDOWN_TIER}" in
   integrity|confidentiality) ;;
   *)
@@ -187,7 +212,17 @@ case "${MARCH_TARGET}" in
   x86-64-v2) KCFLAGS_VAL="-O2 -march=x86-64-v2" ;;
   x86-64-v3) KCFLAGS_VAL="-O2 -march=x86-64-v3" ;;
   x86-64-v4) KCFLAGS_VAL="-O2 -march=x86-64-v4" ;;
-  native)    KCFLAGS_VAL="-O2 -march=native" ;;
+  # R4-D-M3: refuse --march native outright. It produces a kernel .deb
+  # locked to the build host's CPU, and build-iso.sh stages any such
+  # .deb into every ISO -- an unbootable box (illegal-instruction faults
+  # on older/different appliance CPUs) from a flag that looks like a
+  # harmless optimisation. Use a named baseline (x86-64-v3 is the
+  # stripped-mode default) instead.
+  native)
+    echo "[!] --march native is refused: it produces a host-CPU-locked kernel .deb that must not be distributed." >&2
+    echo "    Use a named, auditable baseline instead (e.g. --march x86-64-v3)." >&2
+    exit 1
+    ;;
   armv8-a)   KCFLAGS_VAL="-O2 -march=armv8-a" ;;
   *)
     echo "[!] Invalid --march '${MARCH_TARGET}'" >&2
@@ -414,6 +449,7 @@ write_manifest() {
   "mode": "${MODE}",
   "kernelVersion": "${KERNEL_VERSION}",
   "arch": "${TARGET_ARCH}",
+  "crossCompile": "${CROSS_COMPILE:-}",
   "capabilities": "${CAPABILITIES}",
   "lockdownTier": "${LOCKDOWN_TIER}",
   "march": "${MARCH_TARGET}",

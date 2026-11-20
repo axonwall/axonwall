@@ -182,6 +182,73 @@ describe('Axonwall MCP Safety Guard & Blast-Radius Validator', () => {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
+  it('persists master-switch settings through the canonical path and verifies them (R4-B-M1)', async () => {
+    const { getMcpServerStatus, saveMcpSettings, resolveMcpSettingsPath } = await import('../index.js');
+    // No env override in this test: file-based status decides.
+    const prevEnabled = process.env.AXONWALL_MCP_ENABLED;
+    const prevDisabled = process.env.AXONWALL_DISABLE_MCP;
+    const prevSettingsPath = process.env.AXONWALL_MCP_SETTINGS_PATH;
+    const prevStateDir = process.env.AXONWALL_STATE_DIR;
+    const prevPersistDir = process.env.AXONWALL_PERSIST_YAML_DIR;
+    const prevEtcDir = process.env.AXONWALL_CONFIG_DIR;
+    delete process.env.AXONWALL_MCP_ENABLED;
+    delete process.env.AXONWALL_DISABLE_MCP;
+    delete process.env.AXONWALL_MCP_SETTINGS_PATH;
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'axonwall-lib-mcp-settings-test-'));
+    const stateDir = path.join(tmpDir, 'var');
+    const persistDir = path.join(tmpDir, 'persist');
+    const etcDir = path.join(tmpDir, 'etc');
+    for (const d of [stateDir, persistDir, etcDir]) fs.mkdirSync(d, { recursive: true });
+    process.env.AXONWALL_STATE_DIR = stateDir;
+    process.env.AXONWALL_PERSIST_YAML_DIR = persistDir;
+    process.env.AXONWALL_CONFIG_DIR = etcDir;
+    try {
+      // Canonical path is <stateDir>/mcp-settings.json.
+      expect(resolveMcpSettingsPath()).toBe(path.join(stateDir, 'mcp-settings.json'));
+
+      const disabled = saveMcpSettings({
+        enabled: false,
+        disabledReason: 'Disabled in test',
+        disabledAt: new Date().toISOString(),
+        disabledBy: 'test',
+      });
+      expect(disabled.ok).toBe(true);
+      expect(getMcpServerStatus().enabled).toBe(false);
+
+      // A stale enabled:true mirror must not defeat the disable.
+      fs.writeFileSync(path.join(etcDir, 'mcp-settings.json'), JSON.stringify({ enabled: true }));
+      fs.writeFileSync(path.join(persistDir, 'mcp-settings.json'), JSON.stringify({ enabled: true }));
+      expect(getMcpServerStatus().enabled).toBe(false);
+      expect(getMcpServerStatus().source).toBe('settings_file');
+
+      // Re-enable round-trips and is visible on re-read.
+      expect(saveMcpSettings({ enabled: true }).ok).toBe(true);
+      expect(getMcpServerStatus().enabled).toBe(true);
+
+      // A canonical write that cannot land reports ok:false.
+      const blocker = path.join(tmpDir, 'blocker');
+      fs.writeFileSync(blocker, 'not a directory');
+      process.env.AXONWALL_MCP_SETTINGS_PATH = path.join(blocker, 'mcp-settings.json');
+      const failed = saveMcpSettings({ enabled: false });
+      expect(failed.ok).toBe(false);
+      expect(failed.error || '').toMatch(/Failed to persist mcp-settings\.json to canonical path/);
+    } finally {
+      if (prevEnabled !== undefined) process.env.AXONWALL_MCP_ENABLED = prevEnabled;
+      else delete process.env.AXONWALL_MCP_ENABLED;
+      if (prevDisabled !== undefined) process.env.AXONWALL_DISABLE_MCP = prevDisabled;
+      else delete process.env.AXONWALL_DISABLE_MCP;
+      if (prevSettingsPath !== undefined) process.env.AXONWALL_MCP_SETTINGS_PATH = prevSettingsPath;
+      else delete process.env.AXONWALL_MCP_SETTINGS_PATH;
+      if (prevStateDir !== undefined) process.env.AXONWALL_STATE_DIR = prevStateDir;
+      else delete process.env.AXONWALL_STATE_DIR;
+      if (prevPersistDir !== undefined) process.env.AXONWALL_PERSIST_YAML_DIR = prevPersistDir;
+      else delete process.env.AXONWALL_PERSIST_YAML_DIR;
+      if (prevEtcDir !== undefined) process.env.AXONWALL_CONFIG_DIR = prevEtcDir;
+      else delete process.env.AXONWALL_CONFIG_DIR;
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
   it('validates Linux 6.9+ BPF_TOKEN_CREATE delegation masks and rejects Ring-0 tracing programs', async () => {
     const {
       validateBpfTokenDelegationInput,

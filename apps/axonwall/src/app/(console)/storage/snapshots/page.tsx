@@ -28,6 +28,9 @@ export default function ZfsSnapshotsPage() {
   };
   const [state, setState] = useState<DesiredState | null>(null);
   const [snapshots, setSnapshots] = useState<NasSnapshotItem[]>([]);
+  // R4-C-M2: a failed snapshot load means the list is UNKNOWN, not
+  // empty — surfaced in the runtime section below, never swallowed.
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [dataset, setDataset] = useState('tank/shares/general');
   const [label, setLabel] = useState('');
   const [interval, setIntervalVal] = useState<'hourly' | 'daily' | 'weekly'>('hourly');
@@ -38,11 +41,22 @@ export default function ZfsSnapshotsPage() {
   const [msgKind, setMsgKind] = useState<'success' | 'error'>('success');
 
   const load = async () => {
+    // R4-C-M2: load the config and the runtime snapshot list
+    // separately — a config-load failure must not be misread as a
+    // snapshot-load failure, and a snapshot-load failure must never
+    // collapse to an empty list.
     try {
-      const [st, snaps] = await Promise.all([getCurrentDesiredState(), getNasSnapshotsRuntime()]);
+      const st = await getCurrentDesiredState();
       setState(st);
-      setSnapshots(snaps || []);
     } catch {}
+    try {
+      const snaps = await getNasSnapshotsRuntime();
+      setSnapshots(snaps || []);
+      setLoadError(null);
+    } catch (err: any) {
+      setSnapshots([]);
+      setLoadError(err?.message || 'Failed to load snapshots from the daemon.');
+    }
   };
 
   useEffect(() => {
@@ -262,7 +276,15 @@ export default function ZfsSnapshotsPage() {
 
       <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 space-y-3">
         <h3 className="text-sm font-bold text-white">Runtime Snapshots (live from the daemon)</h3>
-        {snapshots.length === 0 ? (
+        {loadError ? (
+          <div className="p-4 rounded-xl bg-rose-500/10 border border-rose-500/30 text-xs text-rose-300 flex items-start gap-2">
+            <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
+            <span>
+              Daemon unavailable — snapshot list unknown. {loadError} Do not assume no snapshots
+              exist.
+            </span>
+          </div>
+        ) : snapshots.length === 0 ? (
           <p className="text-xs text-slate-500">
             No snapshots reported by the daemon. If you just created one and it is not listed here,
             the creation may not have landed — check the message above.

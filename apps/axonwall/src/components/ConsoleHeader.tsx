@@ -12,6 +12,9 @@ interface ConsoleHeaderProps {
   session: UserSession | null;
   pendingConfirm?: boolean;
   confirmDeadlineUnix?: number;
+  // R4-C-H1: true when axonwalld did not answer — the header shows a
+  // daemon-unavailable chip instead of implying a healthy daemon.
+  daemonDown?: boolean;
   onConfirm?: () => Promise<void>;
   onRollback?: () => Promise<void>;
 }
@@ -20,12 +23,14 @@ export function ConsoleHeader({
   session,
   pendingConfirm: initialPending = false,
   confirmDeadlineUnix: initialDeadline = 0,
+  daemonDown: initialDaemonDown = false,
   onConfirm,
   onRollback,
 }: ConsoleHeaderProps) {
   const router = useRouter();
   const [isPending, setIsPending] = useState<boolean>(initialPending);
   const [deadline, setDeadline] = useState<number>(initialDeadline);
+  const [daemonDown, setDaemonDown] = useState<boolean>(initialDaemonDown);
   const [timeLeft, setTimeLeft] = useState<number>(() => {
     if (!initialDeadline) return 0;
     return Math.max(0, initialDeadline - Math.floor(Date.now() / 1000));
@@ -41,17 +46,19 @@ export function ConsoleHeader({
   useEffect(() => {
     setIsPending(initialPending);
     setDeadline(initialDeadline);
+    setDaemonDown(initialDaemonDown);
     setExpiryChecked(false);
     if (initialDeadline) {
       setTimeLeft(Math.max(0, initialDeadline - Math.floor(Date.now() / 1000)));
     }
-  }, [initialPending, initialDeadline]);
+  }, [initialPending, initialDeadline, initialDaemonDown]);
 
   // Status check function
   const checkStatus = useCallback(async () => {
     try {
       const status = await getAgentStatus();
       setIsPending(Boolean(status.pendingConfirm));
+      setDaemonDown(Boolean(status.daemonDown));
       const newDeadline = Number(status.confirmDeadlineUnix || 0);
       setDeadline(newDeadline);
       if (status.pendingConfirm && newDeadline) {
@@ -169,11 +176,21 @@ export function ConsoleHeader({
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-4">
           <div className="flex items-center gap-2">
-            <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse" />
+            <span
+              className={`w-2.5 h-2.5 rounded-full ${daemonDown ? 'bg-rose-500' : 'bg-emerald-500 animate-pulse'}`}
+            />
             <span className="font-semibold text-sm text-slate-200">axonwall-appliance</span>
             <span className="text-xs bg-slate-800 text-slate-400 px-2 py-0.5 rounded border border-slate-700">
               v0.12.4
             </span>
+            {daemonDown && (
+              <span
+                className="text-xs bg-rose-500/15 text-rose-300 px-2 py-0.5 rounded border border-rose-500/30"
+                title="axonwalld is not responding — daemon-sourced status on this page is unknown"
+              >
+                Daemon unavailable
+              </span>
+            )}
           </div>
 
           {feedback && (

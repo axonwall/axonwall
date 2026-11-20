@@ -15,96 +15,198 @@ import {
 } from '@axonwall/lib/mcp';
 import { acquireMcpLockFile } from './lockfile.js';
 import { resolveControllerDirs } from '../dev-paths.js';
+import { readCanonicalConfig, writeCanonicalConfig, writeFileAtomicSync } from '../atomic-config.js';
 
+// R4-B-L2: the per-key sliding-window budget used to live only in
+// this module-level map, so every fresh axonwall-mcp stdio process
+// started with a full budget and the limit was unenforced on the
+// stdio transport. Buckets are now persisted to a state file under
+// the controller var dir (atomic write, short lock) and reloaded
+// whenever the file changes, so the budget survives across stdio
+// process invocations. The in-process map stays as a cache only.
 const rateLimitBuckets = new Map<string, number[]>();
+let rateLimitDiskMtimeMs = -1;
+let rateLimitDiskLoaded = false;
 
+export function resolveMcpRateLimitPath(): string {
+  if (process.env.AXONWALL_MCP_RATE_LIMIT_PATH) {
+    return process.env.AXONWALL_MCP_RATE_LIMIT_PATH;
+  }
+  return path.join(resolveControllerDirs().varDir, 'mcp-rate-limits.json');
+}
+
+function parseRateLimitState(raw: string): Record<string, number[]> | null {
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+    const out: Record<string, number[]> = {};
+    for (const [keyId, stamps] of Object.entries(parsed as Record<string, unknown>)) {
+      if (!Array.isArray(stamps)) continue;
+      const valid = (stamps as unknown[]).filter(
+        (ts): ts is number => typeof ts === 'number' && Number.isFinite(ts)
+      );
+      if (valid.length > 0) out[keyId] = valid;
+    }
+    return out;
+  } catch {
+    return null;
+  }
+}
+
+function loadRateLimitStateFromDisk(): Record<string, number[]> {
+  const statePath = resolveMcpRateLimitPath();
+  try {
+    if (!fs.existsSync(statePath)) return {};
+    const parsed = parseRateLimitState(fs.readFileSync(statePath, 'utf8'));
+    if (parsed === null) {
+      console.warn(`[MCP RateLimit] Ignoring corrupt rate-limit state file ${statePath}; starting from an empty budget.`);
+      return {};
+    }
+    try {
+      rateLimitDiskMtimeMs = fs.statSync(statePath).mtimeMs;
+    } catch {}
+    rateLimitDiskLoaded = true;
+    return parsed;
+  } catch (err: any) {
+    console.warn(`[MCP RateLimit] Could not read rate-limit state file ${statePath} (${err?.message || err}); starting from an empty budget.`);
+    return {};
+  }
+}
+
+function persistRateLimitState(): boolean {
+  const statePath = resolveMcpRateLimitPath();
+  const now = Date.now();
+  const windowStart = now - 60_000;
+  const snapshot: Record<string, number[]> = {};
+  for (const [keyId, stamps] of rateLimitBuckets.entries()) {
+    const kept = stamps.filter((ts) => ts > windowStart);
+    if (kept.length > 0) snapshot[keyId] = kept;
+  }
+  // Best-effort durability: the limit still holds in-process when
+  // the disk write fails, but the budget then does not survive a
+  // process restart — so a failure is logged loudly, never silent.
+  let release: (() => void) | null = null;
+  try {
+    release = acquireMcpLockFile(`${statePath}.lock`, 2000);
+  } catch (err: any) {
+    console.warn(`[MCP RateLimit] Could not lock rate-limit state file ${statePath} (${err?.message || err}); budget kept in memory only for this process.`);
+    return false;
+  }
+  try {
+    writeFileAtomicSync(statePath, JSON.stringify(snapshot, null, 2), 0o660);
+    try {
+      rateLimitDiskMtimeMs = fs.statSync(statePath).mtimeMs;
+    } catch {}
+    rateLimitDiskLoaded = true;
+    return true;
+  } catch (err: any) {
+    console.warn(`[MCP RateLimit] Failed to persist rate-limit state to ${statePath} (${err?.message || err}); budget kept in memory only for this process.`);
+    return false;
+  } finally {
+    try {
+      release?.();
+    } catch {}
+  }
+}
+
+/** Refresh the in-process cache from disk when another process changed the file. */
+function refreshRateLimitBucketsFromDisk(): void {
+  const statePath = resolveMcpRateLimitPath();
+  let mtimeMs = -1;
+  try {
+    if (!fs.existsSync(statePath)) return;
+    mtimeMs = fs.statSync(statePath).mtimeMs;
+  } catch {
+    return;
+  }
+  if (rateLimitDiskLoaded && mtimeMs === rateLimitDiskMtimeMs) return;
+  const disk = loadRateLimitStateFromDisk();
+  const now = Date.now();
+  const windowStart = now - 60_000;
+  for (const [keyId, stamps] of Object.entries(disk)) {
+    const merged = Array.from(
+      new Set([...(rateLimitBuckets.get(keyId) ?? []), ...stamps])
+    ).filter((ts) => ts > windowStart);
+    rateLimitBuckets.set(keyId, merged);
+  }
+}
+
+// R4-B-M1: the canonical mcp-keys.json path. There is exactly one:
+// the env override when set, otherwise <varDir>/mcp-keys.json. The
+// old resolver returned a mirror copy (persistYamlDir / etcDir)
+// whenever the primary was unreadable, and the loader took the
+// first candidate that parsed — so a stale mirror could defeat a
+// revocation. Reads and writes now go through this path only; see
+// readCanonicalConfig / writeCanonicalConfig.
 export function resolveMcpKeysPath(): string {
   if (process.env.AXONWALL_MCP_KEYS_PATH) {
     return process.env.AXONWALL_MCP_KEYS_PATH;
   }
+  return path.join(resolveControllerDirs().varDir, 'mcp-keys.json');
+}
+
+/** Mirror copies, written best-effort after the canonical write. Never read. */
+function mcpKeysMirrorPaths(): string[] {
+  if (process.env.AXONWALL_MCP_KEYS_PATH) return [];
   const dirs = resolveControllerDirs();
-  const primaryDir = dirs.varDir;
-  const primaryFile = path.join(primaryDir, 'mcp-keys.json');
+  return [
+    path.join(dirs.persistYamlDir, 'mcp-keys.json'),
+    path.join(dirs.etcDir, 'mcp-keys.json'),
+  ];
+}
+
+function parseMcpKeysFile(raw: string): McpApiKey[] | null {
   try {
-    if (fs.existsSync(primaryFile)) {
-      fs.accessSync(primaryFile, fs.constants.R_OK);
-      return primaryFile;
-    }
-    fs.mkdirSync(primaryDir, { recursive: true, mode: 0o775 });
-    fs.accessSync(primaryDir, fs.constants.W_OK);
-    return primaryFile;
-  } catch {
-    for (const candidate of [
-      path.join(dirs.persistYamlDir, 'mcp-keys.json'),
-      path.join(dirs.etcDir, 'mcp-keys.json'),
-    ]) {
-      if (fs.existsSync(candidate)) {
-        return candidate;
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return null;
+    const valid: McpApiKey[] = [];
+    for (const item of parsed) {
+      const res = McpApiKeySchema.safeParse(item);
+      if (res.success) {
+        valid.push(res.data);
       }
     }
-    return primaryFile;
+    return valid;
+  } catch {
+    return null;
   }
 }
 
 function loadMcpKeysInternal(): McpApiKey[] {
-  const dirs = resolveControllerDirs();
-  const candidatePaths = process.env.AXONWALL_MCP_KEYS_PATH
-    ? [process.env.AXONWALL_MCP_KEYS_PATH]
-    : Array.from(
-        new Set([
-          resolveMcpKeysPath(),
-          path.join(dirs.varDir, 'mcp-keys.json'),
-          path.join(dirs.persistYamlDir, 'mcp-keys.json'),
-          path.join(dirs.etcDir, 'mcp-keys.json'),
-        ]),
-      );
-
-  for (const keysPath of candidatePaths) {
-    if (!fs.existsSync(keysPath)) continue;
-    try {
-      const raw = fs.readFileSync(keysPath, 'utf8');
-      const parsed = JSON.parse(raw);
-      if (!Array.isArray(parsed)) continue;
-      const valid: McpApiKey[] = [];
-      for (const item of parsed) {
-        const res = McpApiKeySchema.safeParse(item);
-        if (res.success) {
-          valid.push(res.data);
-        }
-      }
-      return valid;
-    } catch {
-      // try next candidate
-    }
-  }
-  return [];
+  return (
+    readCanonicalConfig({
+      canonicalPath: resolveMcpKeysPath(),
+      mirrorPaths: mcpKeysMirrorPaths(),
+      parse: parseMcpKeysFile,
+      label: 'mcp-keys.json',
+    }) ?? []
+  );
 }
 
 function saveMcpKeysInternal(keys: McpApiKey[]): void {
-  const dirs = resolveControllerDirs();
-  const serialized = JSON.stringify(keys, null, 2);
-  const targetPaths = process.env.AXONWALL_MCP_KEYS_PATH
-    ? [process.env.AXONWALL_MCP_KEYS_PATH]
-    : [
-        resolveMcpKeysPath(),
-        path.join(dirs.persistYamlDir, 'mcp-keys.json'),
-        path.join(dirs.etcDir, 'mcp-keys.json'),
-      ];
-  for (const keysPath of Array.from(new Set(targetPaths))) {
-    try {
-      fs.mkdirSync(path.dirname(keysPath), { recursive: true, mode: 0o775 });
-      const tmpPath = `${keysPath}.tmp.${process.pid}.${crypto.randomUUID()}`;
-      fs.writeFileSync(tmpPath, serialized, { mode: 0o660 });
-      try {
-        fs.chmodSync(tmpPath, 0o660);
-      } catch {}
-      fs.renameSync(tmpPath, keysPath);
-    } catch {
-      try {
-        fs.writeFileSync(keysPath, serialized, { mode: 0o660 });
-        fs.chmodSync(keysPath, 0o660);
-      } catch {}
-    }
+  // Throws when the canonical write fails: a revocation or disable
+  // that did not land must never report success.
+  writeCanonicalConfig({
+    canonicalPath: resolveMcpKeysPath(),
+    mirrorPaths: mcpKeysMirrorPaths(),
+    serialized: JSON.stringify(keys, null, 2),
+    mode: 0o660,
+    label: 'mcp-keys.json',
+  });
+}
+
+/**
+ * Re-read the canonical keys file and confirm the mutation landed.
+ * A write that reported success but is not visible on re-read (disk
+ * error after rename, wrong path, concurrent clobber) is a failed
+ * revocation/disable, not a success.
+ */
+function verifyMcpKeysMutation(check: (keys: McpApiKey[]) => boolean, what: string): void {
+  if (!check(loadMcpKeysInternal())) {
+    throw new Error(
+      `mcp-keys.json mutation did not land on re-read of the canonical file (${resolveMcpKeysPath()}): ${what}. ` +
+        `Treat the change as NOT applied.`
+    );
   }
 }
 
@@ -232,6 +334,10 @@ export function createMcpApiKeyRecord(input: CreateMcpApiKeyInput): CreatedMcpAp
     const existing = loadMcpKeysInternal();
     existing.unshift(record);
     saveMcpKeysInternal(existing);
+    verifyMcpKeysMutation(
+      (keys) => keys.some((k) => k.id === record.id),
+      `newly created key ${record.id} is missing`
+    );
   });
 
   const { secretHashSha256: _omitted, ...publicRecord } = record;
@@ -259,6 +365,13 @@ export function revokeMcpApiKeyRecord(keyId: string): boolean {
     if (idx === -1) return false;
     keys.splice(idx, 1);
     saveMcpKeysInternal(keys);
+    // R4-B-M1: a revocation is only real once the canonical file no
+    // longer contains the key. Verify by re-reading; throw (do not
+    // report success) when the key is still there.
+    verifyMcpKeysMutation(
+      (reloaded) => !reloaded.some((k) => k.id === keyId),
+      `revoked key ${keyId} is still present`
+    );
     return true;
   });
   if (revoked) rateLimitBuckets.delete(keyId);
@@ -272,6 +385,10 @@ export function toggleMcpApiKeyRecord(keyId: string, enabled: boolean): McpApiKe
     if (!target) return null;
     target.enabled = enabled;
     saveMcpKeysInternal(keys);
+    verifyMcpKeysMutation(
+      (reloaded) => reloaded.find((k) => k.id === keyId)?.enabled === enabled,
+      `key ${keyId} did not persist enabled=${enabled}`
+    );
     const { secretHashSha256: _omitted, ...pub } = target;
     return pub;
   });
@@ -302,6 +419,10 @@ function extractClientCertificateFingerprint(req?: http.IncomingMessage): string
 }
 
 function checkSlidingWindowRateLimit(keyId: string, limitPerMinute: number): boolean {
+  // R4-B-L2: the budget is shared across processes through the
+  // on-disk state file. Pull in any other process's usage before
+  // deciding, so a fresh stdio process does not get a fresh budget.
+  refreshRateLimitBucketsFromDisk();
   const now = Date.now();
   const windowStart = now - 60_000;
   const timestamps = (rateLimitBuckets.get(keyId) ?? []).filter((ts) => ts > windowStart);
@@ -311,6 +432,7 @@ function checkSlidingWindowRateLimit(keyId: string, limitPerMinute: number): boo
   }
   timestamps.push(now);
   rateLimitBuckets.set(keyId, timestamps);
+  persistRateLimitState();
   return true;
 }
 

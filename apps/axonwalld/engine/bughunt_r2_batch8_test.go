@@ -21,21 +21,36 @@ import (
 // whenever a peer URI was set, even when that file does not exist yet —
 // with ldap_tls_reqcert=demand, sssd then failed to start. The config
 // must never point at a CA file that does not exist.
+//
+// R4-A-M2 supersedes the old remedy: the fallback used to be
+// `ldap_tls_reqcert = never` + `ldap_id_use_start_tls = False`, which
+// sent the SSSD bind password in cleartext to the HA peer. Now the
+// builder fails closed when a peer is configured and no CA exists;
+// the old insecure config is available only through the explicit
+// AXONWALL_SSSD_ALLOW_UNVERIFIED_PEER_TLS=1 operator opt-in.
 func TestBatch8SSSDConfigNoMissingCACert(t *testing.T) {
 	_, caErr := os.Stat("/etc/axonwall/pki/ca.crt")
 	_, haErr := os.Stat(HAPKICACertPath)
 	if caErr == nil || haErr == nil {
 		t.Skip("a CA cert exists on this host; the missing-CA case does not apply")
 	}
-	cfg := BuildSSSDConfig("dc=axonwall,dc=local", "ldap://10.0.0.2:389")
-	if strings.Contains(cfg, HAPKICACertPath) {
-		t.Fatalf("SSSD config points at a CA file that does not exist:\n%s", cfg)
+	_, err := BuildSSSDConfig("dc=axonwall,dc=local", "ldap://10.0.0.2:389")
+	if err == nil {
+		t.Fatalf("BuildSSSDConfig must fail closed for a peer with no CA cert; refusing to emit a config that sends the bind password over unverified transport")
 	}
-	if strings.Contains(cfg, "ldap_tls_reqcert = demand") {
-		t.Fatalf("SSSD config demands a cert with no CA file present:\n%s", cfg)
+	if !strings.Contains(err.Error(), "AXONWALL_SSSD_ALLOW_UNVERIFIED_PEER_TLS") {
+		t.Fatalf("fail-closed error should name the explicit opt-in, got: %v", err)
+	}
+
+	// Explicit opt-in restores the old insecure config (loud warning
+	// logged by the builder) for a local no-TLS case.
+	t.Setenv("AXONWALL_SSSD_ALLOW_UNVERIFIED_PEER_TLS", "1")
+	cfg, err := BuildSSSDConfig("dc=axonwall,dc=local", "ldap://10.0.0.2:389")
+	if err != nil {
+		t.Fatalf("opt-in BuildSSSDConfig should emit a config, got error: %v", err)
 	}
 	if !strings.Contains(cfg, "ldap_tls_reqcert = never") {
-		t.Fatalf("SSSD config should fall back to reqcert=never with no CA file:\n%s", cfg)
+		t.Fatalf("opt-in SSSD config should fall back to reqcert=never with no CA file:\n%s", cfg)
 	}
 }
 

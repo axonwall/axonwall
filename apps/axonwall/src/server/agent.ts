@@ -108,6 +108,11 @@ export interface AgentStatus {
   activeBundleHash: string;
   pendingConfirm: boolean;
   confirmDeadlineUnix: number;
+  // R4-C-H1: true when axonwalld did not answer /v1/status, so every
+  // daemon-sourced field below is UNKNOWN (not a live measurement).
+  // Consumers must render an explicit "daemon unavailable" state
+  // instead of treating the placeholders as live data.
+  daemonDown: boolean;
   osName?: string;
   osId?: string;
   osFamily?: string;
@@ -196,9 +201,15 @@ export async function getAgentStatus(): Promise<AgentStatus> {
   if (daemonStatus) {
     return {
       nodeId: daemonStatus.node_id || daemonStatus.nodeId || `axonwall-${os.hostname()}`,
-      version: daemonStatus.version || '0.12.4',
-      uptimeSeconds: Number(daemonStatus.uptime_seconds || daemonStatus.uptimeSeconds || os.uptime()),
-      activeBundleHash: daemonStatus.active_bundle_hash || daemonStatus.activeBundleHash || 'hash-active',
+      // R4-C-H1: a daemon that answers without a version / bundle hash /
+      // uptime is UNKNOWN on those fields — never stamp the UI's own
+      // version, a placeholder hash, or the UI host's uptime onto it.
+      // (Main's only change here was bumping the stale literal
+      // '0.12.3' → '0.12.4'; the literal itself is the bug this fix
+      // removes, so the branch version stands.)
+      version: daemonStatus.version || 'UNKNOWN',
+      uptimeSeconds: Number(daemonStatus.uptime_seconds ?? daemonStatus.uptimeSeconds ?? 0),
+      activeBundleHash: daemonStatus.active_bundle_hash || daemonStatus.activeBundleHash || 'UNKNOWN',
       pendingConfirm: Boolean(daemonStatus.pending_confirm ?? daemonStatus.pendingConfirm),
       confirmDeadlineUnix: Number(daemonStatus.confirm_deadline_unix || daemonStatus.confirmDeadlineUnix || 0),
       osName: daemonStatus.os_name || hostOs.prettyName,
@@ -212,9 +223,37 @@ export async function getAgentStatus(): Promise<AgentStatus> {
         isUp: Boolean(iface.is_up ?? iface.isUp),
         ipAddresses: iface.ip_addresses || iface.ipAddresses || [],
       })),
+      daemonDown: false,
     };
   }
 
+  // R4-C-H1: the daemon did not answer. In production, surface
+  // daemon-down explicitly with UNKNOWN placeholders — never build a
+  // healthy-looking node out of local OS data (os.networkInterfaces()
+  // lists interfaces regardless of link state, os.uptime() is the UI
+  // host's uptime, and the version / bundle hash literals are not
+  // daemon measurements). The lobby and layout render an explicit
+  // "daemon unavailable — status unknown" state from daemonDown.
+  if (!isDevModeRuntime()) {
+    return {
+      nodeId: `axonwall-${os.hostname()}`,
+      version: 'UNKNOWN',
+      uptimeSeconds: 0,
+      activeBundleHash: 'UNKNOWN',
+      pendingConfirm: false,
+      confirmDeadlineUnix: 0,
+      osName: hostOs.prettyName,
+      osId: hostOs.id,
+      osFamily: hostOs.family,
+      kernelVersion: hostOs.kernelVersion,
+      runtimeMode: fallbackMode,
+      interfaces: [],
+      daemonDown: true,
+    };
+  }
+
+  // Dev mode only (fc576368 gate): demo fallback from local OS data,
+  // standing in for a daemon that does not exist in a dev checkout.
   // Fallback: Gather real OS interfaces and system uptime directly
   const ifaces = os.networkInterfaces();
   const interfaceList: Array<{
@@ -249,6 +288,9 @@ export async function getAgentStatus(): Promise<AgentStatus> {
     kernelVersion: hostOs.kernelVersion,
     runtimeMode: fallbackMode,
     interfaces: interfaceList,
+    // Dev-mode demo data stands in for the daemon by design (see the
+    // fc576368 gate above); it is not a daemon-down signal.
+    daemonDown: false,
   };
 }
 
@@ -4529,6 +4571,17 @@ export async function getNasSnapshotsRuntime(): Promise<NasSnapshotItem[]> {
   if (daemonResp && Array.isArray(daemonResp.snapshots)) {
     return daemonResp.snapshots;
   }
+
+  // R4-C-M2: daemon-down must not collapse to an empty list — the
+  // snapshots page cannot tell "no snapshots exist" from "the daemon
+  // did not answer". Throw in production (same shape as
+  // getNasDisksInventory / getNasPoolsRuntime); the page renders an
+  // explicit "Daemon unavailable — snapshot list unknown" banner.
+  // Dev mode keeps the empty demo list.
+  if (!isDevModeRuntime()) {
+    throw new Error('Daemon unavailable: could not load snapshots from axonwalld.');
+  }
+
   return [];
 }
 

@@ -61,6 +61,7 @@ type K3sNodeUpdateRequest struct {
 	CustomLabels  map[string]string `json:"customLabels"` // optional user/addon labels
 	RemoveLabels  []string          `json:"removeLabels"` // optional user/addon label keys to delete
 	Taints        []K3sNodeTaint    `json:"taints"`       // desired operator-managed taints
+	RemoveTaints  []K3sNodeTaint    `json:"removeTaints,omitempty"`
 	Unschedulable *bool             `json:"unschedulable,omitempty"`
 }
 
@@ -1224,19 +1225,52 @@ func buildNodeSchedulingMergePatch(existingLabels map[string]string, existingTai
 		labelsPatch[k] = v
 	}
 
+	// R4-A-L2: merge, don't replace. The old code built spec.taints
+	// from system-managed taints + req.Taints only, silently dropping
+	// every custom taint the request did not mention (e.g. a taint
+	// added by kubectl or another controller). Now: start from the
+	// node's current taints (system-managed as before, custom ones
+	// preserved), apply RemoveTaints as exact key+effect+value
+	// deletions, then upsert req.Taints by key+effect (the request
+	// wins on a value change — Kubernetes requires unique
+	// key/effect, so keeping both the old and new value would make
+	// the API server reject the patch). Dedupe is on the exact
+	// triple, not key+effect alone.
+	taintTriple := func(t K3sNodeTaint) string {
+		return t.Key + "\x00" + t.Value + "\x00" + t.Effect
+	}
 	mergedTaints := make([]K3sNodeTaint, 0, len(existingTaints)+len(req.Taints))
 	seenTaints := make(map[string]bool)
 	for _, t := range existingTaints {
-		if !isSystemManagedConditionTaintKey(t.Key) {
-			continue
-		}
 		if t.Key == "node.kubernetes.io/unschedulable" && req.Unschedulable != nil && !*req.Unschedulable {
 			continue
 		}
-		dedupeKey := t.Key + "=" + t.Effect
-		if !seenTaints[dedupeKey] {
-			seenTaints[dedupeKey] = true
-			mergedTaints = append(mergedTaints, t)
+		if seenTaints[taintTriple(t)] {
+			continue
+		}
+		seenTaints[taintTriple(t)] = true
+		mergedTaints = append(mergedTaints, t)
+	}
+
+	for _, t := range req.RemoveTaints {
+		if isSystemManagedConditionTaintKey(t.Key) {
+			continue
+		}
+		if !validK8sLabelOrTaintKey(t.Key) {
+			return nil, fmt.Errorf("invalid taint key to remove %q", t.Key)
+		}
+		if !validK8sLabelOrTaintValue(t.Value) {
+			return nil, fmt.Errorf("invalid taint value to remove %q for key %q", t.Value, t.Key)
+		}
+		if !validK8sTaintEffect(t.Effect) {
+			return nil, fmt.Errorf("invalid taint effect to remove %q for key %q", t.Effect, t.Key)
+		}
+		for i := 0; i < len(mergedTaints); i++ {
+			if mergedTaints[i].Key == t.Key && mergedTaints[i].Value == t.Value && mergedTaints[i].Effect == t.Effect {
+				delete(seenTaints, taintTriple(mergedTaints[i]))
+				mergedTaints = append(mergedTaints[:i], mergedTaints[i+1:]...)
+				break
+			}
 		}
 	}
 
@@ -1253,9 +1287,21 @@ func buildNodeSchedulingMergePatch(existingLabels map[string]string, existingTai
 		if !validK8sTaintEffect(t.Effect) {
 			return nil, fmt.Errorf("invalid taint effect %q for key %q", t.Effect, t.Key)
 		}
-		dedupeKey := t.Key + "=" + t.Effect
-		if !seenTaints[dedupeKey] {
-			seenTaints[dedupeKey] = true
+		upserted := false
+		for i := range mergedTaints {
+			if mergedTaints[i].Key == t.Key && mergedTaints[i].Effect == t.Effect {
+				delete(seenTaints, taintTriple(mergedTaints[i]))
+				mergedTaints[i].Value = t.Value
+				seenTaints[taintTriple(mergedTaints[i])] = true
+				upserted = true
+				break
+			}
+		}
+		if !upserted {
+			if seenTaints[taintTriple(t)] {
+				continue
+			}
+			seenTaints[taintTriple(t)] = true
 			mergedTaints = append(mergedTaints, K3sNodeTaint{
 				Key:    t.Key,
 				Value:  t.Value,

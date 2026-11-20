@@ -39,6 +39,7 @@ import { hasMcpScope } from './authz.js';
 import { acquireMcpLockFile, desiredStateLockPath } from './lockfile.js';
 export { desiredStateLockPath } from './lockfile.js';
 import { recordMcpAuditEntry, queryMcpAuditEntries } from './audit.js';
+import { readCanonicalConfig } from '../atomic-config.js';
 
 function readAgentToken(): string {
   if (process.env.AXONWALL_AGENT_TOKEN) {
@@ -193,19 +194,28 @@ export async function callAxonwalldApi<T = any>(
 }
 
 function loadLocalDesiredState(): DesiredState | null {
-  const candidates = resolveControllerDirs().desiredStateCandidates;
-  for (const p of candidates) {
-    try {
-      if (fs.existsSync(p)) {
-        const raw = JSON.parse(fs.readFileSync(p, 'utf8'));
-        const parsed = DesiredStateSchema.safeParse(raw);
-        if (parsed.success) return parsed.data;
+  // R4-B-M1: same canonical-path rule as the HTTP controller's copy
+  // in index.ts — the canonical path is dirs.stateFile
+  // (<varDir>/state.json, env override wins); a stale etcDir mirror
+  // must never win a state load, and a corrupt canonical fails
+  // closed instead of falling back. (The write side,
+  // persistDesiredStateToDisk, is round-3 B-M4's function, fixed on
+  // the round-3 branch to report failure instead of silent success;
+  // once that lands, read and write agree on the canonical path.)
+  const dirs = resolveControllerDirs();
+  return readCanonicalConfig({
+    canonicalPath: dirs.stateFile,
+    mirrorPaths: [path.join(dirs.etcDir, 'state.json')],
+    parse: (raw) => {
+      try {
+        const parsed = DesiredStateSchema.safeParse(JSON.parse(raw));
+        return parsed.success ? parsed.data : null;
+      } catch {
+        return null;
       }
-    } catch {
-      // continue
-    }
-  }
-  return null;
+    },
+    label: 'state.json',
+  });
 }
 
 // B-M4: returns true only when the state actually landed on disk.
@@ -1422,6 +1432,13 @@ export async function handleMcpReadResource(
         callAxonwalldApi('GET', '/v1/nas/disks'),
         callAxonwalldApi('GET', '/v1/nas/snapshots'),
       ]);
+      // R4-B-L1: same per-source failure shape as
+      // mcp_inspect_nas_storage above — a failing disks/snapshots
+      // source used to collapse to an empty list with no flag.
+      const failedSources: string[] = [
+        ...(!disksRes.ok ? ['disks'] : []),
+        ...(!snapsRes.ok ? ['snapshots'] : []),
+      ];
       payload = {
         telemetry: telRes.ok ? telRes.data : null,
         disks: disksRes.ok ? disksRes.data?.disks ?? [] : [],
@@ -1429,6 +1446,10 @@ export async function handleMcpReadResource(
         ...(!telRes.ok
           ? { daemonDown: true, error: telRes.data?.error || 'axonwalld unreachable' }
           : {}),
+        ...(failedSources.length > 0 && telRes.ok
+          ? { partialDaemonFailure: true, failedSources, error: 'One or more NAS sources failed; the empty lists above are unknown, not empty' }
+          : {}),
+        ...(failedSources.length > 0 && !telRes.ok ? { failedSources } : {}),
       };
       break;
     }
@@ -2186,10 +2207,23 @@ export async function handleMcpCallTool(
           daemonRes.data?.error || 'Daemon unavailable: emergency clear-all was not applied; tactical leases are still active'
         );
       }
-      // Main (fc576368, A-H3): the flush cleared the hub leases but
-      // left the kernel XDP blocks in place — clear them too, or the
-      // emergency clear leaves the data plane still blocking.
-      await callAxonwalldApi('DELETE', '/v1/ebpf/xdp/block', { clearAll: true });
+      // R4-B-M2: the XDP fast-drop clear-all is the second half of
+      // this panic switch, and its result used to be discarded — a
+      // failed clear returned success: true with the flush's
+      // clearedCount while every XDP fast-drop block was still
+      // enforced in the kernel. Check it like the flush; on failure
+      // deny so the caller knows the clear did NOT complete.
+      // (Merged with main's A-H3 XDP clear + round-3 B-H1 fleet
+      // unblock below: the XDP call is now the checked one, and the
+      // fleet unblock runs only after the XDP clear is confirmed,
+      // so a failed clear denies before any fleet change.)
+      const xdpRes = await callAxonwalldApi('DELETE', '/v1/ebpf/xdp/block', { clearAll: true });
+      if (!xdpRes.ok) {
+        return deny(
+          'mcp:firewall:apply',
+          `Emergency clear-all partially applied: tactical leases were flushed (${daemonRes.data?.clearedCount ?? 0} cleared) but the XDP fast-drop clear-all failed (${xdpRes.data?.error || `daemon HTTP ${xdpRes.status}`}); XDP blocks placed via mcp_xdp_fast_drop may still be enforced in the kernel`
+        );
+      }
       // B-H1 (round 3): the flush cleared the hub leases; lift the
       // matching blocks from the fleet too, or every propagated
       // blackhole outlives the emergency clear. Only blackhole
@@ -2223,6 +2257,7 @@ export async function handleMcpCallTool(
               {
                 success: true,
                 clearedCount: daemonRes.data?.clearedCount ?? 0,
+                xdpCleared: true,
                 fleetUnblockedSatellites,
                 reason,
               },
@@ -3466,6 +3501,17 @@ export async function handleMcpCallTool(
         paramsSummary: { includeDisks, includeSnapshots },
       });
 
+      // R4-B-L1: a failing disks/snapshots source used to collapse
+      // to an empty list with no flag (daemonDown only reflects the
+      // telemetry call), so a caller read "no disks" instead of
+      // "disks unknown". Report per-source failures like the
+      // round-3 B-L6 fix for virt/workloads; daemonDown keeps its
+      // total-failure meaning for existing consumers.
+      const failedSources: string[] = [
+        ...(includeDisks && !disksRes.ok ? ['disks'] : []),
+        ...(includeSnapshots && !snapsRes.ok ? ['snapshots'] : []),
+      ];
+
       return {
         content: [
           {
@@ -3476,6 +3522,10 @@ export async function handleMcpCallTool(
                 ...(includeDisks ? { disks: disksRes.ok ? disksRes.data?.disks ?? [] : [] } : {}),
                 ...(includeSnapshots ? { snapshots: snapsRes.ok ? snapsRes.data?.snapshots ?? [] : [] } : {}),
                 ...(!telRes.ok ? { daemonDown: true, error: telRes.data?.error || 'axonwalld unreachable' } : {}),
+                ...(failedSources.length > 0 && telRes.ok
+                  ? { partialDaemonFailure: true, failedSources, error: 'One or more NAS sources failed; the empty lists above are unknown, not empty' }
+                  : {}),
+                ...(failedSources.length > 0 && !telRes.ok ? { failedSources } : {}),
               },
               null,
               2,
