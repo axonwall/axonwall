@@ -1137,6 +1137,22 @@ func (we *WatchdogEngine) ActivateBootEnvironment(beName string) error {
 		return fmt.Errorf("cannot determine current bootfs; refusing to activate %q: zpool get bootfs failed", beName)
 	}
 
+	// R4-E-M2: OpenZFS validates bootfs only syntactically.
+	// bootfs_name_valid() (lib/libzfs/libzfs_pool.c) checks that the
+	// value is a well-formed dataset name in the same pool — it never
+	// opens the dataset, and zpool_valid_proplist() performs no
+	// existence lookup either — so `zpool set bootfs=` happily arms a
+	// dataset that does not exist and the next boot is unbootable.
+	// Verify the target exists first, so every caller
+	// (TriggerRollback, ActivateSlot, Kernel Studio activation) fails
+	// loudly here instead of arming a dangling name. A `zfs list`
+	// failure for any other reason (pool not imported, no ZFS on the
+	// box) likewise fails closed: activation must never proceed on
+	// an unverified target.
+	if listOut, listErr := we.runZfsCmd("list", "-H", "-o", "name", targetDataset); listErr != nil {
+		return fmt.Errorf("cannot activate boot environment %q: dataset %s does not exist: %v (%s)", beName, targetDataset, listErr, strings.TrimSpace(string(listOut)))
+	}
+
 	out, err := we.runZpoolCmd("set", "bootfs="+targetDataset, "zroot")
 	if err != nil {
 		return fmt.Errorf("zpool set bootfs failed: %v (%s)", err, strings.TrimSpace(string(out)))
@@ -1586,6 +1602,47 @@ func selectStandbyBE(bes []ZfsBootEnvironment) *ZfsBootEnvironment {
 	return last
 }
 
+// selectRollbackBE picks the Boot Environment a rollback should arm
+// when no explicit fallback BE is set. R4-E-L2 (judgment call):
+// "rollback" means "last verified-good BE", so a staged, untested BE
+// must never be a rollback candidate — unlike selectStandbyBE, which
+// deliberately prefers the BE already armed for next boot (the right
+// choice for ActivateSlot("B"), the wrong choice for a rollback: the
+// operator is asking to get AWAY from the new code, not to boot it).
+// A BE that is ActiveNext but has never booted is skipped outright,
+// even when it is the newest standby; the newest non-staged standby
+// wins, else the last non-staged standby in dataset-name order.
+// Returns nil when no non-staged standby exists, in which case the
+// rollback must fail loudly rather than arm the staged BE.
+// The fallback_be property path does not need this filter: fallback_be
+// is only ever written as the then-running BE after a successful
+// verification commit (runVerificationSequence), so a BE it names has
+// booted and verified at least once by construction.
+func selectRollbackBE(bes []ZfsBootEnvironment) *ZfsBootEnvironment {
+	var newest *ZfsBootEnvironment
+	var newestTime time.Time
+	var last *ZfsBootEnvironment
+	for i := range bes {
+		be := &bes[i]
+		if be.ActiveNow {
+			continue
+		}
+		if be.ActiveNext {
+			continue
+		}
+		last = be
+		if t, err := time.Parse("Mon Jan _2 15:04 2006", be.CreatedAt); err == nil {
+			if newest == nil || t.After(newestTime) {
+				newest, newestTime = be, t
+			}
+		}
+	}
+	if newest != nil {
+		return newest
+	}
+	return last
+}
+
 // TriggerRollback manually switches the target boot slot to the alternate partition or fallback BE and reboots.
 func (we *WatchdogEngine) TriggerRollback() error {
 	we.mu.Lock()
@@ -1608,15 +1665,19 @@ func (we *WatchdogEngine) TriggerRollback() error {
 		}
 		if fallbackBe == "" || fallbackBe == "-" {
 			// E2-10: refresh the list (script-side arming never
-			// tells the daemon) and prefer the armed/newest standby
+			// tells the daemon) and prefer the newest standby
 			// instead of the first non-active cached entry.
+			// R4-E-L2: rollback means "last verified-good BE", so
+			// use the rollback selector, which never picks a staged
+			// (ActiveNext), untested BE — selectStandbyBE would
+			// arm the staged BE first.
 			we.status.BootEnvironments = we.listBootEnvironmentsLocked()
-			if be := selectStandbyBE(we.status.BootEnvironments); be != nil {
+			if be := selectRollbackBE(we.status.BootEnvironments); be != nil {
 				fallbackBe = be.Dataset
 			}
 		}
 		if fallbackBe == "" || fallbackBe == "-" {
-			return fmt.Errorf("no fallback Boot Environment available for rollback")
+			return fmt.Errorf("no verified-good fallback Boot Environment available for rollback (no non-staged standby exists)")
 		}
 		beName := strings.TrimPrefix(fallbackBe, "zroot/ROOT/")
 		we.mu.Unlock()
