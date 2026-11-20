@@ -61,6 +61,52 @@ func TestScrubThreatPayload(t *testing.T) {
 	}
 }
 
+// R4-A-M6 (hunt repro): the scrubber missed Cookie/Set-Cookie
+// headers and bare (schemeless) Authorization tokens, and the
+// secret-key set missed sessionid/session. The hunt verified
+// numerically that each of these leaked with 0 redactions; the
+// controls (Bearer/Basic, password, X-Api-Key) redacted 1 each.
+func TestScrubThreatPayloadCookieAndBareAuth(t *testing.T) {
+	cases := []struct {
+		name   string
+		raw    string
+		secret string
+	}{
+		{"cookie sessionid", "GET / HTTP/1.1\nCookie: sessionid=abc123def456\nHost: x", "abc123def456"},
+		{"cookie session", "GET / HTTP/1.1\nCookie: session=xyz789abc\nHost: x", "xyz789abc"},
+		{"set-cookie auth", "HTTP/1.1 200 OK\nSet-Cookie: auth=tok987654; Path=/; HttpOnly", "tok987654"},
+		{"bare authorization", "GET / HTTP/1.1\nAuthorization: s3cret-t0ken-value\nHost: x", "s3cret-t0ken-value"},
+		{"sessionid kv", "sessionid=leakme00112233&other=1", "leakme00112233"},
+		{"session kv", "session=leakme44556677&other=1", "leakme44556677"},
+	}
+	for _, tc := range cases {
+		scrubbed, count := ScrubThreatPayload(tc.raw)
+		if count < 1 {
+			t.Errorf("%s: expected >=1 redaction, got %d; scrubbed:\n%s", tc.name, count, scrubbed)
+		}
+		if strings.Contains(scrubbed, tc.secret) {
+			t.Errorf("%s: secret %q leaked into scrubbed payload:\n%s", tc.name, tc.secret, scrubbed)
+		}
+	}
+	// Controls: these already redacted exactly 1 on the hunt's
+	// repro and must keep doing so.
+	controls := []struct {
+		name string
+		raw  string
+	}{
+		{"basic auth", "Authorization: Basic dXNlcjpwYXNzdzByZA=="},
+		{"bearer auth", "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"},
+		{"password kv", "password: hunter2hunter"},
+		{"x-api-key", "X-Api-Key: sk-abcdefghij1234567890"},
+	}
+	for _, tc := range controls {
+		_, count := ScrubThreatPayload(tc.raw)
+		if count != 1 {
+			t.Errorf("%s: expected exactly 1 redaction, got %d", tc.name, count)
+		}
+	}
+}
+
 func TestCryptoPanAnonymizerPrefixPreservation(t *testing.T) {
 	anon, err := NewCryptoPanAnonymizer("test-enterprise-salt-2026", "")
 	if err != nil {
@@ -203,6 +249,10 @@ func TestTlsUprobeControlPlaneExclusion(t *testing.T) {
 }
 
 func TestThreatHarvesterManagerEndToEnd(t *testing.T) {
+	// R4-A-M3: exercise the documented dev path — with no BPF
+	// available in the sandbox, the manager must tolerate the
+	// environment-level "no BPF here" outcome and keep running.
+	t.Setenv("AXONWALL_RUNTIME_MODE", "dev")
 	spool := t.TempDir()
 	mgr := NewThreatHarvesterManager(nil, nil, nil, nil)
 	cfg := DefaultThreatHarvesterConfig()
@@ -266,9 +316,11 @@ func TestThreatHarvesterManagerEndToEnd(t *testing.T) {
 	}
 	copy(ev.Payload[:], []byte("GET /?password=LeakMePlease HTTP/1.1"))
 	mgr.ingestRingEvent(&ev)
-	flushed := mgr.FlushReadyFlows(true)
-	if flushed != 1 {
-		t.Fatalf("expected 1 flushed dark-port flow, got %d", flushed)
+	// R4-A-L7: FlushReadyFlows returns (created, failed); a spool
+	// write failure must be visible, not silently dropped.
+	flushed, failed := mgr.FlushReadyFlows(true)
+	if flushed != 1 || failed != 0 {
+		t.Fatalf("expected 1 flushed dark-port flow with 0 failures, got created=%d failed=%d", flushed, failed)
 	}
 
 	// Test ExportCorpusTarZst
@@ -307,14 +359,22 @@ func TestThreatHarvesterManagerEndToEnd(t *testing.T) {
 		t.Fatalf("anonymized/scrubbed export leaked raw IP or password")
 	}
 	pqMeta, err := ReadThreatParquetMetadata(foundFiles["features.parquet"])
-	if err != nil || pqMeta.NumRows != 5 {
-		t.Fatalf("expected 5 rows in exported features.parquet, got meta=%+v err=%v", pqMeta, err)
+	// R4-A-M5: only the 1 real flushed flow is exported — the 4
+	// injected simulated episodes are pipeline test data, not live
+	// training corpus, and must not appear in the export.
+	if err != nil || pqMeta.NumRows != 1 {
+		t.Fatalf("expected 1 row in exported features.parquet (simulated episodes excluded), got meta=%+v err=%v", pqMeta, err)
+	}
+	if strings.Contains(string(foundFiles["train.jsonl"]), goldEp.ID) {
+		t.Fatalf("simulated gold episode %s leaked into the exported corpus", goldEp.ID)
 	}
 
 	// Test Teacher-LLM endpoint + hourly budget
 	llmCalls := 0
+	var llmBody []byte
 	llmSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		llmCalls++
+		llmBody, _ = io.ReadAll(r.Body)
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"choices": []map[string]any{
@@ -356,6 +416,9 @@ func TestThreatHarvesterManagerEndToEnd(t *testing.T) {
 		AccessKey:    "AKIAEXAMPLE",
 		SecretKey:    "secretkeyexample",
 		UsePathStyle: true,
+		// R4-A-L6: the test S3 server is plaintext http:// on
+		// loopback; shipping to it needs the explicit opt-in.
+		AllowPlaintextEndpoint: true,
 	}
 	if err := mgr.UpdateConfig(cfg); err != nil {
 		t.Fatalf("UpdateConfig failed: %v", err)
@@ -364,6 +427,11 @@ func TestThreatHarvesterManagerEndToEnd(t *testing.T) {
 	updatedEp, err := mgr.AnnotateEpisodeWithTeacherLLM(context.Background(), goldEp.ID)
 	if err != nil || updatedEp.ReasoningTrace != "Teacher refined trace" {
 		t.Fatalf("Teacher LLM annotation failed: ep=%+v err=%v", updatedEp, err)
+	}
+	// R4-A-M7: the teacher prompt must not carry the gold episode's
+	// raw source/destination IPs — they are anonymized by default.
+	if strings.Contains(string(llmBody), "198.51.100.44") || strings.Contains(string(llmBody), "192.168.10.250") {
+		t.Fatalf("teacher LLM request leaked raw episode IPs:\n%s", llmBody)
 	}
 	if _, err := mgr.AnnotateEpisodeWithTeacherLLM(context.Background(), goldEp.ID); err == nil {
 		t.Fatalf("expected hourly budget error on second Teacher-LLM call")
@@ -375,6 +443,19 @@ func TestThreatHarvesterManagerEndToEnd(t *testing.T) {
 	}
 	if shippedMethod != http.MethodPut || !strings.HasPrefix(shippedAuth, "AWS4-HMAC-SHA256 Credential=AKIAEXAMPLE/") || len(shippedHash) != 64 || len(shippedBytes) == 0 || objKey == "" {
 		t.Fatalf("unexpected S3 PUT upload: method=%s auth=%s hash=%s bytes=%d key=%s", shippedMethod, shippedAuth, shippedHash, len(shippedBytes), objKey)
+	}
+
+	// R4-A-M5: an unknown scenario name must not manufacture a
+	// pinned gold episode — it is an error.
+	if _, err := mgr.InjectSimulatedEpisode("totally_bogus_scenario"); err == nil {
+		t.Fatalf("InjectSimulatedEpisode must reject an unknown scenario instead of building a pinned gold episode")
+	}
+	// R4-A-L1: ReviewEpisode must reject ids that are not
+	// server-generated shapes before they reach the shard paths.
+	for _, badID := range []string{"../../etc/passwd", "ep-1/../../x", "", "ep-abc", "..", "sim-gold-rce"} {
+		if _, err := mgr.ReviewEpisode(badID, "approve"); err == nil {
+			t.Fatalf("ReviewEpisode must reject invalid episode id %q", badID)
+		}
 	}
 
 	// Test quota eviction preserves Pinned Gold episodes while evicting older unpinned ones
@@ -395,5 +476,109 @@ func TestThreatHarvesterManagerEndToEnd(t *testing.T) {
 	}
 	if !goldSurvived {
 		t.Fatalf("expected pinned Gold episode %s to survive quota eviction; remaining=%d", goldEp.ID, len(remaining))
+	}
+}
+
+// R4-A-L6: ShipCorpusToS3 refuses a plaintext http:// endpoint by
+// default; a local MinIO-over-HTTP setup must opt in explicitly.
+func TestShipCorpusToS3PlaintextEndpoint(t *testing.T) {
+	t.Setenv("AXONWALL_RUNTIME_MODE", "dev")
+	s3Srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer s3Srv.Close()
+
+	mgr := NewThreatHarvesterManager(nil, nil, nil, nil)
+	cfg := DefaultThreatHarvesterConfig()
+	cfg.Enabled = true
+	cfg.SpoolDir = t.TempDir()
+	cfg.FleetShipper = ThreatFleetShipperConfig{
+		Enabled:      true,
+		Endpoint:     s3Srv.URL, // plaintext http:// loopback
+		Region:       "us-east-1",
+		Bucket:       "test-bucket",
+		AccessKey:    "AKIAEXAMPLE",
+		SecretKey:    "secretkeyexample",
+		UsePathStyle: true,
+	}
+	if err := mgr.UpdateConfig(cfg); err != nil {
+		t.Fatalf("UpdateConfig failed: %v", err)
+	}
+	if _, err := mgr.ShipCorpusToS3(context.Background()); err == nil {
+		t.Fatalf("ShipCorpusToS3 must refuse a plaintext endpoint without the explicit opt-in")
+	} else if !strings.Contains(err.Error(), "plaintext") {
+		t.Fatalf("plaintext refusal should say so, got: %v", err)
+	}
+
+	cfg.FleetShipper.AllowPlaintextEndpoint = true
+	if err := mgr.UpdateConfig(cfg); err != nil {
+		t.Fatalf("UpdateConfig failed: %v", err)
+	}
+	if _, err := mgr.ShipCorpusToS3(context.Background()); err != nil {
+		t.Fatalf("ShipCorpusToS3 with the explicit plaintext opt-in should ship, got: %v", err)
+	}
+}
+
+// R4-A-M7: the teacher LLM prompt is anonymized by default; the raw
+// telemetry opt-in (AllowRawTelemetry) is the only way raw IPs reach
+// the teacher endpoint.
+func TestTeacherLLMAnonymizesByDefault(t *testing.T) {
+	t.Setenv("AXONWALL_RUNTIME_MODE", "dev")
+	var bodies []string
+	llmSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		bodies = append(bodies, string(body))
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []map[string]any{
+				{"message": map[string]string{"content": `{"reasoningTrace":"ok"}`}},
+			},
+		})
+	}))
+	defer llmSrv.Close()
+
+	mgr := NewThreatHarvesterManager(nil, nil, nil, nil)
+	cfg := DefaultThreatHarvesterConfig()
+	cfg.Enabled = true
+	cfg.SpoolDir = t.TempDir()
+	cfg.AnonymizationSalt = "unit-test-salt"
+	cfg.TeacherLlm = ThreatTeacherLlmConfig{
+		Enabled:         true,
+		Endpoint:        llmSrv.URL,
+		Model:           "test-teacher",
+		MaxCallsPerHour: 10,
+	}
+	if err := mgr.UpdateConfig(cfg); err != nil {
+		t.Fatalf("UpdateConfig failed: %v", err)
+	}
+	ep, err := mgr.InjectSimulatedEpisode("dns_c2_exfil")
+	if err != nil {
+		t.Fatalf("InjectSimulatedEpisode failed: %v", err)
+	}
+	if !ep.Simulated {
+		t.Fatalf("simulated episode must carry the Simulated marker")
+	}
+	if _, err := mgr.AnnotateEpisodeWithTeacherLLM(context.Background(), ep.ID); err != nil {
+		t.Fatalf("AnnotateEpisodeWithTeacherLLM failed: %v", err)
+	}
+	if len(bodies) != 1 {
+		t.Fatalf("expected 1 teacher call, got %d", len(bodies))
+	}
+	// The dns_c2_exfil scenario's DSL carries its raw source IP;
+	// the default (anonymized) prompt must not contain it.
+	if strings.Contains(bodies[0], ep.SrcIP) {
+		t.Fatalf("teacher prompt leaked raw source IP %s:\n%s", ep.SrcIP, bodies[0])
+	}
+
+	// Explicit opt-in: raw telemetry reaches the teacher.
+	cfg.TeacherLlm.AllowRawTelemetry = true
+	if err := mgr.UpdateConfig(cfg); err != nil {
+		t.Fatalf("UpdateConfig failed: %v", err)
+	}
+	if _, err := mgr.AnnotateEpisodeWithTeacherLLM(context.Background(), ep.ID); err != nil {
+		t.Fatalf("AnnotateEpisodeWithTeacherLLM (raw opt-in) failed: %v", err)
+	}
+	if len(bodies) != 2 || !strings.Contains(bodies[1], ep.SrcIP) {
+		t.Fatalf("raw-telemetry opt-in should send the unanonymized source IP %s; second body:\n%s", ep.SrcIP, bodies[1])
 	}
 }

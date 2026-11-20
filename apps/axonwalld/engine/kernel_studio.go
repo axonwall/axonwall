@@ -961,8 +961,35 @@ func (m *KernelStudioManager) InstallArtifactSafely(taskMgr *TaskManager, watchd
 		return "", "", "", fmt.Errorf("kernel artifact not found: %s", cleanName)
 	}
 
-	// Verify optional .sha256 sidecar if present
-	if shaBytes, err := os.ReadFile(debPath + ".sha256"); err == nil {
+	// R4-A-H1: the install mode must be known before the checksum
+	// gate, because the .sha256 sidecar is mandatory on the ZBM path
+	// (a .deb installed as root into a boot environment with no
+	// provenance check is an unsigned kernel) and only advisory on
+	// the rolling path.
+	installMode := "rolling"
+	activeBE := ""
+	if watchdog != nil {
+		st := watchdog.GetStatus()
+		if st.InstallMode != "" {
+			installMode = st.InstallMode
+		}
+		for _, be := range st.BootEnvironments {
+			if be.ActiveNow {
+				activeBE = be.Name
+				break
+			}
+		}
+	}
+
+	// Verify the .sha256 sidecar. On the ZBM path it is mandatory:
+	// refuse to install a .deb with no sidecar, or with a mismatched
+	// hash. On the rolling path the check stays advisory (a sidecar,
+	// when present, must still match).
+	shaBytes, shaErr := os.ReadFile(debPath + ".sha256")
+	if installMode == "zbm" && shaErr != nil {
+		return "", installMode, "", fmt.Errorf("refusing kernel install in zbm mode: %s has no .sha256 sidecar; an unsigned kernel package must never be installed into a boot environment", cleanName)
+	}
+	if shaErr == nil {
 		fields := strings.Fields(string(shaBytes))
 		if len(fields) > 0 {
 			f, openErr := os.Open(debPath)
@@ -979,30 +1006,22 @@ func (m *KernelStudioManager) InstallArtifactSafely(taskMgr *TaskManager, watchd
 			if !strings.EqualFold(actualSha, fields[0]) {
 				return "", "", "", fmt.Errorf("checksum mismatch for %s", cleanName)
 			}
-		}
-	}
-
-	installMode := "rolling"
-	activeBE := ""
-	if watchdog != nil {
-		st := watchdog.GetStatus()
-		if st.InstallMode != "" {
-			installMode = st.InstallMode
-		}
-		for _, be := range st.BootEnvironments {
-			if be.ActiveNow {
-				activeBE = be.Name
-				break
-			}
+		} else if installMode == "zbm" {
+			return "", installMode, "", fmt.Errorf("refusing kernel install in zbm mode: %s.sha256 is empty", cleanName)
 		}
 	}
 
 	var safetyNote string
+	// R4-A-H1: the new BE name is chosen up front so the API can
+	// report it (and the operator can see which BE will boot next)
+	// even though the install itself runs asynchronously.
+	newBeName := ""
 	if installMode == "zbm" {
 		if watchdog == nil || activeBE == "" {
 			return "", installMode, "", fmt.Errorf("refusing kernel install in zbm mode: active ZFS Boot Environment unknown (watchdog=%v activeBE=%q)", watchdog != nil, activeBE)
 		}
-		safetyNote = "Clones a standby ZFS Boot Environment before installing the custom kernel so active root stays untouched for ZFSBootMenu rollback."
+		newBeName = "axonwall-kcustom-" + time.Now().UTC().Format("20060102-150405")
+		safetyNote = fmt.Sprintf("Clones a standby ZFS Boot Environment before installing the custom kernel so active root stays untouched for ZFSBootMenu rollback. New boot environment %s will be activated for the next boot once the install succeeds.", newBeName)
 	} else {
 		safetyNote = "Installs custom kernel alongside running Debian kernel and arms one-shot grub-reboot when available; previous kernel remains default fallback."
 	}
@@ -1019,7 +1038,6 @@ func (m *KernelStudioManager) InstallArtifactSafely(taskMgr *TaskManager, watchd
 				return fmt.Errorf("creating ZFS BE snapshot before kernel install: %w", err)
 			}
 			logfn("Created pre-install ZFS snapshot: %s", fullSnap)
-			newBeName := "axonwall-kcustom-" + time.Now().UTC().Format("20060102-150405")
 			dataset, err := watchdog.CloneSnapshotToBootEnvironment(fullSnap, newBeName)
 			if err != nil {
 				_ = exec.Command("zfs", "destroy", fullSnap).Run()
@@ -1086,6 +1104,20 @@ func (m *KernelStudioManager) InstallArtifactSafely(taskMgr *TaskManager, watchd
 			}
 			installSucceeded = true
 			logfn("Installed %s inside standby ZFS Boot Environment %s", cleanName, newBeName)
+			// R4-A-H1: an installed kernel that is never armed can
+			// never boot — the old code reported success while the
+			// reboot would still load the previous kernel. Arm the
+			// new BE for the next boot; an activation failure is
+			// loud (the task fails and the deferred cleanup destroys
+			// the orphaned clone) instead of a silent success.
+			// ActivateBootEnvironment itself does not verify the
+			// target dataset exists (R4-E-M2, separate fix); its
+			// error is handled loudly here.
+			if err := watchdog.ActivateBootEnvironment(newBeName); err != nil {
+				installSucceeded = false
+				return fmt.Errorf("installed %s in ZFS Boot Environment %s but failed to activate it for next boot: %w", cleanName, newBeName, err)
+			}
+			logfn("Activated ZFS Boot Environment %s for next boot", newBeName)
 			return nil
 		}
 

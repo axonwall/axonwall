@@ -1,8 +1,11 @@
 package engine
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -200,5 +203,68 @@ func TestValidateKconfigFragmentAndBuildAndInstallSafety(t *testing.T) {
 		if _, _, _, err := mgr.InstallArtifactSafely(taskMgr, nil, badName, "test@axonwall"); err == nil {
 			t.Fatalf("expected InstallArtifactSafely to reject %q", badName)
 		}
+	}
+}
+
+// R4-A-H1: on the ZBM path the .sha256 sidecar is mandatory and the
+// new boot environment is named (and reported in the safety note)
+// up front so the API can say which BE will boot next. The async
+// task itself cannot complete in the sandbox (no zfs), so the test
+// asserts the synchronous gates and the returned safety note, not
+// the ZFS clone/activation.
+func TestInstallArtifactSafelyZbmSidecarMandatoryAndBeNamed(t *testing.T) {
+	workRoot := t.TempDir()
+	artifact := "linux-image-6.12.15-test-amd64.deb"
+	debPath := filepath.Join(workRoot, "output", artifact)
+	if err := os.MkdirAll(filepath.Dir(debPath), 0755); err != nil {
+		t.Fatal(err)
+	}
+	debContent := []byte("fake kernel deb content")
+	if err := os.WriteFile(debPath, debContent, 0644); err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(debContent)
+	goodSidecar := hex.EncodeToString(sum[:]) + "  " + artifact + "\n"
+
+	wd := NewWatchdogEngineCustom(filepath.Join(workRoot, "grubenv"), filepath.Join(workRoot, "cmdline"))
+	wd.status.InstallMode = "zbm"
+	wd.status.BootEnvironments = []ZfsBootEnvironment{{Name: "axonwall-0.12.3", ActiveNow: true}}
+
+	mgr := &KernelStudioManager{workRoot: workRoot}
+	taskMgr := NewTaskManager()
+
+	// No sidecar at all: refuse.
+	if _, mode, _, err := mgr.InstallArtifactSafely(taskMgr, wd, artifact, "test@axonwall"); err == nil {
+		t.Fatalf("expected zbm install without a .sha256 sidecar to fail, got mode=%q", mode)
+	} else if !strings.Contains(err.Error(), "no .sha256 sidecar") {
+		t.Fatalf("expected missing-sidecar refusal, got: %v", err)
+	}
+
+	// Mismatched sidecar: refuse.
+	if err := os.WriteFile(debPath+".sha256", []byte("deadbeef  "+artifact+"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := mgr.InstallArtifactSafely(taskMgr, wd, artifact, "test@axonwall"); err == nil {
+		t.Fatalf("expected zbm install with a mismatched sidecar to fail")
+	} else if !strings.Contains(err.Error(), "checksum mismatch") {
+		t.Fatalf("expected checksum-mismatch refusal, got: %v", err)
+	}
+
+	// Valid sidecar: starts the install and names the new BE.
+	if err := os.WriteFile(debPath+".sha256", []byte(goodSidecar), 0644); err != nil {
+		t.Fatal(err)
+	}
+	upid, mode, safetyNote, err := mgr.InstallArtifactSafely(taskMgr, wd, artifact, "test@axonwall")
+	if err != nil {
+		t.Fatalf("valid-sidecar zbm install should start, got: %v", err)
+	}
+	if upid == "" {
+		t.Fatalf("expected a task id for the started install")
+	}
+	if mode != "zbm" {
+		t.Fatalf("expected install mode zbm, got %q", mode)
+	}
+	if !strings.Contains(safetyNote, "axonwall-kcustom-") || !strings.Contains(safetyNote, "will be activated for the next boot") {
+		t.Fatalf("safety note must name the new BE to be activated, got: %q", safetyNote)
 	}
 }

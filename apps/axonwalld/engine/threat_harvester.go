@@ -21,6 +21,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -56,6 +57,14 @@ const (
 	harvesterDefaultSftSystem  = "You are Axonwall Blackbox, an autonomous NGFW and Ring-0 eBPF threat reasoning model. Analyze the chronological telemetry episode, identify the MITRE ATT&CK technique and malicious/benign verdict, and emit the exact Axonwall MCP containment tool call when warranted."
 )
 
+// errHarvesterBpfUnavailable marks the environment-level "Ring-0 eBPF
+// attach is not possible here" outcome (unprivileged process, or dev
+// mode without AXONWALL_DEV_EBPF=1). ApplyConfig tolerates exactly
+// this error — the API/correlator keep working in dev mode and the
+// failure stays visible via SnapshotStatus.BpfLoadError — while real
+// attach/detach failures on a capable host are returned (R4-A-M3).
+var errHarvesterBpfUnavailable = errors.New("unprivileged or dev mode without AXONWALL_DEV_EBPF=1; Ring-0 eBPF attach skipped (pipeline & simulator active)")
+
 // Hardcoded control-plane daemons that MUST NEVER have TLS uprobes attached.
 var excludedUprobeBinaries = map[string]bool{
 	"axonwalld":  true,
@@ -77,6 +86,11 @@ type ThreatTeacherLlmConfig struct {
 	Model           string `json:"model"`
 	ApiKey          string `json:"apiKey,omitempty"`
 	MaxCallsPerHour int    `json:"maxCallsPerHour"`
+	// R4-A-M7: when false (default) the teacher prompt is anonymized
+	// with the same Crypto-PAn anonymizer as the export path. Set
+	// explicitly to send raw IPs/SNI/CausalDsl to the teacher
+	// endpoint (only for a local/trusted teacher).
+	AllowRawTelemetry bool `json:"allowRawTelemetry,omitempty"`
 }
 
 type ThreatFleetShipperConfig struct {
@@ -88,6 +102,11 @@ type ThreatFleetShipperConfig struct {
 	AccessKey     string `json:"accessKey,omitempty"`
 	SecretKey     string `json:"secretKey,omitempty"`
 	UsePathStyle  bool   `json:"usePathStyle"`
+	// R4-A-L6: explicit operator opt-in for a plaintext http:// S3
+	// endpoint (e.g. local MinIO over HTTP). Default false: the
+	// shipper refuses plaintext endpoints instead of silently
+	// shipping the corpus readable on the wire.
+	AllowPlaintextEndpoint bool   `json:"allowPlaintextEndpoint,omitempty"`
 	LastShippedAt string `json:"lastShippedAt,omitempty"`
 	LastShippedKey string `json:"lastShippedKey,omitempty"`
 	LastError     string `json:"lastError,omitempty"`
@@ -260,6 +279,12 @@ type ThreatEpisode struct {
 	LabelTier          string   `json:"labelTier"`    // "gold_malicious" | "silver_malicious" | "benign_sampled" | "unlabeled_anomaly"
 	ReviewStatus       string   `json:"reviewStatus"` // "pending" | "approved_malicious" | "marked_benign" | "pinned_gold"
 	Pinned             bool     `json:"pinned"`
+	// R4-A-M5: true for episodes built by InjectSimulatedEpisode.
+	// Simulated episodes exercise the pipeline but are not real
+	// telemetry: they are excluded from the exported training corpus
+	// (ExportCorpusTarZst / ShipCorpusToS3) so test data can never
+	// poison a model as labelled ground truth.
+	Simulated          bool     `json:"simulated,omitempty"`
 	VerdictScore       float64  `json:"verdictScore"`
 	OracleSources      []string `json:"oracleSources"`
 	MitreAttack        []string `json:"mitreAttack"`
@@ -304,6 +329,10 @@ type ThreatHarvesterStats struct {
 	PinnedEpisodes     int    `json:"pinnedEpisodes"`
 	PendingReview      int    `json:"pendingReview"`
 	RedactedSecrets    uint64 `json:"redactedSecrets"`
+	// R4-A-L7: episodes FlushReadyFlows failed to record (spool
+	// write failures). Surfaced here so a quietly shrinking corpus
+	// is visible instead of silently under-reported.
+	RecordFailures      uint64 `json:"recordFailures"`
 	SpoolUsedBytes     int64  `json:"spoolUsedBytes"`
 	SpoolQuotaBytes    int64  `json:"spoolQuotaBytes"`
 	ZfsBacked          bool   `json:"zfsBacked"`
@@ -362,6 +391,16 @@ type ThreatHarvesterManager struct {
 	attachedIfs []string
 	activeHooks []string
 
+	// R4-A-M3: per-interface / per-binary attach bookkeeping so a
+	// config change can detach removed interfaces (and uprobes) and
+	// attach new ones instead of only attaching once. The links are
+	// also tracked in m.links (closed by detachBpfLocked); the maps
+	// are the reconcile index.
+	tcxLinks    map[string][]link.Link
+	uprobeLinks map[string]link.Link
+
+	recordFailures atomic.Uint64 // R4-A-L7: cumulative RecordEpisode failures from FlushReadyFlows
+
 	pendingMu     sync.Mutex
 	pendingFlows  map[string]*pendingFlowRecord
 	recentProcCgs map[uint64]procContextMeta
@@ -401,6 +440,8 @@ func NewThreatHarvesterManager(ebpfMgr *EBPFManager, lsmMgr *LsmGuardManager, vi
 		pendingFlows:  make(map[string]*pendingFlowRecord),
 		recentProcCgs: make(map[uint64]procContextMeta),
 		episodes:      make([]ThreatEpisode, 0, 128),
+		tcxLinks:      make(map[string][]link.Link),
+		uprobeLinks:   make(map[string]link.Link),
 		stopCh:        make(chan struct{}),
 	}
 	mgr.loadIndexLocked()
@@ -491,6 +532,17 @@ func (m *ThreatHarvesterManager) episodeZstPathLocked(id string) string {
 
 func (m *ThreatHarvesterManager) episodeParquetPathLocked(id string) string {
 	return filepath.Join(m.cfg.SpoolDir, "episodes", id+".parquet")
+}
+
+// validThreatEpisodeID admits only the server-generated episode ID
+// shapes (`ep-<millis>`, `ep-<millis>-<hex>`, `sim-<scenario>-<millis>`).
+// R4-A-L1: ReviewEpisode used to take the id straight from API JSON
+// into filepath.Join, so `../../x` escaped the spool dir and the
+// delete action could remove arbitrary *.jsonl.zst / *.parquet files.
+var validThreatEpisodeIDRe = regexp.MustCompile(`^(ep-[0-9]+(-[0-9a-f]{1,8})?|sim-[a-z0-9-]+-[0-9]+)$`)
+
+func validThreatEpisodeID(id string) bool {
+	return validThreatEpisodeIDRe.MatchString(id)
 }
 
 func (m *ThreatHarvesterManager) loadIndexLocked() {
@@ -632,11 +684,44 @@ func (m *ThreatHarvesterManager) ApplyConfig(rawJSON []byte) error {
 
 	if err := m.syncOrAttachBpfLocked(); err != nil {
 		m.bpfLoadErr = err.Error()
-		// Keep API/correlator functional even if kernel headers/privileges restrict attachment in dev mode.
-		log.Printf("[ThreatHarvester] Warning configuring Ring-0 eBPF hooks: %v", err)
-	} else {
-		m.bpfLoadErr = ""
+		// R4-A-M3: a real attach/detach failure is now returned
+		// instead of swallowed — the operator changed the watched
+		// interfaces and the API must not claim success while the
+		// new interfaces are not harvested. Only the
+		// environment-level "no BPF here" outcome stays tolerated
+		// (dev mode keeps the API/correlator functional).
+		if errors.Is(err, errHarvesterBpfUnavailable) {
+			log.Printf("[ThreatHarvester] Warning configuring Ring-0 eBPF hooks: %v", err)
+			return nil
+		}
+		return fmt.Errorf("threat harvester eBPF attach/detach failed: %w", err)
 	}
+	m.bpfLoadErr = ""
+	return nil
+}
+
+// SetEnabled enables or disables the harvester, attaching or detaching
+// the Ring-0 eBPF hooks. It is the wiring point for the
+// ebpf-threat-harvester plugin toggle (R4-A-M4): it returns the attach
+// error instead of reporting success while nothing runs. On failure the
+// enabled flag is rolled back so the manager state matches reality.
+func (m *ThreatHarvesterManager) SetEnabled(enabled bool) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.cfg.Enabled = enabled
+	if !enabled {
+		m.detachBpfLocked()
+		m.bpfLoadErr = ""
+		return nil
+	}
+	m.ensureSpoolStorageLocked()
+	if err := m.syncOrAttachBpfLocked(); err != nil {
+		m.cfg.Enabled = false
+		m.bpfLoadErr = err.Error()
+		return err
+	}
+	m.bpfLoadErr = ""
 	return nil
 }
 
@@ -661,6 +746,8 @@ func (m *ThreatHarvesterManager) detachBpfLocked() {
 	m.links = nil
 	m.activeHooks = nil
 	m.attachedIfs = nil
+	m.tcxLinks = make(map[string][]link.Link)
+	m.uprobeLinks = make(map[string]link.Link)
 	if m.bpfLoaded {
 		_ = m.objs.Close()
 		m.bpfLoaded = false
@@ -705,9 +792,202 @@ func (m *ThreatHarvesterManager) resolveAttachInterfacesLocked() []string {
 	return ifaces
 }
 
+// attachTcxLocked attaches TCX ingress+egress on one interface and
+// records the links for later reconcile (R4-A-M3). Success is at least
+// one direction attached — the initial-attach tolerance: a single bad
+// interface must not fail the whole harvester start. An error is
+// returned only when both directions fail.
+func (m *ThreatHarvesterManager) attachTcxLocked(ifName string) error {
+	nif, err := net.InterfaceByName(ifName)
+	if err != nil {
+		return fmt.Errorf("interface %s not found: %w", ifName, err)
+	}
+	var attached []link.Link
+	var errs []error
+	inLk, errIn := link.AttachTCX(link.TCXOptions{
+		Interface: nif.Index,
+		Program:   m.objs.TcHarvesterIngress,
+		Attach:    ebpf.AttachTCXIngress,
+	})
+	if errIn == nil {
+		m.links = append(m.links, inLk)
+		m.activeHooks = append(m.activeHooks, "tcx_ingress:"+ifName)
+		attached = append(attached, inLk)
+	} else {
+		errs = append(errs, fmt.Errorf("tcx ingress on %s: %w", ifName, errIn))
+	}
+	egLk, errEg := link.AttachTCX(link.TCXOptions{
+		Interface: nif.Index,
+		Program:   m.objs.TcHarvesterEgress,
+		Attach:    ebpf.AttachTCXEgress,
+	})
+	if errEg == nil {
+		m.links = append(m.links, egLk)
+		m.activeHooks = append(m.activeHooks, "tcx_egress:"+ifName)
+		attached = append(attached, egLk)
+	} else {
+		errs = append(errs, fmt.Errorf("tcx egress on %s: %w", ifName, errEg))
+	}
+	if len(attached) == 0 {
+		return errors.Join(errs...)
+	}
+	m.tcxLinks[ifName] = attached
+	m.attachedIfs = append(m.attachedIfs, ifName)
+	return nil
+}
+
+// detachTcxLocked closes the TCX links for one interface and drops all
+// of its bookkeeping (links, attachedIfs, activeHooks) so a later
+// detachBpfLocked never double-closes a link.
+func (m *ThreatHarvesterManager) detachTcxLocked(ifName string) error {
+	links, ok := m.tcxLinks[ifName]
+	if !ok {
+		return nil
+	}
+	var errs []error
+	for _, lk := range links {
+		if lk == nil {
+			continue
+		}
+		if err := lk.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("close tcx link on %s: %w", ifName, err))
+		}
+		m.removeLinkLocked(lk)
+	}
+	delete(m.tcxLinks, ifName)
+	m.attachedIfs = removeStrings(m.attachedIfs, ifName)
+	m.activeHooks = removeStrings(m.activeHooks, "tcx_ingress:"+ifName, "tcx_egress:"+ifName)
+	return errors.Join(errs...)
+}
+
+// attachTlsUprobeLocked attaches the guarded SSL_write uprobe for one
+// allowlisted binary and records it for reconcile. A binary the policy
+// excludes is skipped silently (nil) — that is a policy decision, not
+// an attach failure.
+func (m *ThreatHarvesterManager) attachTlsUprobeLocked(candidate string) error {
+	if !IsBinaryAllowedForTlsUprobe(candidate, filepath.Base(candidate), m.cfg.TlsUprobeAllowlist, false, m.cfg.AutoHoneypotTlsUprobes) {
+		return nil
+	}
+	ex, err := link.OpenExecutable(candidate)
+	if err != nil {
+		return fmt.Errorf("open executable %s for TLS uprobe: %w", candidate, err)
+	}
+	up, err := ex.Uprobe("SSL_write", m.objs.UprobeHarvesterSslWrite, nil)
+	if err != nil {
+		return fmt.Errorf("attach SSL_write uprobe on %s: %w", candidate, err)
+	}
+	m.links = append(m.links, up)
+	m.activeHooks = append(m.activeHooks, "uprobe/SSL_write:"+filepath.Base(candidate))
+	m.uprobeLinks[candidate] = up
+	return nil
+}
+
+// detachTlsUprobeLocked closes the SSL_write uprobe for one binary and
+// drops its bookkeeping.
+func (m *ThreatHarvesterManager) detachTlsUprobeLocked(candidate string) error {
+	up, ok := m.uprobeLinks[candidate]
+	if !ok {
+		return nil
+	}
+	err := up.Close()
+	m.removeLinkLocked(up)
+	delete(m.uprobeLinks, candidate)
+	m.activeHooks = removeStrings(m.activeHooks, "uprobe/SSL_write:"+filepath.Base(candidate))
+	if err != nil {
+		return fmt.Errorf("close TLS uprobe on %s: %w", candidate, err)
+	}
+	return nil
+}
+
+// removeLinkLocked drops one link from the master list (used by the
+// reconcile detaches so detachBpfLocked never closes it twice).
+func (m *ThreatHarvesterManager) removeLinkLocked(target link.Link) {
+	if target == nil {
+		return
+	}
+	kept := make([]link.Link, 0, len(m.links))
+	for _, lk := range m.links {
+		if lk != target {
+			kept = append(kept, lk)
+		}
+	}
+	m.links = kept
+}
+
+func removeStrings(list []string, drop ...string) []string {
+	if len(drop) == 0 {
+		return list
+	}
+	dropSet := make(map[string]bool, len(drop))
+	for _, d := range drop {
+		dropSet[d] = true
+	}
+	kept := make([]string, 0, len(list))
+	for _, s := range list {
+		if !dropSet[s] {
+			kept = append(kept, s)
+		}
+	}
+	return kept
+}
+
+// reconcileBpfAttachmentsLocked re-syncs TCX interfaces and TLS uprobes
+// with the current config after the first attach (R4-A-M3): attach TCX
+// on newly listed interfaces, detach from removed ones, and do the
+// same for the TLS uprobe allowlist. The ringbuf reader is bound to
+// the loaded objects, which persist across a reconcile, so it keeps
+// flowing untouched. Any attach/detach failure is returned instead of
+// nil so ApplyConfig can report it.
+func (m *ThreatHarvesterManager) reconcileBpfAttachmentsLocked() error {
+	var errs []error
+
+	desiredIfs := m.resolveAttachInterfacesLocked()
+	desiredSet := make(map[string]bool, len(desiredIfs))
+	for _, ifName := range desiredIfs {
+		desiredSet[ifName] = true
+	}
+	for ifName := range m.tcxLinks {
+		if !desiredSet[ifName] {
+			if err := m.detachTcxLocked(ifName); err != nil {
+				errs = append(errs, err)
+			}
+		}
+	}
+	for _, ifName := range desiredIfs {
+		if _, ok := m.tcxLinks[ifName]; !ok {
+			if err := m.attachTcxLocked(ifName); err != nil {
+				errs = append(errs, err)
+			}
+		}
+	}
+
+	desiredUprobes := make(map[string]bool)
+	if m.cfg.EnableTlsUprobes {
+		for _, candidate := range m.cfg.TlsUprobeAllowlist {
+			desiredUprobes[candidate] = true
+		}
+	}
+	for candidate := range m.uprobeLinks {
+		if !desiredUprobes[candidate] {
+			if err := m.detachTlsUprobeLocked(candidate); err != nil {
+				errs = append(errs, err)
+			}
+		}
+	}
+	for candidate := range desiredUprobes {
+		if _, ok := m.uprobeLinks[candidate]; !ok {
+			if err := m.attachTlsUprobeLocked(candidate); err != nil {
+				errs = append(errs, err)
+			}
+		}
+	}
+
+	return errors.Join(errs...)
+}
+
 func (m *ThreatHarvesterManager) syncOrAttachBpfLocked() error {
 	if os.Geteuid() != 0 || (strings.TrimSpace(os.Getenv("AXONWALL_RUNTIME_MODE")) == "dev" && strings.TrimSpace(os.Getenv("AXONWALL_DEV_EBPF")) != "1") {
-		return fmt.Errorf("unprivileged or dev mode without AXONWALL_DEV_EBPF=1; Ring-0 eBPF attach skipped (pipeline & simulator active)")
+		return errHarvesterBpfUnavailable
 	}
 
 	if !m.bpfLoaded {
@@ -730,47 +1010,16 @@ func (m *ThreatHarvesterManager) syncOrAttachBpfLocked() error {
 
 		// Attach TCX ingress + egress across active/watched interfaces
 		for _, ifName := range m.resolveAttachInterfacesLocked() {
-			nif, err := net.InterfaceByName(ifName)
-			if err != nil {
-				continue
-			}
-			inLk, errIn := link.AttachTCX(link.TCXOptions{
-				Interface: nif.Index,
-				Program:   m.objs.TcHarvesterIngress,
-				Attach:    ebpf.AttachTCXIngress,
-			})
-			if errIn == nil {
-				m.links = append(m.links, inLk)
-				m.activeHooks = append(m.activeHooks, "tcx_ingress:"+ifName)
-			}
-			egLk, errEg := link.AttachTCX(link.TCXOptions{
-				Interface: nif.Index,
-				Program:   m.objs.TcHarvesterEgress,
-				Attach:    ebpf.AttachTCXEgress,
-			})
-			if errEg == nil {
-				m.links = append(m.links, egLk)
-				m.activeHooks = append(m.activeHooks, "tcx_egress:"+ifName)
-			}
-			if errIn == nil || errEg == nil {
-				m.attachedIfs = append(m.attachedIfs, ifName)
-			}
+			// Initial-attach tolerance: a single bad interface
+			// must not fail the whole harvester start (the
+			// reconcile path below is strict instead).
+			_ = m.attachTcxLocked(ifName)
 		}
 
 		// Guarded optional TLS uprobe attachment (only allowlisted binaries, never control-plane daemons)
 		if m.cfg.EnableTlsUprobes {
 			for _, candidate := range m.cfg.TlsUprobeAllowlist {
-				if !IsBinaryAllowedForTlsUprobe(candidate, filepath.Base(candidate), m.cfg.TlsUprobeAllowlist, false, m.cfg.AutoHoneypotTlsUprobes) {
-					continue
-				}
-				ex, err := link.OpenExecutable(candidate)
-				if err != nil {
-					continue
-				}
-				if up, err := ex.Uprobe("SSL_write", m.objs.UprobeHarvesterSslWrite, nil); err == nil {
-					m.links = append(m.links, up)
-					m.activeHooks = append(m.activeHooks, "uprobe/SSL_write:"+filepath.Base(candidate))
-				}
+				_ = m.attachTlsUprobeLocked(candidate)
 			}
 		}
 
@@ -781,6 +1030,16 @@ func (m *ThreatHarvesterManager) syncOrAttachBpfLocked() error {
 		}
 		m.ringReader = rd
 		go m.consumeRingbufLoop(rd)
+	} else {
+		// R4-A-M3: the attach block used to run only on first
+		// attach, so a later ApplyConfig/UpdateConfig that changed
+		// the watched interfaces updated only the runtime map
+		// while new interfaces were never harvested and old ones
+		// never detached. Reconcile the live attachments with the
+		// current config; failures are returned, not swallowed.
+		if err := m.reconcileBpfAttachmentsLocked(); err != nil {
+			return err
+		}
 	}
 
 	// Update runtime config map
@@ -812,12 +1071,39 @@ func (m *ThreatHarvesterManager) syncOrAttachBpfLocked() error {
 		return err
 	}
 
-	// Sync dark ports map
+	// Sync dark ports map. R4-A-M3: the insert error used to be
+	// discarded (`_ = ...Put(...)`), so a failed canary-port insert
+	// was invisible; it is now returned, and ports removed from the
+	// config are deleted from the map instead of lingering.
+	if m.objs.HarvesterDarkPorts == nil {
+		return fmt.Errorf("harvester dark-port map is not loaded")
+	}
+	desiredPorts := make(map[uint16]bool, len(m.cfg.CanaryPorts))
 	for _, port := range m.cfg.CanaryPorts {
 		if port > 0 && port <= 65535 {
 			p := uint16(port)
+			desiredPorts[p] = true
 			v := uint8(1)
-			_ = m.objs.HarvesterDarkPorts.Put(&p, &v)
+			if err := m.objs.HarvesterDarkPorts.Put(&p, &v); err != nil {
+				return fmt.Errorf("harvester dark-port map insert for port %d: %w", port, err)
+			}
+		}
+	}
+	var stalePorts []uint16
+	it := m.objs.HarvesterDarkPorts.Iterate()
+	var iterKey uint16
+	var iterVal uint8
+	for it.Next(&iterKey, &iterVal) {
+		if !desiredPorts[iterKey] {
+			stalePorts = append(stalePorts, iterKey)
+		}
+	}
+	if err := it.Err(); err != nil {
+		return fmt.Errorf("harvester dark-port map iterate: %w", err)
+	}
+	for _, p := range stalePorts {
+		if err := m.objs.HarvesterDarkPorts.Delete(&p); err != nil {
+			return fmt.Errorf("harvester dark-port map delete for port %d: %w", p, err)
 		}
 	}
 	return nil
@@ -974,7 +1260,11 @@ func (m *ThreatHarvesterManager) correlationLoop() {
 
 // FlushReadyFlows correlates completed/expired pending flows against Gold and Silver
 // on-box oracles and materializes dual-track episodes + quota enforcement.
-func (m *ThreatHarvesterManager) FlushReadyFlows(forceAll bool) int {
+//
+// R4-A-L7: RecordEpisode failures are counted and surfaced (returned
+// as the second value, logged with the first error, and accumulated in
+// Stats.RecordFailures) instead of silently under-reporting `created`.
+func (m *ThreatHarvesterManager) FlushReadyFlows(forceAll bool) (created, failed int) {
 	m.mu.RLock()
 	cfg := m.cfg
 	m.mu.RUnlock()
@@ -1000,7 +1290,7 @@ func (m *ThreatHarvesterManager) FlushReadyFlows(forceAll bool) int {
 	m.pendingMu.Unlock()
 
 	if len(ready) == 0 {
-		return 0
+		return 0, 0
 	}
 
 	eveAlerts := m.readRecentSuricataAlerts()
@@ -1034,7 +1324,8 @@ func (m *ThreatHarvesterManager) FlushReadyFlows(forceAll bool) int {
 		}
 	}
 
-	created := 0
+	created = 0
+	var firstErr error
 	for idx, rec := range ready {
 		srcIP := uint32ToIPv4(rec.key.SrcV4)
 		dstIP := uint32ToIPv4(rec.key.DstV4)
@@ -1109,11 +1400,20 @@ func (m *ThreatHarvesterManager) FlushReadyFlows(forceAll bool) int {
 		}
 
 		ep := buildEpisodeFromFlow(rec, srcIP, dstIP, labelTier, score, oracles, mitre, cfg.PinGoldEpisodes)
-		if err := m.RecordEpisode(ep); err == nil {
+		if err := m.RecordEpisode(ep); err != nil {
+			failed++
+			if firstErr == nil {
+				firstErr = err
+			}
+		} else {
 			created++
 		}
 	}
-	return created
+	if failed > 0 {
+		m.recordFailures.Add(uint64(failed))
+		log.Printf("[ThreatHarvester] FlushReadyFlows: %d of %d ready flows failed to record an episode (first error: %v); spool writes are failing, see Stats.RecordFailures", failed, len(ready), firstErr)
+	}
+	return created, failed
 }
 
 func protoNameFromNum(proto uint8) string {
@@ -1552,6 +1852,12 @@ func (m *ThreatHarvesterManager) ListEpisodes(tier, reviewStatus string, limit i
 }
 
 func (m *ThreatHarvesterManager) ReviewEpisode(id, action string) (*ThreatEpisode, error) {
+	// R4-A-L1: the id flows into shard paths (and os.Remove on the
+	// delete action); reject anything that is not a server-generated
+	// episode id before it ever reaches filepath.Join.
+	if !validThreatEpisodeID(id) {
+		return nil, fmt.Errorf("invalid episode id %q", id)
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -1594,8 +1900,15 @@ func (m *ThreatHarvesterManager) ReviewEpisode(id, action string) (*ThreatEpisod
 
 // AnnotateEpisodeWithTeacherLLM calls an OpenAI-compatible Teacher-LLM endpoint
 // with strict hourly call-budget enforcement to refine Silver/ambiguous reasoning.
+//
+// R4-A-M7: the prompt is anonymized with the same Crypto-PAn anonymizer
+// as the export path before anything leaves the box, unless the
+// operator explicitly opted in to raw telemetry
+// (TeacherLlm.AllowRawTelemetry) for a local/trusted teacher. The
+// recommended MCP tool from the reply is only stored, never executed.
 func (m *ThreatHarvesterManager) AnnotateEpisodeWithTeacherLLM(ctx context.Context, id string) (*ThreatEpisode, error) {
 	m.mu.RLock()
+	fullCfg := m.cfg
 	cfg := m.cfg.TeacherLlm
 	var target *ThreatEpisode
 	for i := range m.episodes {
@@ -1612,6 +1925,24 @@ func (m *ThreatHarvesterManager) AnnotateEpisodeWithTeacherLLM(ctx context.Conte
 	}
 	if !cfg.Enabled || strings.TrimSpace(cfg.Endpoint) == "" {
 		return nil, fmt.Errorf("teacher LLM annotator is disabled in configuration")
+	}
+
+	// R4-A-M7: anonymize IPs, SNI, and the Causal DSL before building
+	// the teacher prompt. Fail closed if the anonymizer cannot be
+	// built — shipping raw telemetry because anonymization errored
+	// would silently defeat the control.
+	promptSrcIP, promptDstIP, promptDsl := target.SrcIP, target.DstIP, target.CausalDsl
+	if !cfg.AllowRawTelemetry {
+		anon, err := NewCryptoPanAnonymizer(fullCfg.AnonymizationSalt, filepath.Join(fullCfg.SpoolDir, ".anon_salt"))
+		if err != nil {
+			return nil, fmt.Errorf("teacher LLM anonymizer unavailable: %w", err)
+		}
+		promptSrcIP = anon.AnonymizeIP(target.SrcIP)
+		promptDstIP = anon.AnonymizeIP(target.DstIP)
+		if target.SNI != "" {
+			promptDsl = strings.ReplaceAll(promptDsl, target.SNI, anon.AnonymizeHostname(target.SNI))
+		}
+		promptDsl = anon.AnonymizeText(promptDsl)
 	}
 
 	m.teacherMu.Lock()
@@ -1644,7 +1975,7 @@ func (m *ThreatHarvesterManager) AnnotateEpisodeWithTeacherLLM(ctx context.Conte
 			},
 			{
 				"role":    "user",
-				"content": fmt.Sprintf("Episode %s (%s -> %s:%d):\n%s", target.ID, target.SrcIP, target.DstIP, target.DstPort, target.CausalDsl),
+				"content": fmt.Sprintf("Episode %s (%s -> %s:%d):\n%s", target.ID, promptSrcIP, promptDstIP, target.DstPort, promptDsl),
 			},
 		},
 		"temperature": 0.1,
@@ -1743,6 +2074,18 @@ func (m *ThreatHarvesterManager) ExportCorpusTarZst(w io.Writer, anonymize bool)
 			return err
 		}
 	}
+
+	// R4-A-M5: simulated episodes never enter the exported training
+	// corpus — they are pipeline test data, not labelled ground
+	// truth. (ShipCorpusToS3 funnels through here, so it inherits
+	// the exclusion.)
+	exported := make([]ThreatEpisode, 0, len(eps))
+	for _, ep := range eps {
+		if !ep.Simulated {
+			exported = append(exported, ep)
+		}
+	}
+	eps = exported
 
 	var trainBuf, valBuf bytes.Buffer
 	pqRows := make([]ThreatParquetRow, 0, len(eps))
@@ -1911,6 +2254,16 @@ func (m *ThreatHarvesterManager) ShipCorpusToS3(ctx context.Context) (string, er
 	baseURL, err := url.Parse(strings.TrimRight(ship.Endpoint, "/"))
 	if err != nil {
 		return "", fmt.Errorf("invalid S3 endpoint URL: %w", err)
+	}
+	// R4-A-L6: a plaintext http:// endpoint ships the corpus readable
+	// on the wire. Refuse by default; a local MinIO-over-HTTP setup
+	// must opt in explicitly (FleetShipper.AllowPlaintextEndpoint),
+	// and even then the shipment is logged loudly.
+	if baseURL.Scheme != "https" {
+		if !ship.AllowPlaintextEndpoint {
+			return "", fmt.Errorf("refusing to ship corpus to plaintext S3 endpoint %q (scheme %q): set fleetShipper.allowPlaintextEndpoint=true explicitly for a local plaintext endpoint", ship.Endpoint, baseURL.Scheme)
+		}
+		log.Printf("[ThreatHarvester] WARNING: shipping corpus to plaintext S3 endpoint %q (allowPlaintextEndpoint opt-in); the corpus travels unencrypted", ship.Endpoint)
 	}
 	if ship.UsePathStyle {
 		baseURL.Path = strings.TrimRight(baseURL.Path, "/") + "/" + ship.Bucket + "/" + keyName
@@ -2091,7 +2444,7 @@ func (m *ThreatHarvesterManager) InjectSimulatedEpisode(scenario string) (*Threa
 			ReasoningTrace:     "Stratified benign negative sample: clean K3s pod HTTPS handshake with zero dark-port, LSM, or IDS triggers.",
 			RecommendedMcpTool: "none (benign baseline verified)",
 		}
-	default: // "honeypot_rce_memfd"
+	case "honeypot_rce_memfd":
 		ep = ThreatEpisode{
 			ID:                 fmt.Sprintf("sim-gold-rce-%d", now.UnixMilli()),
 			CreatedAt:          now.Format(time.RFC3339),
@@ -2123,7 +2476,17 @@ func (m *ThreatHarvesterManager) InjectSimulatedEpisode(scenario string) (*Threa
 			ReasoningTrace:     "External scanner probed canary port 2323, hit DNAT honeypot, injected shell command dropper payload (`wget ... | sh`), and attempted fileless execution via memfd_create before Ring-0 LSM guard blocked escalation.",
 			RecommendedMcpTool: `blackhole_traffic({"target":"198.51.100.44/32","mode":"nft_drop","direction":"both","ttlSeconds":86400,"reason":"Confirmed honeypot RCE + fileless memfd attempt"})`,
 		}
+	default:
+		// R4-A-M5: the unknown-scenario default used to build a
+		// `gold_malicious`, `pinned_gold` episode — a typo in the
+		// scenario name manufactured a permanent gold-malicious
+		// exemplar. Anything unknown is now an error instead.
+		return nil, fmt.Errorf("unknown simulation scenario %q (known: dns_c2_exfil, credential_stuffing_redacted, benign_k3s_egress, honeypot_rce_memfd)", scenario)
 	}
+
+	// R4-A-M5: mark simulated episodes so the export path can exclude
+	// them from the live training corpus.
+	ep.Simulated = true
 
 	if err := m.RecordEpisode(ep); err != nil {
 		return nil, err
@@ -2176,6 +2539,7 @@ func (m *ThreatHarvesterManager) SnapshotStatus() ThreatHarvesterStatusSnapshot 
 		}
 		stats.RedactedSecrets += uint64(ep.RedactionCount)
 	}
+	stats.RecordFailures = m.recordFailures.Load()
 	stats.SpoolUsedBytes = m.computeSpoolBytesLocked()
 	stats.SpoolQuotaBytes = m.quotaLimitBytesLocked()
 	stats.ZfsBacked, _ = isMountZfs(m.cfg.SpoolDir)

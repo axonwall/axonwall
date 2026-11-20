@@ -270,7 +270,16 @@ func (h *EdgeHAEngine) PrepareSyncedInterface(iface EdgeInterfaceSpec) (EdgeInte
 		iface.Enabled = false
 	}
 
-	isLan := lanDev == "" || dev == lanDev
+	// R4-A-L3: the old `lanDev == "" || dev == lanDev` treated every
+	// non-WAN interface as LAN when the LAN device was unknown (the
+	// node never went through a Promote/Demote transition), so a VIP
+	// on any interface was silently stripped. Require an explicit
+	// device match; the only backstop is the interface name itself —
+	// Promote creates the VIP interfaces as `lan-vip4`/`lan-vip6`,
+	// so a lan-vip-named interface is by definition the LAN VIP
+	// interface even when the device name differs across the pair.
+	isLan := (lanDev != "" && dev == lanDev) ||
+		strings.HasPrefix(strings.ToLower(strings.TrimSpace(iface.Name)), "lan-vip")
 	if isLan {
 		if sameHAAddrOrCIDR(iface.Address, vip4) || sameHAAddrOrCIDR(iface.Address, vip6) {
 			iface.Address = ""
@@ -288,10 +297,15 @@ func (h *EdgeHAEngine) PrepareSyncedInterface(iface EdgeInterfaceSpec) (EdgeInte
 }
 
 // ApplySyncedInterface applies a hub-pushed EdgeInterfaceSpec while preserving HA standby fencing.
+//
+// R4-A-L3: the old code returned nil when the interface was dropped
+// by fencing, so the hub's SYNC ack claimed success for an interface
+// that was never applied. A dropped lan-vip interface is now an
+// error, which the SYNC_INTERFACES handler joins into the ack.
 func (h *EdgeHAEngine) ApplySyncedInterface(netEngine *EdgeNetworkEngine, iface EdgeInterfaceSpec) error {
 	filtered, apply := h.PrepareSyncedInterface(iface)
 	if !apply {
-		return nil
+		return fmt.Errorf("standby fencing dropped lan-vip interface %q on device %q: shared VIP addresses were stripped and the interface carries no address", iface.Name, iface.Device)
 	}
 	return netEngine.ConfigureInterface(filtered)
 }
