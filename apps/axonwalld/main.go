@@ -3002,6 +3002,11 @@ func main() {
 	directoryManager := engine.NewDirectoryManager(userManager, etckeeperManager)
 	pluginManager := engine.NewPluginManager(stateDir)
 	pluginManager.SetDirectoryManager(directoryManager)
+	// Shell PATH: repair plugin snippets after a reboot, a zshenv wipe,
+	// or a crashed lifecycle call. Soft-fail: log + continue.
+	if err := engine.RebuildPluginShellPaths(pluginManager); err != nil {
+		log.Printf("[PluginManager] Warning: failed to rebuild plugin shell PATHs at startup: %v", err)
+	}
 	mcpTrafficManager := engine.NewMcpTrafficManager()
 	haEngine.SetDirectoryManager(directoryManager)
 

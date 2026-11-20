@@ -1726,6 +1726,13 @@ func (pm *PluginManager) EnablePlugin(pluginID string) PluginActionResponse {
 		}
 		pm.saveState()
 		pm.mu.Unlock()
+		// Shell PATH: provisioning rewrote /etc/zsh/zshenv, which wipes
+		// the plugin PATH loader block — rebuild every enabled plugin's
+		// snippet so the loader is restored. Soft-fail: the plugin works
+		// via the daemon either way; the snippet is only a convenience.
+		if err := RebuildPluginShellPaths(pm); err != nil {
+			log.Printf("[PluginManager] Warning: failed to rebuild plugin shell PATHs: %v", err)
+		}
 		return PluginActionResponse{
 			Success: true,
 			Message: "Enabled Modern Operator Shell & Editor (ZSH + Oh My Zsh + Starship + VIM + Full Stack Completions).",
@@ -1764,6 +1771,11 @@ func (pm *PluginManager) EnablePlugin(pluginID string) PluginActionResponse {
 	}
 	pm.saveState()
 	pm.mu.Unlock()
+	// Shell PATH (soft-fail: log + continue, never fail the enable —
+	// the plugin works via the daemon's PluginEnv either way).
+	if err := SyncPluginShellPaths(pm, pluginID); err != nil {
+		log.Printf("[PluginManager] Warning: failed to sync shell PATH for plugin %s: %v", pluginID, err)
+	}
 	return resp
 }
 
@@ -1775,6 +1787,11 @@ func (pm *PluginManager) DisablePlugin(pluginID string) PluginActionResponse {
 		pm.disabledMap[pluginID] = true
 		pm.saveState()
 		pm.mu.Unlock()
+		// Shell PATH (soft-fail): remove the snippet so the disabled
+		// plugin's binaries leave interactive shells too.
+		if err := RemovePluginShellPath(pm, pluginID); err != nil {
+			log.Printf("[PluginManager] Warning: failed to remove shell PATH for plugin %s: %v", pluginID, err)
+		}
 		return PluginActionResponse{
 			Success: true,
 			Message: "Disabled Modern Operator Shell & Editor (attack-surface reduction mode active).",
@@ -1809,6 +1826,12 @@ func (pm *PluginManager) DisablePlugin(pluginID string) PluginActionResponse {
 	pm.disabledMap[pluginID] = true
 	pm.saveState()
 	pm.mu.Unlock()
+
+	// Shell PATH (soft-fail): remove the snippet so the disabled
+	// plugin's binaries leave interactive shells too.
+	if err := RemovePluginShellPath(pm, pluginID); err != nil {
+		log.Printf("[PluginManager] Warning: failed to remove shell PATH for plugin %s: %v", pluginID, err)
+	}
 
 	return PluginActionResponse{
 		Success: true,
@@ -2133,6 +2156,12 @@ func (pm *PluginManager) InstallPlugin(pluginID string) PluginActionResponse {
 	// Ensure LDAP integration is provisioned if declared by the plugin
 	go pm.ensurePluginLDAP(pluginID)
 
+	// Shell PATH (soft-fail): the bundled dirs exist now and the plugin
+	// is recorded installed, so interactive shells can use its binaries.
+	if err := SyncPluginShellPaths(pm, pluginID); err != nil {
+		log.Printf("[PluginManager] Warning: failed to sync shell PATH for plugin %s: %v", pluginID, err)
+	}
+
 	return PluginActionResponse{
 		Success: true,
 		Message: fmt.Sprintf("Successfully installed plugin %s (%s)", target.Name, pluginID),
@@ -2269,6 +2298,12 @@ func (pm *PluginManager) UninstallPlugin(pluginID string) PluginActionResponse {
 	pm.saveState()
 	pm.mu.Unlock()
 
+	// Shell PATH (soft-fail): remove the snippet — the plugin dir is
+	// already gone, so the snippet must not outlive it.
+	if err := RemovePluginShellPath(pm, pluginID); err != nil {
+		log.Printf("[PluginManager] Warning: failed to remove shell PATH for plugin %s: %v", pluginID, err)
+	}
+
 	return PluginActionResponse{
 		Success: true,
 		Message: fmt.Sprintf("Successfully uninstalled plugin %s (%s)", target.Name, pluginID),
@@ -2290,6 +2325,11 @@ func (pm *PluginManager) ReconfigurePlugin(pluginID string) PluginActionResponse
 				Success: false,
 				Message: fmt.Sprintf("Failed to reconfigure workstation: %v", err),
 			}
+		}
+		// Shell PATH: provisioning rewrote /etc/zsh/zshenv, which wipes
+		// the plugin PATH loader block — rebuild it (soft-fail).
+		if err := RebuildPluginShellPaths(pm); err != nil {
+			log.Printf("[PluginManager] Warning: failed to rebuild plugin shell PATHs: %v", err)
 		}
 		return PluginActionResponse{
 			Success: true,
