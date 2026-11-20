@@ -13,6 +13,8 @@ import (
 
 	"github.com/axonwall/axonwall/apps/axonwalld/engine"
 	pb "github.com/axonwall/axonwall/apps/axonwalld/gen/agent/v1"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // Round-2 batch 6 (daemon mediums) regression tests.
@@ -138,7 +140,10 @@ func TestR2Batch6ConfirmFailsFastDuringApply(t *testing.T) {
 // then stopped the second's timer and overwrote the pending state, so
 // the second bundle could neither be confirmed nor auto-rolled-back.
 // With applyMu, the second apply does no work at all until the first
-// returns, and the pending state afterwards is the second job's.
+// returns. B-M1 (round 3): after the first returns, the second is now
+// REJECTED with FailedPrecondition instead of superseding the pending
+// job — the pending state afterwards stays the first job's, and only
+// the first job confirms.
 func TestR2Batch6ConcurrentAppliesSerialise(t *testing.T) {
 	dir := t.TempDir()
 	started := filepath.Join(dir, "systemctl-started")
@@ -195,47 +200,58 @@ func TestR2Batch6ConcurrentAppliesSerialise(t *testing.T) {
 	if err := os.WriteFile(release, []byte("go"), 0644); err != nil {
 		t.Fatalf("failed to release the fake systemctl: %v", err)
 	}
-	for name, ch := range map[string]struct {
-		done <-chan *pb.ApplyBundleResponse
-		err  <-chan error
-	}{
-		"A": {doneA, errA},
-		"B": {doneB, errB},
-	} {
-		done, errCh := ch.done, ch.err
-		select {
-		case err := <-errCh:
-			t.Fatalf("ApplyBundle %s failed: %v", name, err)
-		case resp := <-done:
-			if !resp.Success {
-				t.Fatalf("ApplyBundle %s reported failure: %s", name, resp.Message)
-			}
-		case <-time.After(10 * time.Second):
-			t.Fatalf("ApplyBundle %s did not return after release", name)
+	// B-M1 (round 3): the second apply no longer silently supersedes
+	// the first. A returns successfully and stays pending; B waits
+	// on applyMu while A is in flight, then is rejected with
+	// FailedPrecondition once A has armed its pending-confirm
+	// window — the old expectation (pending becomes B's job) was the
+	// bug: B's apply overwrote A's pending job and A's confirm was
+	// refused with a job mismatch.
+	select {
+	case err := <-errA:
+		t.Fatalf("ApplyBundle A failed: %v", err)
+	case resp := <-doneA:
+		if !resp.Success {
+			t.Fatalf("ApplyBundle A reported failure: %s", resp.Message)
 		}
+	case <-time.After(10 * time.Second):
+		t.Fatalf("ApplyBundle A did not return after release")
+	}
+	select {
+	case err := <-errB:
+		st, ok := status.FromError(err)
+		if !ok || st.Code() != codes.FailedPrecondition {
+			t.Fatalf("ApplyBundle B error = %v, want FailedPrecondition", err)
+		}
+		if !strings.Contains(st.Message(), "r2-m1-job-a") {
+			t.Fatalf("ApplyBundle B error %q does not name the pending job A", st.Message())
+		}
+	case resp := <-doneB:
+		t.Fatalf("ApplyBundle B unexpectedly succeeded (%+v) while job A was pending confirmation", resp)
+	case <-time.After(10 * time.Second):
+		t.Fatalf("ApplyBundle B did not return after release")
 	}
 
-	// Both applies ran sequentially, so the pending state is B's job
-	// and only B's job confirms.
+	// The pending state is still A's job, and only A's job confirms.
 	s.mu.Lock()
 	pendingJob := s.pendingJobID
 	s.mu.Unlock()
-	if pendingJob != "r2-m1-job-b" {
-		t.Fatalf("pending job is %q, want %q (the second, sequential apply)", pendingJob, "r2-m1-job-b")
+	if pendingJob != "r2-m1-job-a" {
+		t.Fatalf("pending job is %q, want %q (the first apply, still pending)", pendingJob, "r2-m1-job-a")
 	}
-	resp, err := s.Confirm(context.Background(), &pb.ConfirmRequest{JobId: "r2-m1-job-a"})
+	resp, err := s.Confirm(context.Background(), &pb.ConfirmRequest{JobId: "r2-m1-job-b"})
 	if err != nil {
 		t.Fatalf("Confirm failed: %v", err)
 	}
 	if resp.Success {
-		t.Fatal("stale job A confirmed after job B superseded it; expected a mismatch failure")
+		t.Fatal("stale job B confirmed while job A was pending; expected a mismatch failure")
 	}
-	resp, err = s.Confirm(context.Background(), &pb.ConfirmRequest{JobId: "r2-m1-job-b"})
+	resp, err = s.Confirm(context.Background(), &pb.ConfirmRequest{JobId: "r2-m1-job-a"})
 	if err != nil {
 		t.Fatalf("Confirm failed: %v", err)
 	}
 	if !resp.Success {
-		t.Fatalf("Confirm for the pending job B failed: %s", resp.Message)
+		t.Fatalf("Confirm for the pending job A failed: %s", resp.Message)
 	}
 }
 

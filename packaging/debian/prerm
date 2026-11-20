@@ -4,8 +4,18 @@ set -e
 case "$1" in
     remove|deconfigure)
         if [ -d /run/systemd/system ]; then
-            systemctl stop axonwall-ui.service axonwall-controller.service axonwalld.service headscale.service axonwall-console.service || true
-            systemctl disable axonwall-ui.service axonwall-controller.service axonwalld.service headscale.service axonwall-console.service || true
+            # D-L6: k3s.service and the cert-renew timer were missing here,
+            # so `apt remove axonwall` left K3s running (and the timer
+            # firing) while the .deb's binary/unit files were deleted.
+            # k3s-agent.service is included too: it exists on ISO installs
+            # and is harmlessly absent elsewhere (systemctl fails -> || true).
+            # D-M9: the flavor units are listed too, so removing a
+            # flavor package stops its services (seaweedfs, vault/k3s
+            # firstboot and verify) instead of leaving them running on
+            # removed binaries. All names are `|| true`, so absent
+            # units are a no-op on the other editions.
+            systemctl stop axonwall-ui.service axonwall-controller.service axonwalld.service headscale.service axonwall-console.service k3s.service k3s-agent.service seaweedfs.service axonwall-vault-firstboot.service axonwall-vault-provision.service axonwall-k3s-firstboot.service axonwall-k3s-verify.service axonwall-hub-cert-renew.service axonwall-hub-cert-renew.timer || true
+            systemctl disable axonwall-ui.service axonwall-controller.service axonwalld.service headscale.service axonwall-console.service k3s.service k3s-agent.service seaweedfs.service axonwall-vault-firstboot.service axonwall-vault-provision.service axonwall-k3s-firstboot.service axonwall-k3s-verify.service axonwall-hub-cert-renew.service axonwall-hub-cert-renew.timer || true
         fi
         ;;
     upgrade|failed-upgrade)

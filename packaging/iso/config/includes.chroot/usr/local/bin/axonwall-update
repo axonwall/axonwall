@@ -37,11 +37,151 @@ while [ $# -gt 0 ]; do
       APT_UPGRADE=1
       shift
       ;;
+    --help|-h)
+      cat << 'USAGE_EOF'
+Usage: axonwall-update [--slot A|B] [--version <ver>] [--channel <name>] [--rolling] [--zbm|--zfsbootmenu] [--apt|--apt-upgrade]
+  --slot A|B          Target dual-root slot (default B)
+  --version <ver>     Release version to stage (required for ZBM updates)
+  --channel <name>    Release channel (default stable)
+  --rolling           In-place rolling update (single-root)
+  --zbm               ZFSBootMenu Boot Environment update
+  --apt               Also run an APT upgrade
+USAGE_EOF
+      exit 0
+      ;;
     *)
-      shift
+      # D-L1: unknown options used to be silently swallowed, so a typo
+      # like `--versoin 0.11.68 --slo C` ran a version-less update of
+      # the default slot B and exited 0. Fail loudly instead.
+      echo "[-] Error: unknown option '$1'. Valid options: --slot, --version, --channel, --rolling, --zbm, --apt, --help." >&2
+      exit 1
       ;;
   esac
 done
+
+# D-M9 (round-3): flavor-specific update channel. The updater used to
+# download the NGFW `axonwall_${VER}_amd64.deb` on every box, so a vault
+# or k3s-storage update reintroduced exactly the daemon/UI/controller
+# payload those flavors deliberately strip ("ABSENT, not disabled").
+# Josh's decision (2026-11-12): flavor-specific package/channel — the
+# updater requests `axonwall-<edition>_${VER}_amd64.deb` for vault and
+# k3s-storage, and the NGFW package for the axonwall edition. It never
+# falls back to the NGFW package: a failed flavor download leaves
+# DEB_TMP empty and the E-M1 guard below aborts the update.
+# Detection reads, in order: (1) the canonical edition file
+# /etc/axonwall/edition, written by every install path (TUI installer,
+# d-i hook, firstboots, .deb postinst, image builders); (2) the legacy
+# edition markers the TUI installer writes into the installed slot and
+# the ISO builders write into the image (/etc/axonwall/.vault-edition,
+# /etc/axonwall/.k3s-edition); (3) the `axonwall.edition=` /
+# `axonwall_edition=` kernel cmdline the installers also read; (4) on a
+# legacy box with no signal at all, the NGFW daemon binary as positive
+# evidence — and only then. A box with no signal and no NGFW payload
+# fails closed with an error telling the operator to create the
+# edition file. The updater NEVER silently defaults to the NGFW
+# package: that silent default is the D-M9 hazard.
+detect_edition() {
+  # 1. Canonical edition file (D-M9 marker): /etc/axonwall/edition
+  # holds the edition name on one line. It is written by every
+  # install path (TUI installer, d-i hook, firstboots, .deb postinst,
+  # image builders) and is the signal this updater trusts first, so
+  # there is no question during updates. A file that exists but is
+  # empty (or whitespace-only) counts as no signal and falls through
+  # to the legacy signals below; a non-empty value that is not a known
+  # edition fails closed rather than guessing.
+  if [ -f /etc/axonwall/edition ]; then
+    _file_edition="$(tr -d ' \t\r\n' < /etc/axonwall/edition 2>/dev/null || true)"
+    if [ -n "$_file_edition" ]; then
+      case "$_file_edition" in
+        axonwall|vault|k3s-storage) ;;
+        *)
+          echo "[-] ERROR: /etc/axonwall/edition contains '${_file_edition}' (expected axonwall, vault, or k3s-storage); fix the file and re-run the updater." >&2
+          exit 1
+          ;;
+      esac
+      # A legacy marker contradicting the canonical file means a
+      # corrupt/manual state — fail closed rather than guess which
+      # record is right. (Agreement is the normal case: the install
+      # paths write both.)
+      _contradiction=0
+      if [ "$_file_edition" = "vault" ] && [ -f /etc/axonwall/.k3s-edition ]; then _contradiction=1; fi
+      if [ "$_file_edition" = "k3s-storage" ] && [ -f /etc/axonwall/.vault-edition ]; then _contradiction=1; fi
+      if [ "$_file_edition" = "axonwall" ] && [ -f /etc/axonwall/.vault-edition ]; then _contradiction=1; fi
+      if [ "$_file_edition" = "axonwall" ] && [ -f /etc/axonwall/.k3s-edition ]; then _contradiction=1; fi
+      if [ "$_contradiction" = "1" ]; then
+        echo "[-] ERROR: /etc/axonwall/edition says '${_file_edition}' but a legacy edition marker disagrees; the installed edition is ambiguous. Remove the wrong marker and re-run the updater." >&2
+        exit 1
+      fi
+      echo "$_file_edition"
+      return 0
+    fi
+  fi
+  # 2. Legacy markers (written by the installers/builders before the
+  # edition file existed). Both present is the d-i hook's corrupt
+  # state — the installers remove the other marker in each branch.
+  _vault_marker=0
+  _k3s_marker=0
+  [ -f /etc/axonwall/.vault-edition ] && _vault_marker=1
+  [ -f /etc/axonwall/.k3s-edition ] && _k3s_marker=1
+  if [ "$_vault_marker" = "1" ] && [ "$_k3s_marker" = "1" ]; then
+    echo "[-] ERROR: both /etc/axonwall/.vault-edition and /etc/axonwall/.k3s-edition exist; the installed edition is ambiguous. Remove the wrong marker and re-run the updater." >&2
+    exit 1
+  fi
+  if [ "$_vault_marker" = "1" ]; then
+    echo "vault"
+    return 0
+  fi
+  if [ "$_k3s_marker" = "1" ]; then
+    echo "k3s-storage"
+    return 0
+  fi
+  # 3. Kernel cmdline, the same source the TUI installer reads when no
+  # marker is present.
+  if grep -qsE '(^|[[:space:]])(axonwall_edition=vault|axonwall\.edition=vault)($|[[:space:]])' /proc/cmdline 2>/dev/null; then
+    echo "vault"
+    return 0
+  fi
+  if grep -qsE '(^|[[:space:]])(axonwall_edition=k3s-storage|axonwall\.edition=k3s-storage)($|[[:space:]])' /proc/cmdline 2>/dev/null; then
+    echo "k3s-storage"
+    return 0
+  fi
+  if grep -qsE '(^|[[:space:]])(axonwall_edition=axonwall|axonwall\.edition=axonwall)($|[[:space:]])' /proc/cmdline 2>/dev/null; then
+    echo "axonwall"
+    return 0
+  fi
+  # An edition the updater does not know (e.g. `edge`, which lives
+  # only on the vault branch) must fail closed: guessing axonwall
+  # would stage the NGFW payload onto a box that deliberately strips
+  # it. The operator fixes the cmdline/markers and re-runs.
+  _cmdline_edition="$(grep -oE '(axonwall_edition|axonwall\.edition)=[^[:space:]]+' /proc/cmdline 2>/dev/null | tail -n 1 | sed -E 's/^[^=]+=//')"
+  if [ -n "$_cmdline_edition" ]; then
+    echo "[-] ERROR: unknown edition '${_cmdline_edition}' in kernel cmdline (expected axonwall, vault, or k3s-storage); refusing to guess which package to fetch." >&2
+    exit 1
+  fi
+  # 4. No edition signal at all. This is a legacy box: it predates the
+  # edition file, has no legacy markers (the NGFW edition never wrote
+  # one), and no cmdline edition. Do NOT silently default to the NGFW
+  # package — that is the D-M9 hazard. Default to axonwall ONLY on
+  # positive NGFW evidence: the daemon binary, which the flavors
+  # deliberately strip and the flavor packages never ship, so a clean
+  # flavor box can never satisfy this test. (The one false positive is
+  # a flavor box already contaminated by a pre-fix NGFW .deb install —
+  # it already runs the NGFW payload, so continuing as NGFW is at
+  # least self-consistent.) The warning is loud, on purpose: the
+  # operator should create /etc/axonwall/edition to record it.
+  if [ -x /usr/sbin/axonwalld ]; then
+    echo "[!] WARNING: no edition signal found (no /etc/axonwall/edition, no legacy marker, no axonwall.edition kernel cmdline), but the NGFW daemon is present, so assuming axonwall. Create /etc/axonwall/edition containing the edition name to record it explicitly." >&2
+    echo "axonwall"
+    return 0
+  fi
+  echo "[-] ERROR: cannot determine the installed edition: no /etc/axonwall/edition, no legacy marker (.vault-edition/.k3s-edition), no axonwall.edition kernel cmdline, and no NGFW payload (/usr/sbin/axonwalld absent). Create /etc/axonwall/edition containing one of axonwall, vault, k3s-storage and re-run the updater." >&2
+  exit 1
+}
+
+# Note: command substitution runs in a subshell, so a bare call would
+# swallow detect_edition's exit 1 — the `|| exit 1` makes the failure
+# propagate to this script.
+EDITION="$(detect_edition)" || exit 1
 
 ZBM_MODE=0
 if [ "$FORCE_ZBM" = "1" ]; then
@@ -90,6 +230,7 @@ else
 fi
 echo "  Target Version: ${TARGET_VERSION:-latest}"
 echo "  Channel       : ${UPDATE_CHANNEL}"
+echo "  Edition       : ${EDITION}"
 echo "================================================================================"
 
 # Pre-Update OpenLDAP Directory Backup (protects against MDB version skew on rollback)
@@ -97,9 +238,34 @@ if command -v slapcat >/dev/null 2>&1 && [ -d /var/lib/axonwall/ldap/config/cn=c
   BACKUP_TS="$(date -u +"%Y%m%dT%H%M%SZ" 2>/dev/null || echo "latest")"
   mkdir -p /var/lib/axonwall/ldap/backups 2>/dev/null || true
   echo "[+] Creating pre-update OpenLDAP LDIF snapshot in /var/lib/axonwall/ldap/backups/..."
-  slapcat -F /var/lib/axonwall/ldap/config -n 0 -l "/var/lib/axonwall/ldap/backups/pre-update-slot-${TARGET_SLOT}-config-${BACKUP_TS}.ldif" 2>/dev/null || true
-  slapcat -F /var/lib/axonwall/ldap/config -n 1 -l "/var/lib/axonwall/ldap/backups/pre-update-slot-${TARGET_SLOT}-data-${BACKUP_TS}.ldif" 2>/dev/null || true
-  chmod 0600 "/var/lib/axonwall/ldap/backups/pre-update-slot-${TARGET_SLOT}-"*.ldif 2>/dev/null || true
+  # D-M8: this snapshot is what makes rollback possible after an
+  # LDAP-breaking update. A failed slapcat used to be swallowed (|| true)
+  # and the update proceeded with no snapshot at all. Fail closed: abort
+  # the update when either database cannot be dumped or its LDIF is
+  # missing afterwards. (An empty data LDIF is a valid backup of an empty
+  # directory, so existence — not size — is the check.)
+  _ldap_backup_failed=0
+  _ldap_config_ldif="/var/lib/axonwall/ldap/backups/pre-update-slot-${TARGET_SLOT}-config-${BACKUP_TS}.ldif"
+  _ldap_data_ldif="/var/lib/axonwall/ldap/backups/pre-update-slot-${TARGET_SLOT}-data-${BACKUP_TS}.ldif"
+  if ! slapcat -F /var/lib/axonwall/ldap/config -n 0 -l "$_ldap_config_ldif"; then
+    echo "[-] ERROR: slapcat failed to dump the OpenLDAP config database (cn=config)." >&2
+    _ldap_backup_failed=1
+  fi
+  if ! slapcat -F /var/lib/axonwall/ldap/config -n 1 -l "$_ldap_data_ldif"; then
+    echo "[-] ERROR: slapcat failed to dump the OpenLDAP data database." >&2
+    _ldap_backup_failed=1
+  fi
+  if [ "$_ldap_backup_failed" -eq 0 ]; then
+    chmod 0600 "$_ldap_config_ldif" "$_ldap_data_ldif" 2>/dev/null || true
+    if [ ! -f "$_ldap_config_ldif" ] || [ ! -f "$_ldap_data_ldif" ]; then
+      echo "[-] ERROR: pre-update OpenLDAP LDIF snapshot is incomplete (missing LDIF file)." >&2
+      _ldap_backup_failed=1
+    fi
+  fi
+  if [ "$_ldap_backup_failed" -eq 1 ]; then
+    echo "[-] ERROR: refusing to update without a pre-update LDAP snapshot; rollback after an LDAP-breaking update would have nothing to restore. Fix slapcat/LDAP and re-run the updater." >&2
+    exit 1
+  fi
 fi
 
 # Helper: Extract .deb payload to a destination directory on Debian
@@ -175,7 +341,7 @@ sync_static_etc_axonwall() {
   dst_etc="$2"
   [ -d "$src_etc" ] || return 0
   mkdir -p "$dst_etc" 2>/dev/null || true
-  for item in nvim yara branding starship.toml release-signing.pub; do
+  for item in nvim yara branding starship.toml release-signing.pub release-signing.d; do
     if [ -e "${src_etc}/${item}" ]; then
       cp -af "${src_etc}/${item}" "${dst_etc}/" 2>/dev/null || true
     fi
@@ -272,7 +438,14 @@ apply_staged_tree() {
     # timers must not fail the overlay on the unmatched *.timer glob.
     for unit_f in "${pkg_stage}/lib/systemd/system/"*.service "${pkg_stage}/lib/systemd/system/"*.timer; do
       if [ -e "$unit_f" ]; then
-        if [ "$(basename "$unit_f")" = "k3s.service" ] && { [ -f "${dest_root}/etc/axonwall/.vault-edition" ] || [ -f "${dest_root}/etc/axonwall/.k3s-edition" ]; }; then
+        # D-M9: k3s.service must never land on a vault box (the vault
+        # has no k3s at all) — but on a k3s-storage box the staged unit
+        # IS the flavor's own k3s.service: the D-M9 updater fetches the
+        # flavor .deb, and the NGFW .deb Conflicts-blocks the flavor
+        # packages at dpkg. Skipping it here (as main's fc576368 did
+        # for both flavor markers) would silently drop flavor unit
+        # updates on every k3s-storage update.
+        if [ "$(basename "$unit_f")" = "k3s.service" ] && [ -f "${dest_root}/etc/axonwall/.vault-edition" ]; then
           continue
         fi
         cp -af "$unit_f" "${dest_root}/lib/systemd/system/" 2>/dev/null || _apply_failed=1
@@ -421,11 +594,22 @@ fi
 CLEAN_VER="${TARGET_VERSION#v}"
 DEB_TMP=""
 if [ -n "$CLEAN_VER" ] && command -v curl >/dev/null 2>&1; then
-  DEB_URL="https://github.com/axonwall/axonwall/releases/download/v${CLEAN_VER}/axonwall_${CLEAN_VER}_amd64.deb"
+  # D-M9: flavor-specific package name. The axonwall edition keeps the
+  # historic NGFW artifact name; vault and k3s-storage request their
+  # own package. There is deliberately no fallback to the NGFW package
+  # anywhere below — a failed flavor download leaves DEB_TMP empty and
+  # the E-M1 guard aborts the update instead of staging the wrong
+  # edition's payload.
+  case "$EDITION" in
+    vault) DEB_BASE="axonwall-vault" ;;
+    k3s-storage) DEB_BASE="axonwall-k3s-storage" ;;
+    *) DEB_BASE="axonwall" ;;
+  esac
+  DEB_URL="https://github.com/axonwall/axonwall/releases/download/v${CLEAN_VER}/${DEB_BASE}_${CLEAN_VER}_amd64.deb"
   SHA_URL="${DEB_URL}.sha256"
   SIG_URL="${SHA_URL}.sig"
   RELEASE_PUBKEY="/etc/axonwall/release-signing.pub"
-  CANDIDATE_DEB="/tmp/axonwall_${CLEAN_VER}_amd64.deb"
+  CANDIDATE_DEB="/tmp/${DEB_BASE}_${CLEAN_VER}_amd64.deb"
   echo "[+] Checking release artifact: ${DEB_URL}"
   if curl -fsSL --connect-timeout 10 --max-time 180 -o "${CANDIDATE_DEB}" "${DEB_URL}" 2>/dev/null; then
     # Fail closed: the .deb is only ever used after verification. A
@@ -441,22 +625,47 @@ if [ -n "$CLEAN_VER" ] && command -v curl >/dev/null 2>&1; then
       if [ -z "$EXPECTED_HASH" ] || [ "$EXPECTED_HASH" != "$ACTUAL_HASH" ]; then
         echo "[-] Warning: SHA-256 mismatch for downloaded package, falling back to local image sync."
         rm -f "${CANDIDATE_DEB}" "${CANDIDATE_DEB}.sha256"
-      elif [ -s "$RELEASE_PUBKEY" ]; then
-        # A release signing key is provisioned: the checksum itself
-        # must carry a valid detached signature (${SHA_URL}.sig, made
-        # by the release workflow) before the package is accepted.
-        if curl -fsSL --connect-timeout 10 --max-time 30 -o "${CANDIDATE_DEB}.sha256.sig" "${SIG_URL}" 2>/dev/null \
-          && openssl dgst -sha256 -verify "$RELEASE_PUBKEY" -signature "${CANDIDATE_DEB}.sha256.sig" "${CANDIDATE_DEB}.sha256" >/dev/null 2>&1; then
-          echo "[+] Verified SHA-256 integrity hash and release signature: ${ACTUAL_HASH}"
-          DEB_TMP="${CANDIDATE_DEB}"
-        else
-          echo "[-] ERROR: release signature verification failed for ${DEB_URL}; discarding download."
-          rm -f "${CANDIDATE_DEB}" "${CANDIDATE_DEB}.sha256" "${CANDIDATE_DEB}.sha256.sig"
-        fi
       else
-        echo "[!] Warning: no release signing key at ${RELEASE_PUBKEY}; relying on SHA-256 + TLS only."
-        echo "[+] Verified SHA-256 integrity hash: ${ACTUAL_HASH}"
-        DEB_TMP="${CANDIDATE_DEB}"
+        # E-M2 (round-3): verify the detached signature against the
+        # release-signing keyring — the legacy single pubkey plus any
+        # additional anchors in /etc/axonwall/release-signing.d/. The
+        # old code trusted exactly one key, so a release signed with a
+        # new key could never be downloaded (the new anchor ships
+        # inside the package the old key cannot verify) and rotation
+        # bricked updates fleet-wide until the pubkey was replaced out
+        # of band on every box. With a keyring, a transition release
+        # signed by the OLD key delivers the NEW anchor into the
+        # keyring, and the following release can be signed by the new
+        # key. See release-signing.d/README.md for the procedure.
+        # (Unmatched globs stay literal under /bin/sh; the -s test
+        # below skips them, so an empty keyring dir is safe.)
+        _sig_ok=0
+        _have_key=0
+        for _pubkey in "$RELEASE_PUBKEY" /etc/axonwall/release-signing.d/*.pub; do
+          [ -s "$_pubkey" ] && _have_key=1 && break
+        done
+        if [ "$_have_key" = "1" ]; then
+          if curl -fsSL --connect-timeout 10 --max-time 30 -o "${CANDIDATE_DEB}.sha256.sig" "${SIG_URL}" 2>/dev/null; then
+            for _pubkey in "$RELEASE_PUBKEY" /etc/axonwall/release-signing.d/*.pub; do
+              [ -s "$_pubkey" ] || continue
+              if openssl dgst -sha256 -verify "$_pubkey" -signature "${CANDIDATE_DEB}.sha256.sig" "${CANDIDATE_DEB}.sha256" >/dev/null 2>&1; then
+                _sig_ok=1
+                break
+              fi
+            done
+          fi
+          if [ "$_sig_ok" = "1" ]; then
+            echo "[+] Verified SHA-256 integrity hash and release signature: ${ACTUAL_HASH}"
+            DEB_TMP="${CANDIDATE_DEB}"
+          else
+            echo "[-] ERROR: release signature verification failed for ${DEB_URL}; discarding download."
+            rm -f "${CANDIDATE_DEB}" "${CANDIDATE_DEB}.sha256" "${CANDIDATE_DEB}.sha256.sig"
+          fi
+        else
+          echo "[!] Warning: no release signing key at ${RELEASE_PUBKEY}; relying on SHA-256 + TLS only."
+          echo "[+] Verified SHA-256 integrity hash: ${ACTUAL_HASH}"
+          DEB_TMP="${CANDIDATE_DEB}"
+        fi
       fi
     fi
   fi
@@ -467,12 +676,22 @@ RUNNING_ACTIVE_SLOT="A"
 if grep -qs -E 'axon_root_b|slot=B' /proc/cmdline 2>/dev/null; then
   RUNNING_ACTIVE_SLOT="B"
 fi
-RUNNING_VER="0.8.13"
+# D-L3: "unknown" when the version file is absent -- the running
+# version is genuinely unknown then; a stale literal (0.8.13) fed
+# slot_versions.json and the download-abort comparison a wrong value.
+RUNNING_VER="unknown"
 if [ -f /etc/axonwall/version ]; then
   RUNNING_VER="$(head -n1 /etc/axonwall/version | tr -d '\r\n ')"
 fi
 
-if [ -z "$DEB_TMP" ] && [ -n "$CLEAN_VER" ] && [ -f /etc/axonwall/version ] && [ "$CLEAN_VER" != "$RUNNING_VER" ]; then
+# E-M1 (round-3): a missing /etc/axonwall/version must fail closed, not
+# proceed. The old condition required the file to exist before aborting
+# on a failed download / bad signature, so a box without the file silently
+# staged the running tree and armed it as the requested new version.
+# RUNNING_VER already defaults to 0.8.13 when the file is missing, so
+# dropping the file-existence conjunct aborts whenever a different
+# version was requested but no verified package was obtained.
+if [ -z "$DEB_TMP" ] && [ -n "$CLEAN_VER" ] && [ "$CLEAN_VER" != "$RUNNING_VER" ]; then
   echo "[-] ERROR: Could not download or verify release package for v${CLEAN_VER} (currently running v${RUNNING_VER}). Aborting firmware update." >&2
   exit 1
 fi
@@ -602,10 +821,24 @@ if [ "$ZBM_MODE" = "1" ]; then
       ensure_cli_symlinks "/"
     elif [ -d /opt/axonwall ]; then
       mkdir -p "${ZBM_STAGE_MNT}/opt/axonwall" 2>/dev/null || true
+      # E-H3 (round-3): a failed local sync must fail the update, not
+      # arm a BE whose /opt/axonwall was never copied. The old code
+      # swallowed rsync/cp failures with `|| true` and the ZBM path has
+      # no staging gate, so a disk-full copy still wrote the new version
+      # and armed the BE as success. Mirror the .deb path above: abort
+      # and destroy the temp BE on failure.
+      ZBM_SYNC_OK=1
       if command -v rsync >/dev/null 2>&1; then
-        rsync -a --delete /opt/axonwall/ "${ZBM_STAGE_MNT}/opt/axonwall/" 2>/dev/null || true
+        rsync -a --delete /opt/axonwall/ "${ZBM_STAGE_MNT}/opt/axonwall/" 2>/dev/null || ZBM_SYNC_OK=0
       else
-        cp -a /opt/axonwall/. "${ZBM_STAGE_MNT}/opt/axonwall/" 2>/dev/null || true
+        cp -a /opt/axonwall/. "${ZBM_STAGE_MNT}/opt/axonwall/" 2>/dev/null || ZBM_SYNC_OK=0
+      fi
+      if [ "$ZBM_SYNC_OK" != "1" ]; then
+        echo "[-] ERROR: Failed to sync /opt/axonwall into ${TARGET_BE_DS} (local sync failed); the Boot Environment is NOT armed." >&2
+        umount -l "${ZBM_STAGE_MNT}" 2>/dev/null || true
+        rmdir "${ZBM_STAGE_MNT}" 2>/dev/null || true
+        zfs destroy -r "$TARGET_BE_TMP_DS" 2>/dev/null || true
+        exit 1
       fi
     fi
 
@@ -764,14 +997,37 @@ elif [ -n "$TARGET_DEV" ] && [ -e "$TARGET_DEV" ]; then
           --exclude=/var/lib/axonwall/* \
           --exclude=/home/* \
           --exclude=/boot/efi/* \
+          --exclude=/etc/machine-id \
+          --exclude=/etc/ssh/ssh_host_* \
+          --exclude=/var/lib/dbus/machine-id \
+          --exclude=/var/lib/cloud/data \
+          --exclude=/var/lib/cloud/instance \
+          --exclude=/var/lib/cloud/instances \
           / "${STAGE_DIR}/" 2>/dev/null || STAGING_RSYNCS_FAILED=1
       else
-        for sys_dir in bin etc home lib lib64 opt root sbin usr var; do
+        # D-M1: mirror the rsync excludes -- the old loop copied /home
+        # and /var (including live /var/lib/axonwall state) verbatim.
+        for sys_dir in bin etc lib lib64 opt root sbin usr var; do
           if [ -d "/${sys_dir}" ]; then
-            cp -a "/${sys_dir}" "${STAGE_DIR}/" 2>/dev/null || true
+            # E-M5 (round-3): a failed cp fallback must feed the E1
+            # staging gate exactly like the rsync branch above; the
+            # old `|| true` left STAGING_RSYNCS_FAILED clear and a
+            # partial clone could still pass the gate on markers alone.
+            cp -a "/${sys_dir}" "${STAGE_DIR}/" 2>/dev/null || STAGING_RSYNCS_FAILED=1
           fi
         done
       fi
+      # D-M1: sanitize machine identity on the staged copy, exactly as
+      # the firstboot clone does, so the standby generates its own
+      # machine-id, SSH host keys and cloud-init state on its first
+      # boot. Also drops any live /var/lib/axonwall state the cp
+      # fallback carried over (the rsync branch already excludes it,
+      # and a pre-existing partial staged tree may still hold it).
+      : > "${STAGE_DIR}/etc/machine-id" 2>/dev/null || true
+      rm -f "${STAGE_DIR}/var/lib/dbus/machine-id" "${STAGE_DIR}"/etc/ssh/ssh_host_* 2>/dev/null || true
+      rm -rf "${STAGE_DIR}/var/lib/cloud/data" "${STAGE_DIR}/var/lib/cloud/instance" "${STAGE_DIR}/var/lib/cloud/instances" 2>/dev/null || true
+      rm -rf "${STAGE_DIR}/var/lib/axonwall" 2>/dev/null || true
+      rm -rf "${STAGE_DIR}/home" 2>/dev/null || true
       mkdir -p "${STAGE_DIR}/dev" "${STAGE_DIR}/proc" "${STAGE_DIR}/sys" "${STAGE_DIR}/run" "${STAGE_DIR}/tmp" "${STAGE_DIR}/boot" "${STAGE_DIR}/home" "${STAGE_DIR}/var/lib/axonwall" 2>/dev/null || true
     fi
 
@@ -856,7 +1112,10 @@ elif [ -n "$TARGET_DEV" ] && [ -e "$TARGET_DEV" ]; then
       if command -v rsync >/dev/null 2>&1; then
         rsync -a --delete /opt/axonwall/ "${STAGE_DIR}/opt/axonwall/" 2>/dev/null || STAGING_RSYNCS_FAILED=1
       else
-        cp -a /opt/axonwall/. "${STAGE_DIR}/opt/axonwall/" 2>/dev/null || true
+        # E-M5 (round-3): same as the base-rootfs clone above — a
+        # failed cp fallback must set the staging-failure flag, or the
+        # E1 gate arms a half-staged slot on markers alone.
+        cp -a /opt/axonwall/. "${STAGE_DIR}/opt/axonwall/" 2>/dev/null || STAGING_RSYNCS_FAILED=1
       fi
     fi
 

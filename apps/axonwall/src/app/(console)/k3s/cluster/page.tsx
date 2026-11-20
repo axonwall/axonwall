@@ -31,7 +31,7 @@ import {
 } from '@/server/agent';
 import type { K3sClusterPulse } from '@/components/k3s/types';
 import { useDesiredStateApply } from '@/lib/use-desired-state-apply';
-import type { DesiredState } from '@axonwall/lib/schemas';
+import { K3sConfigSchema, type DesiredState } from '@axonwall/lib/schemas';
 
 const SYSTEM_CONDITION_TAINT_KEYS = new Set([
   'node.kubernetes.io/not-ready',
@@ -80,6 +80,8 @@ export default function K3sClusterPage() {
   const [lbName, setLbName] = useState('bgp-pool-0');
   const [lbCidr, setLbCidr] = useState('192.168.1.240/28');
   const [lbMode, setLbMode] = useState<'bgp' | 'l2-arp' | 'both'>('both');
+  // C-L5: typed banner — errors render red, not emerald. Main fixed the
+  // same finding with an { ok, text } banner; this file uses main's shape.
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [joining, setJoining] = useState(false);
 
@@ -237,27 +239,12 @@ export default function K3sClusterPage() {
       virtEnabled: Boolean(next.capabilities?.virtEnabled ?? next.virt?.enabled),
       vigilanteEnabled: Boolean(next.capabilities?.vigilanteEnabled ?? next.vigilante?.enabled),
     };
-    next.k3s = next.k3s || {
-      enabled: true,
-      clusterCidr: '10.42.0.0/16',
-      serviceCidr: '10.43.0.0/16',
-      nodeIpInterface: 'lan',
-      flannelBackend: 'wireguard-native',
-      disableTraefik: false,
-      autoJoinHaPeer: true,
-      openEbs: {
-        enabled: true,
-        zfsLocalPvEnabled: true,
-        zfsLocalPvPool: 'tank',
-        replicatedStorageEnabled: true,
-        defaultReplicaCount: 2,
-        replicatedBackingPool: 'tank/openebs-replicated',
-      },
-      enableUserNamespaces: false,
-      bpfTokenProfiles: [],
-      workloads: [],
-    };
-    next.k3s.enabled = true;
+    // C-M3: never invent a full K3s/OpenEBS config here. When no K3s
+    // config exists yet, materialize the schema's own defaults (cluster /
+    // service CIDRs, CNI) and leave openEbs unset — no pool names, replica
+    // counts or forced replication the operator never chose. OpenEBS is
+    // enabled from the Storage page, where the operator sees the values.
+    next.k3s = next.k3s ? { ...next.k3s, enabled: true } : K3sConfigSchema.parse({ enabled: true });
     // C2: a fingerprint mismatch (or any apply failure) must be visible,
     // not an unhandled rejection — the save did not happen.
     try {
@@ -329,11 +316,21 @@ export default function K3sClusterPage() {
         </div>
       )}
 
+      {status?.daemonDown && (
+        <div className="p-4 rounded-xl bg-amber-500/10 border border-amber-500/30 text-xs text-amber-300">
+          Daemon unreachable — K3s cluster state is unknown. The control plane, nodes and storage below are not live data.
+        </div>
+      )}
+
       <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
         <div className="p-5 rounded-2xl bg-slate-900 border border-slate-800">
           <span className="text-xs text-slate-400 block">Control Plane Status</span>
-          <span className="text-lg font-bold text-emerald-400 font-mono mt-1 block">
-            {status?.serviceActive ? 'ACTIVE (Ready)' : 'STANDBY'}
+          <span
+            className={`text-lg font-bold font-mono mt-1 block ${
+              status?.daemonDown ? 'text-slate-400' : 'text-emerald-400'
+            }`}
+          >
+            {status?.daemonDown ? 'UNKNOWN' : status?.serviceActive ? 'ACTIVE (Ready)' : 'STANDBY'}
           </span>
         </div>
         <div className="p-5 rounded-2xl bg-slate-900 border border-slate-800">
@@ -352,8 +349,12 @@ export default function K3sClusterPage() {
         </div>
         <div className="p-5 rounded-2xl bg-slate-900 border border-slate-800">
           <span className="text-xs text-slate-400 block">OpenEBS CSI Engine</span>
-          <span className="text-lg font-bold text-emerald-400 font-mono mt-1 block">
-            {status?.openEbsHealthy ? 'HEALTHY (2 Classes)' : 'PENDING'}
+          <span
+            className={`text-lg font-bold font-mono mt-1 block ${
+              status?.daemonDown ? 'text-slate-400' : 'text-emerald-400'
+            }`}
+          >
+            {status?.daemonDown ? 'UNKNOWN' : status?.openEbsHealthy ? 'HEALTHY (2 Classes)' : 'PENDING'}
           </span>
         </div>
       </div>
@@ -507,7 +508,7 @@ export default function K3sClusterPage() {
             onChange={(e) => {
               if (!state) return;
               const next = structuredClone(state);
-              next.k3s = next.k3s || ({ enabled: true, flannelBackend: 'wireguard-native', disableTraefik: false, autoJoinHaPeer: true, enableUserNamespaces: true, bpfTokenProfiles: [], workloads: [], clusterCidr: '10.42.0.0/16', serviceCidr: '10.43.0.0/16', nodeIpInterface: 'lan' } as any);
+              next.k3s = next.k3s || K3sConfigSchema.parse({ enabled: true });
               next.k3s!.cniPlugin = e.target.value as 'flannel' | 'cilium-ebpf';
               setState(next);
             }}
@@ -645,18 +646,8 @@ export default function K3sClusterPage() {
             onClick={() => {
               if (!state || !lbName.trim() || !lbCidr.trim()) return;
               const next = structuredClone(state);
-              next.k3s = next.k3s || ({
-                enabled: true,
-                clusterCidr: '10.42.0.0/16',
-                serviceCidr: '10.43.0.0/16',
-                nodeIpInterface: 'lan',
-                flannelBackend: 'wireguard-native',
-                disableTraefik: false,
-                autoJoinHaPeer: true,
-                enableUserNamespaces: true,
-                bpfTokenProfiles: [],
-                workloads: [],
-              } as any);
+              // C-M3: staging a pool must not invent a cluster config.
+              next.k3s = next.k3s || K3sConfigSchema.parse({ enabled: true });
               const existingPools = next.k3s!.serviceLbPools ?? [];
               next.k3s!.serviceLbPools = [
                 ...existingPools.filter((p) => p.name !== lbName.trim()),
@@ -824,7 +815,7 @@ export default function K3sClusterPage() {
                         n.status === 'Ready' ? 'text-emerald-400' : 'text-amber-400'
                       }`}
                     >
-                      <CheckCircle2 className="w-3.5 h-3.5" /> {n.status}
+                      {n.status === 'Ready' ? <CheckCircle2 className="w-3.5 h-3.5" /> : null} {n.status}
                     </span>
                   </td>
                   <td className="py-3.5 px-4 text-right whitespace-nowrap">
@@ -849,6 +840,13 @@ export default function K3sClusterPage() {
                 </tr>
               );
             })}
+            {status?.daemonDown && (status?.nodes ?? []).length === 0 && (
+              <tr>
+                <td colSpan={8} className="py-8 px-4 text-center text-slate-500">
+                  Cluster nodes unknown — daemon unreachable.
+                </td>
+              </tr>
+            )}
           </tbody>
         </table>
       </div>

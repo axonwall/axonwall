@@ -93,7 +93,6 @@ type WatchdogEngine struct {
 	slotVersionsPath string
 	status           PartitionStatus
 	stopChan         chan struct{}
-	bootSyncDone     bool
 
 	// Injectable for tests; production values are set by the constructor.
 	updaterPaths        []string
@@ -620,7 +619,7 @@ func (we *WatchdogEngine) detectInitialState() {
 }
 
 func readInstalledVersion() string {
-	appVer := "0.12.3"
+	appVer := "0.12.4"
 	for _, vpath := range []string{"/etc/axonwall/version", "/opt/axonwall/apps/axonwall/package.json", "/opt/axonwall/package.json", "./package.json", "../package.json"} {
 		if data, err := os.ReadFile(vpath); err == nil {
 			trimmed := strings.TrimSpace(string(data))
@@ -733,6 +732,30 @@ func (we *WatchdogEngine) GetStatus() PartitionStatus {
 					we.status.SlotBVersion = be.Version
 				} else if we.status.SlotBVersion == "Standby BE" || we.status.SlotBVersion == "" {
 					we.status.SlotBVersion = be.Version
+				}
+			}
+			// E-L1 (round-3): the file-seeded SlotBVersion above
+			// survives when no BE is ActiveNext and it is not the
+			// placeholder, so a deleted standby BE's version was
+			// reported indefinitely (deleting a BE never updates
+			// slot_versions.json). When the live list is available
+			// and no listed BE carries that version, refresh it
+			// from the list instead of the stale file value.
+			known := false
+			firstStandby := ""
+			for _, be := range bes {
+				if be.Version == we.status.SlotBVersion {
+					known = true
+				}
+				if !be.ActiveNow && firstStandby == "" {
+					firstStandby = be.Version
+				}
+			}
+			if !known {
+				if firstStandby != "" {
+					we.status.SlotBVersion = firstStandby
+				} else {
+					we.status.SlotBVersion = "Standby BE"
 				}
 			}
 		}
@@ -922,6 +945,47 @@ func (we *WatchdogEngine) listBootEnvironmentsLocked() []ZfsBootEnvironment {
 	return results
 }
 
+// zbmBootfsNeedsSyncLocked reports whether the pool's bootfs needs
+// repairing to the running BE. E-H1 (round-3): a bootfs naming a
+// different, existing BE is a staged update (or a deliberate manual
+// arming) and must be left alone; only an unset bootfs ("", "-") or
+// one naming a dataset that no longer exists is repaired. A bootfs
+// that cannot be read is never guessed at. Called with we.mu held
+// (from runVerificationSequence).
+func (we *WatchdogEngine) zbmBootfsNeedsSyncLocked(activeBe string) bool {
+	if we.runZpoolCmd == nil {
+		return false
+	}
+	out, err := we.runZpoolCmd("get", "-H", "-o", "value", "bootfs", "zroot")
+	if err != nil {
+		return false
+	}
+	current := strings.TrimSpace(string(out))
+	if current == activeBe {
+		return false
+	}
+	if current == "" || current == "-" {
+		return true
+	}
+	for _, be := range we.listBootEnvironmentsLocked() {
+		if be.Dataset == current {
+			return false
+		}
+	}
+	return true
+}
+
+// zbmBeExistsLocked reports whether the named BE (dataset path or bare
+// name) is present in the refreshed BE list. Called with we.mu held.
+func (we *WatchdogEngine) zbmBeExistsLocked(name string) bool {
+	for _, be := range we.status.BootEnvironments {
+		if be.Dataset == name || be.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
 // ListBootEnvironments returns all OpenZFS boot environments.
 func (we *WatchdogEngine) ListBootEnvironments() ([]ZfsBootEnvironment, error) {
 	we.mu.Lock()
@@ -948,8 +1012,15 @@ func (we *WatchdogEngine) CreateBootEnvironmentSnapshot(beName, label string) (s
 				break
 			}
 		}
-		if beName == "" && len(we.status.BootEnvironments) > 0 {
-			beName = we.status.BootEnvironments[0].Name
+		// E-L2 (round-3): when no BE in the refreshed list is
+		// ActiveNow, fail instead of snapshotting the first BE in
+		// list order. ActiveNow is only missing when the root source
+		// matches no dataset (e.g. booted from rescue media with the
+		// pool imported) — silently snapshotting an arbitrary BE
+		// there is never the caller's intent.
+		if beName == "" || beName == "axonwall-active" {
+			we.mu.Unlock()
+			return "", fmt.Errorf("cannot determine the active Boot Environment: no Boot Environment is marked active; pass an explicit Boot Environment name")
 		}
 		we.mu.Unlock()
 	}
@@ -1364,11 +1435,27 @@ func (we *WatchdogEngine) runVerificationSequence() {
 						}
 					}
 				}
-				_, _ = we.runZfsCmd("set", "org.axonwall:fallback_be="+activeBe, "zroot/ROOT")
-				if commitOK && !we.bootSyncDone {
+				// E-H2 (round-3): fallback_be is the rollback pointer
+				// the ZBM watchdog hook follows on a failed boot, so
+				// only a verification whose healthy state actually
+				// committed may advance it to the running BE. The old
+				// code repointed it on every passing quorum even when
+				// the bootcount commit had failed.
+				if commitOK {
+					_, _ = we.runZfsCmd("set", "org.axonwall:fallback_be="+activeBe, "zroot/ROOT")
+				}
+				// E-H1 (round-3): never overwrite a bootfs that names
+				// a different, existing BE — that is a staged update
+				// (or a deliberate manual arming) waiting for its
+				// reboot, and a daemon restart must not cancel it.
+				// Only repair bootfs when it is unset or names a
+				// dataset that no longer exists. The old code synced
+				// unconditionally behind a RAM-only bootSyncDone flag,
+				// so every fresh daemon process disarmed the staged
+				// update on its first passing verification.
+				if commitOK && we.zbmBootfsNeedsSyncLocked(activeBe) {
 					_, _ = we.runZpoolCmd("set", "bootfs="+activeBe, "zroot")
 					_, _ = we.runZfsCmd("set", "org.axonwall:active_be="+activeBe, "zroot/ROOT")
-					we.bootSyncDone = true
 				}
 			}
 		} else {
@@ -1663,23 +1750,54 @@ func (we *WatchdogEngine) TriggerRollback() error {
 		if err == nil {
 			fallbackBe = strings.TrimSpace(string(fallbackOut))
 		}
-		if fallbackBe == "" || fallbackBe == "-" {
-			// E2-10: refresh the list (script-side arming never
-			// tells the daemon) and prefer the newest standby
-			// instead of the first non-active cached entry.
-			// R4-E-L2: rollback means "last verified-good BE", so
-			// use the rollback selector, which never picks a staged
-			// (ActiveNext), untested BE — selectStandbyBE would
-			// arm the staged BE first.
-			we.status.BootEnvironments = we.listBootEnvironmentsLocked()
-			if be := selectRollbackBE(we.status.BootEnvironments); be != nil {
-				fallbackBe = be.Dataset
+		// E-H2 (round-3): refresh the list (script-side arming never
+		// tells the daemon) and arm a BE other than the running one.
+		// fallback_be is the last verified-good BE, which after one
+		// passing verification IS the running BE — arming it verbatim
+		// was a no-op rollback that reported success while rebooting
+		// into the same bad BE. Prefer the newest non-running,
+		// non-staged standby (the selectRollbackBE path, R4-E-L2:
+		// rollback means "last verified-good BE", so a staged,
+		// untested BE is never a rollback candidate); only use
+		// fallback_be when it names a different BE that still
+		// exists. Fail loudly when no other BE exists.
+		we.status.BootEnvironments = we.listBootEnvironmentsLocked()
+		runningBe := we.status.ActiveRootDevice
+		for _, be := range we.status.BootEnvironments {
+			if be.ActiveNow {
+				runningBe = be.Dataset
 			}
 		}
-		if fallbackBe == "" || fallbackBe == "-" {
-			return fmt.Errorf("no verified-good fallback Boot Environment available for rollback (no non-staged standby exists)")
+		runningName := strings.TrimPrefix(runningBe, "zroot/ROOT/")
+		target := ""
+		// Prefer the newest non-running, non-staged standby (the
+		// selectRollbackBE path, R4-E-L2). selectRollbackBE skips
+		// the ActiveNow entry, but the list can carry no ActiveNow
+		// flag (e.g. /proc/mounts unreadable) — and then it could
+		// return the running BE itself as the newest standby.
+		// Filter the running BE out first, so the choice never
+		// depends on the ActiveNow flags being right.
+		nonRunning := make([]ZfsBootEnvironment, 0, len(we.status.BootEnvironments))
+		for _, be := range we.status.BootEnvironments {
+			if be.Dataset != runningBe && be.Name != runningName {
+				nonRunning = append(nonRunning, be)
+			}
 		}
-		beName := strings.TrimPrefix(fallbackBe, "zroot/ROOT/")
+		if be := selectRollbackBE(nonRunning); be != nil {
+			target = be.Dataset
+		} else if fallbackBe != "" && fallbackBe != "-" && fallbackBe != runningBe && fallbackBe != runningName {
+			// No usable standby: trust the fallback pointer only if
+			// it names a BE that still exists in the refreshed list.
+			// A dangling pointer (BE deleted since it was recorded)
+			// must fail loudly, not re-arm the running BE.
+			if we.zbmBeExistsLocked(fallbackBe) {
+				target = fallbackBe
+			}
+		}
+		if target == "" {
+			return fmt.Errorf("no verified-good fallback Boot Environment available for rollback: no non-staged standby Boot Environment other than the running one (%s)", runningBe)
+		}
+		beName := strings.TrimPrefix(target, "zroot/ROOT/")
 		we.mu.Unlock()
 		err = we.ActivateBootEnvironment(beName)
 		we.mu.Lock()
@@ -1725,11 +1843,29 @@ func (we *WatchdogEngine) ActivateSlot(targetSlot string) error {
 	if mode == "zbm" {
 		targetBE := strings.TrimSpace(targetSlot)
 		if strings.EqualFold(targetBE, "A") {
+			// E-M4 (round-3): refresh the list exactly as the "B"
+			// branch does, and refuse when no ActiveNow BE is found
+			// instead of falling through with the literal "A". The
+			// old code scanned the possibly stale cache and, with an
+			// empty cache, called ActivateBootEnvironment("A") — and
+			// zpool set bootfs validates only the name syntax/pool,
+			// not that the dataset exists, so bootfs would have been
+			// pointed at the nonexistent zroot/ROOT/A.
+			we.status.BootEnvironments = we.listBootEnvironmentsLocked()
+			found := false
 			for _, be := range we.status.BootEnvironments {
-				if be.ActiveNow {
+				// ActiveNow comes from /proc/mounts; also match the
+				// daemon's recorded running dataset, which agrees
+				// with it on a normally booted box and covers a list
+				// whose ActiveNow flags are missing.
+				if be.ActiveNow || (we.status.ActiveRootDevice != "" && be.Dataset == we.status.ActiveRootDevice) {
 					targetBE = be.Name
+					found = true
 					break
 				}
+			}
+			if !found {
+				return fmt.Errorf("cannot activate slot A: no active Boot Environment found in the Boot Environment list; refusing to arm the literal name %q", targetBE)
 			}
 		} else if strings.EqualFold(targetBE, "B") {
 			// E2-10: refresh the list (script-side arming never

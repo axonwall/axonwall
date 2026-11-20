@@ -2,6 +2,7 @@ package engine
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -11,13 +12,15 @@ import (
 func TestXdpLpmCidrAndSynFloodProtection(t *testing.T) {
 	mgr := NewEBPFManager()
 
-	// Valid public IPv4 /24 CIDR block
-	if err := mgr.AddXdpBlock("198.51.100.0/24", 600, 1, "Threat feed ASN prefix"); err != nil {
-		t.Fatalf("expected valid IPv4 CIDR block to succeed, got: %v", err)
-	}
-	// Valid public IPv6 /48 CIDR block
-	if err := mgr.AddXdpBlock("2001:db8:c0de::/48", 600, 2, "IPv6 botnet prefix"); err != nil {
-		t.Fatalf("expected valid IPv6 CIDR block to succeed, got: %v", err)
+	// A-H3 (round 3): the manager is unstarted, so no CIDR block can
+	// be enforced in the kernel — valid CIDRs must FAIL LOUDLY
+	// instead of succeeding and being listed as active. (The old
+	// test asserted the lie; the accept path needs a host with eBPF
+	// loaded and is not exercisable in this sandbox.)
+	for _, cidr := range []string{"198.51.100.0/24", "2001:db8:c0de::/48"} {
+		if err := mgr.AddXdpBlock(cidr, 600, 1, "Threat feed prefix"); err == nil {
+			t.Fatalf("expected CIDR block %s on an unstarted manager to fail loudly, got nil", cidr)
+		}
 	}
 
 	// Overly broad IPv4 CIDR (/4 < /8) must be rejected
@@ -40,15 +43,15 @@ func TestXdpLpmCidrAndSynFloodProtection(t *testing.T) {
 	if snap.SynFloodLimitPps != 5000 {
 		t.Fatalf("expected SynFloodLimitPps=5000, got %d", snap.SynFloodLimitPps)
 	}
-	if len(snap.ActiveBlocks) != 2 {
-		t.Fatalf("expected 2 active CIDR blocks, got %d", len(snap.ActiveBlocks))
+	if len(snap.ActiveBlocks) != 0 {
+		t.Fatalf("expected 0 active CIDR blocks on an unstarted manager, got %d", len(snap.ActiveBlocks))
 	}
 
 	if err := mgr.RemoveXdpBlock("198.51.100.0/24"); err != nil {
 		t.Fatalf("RemoveXdpBlock CIDR failed: %v", err)
 	}
-	if len(mgr.GetDataplaneSnapshot(10).ActiveBlocks) != 1 {
-		t.Fatalf("expected 1 active block remaining")
+	if len(mgr.GetDataplaneSnapshot(10).ActiveBlocks) != 0 {
+		t.Fatalf("expected 0 active blocks remaining")
 	}
 }
 
@@ -159,6 +162,13 @@ func TestBundleValidatorsParityPlusSecurityInvariants(t *testing.T) {
 }
 
 func TestVirtManagerCloneLibvirtXmlAndGfsPrune(t *testing.T) {
+	// Isolate persisted specs: without this the test reads/writes the
+	// live /var/lib/axonwall/virt-specs.json, so a previous run's
+	// cloned VM 200 makes CloneVM fail with "already exists".
+	oldSpecsPath := VirtSpecsPath
+	VirtSpecsPath = filepath.Join(t.TempDir(), "virt-specs.json")
+	defer func() { VirtSpecsPath = oldSpecsPath }()
+
 	tm := NewTaskManager()
 	nm := NewNasManager()
 	vm := NewVirtManager(tm, nm)
@@ -184,23 +194,34 @@ func TestVirtManagerCloneLibvirtXmlAndGfsPrune(t *testing.T) {
 		t.Fatalf("ApplyVirtBundleJSON failed: %v", err)
 	}
 
-	cloned, err := vm.CloneVM(100, 200, "win11-clone", true)
-	if err != nil {
-		t.Fatalf("CloneVM failed: %v", err)
-	}
-	if cloned.VMID != 200 || cloned.Name != "win11-clone" {
-		t.Fatalf("unexpected cloned VM spec: %+v", cloned)
-	}
-	if cloned.Disks[0].Zvol != "tank/vms/vm-200-disk-0" {
-		t.Fatalf("expected rewritten zvol path, got %s", cloned.Disks[0].Zvol)
-	}
+	// A-M2 (round 3): CloneVM must fail loudly when zfs is missing
+	// (or a source zvol is absent) instead of registering a clone
+	// whose disks were never copied. Without zfs there is no clone
+	// to assert on, so the success path below only runs where zfs
+	// exists; the guard tests after it run in both cases.
+	if _, err := exec.LookPath("zfs"); err != nil {
+		if _, err := vm.CloneVM(100, 200, "win11-clone", true); err == nil {
+			t.Fatalf("expected CloneVM without zfs to fail loudly, got nil")
+		}
+	} else {
+		cloned, err := vm.CloneVM(100, 200, "win11-clone", true)
+		if err != nil {
+			t.Fatalf("CloneVM failed: %v", err)
+		}
+		if cloned.VMID != 200 || cloned.Name != "win11-clone" {
+			t.Fatalf("unexpected cloned VM spec: %+v", cloned)
+		}
+		if cloned.Disks[0].Zvol != "tank/vms/vm-200-disk-0" {
+			t.Fatalf("expected rewritten zvol path, got %s", cloned.Disks[0].Zvol)
+		}
 
-	xmlStr, err := vm.ExportLibvirtXML(200)
-	if err != nil {
-		t.Fatalf("ExportLibvirtXML failed: %v", err)
-	}
-	if !strings.Contains(xmlStr, "<domain type='kvm'>") || !strings.Contains(xmlStr, "<name>win11-clone</name>") {
-		t.Fatalf("unexpected Libvirt XML: %s", xmlStr)
+		xmlStr, err := vm.ExportLibvirtXML(200)
+		if err != nil {
+			t.Fatalf("ExportLibvirtXML failed: %v", err)
+		}
+		if !strings.Contains(xmlStr, "<domain type='kvm'>") || !strings.Contains(xmlStr, "<name>win11-clone</name>") {
+			t.Fatalf("unexpected Libvirt XML: %s", xmlStr)
+		}
 	}
 
 	// Test GFS backup pruning logic via temp directory under /mnt if writable or verify input guard

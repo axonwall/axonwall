@@ -937,12 +937,22 @@ func (m *SqliteSyncManager) pollAndSync(stopCh <-chan struct{}, pollerCtx contex
 				m.mu.Lock()
 				km := m.k3sManager
 				m.mu.Unlock()
-				if km != nil {
-					km.MarkHaAutoJoined(cfg.PeerAddress)
-				}
+				// A-H2 (round 3): the latch used to be set here, on
+				// token possession alone, BEFORE the reload below —
+				// and the reload hardcoded unit "k3s" instead of
+				// the configured unit, so on a k3s-agent edition it
+				// restarted the wrong unit while reporting joined.
+				// Restart first (via the manager, which resolves
+				// the unit); latch only if the restart succeeds.
 				_, cfgErr := os.Stat("/etc/rancher/k3s/config.yaml")
 				if (km != nil && km.IsEnabled()) || cfgErr == nil {
-					if err := exec.Command("systemctl", "--no-ask-password", "reload-or-restart", "k3s").Run(); err != nil {
+					if km != nil {
+						if err := km.RestartK3sAfterTokenFetch(); err != nil {
+							slog.Error("HA Backup Poller: Failed to reload k3s after retrieving join token; not marking node as joined", "error", err)
+						} else {
+							km.MarkHaAutoJoined(cfg.PeerAddress)
+						}
+					} else if err := exec.Command("systemctl", "--no-ask-password", "reload-or-restart", "k3s").Run(); err != nil {
 						slog.Error("HA Backup Poller: Failed to reload k3s after retrieving join token", "error", err)
 					}
 				}

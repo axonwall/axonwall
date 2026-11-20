@@ -204,6 +204,9 @@ export async function getAgentStatus(): Promise<AgentStatus> {
       // R4-C-H1: a daemon that answers without a version / bundle hash /
       // uptime is UNKNOWN on those fields — never stamp the UI's own
       // version, a placeholder hash, or the UI host's uptime onto it.
+      // (Main's only change here was bumping the stale literal
+      // '0.12.3' → '0.12.4'; the literal itself is the bug this fix
+      // removes, so the branch version stands.)
       version: daemonStatus.version || 'UNKNOWN',
       uptimeSeconds: Number(daemonStatus.uptime_seconds ?? daemonStatus.uptimeSeconds ?? 0),
       activeBundleHash: daemonStatus.active_bundle_hash || daemonStatus.activeBundleHash || 'UNKNOWN',
@@ -274,7 +277,7 @@ export async function getAgentStatus(): Promise<AgentStatus> {
 
   return {
     nodeId: `axonwall-${os.hostname()}`,
-    version: '0.12.3',
+    version: '0.12.4',
     uptimeSeconds: Math.floor(os.uptime()),
     activeBundleHash: mockActiveRuleset ? 'hash-active-ruleset' : 'hash-initial-default',
     pendingConfirm: mockPendingConfirm,
@@ -550,7 +553,8 @@ export async function getYamlConfigFilesSnapshot(): Promise<{
 export async function saveYamlDomainFile(
   filename: string,
   yamlContent: string,
-  applyImmediately = true
+  applyImmediately = true,
+  options?: { expectedFingerprint?: string }
 ): Promise<{ success: boolean; message: string; warnings: string[] }> {
   const session = await getSession();
   assertActionPermitted(session, 'admin');
@@ -580,7 +584,13 @@ export async function saveYamlDomainFile(
     // was applied. Same for a fingerprint conflict, if one is ever
     // threaded through this path.
     try {
-      const res = await applyDesiredState(validation.state);
+      // C-M8: thread the caller's fingerprint through so a concurrent
+      // save in another tab cannot be silently reverted by this apply.
+      const res = await applyDesiredState(
+        validation.state,
+        120,
+        options?.expectedFingerprint ? { expectedFingerprint: options.expectedFingerprint } : undefined
+      );
       return {
         success: res.success,
         message: `Saved /etc/axonwall/${filename} and applied configuration.`,
@@ -3121,7 +3131,7 @@ function getCurrentInstalledVersion(): string {
       }
     } catch {}
   }
-  return '0.12.3';
+  return '0.12.4';
 }
 
 function compareSemver(v1: string, v2: string): number {
@@ -3435,6 +3445,16 @@ export async function getSystemPartitionsTelemetry(): Promise<SystemPartitionsTe
     const runningHealthKnown =
       daemonData.healthVerified !== undefined && daemonData.healthVerified !== null;
     const runningHealthy = Boolean(daemonData.healthVerified);
+    // E-L5 (round-3): derive the standby BE's device from the daemon's
+    // bootEnvironments list instead of synthesising it from the version
+    // string. The old code assumed every BE is named axonwall-<version>
+    // and produced the literal "zroot/ROOT/axonwall-Standby BE" when no
+    // BE was known. Prefer the armed (ActiveNext) BE, else the last
+    // non-running entry in list order; with no BE known, fall back to
+    // the parent dataset label rather than inventing a dataset.
+    const standbyBe =
+      (daemonData.bootEnvironments || []).find((be: any) => be.activeNext) ||
+      [...(daemonData.bootEnvironments || [])].reverse().find((be: any) => !be.activeNow);
     return {
       installMode,
       zbmPoolName: daemonData.zbmPoolName || 'zroot',
@@ -3489,7 +3509,7 @@ export async function getSystemPartitionsTelemetry(): Promise<SystemPartitionsTe
                   healthKnown: false,
                   version: slotBVer,
                   kernel: daemonData.kernelVersion || kernel,
-                  device: `zroot/ROOT/axonwall-${slotBVer}`,
+                  device: standbyBe ? standbyBe.dataset : 'zroot/ROOT',
                   label: 'zroot/ROOT',
                   size: 'Root-on-ZFS (Copy-on-Write)',
                   lastUpdated: 'Standby Boot Environment',
@@ -3675,7 +3695,24 @@ export async function activatePartitionSlot(slot: 'A' | 'B'): Promise<{ success:
       };
     }
 
-    // 2. Direct grub-editenv execution if running as root or with sudo
+    // 2. Direct grub-editenv execution if running as root or with sudo.
+    // E-L6 (round-3): this grubenv fallback only arms dual-root A/B
+    // installs. On rolling installs there are no slots to arm, and on
+    // ZBM installs GRUB's grubenv is not the boot mechanism at all
+    // (bootfs is) — neither installer creates /boot/grub/grubenv on
+    // those modes, so a write there would report an arming that never
+    // happens (grub-editenv creates the file if it does not exist).
+    // Refuse instead of reporting success.
+    const localInstallMode = detectLocalInstallMode();
+    if (localInstallMode !== 'ab') {
+      return {
+        success: false,
+        message:
+          localInstallMode === 'zbm'
+            ? `Cannot arm Slot ${cleanSlot} via the GRUB environment: this is a ZFSBootMenu install, where the boot target is the pool's bootfs property, not grubenv. The daemon is unreachable, so the slot was NOT armed; do not reboot on the basis of this result.`
+            : `Cannot arm Slot ${cleanSlot}: this is a Rolling Single-Root install with no A/B slots. The slot was NOT armed.`,
+      };
+    }
     try {
       execFileSync('grub-editenv', ['/boot/grub/grubenv', 'set', `active_slot=${cleanSlot}`, 'bootcount=0'], {
         stdio: 'ignore',
@@ -3824,7 +3861,7 @@ export async function applySystemFirmwareUpdate(targetSlot: 'A' | 'B'): Promise<
 
     const currentVersion = getCurrentInstalledVersion();
     const release = await getReleaseInfo(true);
-    const targetVersion = (release.latestVersion || '0.12.3').replace(/[^0-9a-zA-Z._-]/g, '');
+    const targetVersion = (release.latestVersion || '0.12.4').replace(/[^0-9a-zA-Z._-]/g, '');
 
     // 1. Delegate privileged firmware update to root daemon (axonwalld) first
     const daemonResp = await callAgentApi<any>(
@@ -4442,6 +4479,9 @@ export interface K3sRuntimeStatus {
   podsRunning: number;
   podsTotal: number;
   openEbsHealthy: boolean;
+  // C-H3: true when the daemon did not answer, so the page can say the
+  // cluster state is unknown instead of rendering a healthy cluster.
+  daemonDown: boolean;
 }
 
 export async function getNasDisksInventory(): Promise<{
@@ -4455,6 +4495,9 @@ export async function getNasDisksInventory(): Promise<{
     systemRaidDisks: string;
     autoCreatePool: boolean;
   } | null;
+  // C-M9: true when the daemon did not answer, so callers can say the
+  // inventory is unknown instead of rendering an empty (or invented) list.
+  daemonDown: boolean;
 }> {
   const session = await getSession();
   assertActionPermitted(session);
@@ -4464,6 +4507,7 @@ export async function getNasDisksInventory(): Promise<{
     return {
       disks: daemonResp.disks,
       installSpec: daemonResp.installSpec || null,
+      daemonDown: false,
     };
   }
 
@@ -4478,58 +4522,14 @@ export async function getNasDisksInventory(): Promise<{
     }
   } catch {}
 
+  // C-M9: the daemon did not answer, so no disk inventory is known.
+  // Returning invented disks with serial numbers and passing SMART
+  // results told the operator a failing (or absent) disk set was healthy.
+  // The install spec above is real local file data, so it is kept.
   return {
-    disks: [
-      {
-        name: 'sda6',
-        path: '/dev/disk/by-partlabel/axon_zfs_1',
-        sizeBytes: 214748364800,
-        model: 'Samsung PM9A3 NVMe (Boot ZFS Partition)',
-        serial: 'S64ENX0T801921',
-        type: 'part',
-        fsType: 'zfs_member',
-        mountpoint: '',
-        partLabel: 'axon_zfs_1',
-        rotational: false,
-        smartPassed: true,
-        temperatureC: 37,
-        eligibleForZfs: true,
-        role: 'boot_zfs_partition',
-      },
-      {
-        name: 'sdb',
-        path: '/dev/sdb',
-        sizeBytes: 4000787030016,
-        model: 'WDC WD40EFPX-68C6CN0',
-        serial: 'WD-WX42D91A8321',
-        type: 'disk',
-        fsType: '',
-        mountpoint: '',
-        partLabel: '',
-        rotational: true,
-        smartPassed: true,
-        temperatureC: 34,
-        eligibleForZfs: true,
-        role: 'available',
-      },
-      {
-        name: 'sdc',
-        path: '/dev/sdc',
-        sizeBytes: 4000787030016,
-        model: 'WDC WD40EFPX-68C6CN0',
-        serial: 'WD-WX42D91A8322',
-        type: 'disk',
-        fsType: '',
-        mountpoint: '',
-        partLabel: '',
-        rotational: true,
-        smartPassed: true,
-        temperatureC: 35,
-        eligibleForZfs: true,
-        role: 'available',
-      },
-    ],
+    disks: [],
     installSpec,
+    daemonDown: true,
   };
 }
 
@@ -4547,15 +4547,18 @@ export async function getNasPoolsRuntime(): Promise<NasPoolStatus[]> {
   }
 
   const state = await getCurrentDesiredState();
+  // C-M9: the daemon did not answer, so no pool runtime is known. Report
+  // each configured pool as UNKNOWN with zeroed counters (sizes are
+  // unknown, not zero) instead of inventing a 4 TB ONLINE pool.
   return (state.nas?.pools ?? []).map((p) => ({
     name: p.name,
     topology: p.topology,
-    sizeBytes: 4000787030016,
-    allocBytes: 185899345920,
-    freeBytes: 3814887684096,
-    fragmentation: 2,
-    capacityPct: 4,
-    health: 'ONLINE',
+    sizeBytes: 0,
+    allocBytes: 0,
+    freeBytes: 0,
+    fragmentation: 0,
+    capacityPct: 0,
+    health: 'UNKNOWN',
     dataDisks: p.dataDisks,
   }));
 }
@@ -4937,13 +4940,13 @@ export async function getK3sRuntimeStatus(): Promise<K3sRuntimeStatus> {
   if (daemonResp) {
     return {
       enabled: Boolean(daemonResp.enabled ?? daemonResp.service_active ?? daemonResp.serviceActive),
-      installed: Boolean(daemonResp.installed ?? true),
+      installed: Boolean(daemonResp.installed ?? false),
       serviceActive: Boolean(daemonResp.service_active ?? daemonResp.serviceActive),
       clusterJoined: Boolean(daemonResp.cluster_joined ?? daemonResp.clusterJoined),
       role: daemonResp.role || (daemonResp.is_server || daemonResp.isServer ? 'primary-server' : 'agent-worker'),
       nodes: (daemonResp.nodes || []).map((n: any) => ({
         name: n.name || '',
-        status: n.status || 'Ready',
+        status: n.status || 'Unknown',
         roles: n.roles || n.role || '',
         version: n.version || '',
         internalIp: n.internal_ip || n.internalIp || '',
@@ -4955,6 +4958,7 @@ export async function getK3sRuntimeStatus(): Promise<K3sRuntimeStatus> {
       podsRunning: Number(daemonResp.pods_running ?? daemonResp.podsRunning ?? 0),
       podsTotal: Number(daemonResp.pods_total ?? daemonResp.podsTotal ?? 0),
       openEbsHealthy: Boolean(daemonResp.openebs_healthy ?? daemonResp.openEbsHealthy),
+      daemonDown: false,
     };
   }
 
@@ -4964,31 +4968,23 @@ export async function getK3sRuntimeStatus(): Promise<K3sRuntimeStatus> {
 
   const state = await getCurrentDesiredState();
   const k3sEnabled = Boolean(state.capabilities?.k3sEnabled ?? state.k3s?.enabled);
-  const role = state.ha?.enabled && (state.ha.role === 'backup' || state.ha.nodeRole === 'backup')
-    ? 'secondary-ha-server'
-    : 'primary-server';
 
+  // C-H3: the daemon did not answer, so the live cluster state is
+  // unknown. Report that (plus the configured enabled flag, which is real
+  // desired-state data) instead of fabricating a healthy Ready cluster
+  // with an invented node, version, storage classes and pod counts.
   return {
     enabled: k3sEnabled,
-    installed: true,
-    serviceActive: k3sEnabled,
-    clusterJoined: k3sEnabled,
-    role,
-    nodes: k3sEnabled
-      ? [
-          {
-            name: state.system.hostname || 'axonwall-core',
-            status: 'Ready',
-            roles: 'control-plane,etcd,master',
-            version: 'v1.31.2+k3s1',
-            internalIp: state.interfaces.find((i) => i.name === 'lan')?.ipv4Address?.split('/')[0] || '192.168.1.1',
-          },
-        ]
-      : [],
-    storageClasses: k3sEnabled ? ['axonwall-zfs-local', 'axonwall-replicated-ha (default)'] : [],
-    podsRunning: k3sEnabled ? 8 + (state.k3s?.workloads?.filter((w) => w.enabled).length ?? 0) : 0,
-    podsTotal: k3sEnabled ? 8 + (state.k3s?.workloads?.filter((w) => w.enabled).length ?? 0) : 0,
-    openEbsHealthy: k3sEnabled,
+    installed: false,
+    serviceActive: false,
+    clusterJoined: false,
+    role: 'unknown',
+    nodes: [],
+    storageClasses: [],
+    podsRunning: 0,
+    podsTotal: 0,
+    openEbsHealthy: false,
+    daemonDown: true,
   };
 }
 
@@ -5058,6 +5054,10 @@ export async function triggerK3sHaAutoJoin(): Promise<{ success: boolean; messag
     };
   }
 
+  // C-H4 (round-3) is preserved in production by the non-dev branch
+  // above: a null response means the daemon never ran the join, so it is
+  // a failure, not a success. The dev-mode success below is main's
+  // deliberate dev-mode simulation, explicitly labelled DEV MODE.
   if (!isDevModeRuntime()) {
     return {
       success: false,
@@ -5775,6 +5775,10 @@ export interface McpDashboardData {
     brokenAtIndex?: number;
     headHash: string;
   };
+  // C-M7: true when the daemon did not answer the posture call, so the
+  // page can say lease/posture state is unknown instead of rendering an
+  // empty lease list and invented anti-lockout data as fact.
+  daemonDown: boolean;
 }
 
 export async function getMcpDashboardData(): Promise<McpDashboardData> {
@@ -5785,11 +5789,16 @@ export async function getMcpDashboardData(): Promise<McpDashboardData> {
   const { entries, integrity } = readAndVerifyMcpAuditLog(100);
 
   let leases: McpTacticalLease[] = [];
+  // C-M7: no invented posture. When the daemon does not answer, the
+  // anti-lockout posture is unknown — the daemon owns the kernel leases
+  // and the protected IPs/ports, so empty arrays plus daemonDown: true is
+  // the honest answer, not a plausible-looking default.
   let protectedPosture = {
-    applianceIps: ['192.168.1.1'],
+    applianceIps: [] as string[],
     gatewayAndHaIps: [] as string[],
-    antiLockoutPorts: [2966, 22, 9876],
+    antiLockoutPorts: [] as number[],
   };
+  let daemonDown = false;
 
   const postureRes = await callAgentApi<any>('/v1/mcp/posture');
   if (postureRes && postureRes.success) {
@@ -5803,6 +5812,8 @@ export async function getMcpDashboardData(): Promise<McpDashboardData> {
         antiLockoutPorts: postureRes.posture.antiLockoutPorts || [2966, 22, 9876],
       };
     }
+  } else {
+    daemonDown = true;
   }
 
   const serverStatus = getMcpServerStatus();
@@ -5814,6 +5825,7 @@ export async function getMcpDashboardData(): Promise<McpDashboardData> {
     protectedPosture,
     auditEntries: entries,
     auditIntegrity: integrity,
+    daemonDown,
   };
 }
 
@@ -5848,7 +5860,15 @@ export async function createMcpApiKeyAction(input: {
       ? new Date(now.getTime() + input.expiresInDays * 86400 * 1000).toISOString()
       : undefined;
 
-  const parsedLimits = McpPolicyLimitsSchema.parse(input.policyLimits || {});
+  // C-L8: a Zod throw here used to surface as an unhandled rejection in
+  // the page (modal stuck open, no key, no message). Return it as a
+  // structured failure like the sibling key actions do.
+  let parsedLimits: McpPolicyLimits;
+  try {
+    parsedLimits = McpPolicyLimitsSchema.parse(input.policyLimits || {});
+  } catch (err: any) {
+    return { success: false, error: `Invalid policy limits: ${err?.message || 'out-of-range value'}` };
+  }
 
   const record = McpApiKeySchema.parse({
     id: `mcp_key_${shortId}`,
@@ -6494,12 +6514,14 @@ export async function getEbpfOverviewTelemetry(): Promise<EbpfOverviewTelemetry>
   const patch = m && m[3] ? parseInt(m[3], 10) : 0;
   const supportsBpfToken = major > 6 || (major === 6 && minor >= 9);
 
+  // Daemon-down fallback: report unknown, never assert capabilities the
+  // daemon never reported (C-M1). The page renders these as unknown.
   return {
     daemonDown: true,
     dataplane: {
       attachedInterfaces: [],
-      dualStackEnabled: true,
-      vlanPeelingEnabled: true,
+      dualStackEnabled: false,
+      vlanPeelingEnabled: false,
       xdpStats: {
         rxPackets: 0,
         rxBytes: 0,
@@ -6516,13 +6538,7 @@ export async function getEbpfOverviewTelemetry(): Promise<EbpfOverviewTelemetry>
     },
     bpfLsm: {
       attached: false,
-      attachedHooks: [
-        'lsm/socket_bind',
-        'lsm/bpf',
-        'lsm/uring_sqpoll',
-        'lsm/bpf_token_create',
-        'lsm/bpf_token_cmd',
-      ],
+      attachedHooks: [],
       denialEventsCount: 0,
     },
     bpfTokens: {
@@ -6533,8 +6549,8 @@ export async function getEbpfOverviewTelemetry(): Promise<EbpfOverviewTelemetry>
       supportsBpfToken,
       supportsUserNsBpf: supportsBpfToken,
       bpffsRootMounted: fs.existsSync('/sys/fs/bpf'),
-      unprivilegedBpfSysctl: '2',
-      bpfLsmActive: true,
+      unprivilegedBpfSysctl: '',
+      bpfLsmActive: false,
       forbiddenRing0ProgTypes: [
         'kprobe',
         'tracepoint',
@@ -6770,73 +6786,14 @@ export async function renderK3sBpfTokenManifestAction(input: {
     return { success: true, manifestYaml: res.manifestYaml };
   }
 
-  const hostPath = `/run/axonwall/bpffs-tokens/${profileName}`;
-  const podSpecLines = [
-    `      hostUsers: false`,
-    `      securityContext:`,
-    `        seccompProfile:`,
-    `          type: RuntimeDefault`,
-    `      containers:`,
-    `        - name: ${cleanName}`,
-    `          image: ${cleanImg}`,
-    `          env:`,
-    `            - name: LIBBPF_BPF_TOKEN_PATH`,
-    `              value: /sys/fs/bpf`,
-    `          securityContext:`,
-    `            allowPrivilegeEscalation: false`,
-    `            capabilities:`,
-    `              drop: ["ALL"]`,
-    `              add: ["BPF", "NET_ADMIN"]`,
-    `          volumeMounts:`,
-    `            - name: delegated-bpffs`,
-    `              mountPath: /sys/fs/bpf`,
-    `              readOnly: false`,
-    `      volumes:`,
-    `        - name: delegated-bpffs`,
-    `          hostPath:`,
-    `            path: ${hostPath}`,
-    `            type: Directory`,
-  ];
-
-  const manifestYaml =
-    kind === 'DaemonSet'
-      ? [
-          `# Linux 6.9+ Unprivileged UserNS BPF_TOKEN DaemonSet (K8s 1.33+ UserNamespacesSupport)`,
-          `# Ring-0 Guardrail: kprobe/tracepoint/lsm/bpf_probe_read_kernel blocked by Axonwall BPF-LSM`,
-          `apiVersion: apps/v1`,
-          `kind: DaemonSet`,
-          `metadata:`,
-          `  name: ${cleanName}`,
-          `  namespace: ${cleanNs}`,
-          `  labels:`,
-          `    axonwall.io/bpf-token-profile: ${profileName}`,
-          `spec:`,
-          `  selector:`,
-          `    matchLabels:`,
-          `      app: ${cleanName}`,
-          `  template:`,
-          `    metadata:`,
-          `      labels:`,
-          `        app: ${cleanName}`,
-          `        axonwall.io/bpf-token-profile: ${profileName}`,
-          `    spec:`,
-          ...podSpecLines,
-        ].join('\n')
-      : [
-          `# Linux 6.9+ Unprivileged UserNS BPF_TOKEN Pod (K8s 1.33+ UserNamespacesSupport)`,
-          `# Ring-0 Guardrail: kprobe/tracepoint/lsm/bpf_probe_read_kernel blocked by Axonwall BPF-LSM`,
-          `apiVersion: v1`,
-          `kind: Pod`,
-          `metadata:`,
-          `  name: ${cleanName}`,
-          `  namespace: ${cleanNs}`,
-          `  labels:`,
-          `    axonwall.io/bpf-token-profile: ${profileName}`,
-          `spec:`,
-          ...podSpecLines.map((l) => l.slice(4)),
-        ].join('\n');
-
-  return { success: true, manifestYaml };
+  if (!res) {
+    return { success: false, manifestYaml: '', error: 'Daemon unavailable — K3s manifest was not rendered.' };
+  }
+  return {
+    success: false,
+    manifestYaml: '',
+    error: res.error || 'Failed to render K3s manifest on the daemon.',
+  };
 }
 
 // =============================================================================

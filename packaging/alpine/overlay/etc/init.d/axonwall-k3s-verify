@@ -1,0 +1,37 @@
+#!/sbin/openrc-run
+
+name="axonwall-k3s-verify"
+description="Axonwall K3s + ZFS Storage Host Readiness Verification"
+
+depend() {
+    need localmount
+    use net
+    after networking axonwall-firstboot k3s k3s-agent
+}
+
+start_pre() {
+    if grep -qE '(^|[[:space:]])(axonwall_install=1|axonwall\.install=1|axonwall\.unattended=1)($|[[:space:]])' /proc/cmdline 2>/dev/null; then
+        eerror "Installer mode active; skipping k3s verification"
+        return 1
+    fi
+    if [ ! -x /usr/local/bin/axonwall-k3s-verify ]; then
+        eerror "/usr/local/bin/axonwall-k3s-verify is missing"
+        return 1
+    fi
+}
+
+start() {
+    # D-M3: the marker is the gate. Once verification has passed (or this
+    # is not a firstboot at all) there is nothing to do — without this
+    # check the service would re-poll K3s on every boot. While the marker
+    # exists, run the check; on failure the service fails, the marker
+    # stays, and the next boot retries firstboot + verification (the same
+    # retry loop the Debian axonwall-k3s-verify.service provides).
+    if [ ! -f /etc/axonwall/.k3s-firstboot ]; then
+        einfo "K3s firstboot already verified; skipping"
+        return 0
+    fi
+    ebegin "Verifying K3s readiness"
+    /usr/local/bin/axonwall-k3s-verify
+    eend $?
+}

@@ -2043,8 +2043,8 @@ var require_pushgateway = __commonJS({
       const gatewayUrlParsed = url2.parse(this.gatewayUrl);
       const gatewayUrlPath = gatewayUrlParsed.pathname && gatewayUrlParsed.pathname !== "/" ? gatewayUrlParsed.pathname : "";
       const jobPath = job ? `/job/${encodeURIComponent(job)}${generateGroupings(groupings)}` : "";
-      const path9 = `${gatewayUrlPath}/metrics${jobPath}`;
-      const target = url2.resolve(this.gatewayUrl, path9);
+      const path8 = `${gatewayUrlPath}/metrics${jobPath}`;
+      const target = url2.resolve(this.gatewayUrl, path8);
       const requestParams = url2.parse(target);
       const httpModule = isHttps(requestParams.href) ? https2 : http3;
       const options = Object.assign(requestParams, this.requestOptions, {
@@ -3794,7 +3794,7 @@ var require_osMemoryHeapLinux = __commonJS({
   "../../node_modules/.pnpm/prom-client@15.1.3/node_modules/prom-client/lib/metrics/osMemoryHeapLinux.js"(exports2, module) {
     "use strict";
     var Gauge = require_gauge();
-    var fs10 = __require("fs");
+    var fs9 = __require("fs");
     var values = ["VmSize", "VmRSS", "VmData"];
     var PROCESS_RESIDENT_MEMORY = "process_resident_memory_bytes";
     var PROCESS_VIRTUAL_MEMORY = "process_virtual_memory_bytes";
@@ -3825,7 +3825,7 @@ var require_osMemoryHeapLinux = __commonJS({
         // Use this one metric's `collect` to set all metrics' values.
         collect() {
           try {
-            const stat = fs10.readFileSync("/proc/self/status", "utf8");
+            const stat = fs9.readFileSync("/proc/self/status", "utf8");
             const structuredOutput = structureOutput(stat);
             residentMemGauge.set(labels, structuredOutput.VmRSS);
             virtualMemGauge.set(labels, structuredOutput.VmSize);
@@ -3905,7 +3905,7 @@ var require_processOpenFileDescriptors = __commonJS({
   "../../node_modules/.pnpm/prom-client@15.1.3/node_modules/prom-client/lib/metrics/processOpenFileDescriptors.js"(exports2, module) {
     "use strict";
     var Gauge = require_gauge();
-    var fs10 = __require("fs");
+    var fs9 = __require("fs");
     var process2 = __require("process");
     var PROCESS_OPEN_FDS = "process_open_fds";
     module.exports = (registry2, config2 = {}) => {
@@ -3922,7 +3922,7 @@ var require_processOpenFileDescriptors = __commonJS({
         labelNames,
         collect() {
           try {
-            const fds = fs10.readdirSync("/proc/self/fd");
+            const fds = fs9.readdirSync("/proc/self/fd");
             this.set(labels, fds.length - 1);
           } catch {
           }
@@ -3938,13 +3938,13 @@ var require_processMaxFileDescriptors = __commonJS({
   "../../node_modules/.pnpm/prom-client@15.1.3/node_modules/prom-client/lib/metrics/processMaxFileDescriptors.js"(exports2, module) {
     "use strict";
     var Gauge = require_gauge();
-    var fs10 = __require("fs");
+    var fs9 = __require("fs");
     var PROCESS_MAX_FDS = "process_max_fds";
     var maxFds;
     module.exports = (registry2, config2 = {}) => {
       if (maxFds === void 0) {
         try {
-          const limits = fs10.readFileSync("/proc/self/limits", "utf8");
+          const limits = fs9.readFileSync("/proc/self/limits", "utf8");
           const lines = limits.split("\n");
           for (const line of lines) {
             if (line.startsWith("Max open files")) {
@@ -4865,17 +4865,17 @@ var require_visit = __commonJS({
     visit2.BREAK = BREAK;
     visit2.SKIP = SKIP;
     visit2.REMOVE = REMOVE;
-    function visit_(key, node2, visitor, path9) {
-      const ctrl = callVisitor(key, node2, visitor, path9);
+    function visit_(key, node2, visitor, path8) {
+      const ctrl = callVisitor(key, node2, visitor, path8);
       if (identity.isNode(ctrl) || identity.isPair(ctrl)) {
-        replaceNode(key, path9, ctrl);
-        return visit_(key, ctrl, visitor, path9);
+        replaceNode(key, path8, ctrl);
+        return visit_(key, ctrl, visitor, path8);
       }
       if (typeof ctrl !== "symbol") {
         if (identity.isCollection(node2)) {
-          path9 = Object.freeze(path9.concat(node2));
+          path8 = Object.freeze(path8.concat(node2));
           for (let i = 0; i < node2.items.length; ++i) {
-            const ci = visit_(i, node2.items[i], visitor, path9);
+            const ci = visit_(i, node2.items[i], visitor, path8);
             if (typeof ci === "number")
               i = ci - 1;
             else if (ci === BREAK)
@@ -4886,13 +4886,13 @@ var require_visit = __commonJS({
             }
           }
         } else if (identity.isPair(node2)) {
-          path9 = Object.freeze(path9.concat(node2));
-          const ck = visit_("key", node2.key, visitor, path9);
+          path8 = Object.freeze(path8.concat(node2));
+          const ck = visit_("key", node2.key, visitor, path8);
           if (ck === BREAK)
             return BREAK;
           else if (ck === REMOVE)
             node2.key = null;
-          const cv = visit_("value", node2.value, visitor, path9);
+          const cv = visit_("value", node2.value, visitor, path8);
           if (cv === BREAK)
             return BREAK;
           else if (cv === REMOVE)
@@ -4913,17 +4913,17 @@ var require_visit = __commonJS({
     visitAsync.BREAK = BREAK;
     visitAsync.SKIP = SKIP;
     visitAsync.REMOVE = REMOVE;
-    async function visitAsync_(key, node2, visitor, path9) {
-      const ctrl = await callVisitor(key, node2, visitor, path9);
+    async function visitAsync_(key, node2, visitor, path8) {
+      const ctrl = await callVisitor(key, node2, visitor, path8);
       if (identity.isNode(ctrl) || identity.isPair(ctrl)) {
-        replaceNode(key, path9, ctrl);
-        return visitAsync_(key, ctrl, visitor, path9);
+        replaceNode(key, path8, ctrl);
+        return visitAsync_(key, ctrl, visitor, path8);
       }
       if (typeof ctrl !== "symbol") {
         if (identity.isCollection(node2)) {
-          path9 = Object.freeze(path9.concat(node2));
+          path8 = Object.freeze(path8.concat(node2));
           for (let i = 0; i < node2.items.length; ++i) {
-            const ci = await visitAsync_(i, node2.items[i], visitor, path9);
+            const ci = await visitAsync_(i, node2.items[i], visitor, path8);
             if (typeof ci === "number")
               i = ci - 1;
             else if (ci === BREAK)
@@ -4934,13 +4934,13 @@ var require_visit = __commonJS({
             }
           }
         } else if (identity.isPair(node2)) {
-          path9 = Object.freeze(path9.concat(node2));
-          const ck = await visitAsync_("key", node2.key, visitor, path9);
+          path8 = Object.freeze(path8.concat(node2));
+          const ck = await visitAsync_("key", node2.key, visitor, path8);
           if (ck === BREAK)
             return BREAK;
           else if (ck === REMOVE)
             node2.key = null;
-          const cv = await visitAsync_("value", node2.value, visitor, path9);
+          const cv = await visitAsync_("value", node2.value, visitor, path8);
           if (cv === BREAK)
             return BREAK;
           else if (cv === REMOVE)
@@ -4967,23 +4967,23 @@ var require_visit = __commonJS({
       }
       return visitor;
     }
-    function callVisitor(key, node2, visitor, path9) {
+    function callVisitor(key, node2, visitor, path8) {
       if (typeof visitor === "function")
-        return visitor(key, node2, path9);
+        return visitor(key, node2, path8);
       if (identity.isMap(node2))
-        return visitor.Map?.(key, node2, path9);
+        return visitor.Map?.(key, node2, path8);
       if (identity.isSeq(node2))
-        return visitor.Seq?.(key, node2, path9);
+        return visitor.Seq?.(key, node2, path8);
       if (identity.isPair(node2))
-        return visitor.Pair?.(key, node2, path9);
+        return visitor.Pair?.(key, node2, path8);
       if (identity.isScalar(node2))
-        return visitor.Scalar?.(key, node2, path9);
+        return visitor.Scalar?.(key, node2, path8);
       if (identity.isAlias(node2))
-        return visitor.Alias?.(key, node2, path9);
+        return visitor.Alias?.(key, node2, path8);
       return void 0;
     }
-    function replaceNode(key, path9, node2) {
-      const parent = path9[path9.length - 1];
+    function replaceNode(key, path8, node2) {
+      const parent = path8[path8.length - 1];
       if (identity.isCollection(parent)) {
         parent.items[key] = node2;
       } else if (identity.isPair(parent)) {
@@ -5595,10 +5595,10 @@ var require_Collection = __commonJS({
     var createNode = require_createNode();
     var identity = require_identity();
     var Node = require_Node();
-    function collectionFromPath(schema, path9, value) {
+    function collectionFromPath(schema, path8, value) {
       let v = value;
-      for (let i = path9.length - 1; i >= 0; --i) {
-        const k = path9[i];
+      for (let i = path8.length - 1; i >= 0; --i) {
+        const k = path8[i];
         if (typeof k === "number" && Number.isInteger(k) && k >= 0) {
           const a = [];
           a[k] = v;
@@ -5617,7 +5617,7 @@ var require_Collection = __commonJS({
         sourceObjects: /* @__PURE__ */ new Map()
       });
     }
-    var isEmptyPath = (path9) => path9 == null || typeof path9 === "object" && !!path9[Symbol.iterator]().next().done;
+    var isEmptyPath = (path8) => path8 == null || typeof path8 === "object" && !!path8[Symbol.iterator]().next().done;
     var Collection = class extends Node.NodeBase {
       constructor(type, schema) {
         super(type);
@@ -5647,11 +5647,11 @@ var require_Collection = __commonJS({
        * be a Pair instance or a `{ key, value }` object, which may not have a key
        * that already exists in the map.
        */
-      addIn(path9, value) {
-        if (isEmptyPath(path9))
+      addIn(path8, value) {
+        if (isEmptyPath(path8))
           this.add(value);
         else {
-          const [key, ...rest] = path9;
+          const [key, ...rest] = path8;
           const node2 = this.get(key, true);
           if (identity.isCollection(node2))
             node2.addIn(rest, value);
@@ -5665,8 +5665,8 @@ var require_Collection = __commonJS({
        * Removes a value from the collection.
        * @returns `true` if the item was found and removed.
        */
-      deleteIn(path9) {
-        const [key, ...rest] = path9;
+      deleteIn(path8) {
+        const [key, ...rest] = path8;
         if (rest.length === 0)
           return this.delete(key);
         const node2 = this.get(key, true);
@@ -5680,8 +5680,8 @@ var require_Collection = __commonJS({
        * scalar values from their surrounding node; to disable set `keepScalar` to
        * `true` (collections are always returned intact).
        */
-      getIn(path9, keepScalar) {
-        const [key, ...rest] = path9;
+      getIn(path8, keepScalar) {
+        const [key, ...rest] = path8;
         const node2 = this.get(key, true);
         if (rest.length === 0)
           return !keepScalar && identity.isScalar(node2) ? node2.value : node2;
@@ -5699,8 +5699,8 @@ var require_Collection = __commonJS({
       /**
        * Checks if the collection includes a value with the key `key`.
        */
-      hasIn(path9) {
-        const [key, ...rest] = path9;
+      hasIn(path8) {
+        const [key, ...rest] = path8;
         if (rest.length === 0)
           return this.has(key);
         const node2 = this.get(key, true);
@@ -5710,8 +5710,8 @@ var require_Collection = __commonJS({
        * Sets a value in this collection. For `!!set`, `value` needs to be a
        * boolean to add/remove the item from the set.
        */
-      setIn(path9, value) {
-        const [key, ...rest] = path9;
+      setIn(path8, value) {
+        const [key, ...rest] = path8;
         if (rest.length === 0) {
           this.set(key, value);
         } else {
@@ -8226,9 +8226,9 @@ var require_Document = __commonJS({
           this.contents.add(value);
       }
       /** Adds a value to the document. */
-      addIn(path9, value) {
+      addIn(path8, value) {
         if (assertCollection(this.contents))
-          this.contents.addIn(path9, value);
+          this.contents.addIn(path8, value);
       }
       /**
        * Create a new `Alias` node, ensuring that the target `node` has the required anchor.
@@ -8303,14 +8303,14 @@ var require_Document = __commonJS({
        * Removes a value from the document.
        * @returns `true` if the item was found and removed.
        */
-      deleteIn(path9) {
-        if (Collection.isEmptyPath(path9)) {
+      deleteIn(path8) {
+        if (Collection.isEmptyPath(path8)) {
           if (this.contents == null)
             return false;
           this.contents = null;
           return true;
         }
-        return assertCollection(this.contents) ? this.contents.deleteIn(path9) : false;
+        return assertCollection(this.contents) ? this.contents.deleteIn(path8) : false;
       }
       /**
        * Returns item at `key`, or `undefined` if not found. By default unwraps
@@ -8325,10 +8325,10 @@ var require_Document = __commonJS({
        * scalar values from their surrounding node; to disable set `keepScalar` to
        * `true` (collections are always returned intact).
        */
-      getIn(path9, keepScalar) {
-        if (Collection.isEmptyPath(path9))
+      getIn(path8, keepScalar) {
+        if (Collection.isEmptyPath(path8))
           return !keepScalar && identity.isScalar(this.contents) ? this.contents.value : this.contents;
-        return identity.isCollection(this.contents) ? this.contents.getIn(path9, keepScalar) : void 0;
+        return identity.isCollection(this.contents) ? this.contents.getIn(path8, keepScalar) : void 0;
       }
       /**
        * Checks if the document includes a value with the key `key`.
@@ -8339,10 +8339,10 @@ var require_Document = __commonJS({
       /**
        * Checks if the document includes a value at `path`.
        */
-      hasIn(path9) {
-        if (Collection.isEmptyPath(path9))
+      hasIn(path8) {
+        if (Collection.isEmptyPath(path8))
           return this.contents !== void 0;
-        return identity.isCollection(this.contents) ? this.contents.hasIn(path9) : false;
+        return identity.isCollection(this.contents) ? this.contents.hasIn(path8) : false;
       }
       /**
        * Sets a value in this document. For `!!set`, `value` needs to be a
@@ -8359,13 +8359,13 @@ var require_Document = __commonJS({
        * Sets a value in this document. For `!!set`, `value` needs to be a
        * boolean to add/remove the item from the set.
        */
-      setIn(path9, value) {
-        if (Collection.isEmptyPath(path9)) {
+      setIn(path8, value) {
+        if (Collection.isEmptyPath(path8)) {
           this.contents = value;
         } else if (this.contents == null) {
-          this.contents = Collection.collectionFromPath(this.schema, Array.from(path9), value);
+          this.contents = Collection.collectionFromPath(this.schema, Array.from(path8), value);
         } else if (assertCollection(this.contents)) {
-          this.contents.setIn(path9, value);
+          this.contents.setIn(path8, value);
         }
       }
       /**
@@ -10326,9 +10326,9 @@ var require_cst_visit = __commonJS({
     visit2.BREAK = BREAK;
     visit2.SKIP = SKIP;
     visit2.REMOVE = REMOVE;
-    visit2.itemAtPath = (cst, path9) => {
+    visit2.itemAtPath = (cst, path8) => {
       let item = cst;
-      for (const [field, index] of path9) {
+      for (const [field, index] of path8) {
         const tok = item?.[field];
         if (tok && "items" in tok) {
           item = tok.items[index];
@@ -10337,23 +10337,23 @@ var require_cst_visit = __commonJS({
       }
       return item;
     };
-    visit2.parentCollection = (cst, path9) => {
-      const parent = visit2.itemAtPath(cst, path9.slice(0, -1));
-      const field = path9[path9.length - 1][0];
+    visit2.parentCollection = (cst, path8) => {
+      const parent = visit2.itemAtPath(cst, path8.slice(0, -1));
+      const field = path8[path8.length - 1][0];
       const coll = parent?.[field];
       if (coll && "items" in coll)
         return coll;
       throw new Error("Parent collection not found");
     };
-    function _visit(path9, item, visitor) {
-      let ctrl = visitor(item, path9);
+    function _visit(path8, item, visitor) {
+      let ctrl = visitor(item, path8);
       if (typeof ctrl === "symbol")
         return ctrl;
       for (const field of ["key", "value"]) {
         const token = item[field];
         if (token && "items" in token) {
           for (let i = 0; i < token.items.length; ++i) {
-            const ci = _visit(Object.freeze(path9.concat([[field, i]])), token.items[i], visitor);
+            const ci = _visit(Object.freeze(path8.concat([[field, i]])), token.items[i], visitor);
             if (typeof ci === "number")
               i = ci - 1;
             else if (ci === BREAK)
@@ -10364,10 +10364,10 @@ var require_cst_visit = __commonJS({
             }
           }
           if (typeof ctrl === "function" && field === "key")
-            ctrl = ctrl(item, path9);
+            ctrl = ctrl(item, path8);
         }
       }
-      return typeof ctrl === "function" ? ctrl(item, path9) : ctrl;
+      return typeof ctrl === "function" ? ctrl(item, path8) : ctrl;
     }
     exports2.visit = visit2;
   }
@@ -11669,14 +11669,14 @@ var require_parser = __commonJS({
             case "scalar":
             case "single-quoted-scalar":
             case "double-quoted-scalar": {
-              const fs10 = this.flowScalar(this.type);
+              const fs9 = this.flowScalar(this.type);
               if (atNextItem || it.value) {
-                map2.items.push({ start, key: fs10, sep: [] });
+                map2.items.push({ start, key: fs9, sep: [] });
                 this.onKeyLine = true;
               } else if (it.sep) {
-                this.stack.push(fs10);
+                this.stack.push(fs9);
               } else {
-                Object.assign(it, { key: fs10, sep: [] });
+                Object.assign(it, { key: fs9, sep: [] });
                 this.onKeyLine = true;
               }
               return;
@@ -11804,13 +11804,13 @@ var require_parser = __commonJS({
             case "scalar":
             case "single-quoted-scalar":
             case "double-quoted-scalar": {
-              const fs10 = this.flowScalar(this.type);
+              const fs9 = this.flowScalar(this.type);
               if (!it || it.value)
-                fc.items.push({ start: [], key: fs10, sep: [] });
+                fc.items.push({ start: [], key: fs9, sep: [] });
               else if (it.sep)
-                this.stack.push(fs10);
+                this.stack.push(fs9);
               else
-                Object.assign(it, { key: fs10, sep: [] });
+                Object.assign(it, { key: fs9, sep: [] });
               return;
             }
             case "flow-map-end":
@@ -16621,10 +16621,10 @@ function mergeDefs(...defs) {
 function cloneDef(schema) {
   return mergeDefs(schema._zod.def);
 }
-function getElementAtPath(obj, path9) {
-  if (!path9)
+function getElementAtPath(obj, path8) {
+  if (!path8)
     return obj;
-  return path9.reduce((acc, key) => acc?.[key], obj);
+  return path8.reduce((acc, key) => acc?.[key], obj);
 }
 function promiseAllObject(promisesObj) {
   const keys = Object.keys(promisesObj);
@@ -16964,11 +16964,11 @@ function explicitlyAborted(x, startIndex = 0) {
   }
   return false;
 }
-function prefixIssues(path9, issues) {
+function prefixIssues(path8, issues) {
   return issues.map((iss) => {
     var _a3;
     (_a3 = iss).path ?? (_a3.path = []);
-    iss.path.unshift(path9);
+    iss.path.unshift(path8);
     return iss;
   });
 }
@@ -17430,16 +17430,16 @@ function flattenError(error62, mapper = (issue2) => issue2.message) {
 }
 function formatError(error62, mapper = (issue2) => issue2.message) {
   const fieldErrors = { _errors: [] };
-  const processError = (error63, path9 = []) => {
+  const processError = (error63, path8 = []) => {
     for (const issue2 of error63.issues) {
       if (issue2.code === "invalid_union" && issue2.errors.length) {
-        issue2.errors.map((issues) => processError({ issues }, [...path9, ...issue2.path]));
+        issue2.errors.map((issues) => processError({ issues }, [...path8, ...issue2.path]));
       } else if (issue2.code === "invalid_key") {
-        processError({ issues: issue2.issues }, [...path9, ...issue2.path]);
+        processError({ issues: issue2.issues }, [...path8, ...issue2.path]);
       } else if (issue2.code === "invalid_element") {
-        processError({ issues: issue2.issues }, [...path9, ...issue2.path]);
+        processError({ issues: issue2.issues }, [...path8, ...issue2.path]);
       } else {
-        const fullpath = [...path9, ...issue2.path];
+        const fullpath = [...path8, ...issue2.path];
         if (fullpath.length === 0) {
           fieldErrors._errors.push(mapper(issue2));
         } else {
@@ -17478,17 +17478,17 @@ function formatError(error62, mapper = (issue2) => issue2.message) {
 }
 function treeifyError(error62, mapper = (issue2) => issue2.message) {
   const result = { errors: [] };
-  const processError = (error63, path9 = []) => {
+  const processError = (error63, path8 = []) => {
     var _a3;
     for (const issue2 of error63.issues) {
       if (issue2.code === "invalid_union" && issue2.errors.length) {
-        issue2.errors.map((issues) => processError({ issues }, [...path9, ...issue2.path]));
+        issue2.errors.map((issues) => processError({ issues }, [...path8, ...issue2.path]));
       } else if (issue2.code === "invalid_key") {
-        processError({ issues: issue2.issues }, [...path9, ...issue2.path]);
+        processError({ issues: issue2.issues }, [...path8, ...issue2.path]);
       } else if (issue2.code === "invalid_element") {
-        processError({ issues: issue2.issues }, [...path9, ...issue2.path]);
+        processError({ issues: issue2.issues }, [...path8, ...issue2.path]);
       } else {
-        const fullpath = [...path9, ...issue2.path];
+        const fullpath = [...path8, ...issue2.path];
         if (fullpath.length === 0) {
           result.errors.push(mapper(issue2));
           continue;
@@ -17527,8 +17527,8 @@ function treeifyError(error62, mapper = (issue2) => issue2.message) {
 }
 function toDotPath(_path) {
   const segs = [];
-  const path9 = _path.map((seg) => typeof seg === "object" ? seg.key : seg);
-  for (const seg of path9) {
+  const path8 = _path.map((seg) => typeof seg === "object" ? seg.key : seg);
+  for (const seg of path8) {
     if (typeof seg === "number")
       segs.push(`[${seg}]`);
     else if (typeof seg === "symbol")
@@ -34666,13 +34666,13 @@ function resolveRef(ref, ctx) {
   if (!ref.startsWith("#")) {
     throw new Error("External $ref is not supported, only local refs (#/...) are allowed");
   }
-  const path9 = ref.slice(1).split("/").filter(Boolean);
-  if (path9.length === 0) {
+  const path8 = ref.slice(1).split("/").filter(Boolean);
+  if (path8.length === 0) {
     return ctx.rootSchema;
   }
   const defsKey = ctx.version === "draft-2020-12" ? "$defs" : "definitions";
-  if (path9[0] === defsKey) {
-    const key = path9[1] === void 0 ? void 0 : decodeJSONPointerSegment(path9[1]);
+  if (path8[0] === defsKey) {
+    const key = path8[1] === void 0 ? void 0 : decodeJSONPointerSegment(path8[1]);
     if (!key || !ctx.defs[key]) {
       throw new Error(`Reference not found: ${ref}`);
     }
@@ -42462,6 +42462,9 @@ function resolveOvmfFirmwarePure(options = {}) {
 }
 
 // ../../packages/axonwall_lib/dist/compile/virt/index.js
+var HOSTED_EDGE_VM_ID = "edge";
+var HOSTED_EDGE_VMID = 100;
+var HOSTED_EDGE_VM_NAME = "axonwall-edge-ngfw";
 function sanitizeIdentifier2(v) {
   return v.replace(/[^a-zA-Z0-9_.-]/g, "_");
 }
@@ -45041,7 +45044,7 @@ function lintRuleset(state) {
 }
 
 // src/index.ts
-import * as crypto8 from "node:crypto";
+import * as crypto6 from "node:crypto";
 
 // ../../node_modules/.pnpm/ws@8.22.0/node_modules/ws/wrapper.mjs
 var import_stream = __toESM(require_stream(), 1);
@@ -45056,30 +45059,14 @@ var import_websocket_server = __toESM(require_websocket_server(), 1);
 // src/index.ts
 import * as http2 from "node:http";
 import * as https from "node:https";
-import * as fs9 from "node:fs";
+import * as fs8 from "node:fs";
 import * as net from "node:net";
-import * as path8 from "node:path";
+import * as path7 from "node:path";
 
 // src/dev-paths.ts
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { fileURLToPath } from "node:url";
-var warnedWorkspaceRootMismatch = false;
-var warnedSystemAgentSocket = false;
-function findWorkspaceRootFromModule() {
-  let cur = path.dirname(fileURLToPath(import.meta.url));
-  for (; ; ) {
-    if (fs.existsSync(path.join(cur, "pnpm-workspace.yaml"))) {
-      return cur;
-    }
-    const parent = path.dirname(cur);
-    if (parent === cur) {
-      return null;
-    }
-    cur = parent;
-  }
-}
-function findWorkspaceRootFromCwd() {
+function findWorkspaceRoot() {
   let cur = process.cwd();
   for (; ; ) {
     if (fs.existsSync(path.join(cur, "pnpm-workspace.yaml"))) {
@@ -45091,17 +45078,6 @@ function findWorkspaceRootFromCwd() {
     }
     cur = parent;
   }
-}
-function findWorkspaceRoot() {
-  const fromModule = findWorkspaceRootFromModule();
-  const fromCwd = findWorkspaceRootFromCwd();
-  if (fromModule && fromCwd && fromModule !== fromCwd && !warnedWorkspaceRootMismatch) {
-    warnedWorkspaceRootMismatch = true;
-    console.warn(
-      `[Dev Paths] Working directory resolves to a different workspace root (${fromCwd}) than this module's own location (${fromModule}). Using the module-anchored root so every controller process shares one dev state root regardless of where it was started.`
-    );
-  }
-  return fromModule ?? fromCwd;
 }
 function resolveDevRootDir() {
   const explicit = process.env.AXONWALL_DEV_DIR;
@@ -45146,12 +45122,6 @@ function resolveAgentSocket(runDir, devMode) {
     try {
       if (fs.existsSync(systemSock)) {
         fs.accessSync(systemSock, fs.constants.R_OK | fs.constants.W_OK);
-        if (!warnedSystemAgentSocket) {
-          warnedSystemAgentSocket = true;
-          console.warn(
-            `[Dev Paths] No dev daemon socket at ${primarySock}; falling back to the SYSTEM daemon socket ${systemSock}. This dev controller will talk to the live production daemon \u2014 intended only when the dev daemon is deliberately not running.`
-          );
-        }
         return systemSock;
       }
     } catch {
@@ -45212,103 +45182,14 @@ function resolveControllerDirs() {
   };
 }
 
-// src/atomic-config.ts
-import * as crypto2 from "node:crypto";
-import * as fs2 from "node:fs";
-import * as path2 from "node:path";
-function writeFileAtomicSync(filePath, data, mode = 432) {
-  fs2.mkdirSync(path2.dirname(filePath), { recursive: true, mode: 509 });
-  const tmpPath = `${filePath}.tmp.${process.pid}.${crypto2.randomUUID()}`;
-  try {
-    fs2.writeFileSync(tmpPath, data, { mode });
-    try {
-      fs2.chmodSync(tmpPath, mode);
-    } catch {
-    }
-    fs2.renameSync(tmpPath, filePath);
-  } catch (err) {
-    try {
-      fs2.unlinkSync(tmpPath);
-    } catch {
-    }
-    throw err;
-  }
-}
-function readCanonicalConfig(opts) {
-  const { canonicalPath, mirrorPaths, parse: parse3, label } = opts;
-  if (fs2.existsSync(canonicalPath)) {
-    try {
-      const parsed = parse3(fs2.readFileSync(canonicalPath, "utf8"));
-      if (parsed !== null) return parsed;
-      console.error(
-        `[Config] ${label}: canonical file ${canonicalPath} is present but unusable; refusing to fall back to a mirror (a stale mirror must never defeat a revocation or disable).`
-      );
-      return null;
-    } catch (err) {
-      console.error(
-        `[Config] ${label}: cannot read canonical file ${canonicalPath} (${err?.message || err}); refusing to fall back to a mirror.`
-      );
-      return null;
-    }
-  }
-  let newest = null;
-  for (const mirror of mirrorPaths) {
-    if (mirror === canonicalPath) continue;
-    try {
-      if (!fs2.existsSync(mirror)) continue;
-      const raw = fs2.readFileSync(mirror, "utf8");
-      const value = parse3(raw);
-      if (value === null) continue;
-      const mtimeMs = fs2.statSync(mirror).mtimeMs;
-      if (!newest || mtimeMs > newest.mtimeMs) newest = { value, raw, mtimeMs, source: mirror };
-    } catch {
-    }
-  }
-  if (!newest) return null;
-  console.warn(
-    `[Config] ${label}: canonical file ${canonicalPath} is missing; adopting the newest mirror copy (${newest.source}) as the canonical file. Mirror copies are migration-only from here on: all reads and writes go through the canonical path.`
-  );
-  try {
-    writeFileAtomicSync(canonicalPath, newest.raw, 432);
-  } catch (err) {
-    console.error(
-      `[Config] ${label}: could not adopt mirror ${newest.source} into canonical path ${canonicalPath} (${err?.message || err}); using the mirror content for this load only \u2014 the next load will re-adopt.`
-    );
-  }
-  return newest.value;
-}
-function writeCanonicalConfig(opts) {
-  const { canonicalPath, mirrorPaths, serialized, mode = 432, label } = opts;
-  try {
-    writeFileAtomicSync(canonicalPath, serialized, mode);
-  } catch (err) {
-    throw new Error(
-      `Failed to persist ${label} to canonical path ${canonicalPath}: ${err?.message || err}. Nothing was written; the change did NOT land.`
-    );
-  }
-  const failedMirrors = [];
-  for (const mirror of mirrorPaths) {
-    if (mirror === canonicalPath) continue;
-    try {
-      writeFileAtomicSync(mirror, serialized, mode);
-    } catch (err) {
-      failedMirrors.push(mirror);
-      console.warn(
-        `[Config] ${label}: mirror write to ${mirror} failed (${err?.message || err}) after the canonical write succeeded. The canonical file is authoritative; repair or remove the stale mirror.`
-      );
-    }
-  }
-  return { failedMirrors };
-}
-
 // src/index.ts
 import * as os from "node:os";
 import * as child_process from "node:child_process";
-import { fileURLToPath as fileURLToPath3 } from "node:url";
+import { fileURLToPath as fileURLToPath2 } from "node:url";
 
 // src/headscale.ts
 import { execFile } from "child_process";
-import fs4 from "fs";
+import fs3 from "fs";
 
 // ../../node_modules/.pnpm/fast-xml-parser@5.11.2/node_modules/fast-xml-parser/src/util.js
 var nameStartChar = ":A-Za-z_\\u00C0-\\u00D6\\u00D8-\\u00F6\\u00F8-\\u02FF\\u0370-\\u037D\\u037F-\\u1FFF\\u200C-\\u200D\\u2070-\\u218F\\u2C00-\\u2FEF\\u3001-\\uD7FF\\uF900-\\uFDCF\\uFDF0-\\uFFFD";
@@ -47430,16 +47311,16 @@ var MatcherView = class {
    * @returns {string|undefined}
    */
   getCurrentTag() {
-    const path9 = this._matcher.path;
-    return path9.length > 0 ? path9[path9.length - 1].tag : void 0;
+    const path8 = this._matcher.path;
+    return path8.length > 0 ? path8[path8.length - 1].tag : void 0;
   }
   /**
    * Get current namespace.
    * @returns {string|undefined}
    */
   getCurrentNamespace() {
-    const path9 = this._matcher.path;
-    return path9.length > 0 ? path9[path9.length - 1].namespace : void 0;
+    const path8 = this._matcher.path;
+    return path8.length > 0 ? path8[path8.length - 1].namespace : void 0;
   }
   /**
    * Get current node's attribute value.
@@ -47447,9 +47328,9 @@ var MatcherView = class {
    * @returns {*}
    */
   getAttrValue(attrName) {
-    const path9 = this._matcher.path;
-    if (path9.length === 0) return void 0;
-    return path9[path9.length - 1].values?.[attrName];
+    const path8 = this._matcher.path;
+    if (path8.length === 0) return void 0;
+    return path8[path8.length - 1].values?.[attrName];
   }
   /**
    * Check if current node has an attribute.
@@ -47457,9 +47338,9 @@ var MatcherView = class {
    * @returns {boolean}
    */
   hasAttr(attrName) {
-    const path9 = this._matcher.path;
-    if (path9.length === 0) return false;
-    const current = path9[path9.length - 1];
+    const path8 = this._matcher.path;
+    if (path8.length === 0) return false;
+    const current = path8[path8.length - 1];
     return current.values !== void 0 && attrName in current.values;
   }
   /**
@@ -47485,18 +47366,18 @@ var MatcherView = class {
    * @returns {number}
    */
   getPosition() {
-    const path9 = this._matcher.path;
-    if (path9.length === 0) return -1;
-    return path9[path9.length - 1].position ?? 0;
+    const path8 = this._matcher.path;
+    if (path8.length === 0) return -1;
+    return path8[path8.length - 1].position ?? 0;
   }
   /**
    * Get current node's repeat counter (occurrence count of this tag name).
    * @returns {number}
    */
   getCounter() {
-    const path9 = this._matcher.path;
-    if (path9.length === 0) return -1;
-    return path9[path9.length - 1].counter ?? 0;
+    const path8 = this._matcher.path;
+    if (path8.length === 0) return -1;
+    return path8[path8.length - 1].counter ?? 0;
   }
   /**
    * Get current node's sibling index (alias for getPosition).
@@ -53551,12 +53432,12 @@ function importTruenasConfig(content) {
     const rawSmb = Array.isArray(data.smb_shares) ? data.smb_shares : Array.isArray(data.sharing_smb) ? data.sharing_smb : Array.isArray(data["sharing.smb"]) ? data["sharing.smb"] : [];
     for (const sh of rawSmb) {
       const name = String(sh.name || "").trim();
-      const path9 = String(sh.path || "").trim();
-      if (!name || !path9)
+      const path8 = String(sh.path || "").trim();
+      if (!name || !path8)
         continue;
       smbShares.push({
         name,
-        path: path9,
+        path: path8,
         comment: String(sh.comment || "").slice(0, 255),
         readOnly: Boolean(sh.ro || sh.readOnly),
         guestOk: Boolean(sh.guestok || sh.guestOk),
@@ -54388,10 +54269,8 @@ var FullCloudInitSchema = external_exports.object({
 });
 
 // ../../packages/axonwall_lib/dist/mcp/index.js
-import * as crypto3 from "node:crypto";
-import * as fs3 from "node:fs";
-import * as path3 from "node:path";
-import { fileURLToPath as fileURLToPath2 } from "node:url";
+import * as fs2 from "node:fs";
+import * as path2 from "node:path";
 var MCP_SCOPES = [
   "mcp:telemetry:read",
   "mcp:pcap:capture",
@@ -54694,19 +54573,20 @@ function validateBpfTokenDelegationInput(input2) {
   }
   return { valid: true };
 }
-function validateVirtWorkloadSafety(workloadName, action, hostedEdgeEnabled) {
+function validateVirtWorkloadSafety(workloadName, action, hostedEdgeEnabled, workloadId) {
   const destructiveActions = /* @__PURE__ */ new Set(["stop", "pause", "reboot", "restore", "rollback", "live_migrate"]);
   if (!destructiveActions.has(action)) {
     return { valid: true };
   }
   const lower = (workloadName || "").trim().toLowerCase();
-  if (hostedEdgeEnabled && !lower) {
+  if (!lower) {
     return {
       valid: false,
-      reason: `Anti-lockout guard: refusing to ${action} an unidentified workload while Hosted Edge is enabled`
+      reason: `Anti-lockout guard: refusing to ${action} a virtualization workload whose name could not be resolved (not in local state and the daemon list lookup failed); refusing blind rather than risking the Hosted Edge gateway VM`
     };
   }
-  if (lower === "edge" || lower.startsWith("edge-") || lower.includes("axonwall-edge") || hostedEdgeEnabled && lower.includes("ngfw")) {
+  const idMatchesHostedEdge = hostedEdgeEnabled === true && (workloadId === HOSTED_EDGE_VMID || typeof workloadId === "string" && workloadId.trim().toLowerCase() === HOSTED_EDGE_VM_ID);
+  if (lower === "edge" || lower.startsWith("edge-") || lower.includes("axonwall-edge") || lower === HOSTED_EDGE_VM_NAME || hostedEdgeEnabled && lower.includes("ngfw") || idMatchesHostedEdge) {
     return {
       valid: false,
       reason: `Anti-lockout guard: refusing to ${action} Hosted Edge / gateway VM '${workloadName}' because it carries appliance WAN/LAN transit`
@@ -55101,45 +54981,22 @@ function validateRedirectTargetAllowlist(targetDestination, allowedRedirectTarge
     reason: `Redirect destination '${targetDestination}' is not in this MCP key's allowedRedirectTargets allowlist (${allowedRedirectTargets.join(", ")})`
   };
 }
-var warnedDevRootMismatch = false;
-function findWorkspaceRootFromModule2() {
-  let cur = path3.dirname(fileURLToPath2(import.meta.url));
-  for (; ; ) {
-    if (fs3.existsSync(path3.join(cur, "pnpm-workspace.yaml"))) {
-      return cur;
-    }
-    const parent = path3.dirname(cur);
-    if (parent === cur) {
-      return null;
-    }
-    cur = parent;
-  }
-}
-function findWorkspaceRootFromCwd2() {
+function findMcpDevWorkspaceRoot() {
   let cur = process.cwd();
   for (; ; ) {
-    if (fs3.existsSync(path3.join(cur, "pnpm-workspace.yaml"))) {
+    if (fs2.existsSync(path2.join(cur, "pnpm-workspace.yaml"))) {
       return cur;
     }
-    const parent = path3.dirname(cur);
+    const parent = path2.dirname(cur);
     if (parent === cur) {
       return null;
     }
     cur = parent;
   }
-}
-function findMcpDevWorkspaceRoot() {
-  const fromModule = findWorkspaceRootFromModule2();
-  const fromCwd = findWorkspaceRootFromCwd2();
-  if (fromModule && fromCwd && fromModule !== fromCwd && !warnedDevRootMismatch) {
-    warnedDevRootMismatch = true;
-    console.warn(`[MCP Dev] Working directory resolves to a different workspace root (${fromCwd}) than this module's own location (${fromModule}). Using the module-anchored root so every controller process shares one dev state root regardless of where it was started.`);
-  }
-  return fromModule ?? fromCwd;
 }
 function isMcpDevFallback() {
   try {
-    if (fs3.existsSync("/etc/axonwall/.axonwall-os")) {
+    if (fs2.existsSync("/etc/axonwall/.axonwall-os")) {
       return false;
     }
   } catch {
@@ -55158,138 +55015,47 @@ function isMcpDevFallback() {
   if (!wsRoot) {
     return false;
   }
-  return fs3.existsSync(path3.join(wsRoot, ".axonwall-dev")) || !fs3.existsSync("/etc/axonwall");
+  return fs2.existsSync(path2.join(wsRoot, ".axonwall-dev")) || !fs2.existsSync("/etc/axonwall");
 }
 function resolveMcpStateDirs() {
   const devFallback = isMcpDevFallback();
   let devRoot = "";
   if (devFallback) {
     if (process.env.AXONWALL_DEV_DIR?.trim()) {
-      devRoot = path3.resolve(process.env.AXONWALL_DEV_DIR.trim());
+      devRoot = path2.resolve(process.env.AXONWALL_DEV_DIR.trim());
     } else {
       const wsRoot = findMcpDevWorkspaceRoot();
-      devRoot = wsRoot ? path3.join(wsRoot, ".axonwall-dev") : path3.resolve(".axonwall-dev");
+      devRoot = wsRoot ? path2.join(wsRoot, ".axonwall-dev") : path2.resolve(".axonwall-dev");
     }
   }
-  const stateDir = process.env.AXONWALL_STATE_DIR?.trim() || (devFallback ? path3.join(devRoot, "var") : "/var/lib/axonwall");
-  const persistDir = process.env.AXONWALL_PERSIST_YAML_DIR?.trim() || path3.join(stateDir, "etc-axonwall");
-  const etcDir = process.env.AXONWALL_CONFIG_DIR?.trim() || process.env.AXONWALL_ETC_DIR?.trim() || (devFallback ? path3.join(devRoot, "etc") : "/etc/axonwall");
+  const stateDir = process.env.AXONWALL_STATE_DIR?.trim() || (devFallback ? path2.join(devRoot, "var") : "/var/lib/axonwall");
+  const persistDir = process.env.AXONWALL_PERSIST_YAML_DIR?.trim() || path2.join(stateDir, "etc-axonwall");
+  const etcDir = process.env.AXONWALL_CONFIG_DIR?.trim() || process.env.AXONWALL_ETC_DIR?.trim() || (devFallback ? path2.join(devRoot, "etc") : "/etc/axonwall");
   return { stateDir, persistDir, etcDir };
 }
 function resolveMcpSettingsPath() {
   if (process.env.AXONWALL_MCP_SETTINGS_PATH) {
     return process.env.AXONWALL_MCP_SETTINGS_PATH;
   }
-  const { stateDir } = resolveMcpStateDirs();
-  return path3.join(stateDir, "mcp-settings.json");
-}
-function mcpSettingsMirrorPaths() {
-  if (process.env.AXONWALL_MCP_SETTINGS_PATH)
-    return [];
   const { stateDir, persistDir, etcDir } = resolveMcpStateDirs();
-  return Array.from(/* @__PURE__ */ new Set([
-    path3.join(stateDir, "mcp-settings.json"),
-    path3.join(persistDir, "mcp-settings.json"),
-    path3.join(etcDir, "mcp-settings.json")
-  ])).filter((p) => p !== resolveMcpSettingsPath());
-}
-function writeFileAtomicSync2(filePath, data, mode = 432) {
-  fs3.mkdirSync(path3.dirname(filePath), { recursive: true, mode: 509 });
-  const tmpPath = `${filePath}.tmp.${process.pid}.${crypto3.randomUUID()}`;
+  const primaryDir = stateDir;
+  const primaryFile = path2.join(primaryDir, "mcp-settings.json");
   try {
-    fs3.writeFileSync(tmpPath, data, { mode });
-    try {
-      fs3.chmodSync(tmpPath, mode);
-    } catch {
+    if (fs2.existsSync(primaryFile)) {
+      fs2.accessSync(primaryFile, fs2.constants.R_OK);
+      return primaryFile;
     }
-    fs3.renameSync(tmpPath, filePath);
-  } catch (err) {
-    try {
-      fs3.unlinkSync(tmpPath);
-    } catch {
-    }
-    throw err;
-  }
-}
-function parseMcpSettingsFile(raw) {
-  try {
-    const validated = McpSettingsSchema.safeParse(JSON.parse(raw));
-    return validated.success ? validated.data : null;
+    fs2.mkdirSync(primaryDir, { recursive: true, mode: 509 });
+    fs2.accessSync(primaryDir, fs2.constants.W_OK);
+    return primaryFile;
   } catch {
-    return null;
-  }
-}
-function readCanonicalMcpSettings() {
-  const canonicalPath = resolveMcpSettingsPath();
-  if (fs3.existsSync(canonicalPath)) {
-    try {
-      const parsed = parseMcpSettingsFile(fs3.readFileSync(canonicalPath, "utf8"));
-      if (parsed !== null)
-        return parsed;
-      console.error(`[MCP Settings] Canonical file ${canonicalPath} is present but unusable; refusing to fall back to a mirror (a stale mirror must never defeat an MCP disable).`);
-      return null;
-    } catch (err) {
-      console.error(`[MCP Settings] Cannot read canonical file ${canonicalPath} (${err?.message || err}); refusing to fall back to a mirror.`);
-      return null;
+    for (const candidate of [path2.join(persistDir, "mcp-settings.json"), path2.join(etcDir, "mcp-settings.json")]) {
+      if (fs2.existsSync(candidate)) {
+        return candidate;
+      }
     }
+    return primaryFile;
   }
-  let newest = null;
-  for (const mirror of mcpSettingsMirrorPaths()) {
-    try {
-      if (!fs3.existsSync(mirror))
-        continue;
-      const raw = fs3.readFileSync(mirror, "utf8");
-      if (parseMcpSettingsFile(raw) === null)
-        continue;
-      const mtimeMs = fs3.statSync(mirror).mtimeMs;
-      if (!newest || mtimeMs > newest.mtimeMs)
-        newest = { raw, mtimeMs, source: mirror };
-    } catch {
-    }
-  }
-  if (!newest)
-    return null;
-  console.warn(`[MCP Settings] Canonical file ${canonicalPath} is missing; adopting the newest mirror copy (${newest.source}) as the canonical file. Mirror copies are migration-only from here on.`);
-  try {
-    writeFileAtomicSync2(canonicalPath, newest.raw, 432);
-  } catch (err) {
-    console.error(`[MCP Settings] Could not adopt mirror ${newest.source} into canonical path ${canonicalPath} (${err?.message || err}); using the mirror content for this read only.`);
-  }
-  return parseMcpSettingsFile(newest.raw);
-}
-function saveMcpSettings(settings) {
-  const parsed = McpSettingsSchema.safeParse(settings);
-  if (!parsed.success) {
-    return { ok: false, error: `Invalid MCP settings: ${parsed.error.message}` };
-  }
-  const canonicalPath = resolveMcpSettingsPath();
-  const serialized = JSON.stringify(parsed.data, null, 2);
-  try {
-    writeFileAtomicSync2(canonicalPath, serialized, 432);
-  } catch (err) {
-    return {
-      ok: false,
-      error: `Failed to persist mcp-settings.json to canonical path ${canonicalPath}: ${err?.message || err}. The change did NOT land.`
-    };
-  }
-  const failedMirrors = [];
-  for (const mirror of mcpSettingsMirrorPaths()) {
-    try {
-      writeFileAtomicSync2(mirror, serialized, 432);
-    } catch (err) {
-      failedMirrors.push(mirror);
-      console.warn(`[MCP Settings] Mirror write to ${mirror} failed (${err?.message || err}) after the canonical write succeeded. The canonical file is authoritative; repair or remove the stale mirror.`);
-    }
-  }
-  const reloaded = readCanonicalMcpSettings();
-  if (!reloaded || reloaded.enabled !== parsed.data.enabled) {
-    return {
-      ok: false,
-      error: `mcp-settings.json write did not land on re-read of the canonical file (${canonicalPath}): enabled is ${reloaded?.enabled ?? "unknown"}, expected ${parsed.data.enabled}. Treat the change as NOT applied.`,
-      failedMirrors
-    };
-  }
-  return { ok: true, failedMirrors };
 }
 function getMcpServerStatus(settingsPath) {
   const envEnabled = process.env.AXONWALL_MCP_ENABLED;
@@ -55316,29 +55082,37 @@ function getMcpServerStatus(settingsPath) {
       };
     }
   }
-  const settings = settingsPath ? (() => {
+  const { stateDir, persistDir, etcDir } = resolveMcpStateDirs();
+  const candidatePaths = settingsPath ? [settingsPath] : Array.from(/* @__PURE__ */ new Set([
+    resolveMcpSettingsPath(),
+    path2.join(stateDir, "mcp-settings.json"),
+    path2.join(persistDir, "mcp-settings.json"),
+    path2.join(etcDir, "mcp-settings.json")
+  ]));
+  for (const filePath of candidatePaths) {
+    if (!fs2.existsSync(filePath))
+      continue;
     try {
-      if (!fs3.existsSync(settingsPath))
-        return null;
-      return parseMcpSettingsFile(fs3.readFileSync(settingsPath, "utf8"));
+      const raw = fs2.readFileSync(filePath, "utf8");
+      const parsed = JSON.parse(raw);
+      const validated = McpSettingsSchema.safeParse(parsed);
+      if (validated.success) {
+        if (!validated.data.enabled) {
+          return {
+            enabled: false,
+            disabledReason: validated.data.disabledReason || "Disabled by administrator policy",
+            disabledAt: validated.data.disabledAt,
+            disabledBy: validated.data.disabledBy,
+            source: "settings_file"
+          };
+        }
+        return {
+          enabled: true,
+          source: "settings_file"
+        };
+      }
     } catch {
-      return null;
     }
-  })() : readCanonicalMcpSettings();
-  if (settings) {
-    if (!settings.enabled) {
-      return {
-        enabled: false,
-        disabledReason: settings.disabledReason || "Disabled by administrator policy",
-        disabledAt: settings.disabledAt,
-        disabledBy: settings.disabledBy,
-        source: "settings_file"
-      };
-    }
-    return {
-      enabled: true,
-      source: "settings_file"
-    };
   }
   return {
     enabled: false,
@@ -55528,19 +55302,19 @@ function headscaleTimestamp(record2, ...keys) {
   return void 0;
 }
 function getHeadscaleBin() {
-  if (fs4.existsSync(HEADSCALE_BIN)) return HEADSCALE_BIN;
-  if (fs4.existsSync("/usr/local/bin/headscale")) return "/usr/local/bin/headscale";
+  if (fs3.existsSync(HEADSCALE_BIN)) return HEADSCALE_BIN;
+  if (fs3.existsSync("/usr/local/bin/headscale")) return "/usr/local/bin/headscale";
   return "headscale";
 }
 function runHeadscale(args) {
   return new Promise((resolve4, reject) => {
-    if (!fs4.existsSync(HEADSCALE_SOCKET_PATH)) {
+    if (!fs3.existsSync(HEADSCALE_SOCKET_PATH)) {
       return reject(
         new Error(`Headscale service is not running (${HEADSCALE_SOCKET_PATH} not found). Ensure the headscale service is started.`)
       );
     }
     const bin = getHeadscaleBin();
-    const fullArgs = fs4.existsSync(HEADSCALE_CONFIG_PATH) ? ["--config", HEADSCALE_CONFIG_PATH, ...args] : args;
+    const fullArgs = fs3.existsSync(HEADSCALE_CONFIG_PATH) ? ["--config", HEADSCALE_CONFIG_PATH, ...args] : args;
     execFile(bin, fullArgs, { timeout: 1e4 }, (err, stdout, stderr) => {
       if (err) {
         return reject(new Error(stderr?.trim() || err.message));
@@ -55563,7 +55337,11 @@ async function listUsers() {
   return data.map((u) => ({
     id: u.id,
     name: u.name,
-    createdAt: headscaleTimestamp(u, "createdAt", "created_at") ?? (/* @__PURE__ */ new Date()).toISOString()
+    // B-L5: a missing/unparsable timestamp used to fall back to
+    // "now", so a user created months ago showed up as just created.
+    // Leave it undefined instead of inventing a creation time (cf.
+    // listPreAuthKeys, which already does this).
+    createdAt: headscaleTimestamp(u, "createdAt", "created_at")
   }));
 }
 async function createUser(name) {
@@ -55572,7 +55350,8 @@ async function createUser(name) {
   return {
     id: data?.id,
     name: data?.name || safeName,
-    createdAt: headscaleTimestamp(data, "createdAt", "created_at") ?? (/* @__PURE__ */ new Date()).toISOString()
+    // B-L5: as in listUsers — no invented creation time.
+    createdAt: headscaleTimestamp(data, "createdAt", "created_at")
   };
 }
 async function createPreAuthKey(user, reusable, ephemeral, expiration) {
@@ -55601,8 +55380,8 @@ async function createPreAuthKey(user, reusable, ephemeral, expiration) {
     if (ms <= 0) {
       throw new Error("Expiration timestamp must be in the future");
     }
-    const hours = Math.max(1, Math.round(ms / (1e3 * 60 * 60)));
-    args.push("--expiration", `${hours}h`);
+    const seconds = Math.ceil(ms / 1e3);
+    args.push("--expiration", `${seconds}s`);
   }
   const data = await runHeadscale(args);
   return {
@@ -55616,14 +55395,14 @@ async function createPreAuthKey(user, reusable, ephemeral, expiration) {
 }
 
 // src/mcp/authz.ts
-import * as crypto5 from "node:crypto";
-import * as fs6 from "node:fs";
-import * as path5 from "node:path";
-
-// src/mcp/lockfile.ts
-import * as crypto4 from "node:crypto";
+import * as crypto3 from "node:crypto";
 import * as fs5 from "node:fs";
 import * as path4 from "node:path";
+
+// src/mcp/lockfile.ts
+import * as crypto2 from "node:crypto";
+import * as fs4 from "node:fs";
+import * as path3 from "node:path";
 function desiredStateLockPath() {
   const override = process.env.AXONWALL_DESIRED_STATE_LOCK_PATH;
   if (override) return override;
@@ -55635,66 +55414,46 @@ function desiredStateLockPath() {
   }
   const configDir = process.env.AXONWALL_CONFIG_DIR || process.env.AXONWALL_ETC_DIR;
   if (configDir) {
-    return path4.join(configDir, "state.json.lock");
+    return path3.join(configDir, "state.json.lock");
   }
   const stateDir = process.env.AXONWALL_STATE_DIR?.trim();
   if (stateDir) {
-    return path4.join(stateDir, "state.json.lock");
+    return path3.join(stateDir, "state.json.lock");
   }
   if (isControllerDevRuntime()) {
-    return path4.join(resolveControllerDirs().etcDir, "state.json.lock");
+    return path3.join(resolveControllerDirs().etcDir, "state.json.lock");
   }
-  return fs5.existsSync("/etc/axonwall") ? "/etc/axonwall/state.json.lock" : "/var/lib/axonwall/state.json.lock";
+  return fs4.existsSync("/etc/axonwall") ? "/etc/axonwall/state.json.lock" : "/var/lib/axonwall/state.json.lock";
 }
 function acquireMcpLockFile(lockPath, timeoutMs = 1e4) {
   const deadline = Date.now() + timeoutMs;
   const staleThresholdMs = Math.min(Math.max(1e3, timeoutMs - 500), 1e4);
   const waiter = new Int32Array(new SharedArrayBuffer(4));
-  const lockDir = path4.dirname(lockPath);
-  if (!fs5.existsSync(lockDir)) {
-    fs5.mkdirSync(lockDir, { recursive: true, mode: 509 });
+  const lockDir = path3.dirname(lockPath);
+  if (!fs4.existsSync(lockDir)) {
+    fs4.mkdirSync(lockDir, { recursive: true, mode: 509 });
   }
-  let warnedLiveHolder = false;
   for (; ; ) {
     try {
-      const fd = fs5.openSync(lockPath, "wx", 432);
-      const token = `${process.pid}:${Date.now()}:${crypto4.randomBytes(8).toString("hex")}`;
+      const fd = fs4.openSync(lockPath, "wx", 432);
+      const token = `${process.pid}:${Date.now()}:${crypto2.randomBytes(8).toString("hex")}`;
       try {
-        fs5.writeFileSync(
+        fs4.writeFileSync(
           fd,
           JSON.stringify({ pid: process.pid, createdAt: (/* @__PURE__ */ new Date()).toISOString(), token })
         );
       } catch {
       }
       let released = false;
-      const heartbeatMs = Math.max(250, Math.min(2e3, Math.floor(staleThresholdMs / 3)));
-      const heartbeat = setInterval(() => {
-        try {
-          const raw = fs5.readFileSync(lockPath, "utf8");
-          if (JSON.parse(raw)?.token !== token) {
-            clearInterval(heartbeat);
-            return;
-          }
-          fs5.utimesSync(lockPath, /* @__PURE__ */ new Date(), /* @__PURE__ */ new Date());
-        } catch {
-        }
-      }, heartbeatMs);
-      if (typeof heartbeat === "object" && heartbeat !== null && typeof heartbeat.unref === "function") {
-        heartbeat.unref();
-      }
       return () => {
         if (released) return;
         released = true;
         try {
-          clearInterval(heartbeat);
+          fs4.closeSync(fd);
         } catch {
         }
         try {
-          fs5.closeSync(fd);
-        } catch {
-        }
-        try {
-          const raw = fs5.readFileSync(lockPath, "utf8");
+          const raw = fs4.readFileSync(lockPath, "utf8");
           const parsed = JSON.parse(raw);
           if (parsed?.token !== token) {
             console.warn(
@@ -55702,7 +55461,7 @@ function acquireMcpLockFile(lockPath, timeoutMs = 1e4) {
             );
             return;
           }
-          fs5.unlinkSync(lockPath);
+          fs4.unlinkSync(lockPath);
         } catch {
         }
       };
@@ -55710,62 +55469,43 @@ function acquireMcpLockFile(lockPath, timeoutMs = 1e4) {
       if (err?.code !== "EEXIST") throw err;
       let stale = false;
       let holderPid = null;
-      let holderPidAlive = null;
       let observedMtimeMs = 0;
       try {
-        const stat = fs5.statSync(lockPath);
+        const stat = fs4.statSync(lockPath);
         observedMtimeMs = stat.mtimeMs;
-        const mtimeStale = Date.now() - stat.mtimeMs > staleThresholdMs;
-        if (stat.size > 0) {
-          const raw = fs5.readFileSync(lockPath, "utf8");
+        stale = Date.now() - stat.mtimeMs > staleThresholdMs;
+        if (!stale && stat.size > 0) {
+          const raw = fs4.readFileSync(lockPath, "utf8");
           const parsed = JSON.parse(raw);
           if (typeof parsed?.pid === "number" && parsed.pid > 0 && parsed.pid !== process.pid) {
             holderPid = parsed.pid;
             try {
               process.kill(parsed.pid, 0);
-              holderPidAlive = true;
             } catch (killErr) {
               if (killErr?.code === "ESRCH") {
-                holderPidAlive = false;
-              } else {
-                holderPidAlive = true;
+                stale = true;
               }
             }
           }
-        }
-        stale = mtimeStale && (holderPid === null || holderPidAlive === false);
-        if (mtimeStale && holderPid !== null && holderPidAlive === true && !warnedLiveHolder) {
-          warnedLiveHolder = true;
-          console.warn(
-            `[MCP Lock] Lock ${lockPath} looks mtime-stale (${Math.round((Date.now() - observedMtimeMs) / 1e3)}s old) but holder pid ${holderPid} is still alive; not breaking it.`
-          );
         }
       } catch {
       }
       if (stale) {
         let stillStale = true;
         try {
-          const restat = fs5.statSync(lockPath);
+          const restat = fs4.statSync(lockPath);
           if (restat.mtimeMs !== observedMtimeMs) stillStale = false;
           if (stillStale && holderPid !== null && restat.size > 0) {
-            const raw = fs5.readFileSync(lockPath, "utf8");
+            const raw = fs4.readFileSync(lockPath, "utf8");
             const parsed = JSON.parse(raw);
             if (parsed?.pid !== holderPid) stillStale = false;
-            if (stillStale && typeof parsed?.pid === "number" && parsed.pid > 0 && parsed.pid !== process.pid) {
-              try {
-                process.kill(parsed.pid, 0);
-                stillStale = false;
-              } catch (killErr) {
-                if (killErr?.code !== "ESRCH") stillStale = false;
-              }
-            }
           }
         } catch {
           stillStale = false;
         }
         if (stillStale) {
           try {
-            fs5.unlinkSync(lockPath);
+            fs4.unlinkSync(lockPath);
           } catch {
           }
         }
@@ -55781,165 +55521,95 @@ function acquireMcpLockFile(lockPath, timeoutMs = 1e4) {
 
 // src/mcp/authz.ts
 var rateLimitBuckets = /* @__PURE__ */ new Map();
-var rateLimitDiskMtimeMs = -1;
-var rateLimitDiskLoaded = false;
-function resolveMcpRateLimitPath() {
-  if (process.env.AXONWALL_MCP_RATE_LIMIT_PATH) {
-    return process.env.AXONWALL_MCP_RATE_LIMIT_PATH;
-  }
-  return path5.join(resolveControllerDirs().varDir, "mcp-rate-limits.json");
-}
-function parseRateLimitState(raw) {
-  try {
-    const parsed = JSON.parse(raw);
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
-    const out = {};
-    for (const [keyId, stamps] of Object.entries(parsed)) {
-      if (!Array.isArray(stamps)) continue;
-      const valid = stamps.filter(
-        (ts) => typeof ts === "number" && Number.isFinite(ts)
-      );
-      if (valid.length > 0) out[keyId] = valid;
-    }
-    return out;
-  } catch {
-    return null;
-  }
-}
-function loadRateLimitStateFromDisk() {
-  const statePath = resolveMcpRateLimitPath();
-  try {
-    if (!fs6.existsSync(statePath)) return {};
-    const parsed = parseRateLimitState(fs6.readFileSync(statePath, "utf8"));
-    if (parsed === null) {
-      console.warn(`[MCP RateLimit] Ignoring corrupt rate-limit state file ${statePath}; starting from an empty budget.`);
-      return {};
-    }
-    try {
-      rateLimitDiskMtimeMs = fs6.statSync(statePath).mtimeMs;
-    } catch {
-    }
-    rateLimitDiskLoaded = true;
-    return parsed;
-  } catch (err) {
-    console.warn(`[MCP RateLimit] Could not read rate-limit state file ${statePath} (${err?.message || err}); starting from an empty budget.`);
-    return {};
-  }
-}
-function persistRateLimitState() {
-  const statePath = resolveMcpRateLimitPath();
-  const now = Date.now();
-  const windowStart = now - 6e4;
-  const snapshot = {};
-  for (const [keyId, stamps] of rateLimitBuckets.entries()) {
-    const kept = stamps.filter((ts) => ts > windowStart);
-    if (kept.length > 0) snapshot[keyId] = kept;
-  }
-  let release = null;
-  try {
-    release = acquireMcpLockFile(`${statePath}.lock`, 2e3);
-  } catch (err) {
-    console.warn(`[MCP RateLimit] Could not lock rate-limit state file ${statePath} (${err?.message || err}); budget kept in memory only for this process.`);
-    return false;
-  }
-  try {
-    writeFileAtomicSync(statePath, JSON.stringify(snapshot, null, 2), 432);
-    try {
-      rateLimitDiskMtimeMs = fs6.statSync(statePath).mtimeMs;
-    } catch {
-    }
-    rateLimitDiskLoaded = true;
-    return true;
-  } catch (err) {
-    console.warn(`[MCP RateLimit] Failed to persist rate-limit state to ${statePath} (${err?.message || err}); budget kept in memory only for this process.`);
-    return false;
-  } finally {
-    try {
-      release?.();
-    } catch {
-    }
-  }
-}
-function refreshRateLimitBucketsFromDisk() {
-  const statePath = resolveMcpRateLimitPath();
-  let mtimeMs = -1;
-  try {
-    if (!fs6.existsSync(statePath)) return;
-    mtimeMs = fs6.statSync(statePath).mtimeMs;
-  } catch {
-    return;
-  }
-  if (rateLimitDiskLoaded && mtimeMs === rateLimitDiskMtimeMs) return;
-  const disk = loadRateLimitStateFromDisk();
-  const now = Date.now();
-  const windowStart = now - 6e4;
-  for (const [keyId, stamps] of Object.entries(disk)) {
-    const merged = Array.from(
-      /* @__PURE__ */ new Set([...rateLimitBuckets.get(keyId) ?? [], ...stamps])
-    ).filter((ts) => ts > windowStart);
-    rateLimitBuckets.set(keyId, merged);
-  }
-}
 function resolveMcpKeysPath() {
   if (process.env.AXONWALL_MCP_KEYS_PATH) {
     return process.env.AXONWALL_MCP_KEYS_PATH;
   }
-  return path5.join(resolveControllerDirs().varDir, "mcp-keys.json");
-}
-function mcpKeysMirrorPaths() {
-  if (process.env.AXONWALL_MCP_KEYS_PATH) return [];
   const dirs = resolveControllerDirs();
-  return [
-    path5.join(dirs.persistYamlDir, "mcp-keys.json"),
-    path5.join(dirs.etcDir, "mcp-keys.json")
-  ];
-}
-function parseMcpKeysFile(raw) {
+  const primaryDir = dirs.varDir;
+  const primaryFile = path4.join(primaryDir, "mcp-keys.json");
   try {
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return null;
-    const valid = [];
-    for (const item of parsed) {
-      const res = McpApiKeySchema.safeParse(item);
-      if (res.success) {
-        valid.push(res.data);
+    if (fs5.existsSync(primaryFile)) {
+      fs5.accessSync(primaryFile, fs5.constants.R_OK);
+      return primaryFile;
+    }
+    fs5.mkdirSync(primaryDir, { recursive: true, mode: 509 });
+    fs5.accessSync(primaryDir, fs5.constants.W_OK);
+    return primaryFile;
+  } catch {
+    for (const candidate of [
+      path4.join(dirs.persistYamlDir, "mcp-keys.json"),
+      path4.join(dirs.etcDir, "mcp-keys.json")
+    ]) {
+      if (fs5.existsSync(candidate)) {
+        return candidate;
       }
     }
-    return valid;
-  } catch {
-    return null;
+    return primaryFile;
   }
 }
 function loadMcpKeysInternal() {
-  return readCanonicalConfig({
-    canonicalPath: resolveMcpKeysPath(),
-    mirrorPaths: mcpKeysMirrorPaths(),
-    parse: parseMcpKeysFile,
-    label: "mcp-keys.json"
-  }) ?? [];
+  const dirs = resolveControllerDirs();
+  const candidatePaths = process.env.AXONWALL_MCP_KEYS_PATH ? [process.env.AXONWALL_MCP_KEYS_PATH] : Array.from(
+    /* @__PURE__ */ new Set([
+      resolveMcpKeysPath(),
+      path4.join(dirs.varDir, "mcp-keys.json"),
+      path4.join(dirs.persistYamlDir, "mcp-keys.json"),
+      path4.join(dirs.etcDir, "mcp-keys.json")
+    ])
+  );
+  for (const keysPath of candidatePaths) {
+    if (!fs5.existsSync(keysPath)) continue;
+    try {
+      const raw = fs5.readFileSync(keysPath, "utf8");
+      const parsed = JSON.parse(raw);
+      if (!Array.isArray(parsed)) continue;
+      const valid = [];
+      for (const item of parsed) {
+        const res = McpApiKeySchema.safeParse(item);
+        if (res.success) {
+          valid.push(res.data);
+        }
+      }
+      return valid;
+    } catch {
+    }
+  }
+  return [];
 }
 function saveMcpKeysInternal(keys) {
-  writeCanonicalConfig({
-    canonicalPath: resolveMcpKeysPath(),
-    mirrorPaths: mcpKeysMirrorPaths(),
-    serialized: JSON.stringify(keys, null, 2),
-    mode: 432,
-    label: "mcp-keys.json"
-  });
-}
-function verifyMcpKeysMutation(check2, what) {
-  if (!check2(loadMcpKeysInternal())) {
-    throw new Error(
-      `mcp-keys.json mutation did not land on re-read of the canonical file (${resolveMcpKeysPath()}): ${what}. Treat the change as NOT applied.`
-    );
+  const dirs = resolveControllerDirs();
+  const serialized = JSON.stringify(keys, null, 2);
+  const targetPaths = process.env.AXONWALL_MCP_KEYS_PATH ? [process.env.AXONWALL_MCP_KEYS_PATH] : [
+    resolveMcpKeysPath(),
+    path4.join(dirs.persistYamlDir, "mcp-keys.json"),
+    path4.join(dirs.etcDir, "mcp-keys.json")
+  ];
+  for (const keysPath of Array.from(new Set(targetPaths))) {
+    try {
+      fs5.mkdirSync(path4.dirname(keysPath), { recursive: true, mode: 509 });
+      const tmpPath = `${keysPath}.tmp.${process.pid}.${crypto3.randomUUID()}`;
+      fs5.writeFileSync(tmpPath, serialized, { mode: 432 });
+      try {
+        fs5.chmodSync(tmpPath, 432);
+      } catch {
+      }
+      fs5.renameSync(tmpPath, keysPath);
+    } catch {
+      try {
+        fs5.writeFileSync(keysPath, serialized, { mode: 432 });
+        fs5.chmodSync(keysPath, 432);
+      } catch {
+      }
+    }
   }
 }
 function hashMcpToken(rawToken) {
-  return crypto5.createHash("sha256").update(rawToken.trim()).digest("hex");
+  return crypto3.createHash("sha256").update(rawToken.trim()).digest("hex");
 }
 function readLastUsedSidecar(keysPath) {
   try {
-    const raw = fs6.readFileSync(`${keysPath}.lastused.json`, "utf8");
+    const raw = fs5.readFileSync(`${keysPath}.lastused.json`, "utf8");
     const parsed = JSON.parse(raw);
     if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
       return parsed;
@@ -55949,15 +55619,23 @@ function readLastUsedSidecar(keysPath) {
   return {};
 }
 function writeLastUsedSidecar(keysPath, keyId, entry) {
+  let release = null;
   try {
+    try {
+      release = acquireMcpLockFile(`${keysPath}.lastused.json.lock`, 2e3);
+    } catch {
+      return;
+    }
     const sidecarPath = `${keysPath}.lastused.json`;
     const all = readLastUsedSidecar(keysPath);
     all[keyId] = entry;
-    fs6.mkdirSync(path5.dirname(sidecarPath), { recursive: true, mode: 509 });
-    const tmpPath = `${sidecarPath}.tmp.${process.pid}.${crypto5.randomUUID()}`;
-    fs6.writeFileSync(tmpPath, JSON.stringify(all, null, 2), { mode: 432 });
-    fs6.renameSync(tmpPath, sidecarPath);
+    fs5.mkdirSync(path4.dirname(sidecarPath), { recursive: true, mode: 509 });
+    const tmpPath = `${sidecarPath}.tmp.${process.pid}.${crypto3.randomUUID()}`;
+    fs5.writeFileSync(tmpPath, JSON.stringify(all, null, 2), { mode: 432 });
+    fs5.renameSync(tmpPath, sidecarPath);
   } catch {
+  } finally {
+    release?.();
   }
 }
 function withMcpKeysLock(fn) {
@@ -55969,8 +55647,8 @@ function withMcpKeysLock(fn) {
   }
 }
 function createMcpApiKeyRecord(input2) {
-  const shortId = crypto5.randomBytes(4).toString("hex");
-  const secretHex = crypto5.randomBytes(32).toString("hex");
+  const shortId = crypto3.randomBytes(4).toString("hex");
+  const secretHex = crypto3.randomBytes(32).toString("hex");
   const keyPrefix = `axw_mcp_${shortId}`;
   const rawToken = `${keyPrefix}_${secretHex}`;
   const secretHashSha256 = hashMcpToken(rawToken);
@@ -55999,10 +55677,6 @@ function createMcpApiKeyRecord(input2) {
     const existing = loadMcpKeysInternal();
     existing.unshift(record2);
     saveMcpKeysInternal(existing);
-    verifyMcpKeysMutation(
-      (keys) => keys.some((k) => k.id === record2.id),
-      `newly created key ${record2.id} is missing`
-    );
   });
   const { secretHashSha256: _omitted, ...publicRecord } = record2;
   return {
@@ -56027,10 +55701,6 @@ function revokeMcpApiKeyRecord(keyId) {
     if (idx === -1) return false;
     keys.splice(idx, 1);
     saveMcpKeysInternal(keys);
-    verifyMcpKeysMutation(
-      (reloaded) => !reloaded.some((k) => k.id === keyId),
-      `revoked key ${keyId} is still present`
-    );
     return true;
   });
   if (revoked) rateLimitBuckets.delete(keyId);
@@ -56052,7 +55722,6 @@ function extractClientCertificateFingerprint(req) {
   return null;
 }
 function checkSlidingWindowRateLimit(keyId, limitPerMinute) {
-  refreshRateLimitBucketsFromDisk();
   const now = Date.now();
   const windowStart = now - 6e4;
   const timestamps = (rateLimitBuckets.get(keyId) ?? []).filter((ts) => ts > windowStart);
@@ -56062,7 +55731,6 @@ function checkSlidingWindowRateLimit(keyId, limitPerMinute) {
   }
   timestamps.push(now);
   rateLimitBuckets.set(keyId, timestamps);
-  persistRateLimitState();
   return true;
 }
 function authenticateMcpToken(rawToken, clientIp, req) {
@@ -56090,7 +55758,7 @@ function authenticateMcpToken(rawToken, clientIp, req) {
   let matchedKey;
   for (const k of keys) {
     const storedBuf = Buffer.from(k.secretHashSha256, "hex");
-    if (storedBuf.length === candidateBuf.length && crypto5.timingSafeEqual(storedBuf, candidateBuf)) {
+    if (storedBuf.length === candidateBuf.length && crypto3.timingSafeEqual(storedBuf, candidateBuf)) {
       matchedKey = k;
       break;
     }
@@ -56176,15 +55844,16 @@ function hasMcpScope(key, requiredScope) {
 }
 
 // src/mcp/server.ts
-import * as fs8 from "node:fs";
+import * as fs7 from "node:fs";
 import * as http from "node:http";
-import * as path7 from "node:path";
-import * as crypto7 from "node:crypto";
+import * as path6 from "node:path";
+import * as crypto5 from "node:crypto";
+import { fileURLToPath } from "node:url";
 
 // src/mcp/audit.ts
-import * as crypto6 from "node:crypto";
-import * as fs7 from "node:fs";
-import * as path6 from "node:path";
+import * as crypto4 from "node:crypto";
+import * as fs6 from "node:fs";
+import * as path5 from "node:path";
 var GENESIS_HASH = "0000000000000000000000000000000000000000000000000000000000000000";
 function resolveMcpAuditPath() {
   if (process.env.AXONWALL_MCP_AUDIT_PATH) {
@@ -56192,21 +55861,21 @@ function resolveMcpAuditPath() {
   }
   const dirs = resolveControllerDirs();
   for (const dir of Array.from(/* @__PURE__ */ new Set([dirs.varDir, dirs.logDir]))) {
-    const file2 = path6.join(dir, "mcp-audit.jsonl");
+    const file2 = path5.join(dir, "mcp-audit.jsonl");
     try {
-      if (fs7.existsSync(file2)) {
-        fs7.accessSync(file2, fs7.constants.W_OK);
+      if (fs6.existsSync(file2)) {
+        fs6.accessSync(file2, fs6.constants.W_OK);
         return file2;
       }
-      fs7.mkdirSync(dir, { recursive: true, mode: 509 });
-      fs7.accessSync(dir, fs7.constants.W_OK);
+      fs6.mkdirSync(dir, { recursive: true, mode: 509 });
+      fs6.accessSync(dir, fs6.constants.W_OK);
       return file2;
     } catch {
     }
   }
-  const fallbackDir = dirs.devMode ? path6.join(dirs.varDir, "tmp") : "/tmp/axonwall";
-  fs7.mkdirSync(fallbackDir, { recursive: true, mode: 509 });
-  return path6.join(fallbackDir, "mcp-audit.jsonl");
+  const fallbackDir = dirs.devMode ? path5.join(dirs.varDir, "tmp") : "/tmp/axonwall";
+  fs6.mkdirSync(fallbackDir, { recursive: true, mode: 509 });
+  return path5.join(fallbackDir, "mcp-audit.jsonl");
 }
 function computeEntryHash(entryWithoutHash) {
   const canonical = JSON.stringify({
@@ -56225,12 +55894,12 @@ function computeEntryHash(entryWithoutHash) {
     leaseId: entryWithoutHash.leaseId ?? null,
     prevHash: entryWithoutHash.prevHash
   });
-  return crypto6.createHash("sha256").update(canonical).digest("hex");
+  return crypto4.createHash("sha256").update(canonical).digest("hex");
 }
 function getLastHash(auditPath) {
   try {
-    if (!fs7.existsSync(auditPath)) return GENESIS_HASH;
-    const content = fs7.readFileSync(auditPath, "utf8").trim();
+    if (!fs6.existsSync(auditPath)) return GENESIS_HASH;
+    const content = fs6.readFileSync(auditPath, "utf8").trim();
     if (!content) return GENESIS_HASH;
     const lines = content.split("\n");
     for (let i = lines.length - 1; i >= 0; i--) {
@@ -56245,7 +55914,7 @@ function getLastHash(auditPath) {
 }
 function buildAuditEntry(input2, prevHash) {
   const partial2 = {
-    id: `mcp_aud_${crypto6.randomBytes(6).toString("hex")}`,
+    id: `mcp_aud_${crypto4.randomBytes(6).toString("hex")}`,
     timestamp: (/* @__PURE__ */ new Date()).toISOString(),
     keyId: input2.keyId,
     keyName: input2.keyName,
@@ -56278,10 +55947,10 @@ function recordMcpAuditEntry(input2) {
   try {
     const fullEntry = buildAuditEntry(input2, getLastHash(auditPath));
     try {
-      fs7.mkdirSync(path6.dirname(auditPath), { recursive: true, mode: 509 });
-      fs7.appendFileSync(auditPath, JSON.stringify(fullEntry) + "\n", { mode: 432 });
+      fs6.mkdirSync(path5.dirname(auditPath), { recursive: true, mode: 509 });
+      fs6.appendFileSync(auditPath, JSON.stringify(fullEntry) + "\n", { mode: 432 });
       try {
-        fs7.chmodSync(auditPath, 432);
+        fs6.chmodSync(auditPath, 432);
       } catch {
       }
     } catch (err) {
@@ -56295,10 +55964,10 @@ function recordMcpAuditEntry(input2) {
 }
 function verifyMcpAuditChain() {
   const auditPath = resolveMcpAuditPath();
-  if (!fs7.existsSync(auditPath)) {
+  if (!fs6.existsSync(auditPath)) {
     return { valid: true, totalEntries: 0, headHash: GENESIS_HASH };
   }
-  const raw = fs7.readFileSync(auditPath, "utf8").trim();
+  const raw = fs6.readFileSync(auditPath, "utf8").trim();
   if (!raw) {
     return { valid: true, totalEntries: 0, headHash: GENESIS_HASH };
   }
@@ -56345,10 +56014,10 @@ function verifyMcpAuditChain() {
 function queryMcpAuditEntries(limit = 100) {
   const auditPath = resolveMcpAuditPath();
   const integrity = verifyMcpAuditChain();
-  if (!fs7.existsSync(auditPath)) {
+  if (!fs6.existsSync(auditPath)) {
     return { entries: [], integrity };
   }
-  const raw = fs7.readFileSync(auditPath, "utf8").trim();
+  const raw = fs6.readFileSync(auditPath, "utf8").trim();
   if (!raw) {
     return { entries: [], integrity };
   }
@@ -56372,8 +56041,8 @@ function readAgentToken() {
   const tokenPaths = resolveControllerDirs().agentTokenPaths;
   for (const p of tokenPaths) {
     try {
-      if (fs8.existsSync(p)) {
-        const tok = fs8.readFileSync(p, "utf8").trim();
+      if (fs7.existsSync(p)) {
+        const tok = fs7.readFileSync(p, "utf8").trim();
         if (tok) return tok;
       }
     } catch {
@@ -56382,7 +56051,26 @@ function readAgentToken() {
   return "";
 }
 function newMcpApplyJobId() {
-  return `mcp_apply_${Date.now()}_${crypto7.randomBytes(4).toString("hex")}`;
+  return `mcp_apply_${Date.now()}_${crypto5.randomBytes(4).toString("hex")}`;
+}
+function resolveMcpServerVersion() {
+  try {
+    const moduleDir = path6.dirname(fileURLToPath(import.meta.url));
+    for (const candidate of [
+      path6.join(moduleDir, "..", "package.json"),
+      path6.join(moduleDir, "..", "..", "package.json")
+    ]) {
+      try {
+        const parsed = JSON.parse(fs7.readFileSync(candidate, "utf8"));
+        if (typeof parsed.version === "string" && parsed.version.trim()) {
+          return parsed.version.trim();
+        }
+      } catch {
+      }
+    }
+  } catch {
+  }
+  return "unknown";
 }
 function insertMcpRuleIntoState(targetState, rule) {
   const isBlockOrReject = rule.action === "block" || rule.action === "reject";
@@ -56399,7 +56087,7 @@ function insertMcpRuleIntoState(targetState, rule) {
 }
 async function callAxonwalldApi(method, pathUrl, body, timeoutMs = 15e3) {
   const agentSocketPath = resolveControllerDirs().agentSock;
-  if (!fs8.existsSync(agentSocketPath)) {
+  if (!fs7.existsSync(agentSocketPath)) {
     return {
       ok: false,
       status: 503,
@@ -56463,55 +56151,59 @@ async function callAxonwalldApi(method, pathUrl, body, timeoutMs = 15e3) {
   });
 }
 function loadLocalDesiredState() {
-  const dirs = resolveControllerDirs();
-  return readCanonicalConfig({
-    canonicalPath: dirs.stateFile,
-    mirrorPaths: [path7.join(dirs.etcDir, "state.json")],
-    parse: (raw) => {
-      try {
-        const parsed = DesiredStateSchema.safeParse(JSON.parse(raw));
-        return parsed.success ? parsed.data : null;
-      } catch {
-        return null;
+  const candidates = resolveControllerDirs().desiredStateCandidates;
+  for (const p of candidates) {
+    try {
+      if (fs7.existsSync(p)) {
+        const raw = JSON.parse(fs7.readFileSync(p, "utf8"));
+        const parsed = DesiredStateSchema.safeParse(raw);
+        if (parsed.success) return parsed.data;
       }
-    },
-    label: "state.json"
-  });
+    } catch {
+    }
+  }
+  return null;
 }
 function persistDesiredStateToDisk(targetState) {
   const dirs = resolveControllerDirs();
   const customState = process.env.AXONWALL_STATE_JSON_PATH || process.env.AXONWALL_STATE_FILE;
   if (customState) {
     try {
-      fs8.mkdirSync(path7.dirname(customState), { recursive: true, mode: 504 });
-      fs8.writeFileSync(customState, JSON.stringify(targetState, null, 2), { mode: 384 });
+      fs7.mkdirSync(path6.dirname(customState), { recursive: true, mode: 504 });
+      fs7.writeFileSync(customState, JSON.stringify(targetState, null, 2), { mode: 384 });
       const yamlFiles = serializeDesiredStateToYamlFiles(targetState);
-      const customDir = path7.dirname(customState);
+      const customDir = path6.dirname(customState);
       for (const [fn, content] of Object.entries(yamlFiles)) {
-        fs8.writeFileSync(path7.join(customDir, fn), content, { mode: 432 });
+        fs7.writeFileSync(path6.join(customDir, fn), content, { mode: 432 });
       }
+      return true;
     } catch {
+      return false;
     }
-    return;
   }
-  for (const statePath of Array.from(/* @__PURE__ */ new Set([path7.join(dirs.etcDir, "state.json"), dirs.stateFile]))) {
+  let stateJsonLanded = false;
+  for (const statePath of Array.from(/* @__PURE__ */ new Set([path6.join(dirs.etcDir, "state.json"), dirs.stateFile]))) {
     try {
-      fs8.mkdirSync(path7.dirname(statePath), { recursive: true, mode: 504 });
-      fs8.writeFileSync(statePath, JSON.stringify(targetState, null, 2), { mode: 384 });
+      fs7.mkdirSync(path6.dirname(statePath), { recursive: true, mode: 504 });
+      fs7.writeFileSync(statePath, JSON.stringify(targetState, null, 2), { mode: 384 });
+      stateJsonLanded = true;
     } catch {
     }
   }
+  if (!stateJsonLanded) return false;
   try {
     const yamlFiles = serializeDesiredStateToYamlFiles(targetState);
     for (const dir of Array.from(/* @__PURE__ */ new Set([dirs.etcDir, dirs.persistYamlDir]))) {
-      if (fs8.existsSync(dir)) {
+      if (fs7.existsSync(dir)) {
         for (const [fn, content] of Object.entries(yamlFiles)) {
-          fs8.writeFileSync(path7.join(dir, fn), content, { mode: 432 });
+          fs7.writeFileSync(path6.join(dir, fn), content, { mode: 432 });
         }
       }
     }
   } catch {
+    return false;
   }
+  return true;
 }
 function resolveBpfTokenPresetMasks(preset) {
   switch (preset) {
@@ -57409,8 +57101,8 @@ async function handleMcpReadResource(uri, env) {
     case "axonwall://telemetry/alerts/suricata": {
       const alerts = [];
       try {
-        if (fs8.existsSync("/var/log/suricata/eve.json")) {
-          const lines = fs8.readFileSync("/var/log/suricata/eve.json", "utf8").trim().split("\n");
+        if (fs7.existsSync("/var/log/suricata/eve.json")) {
+          const lines = fs7.readFileSync("/var/log/suricata/eve.json", "utf8").trim().split("\n");
           for (const line of lines.slice(-50).reverse()) {
             try {
               alerts.push(JSON.parse(line));
@@ -57500,13 +57192,20 @@ async function handleMcpReadResource(uri, env) {
         callAxonwalldApi("GET", "/v1/virt/pci"),
         callAxonwalldApi("GET", "/v1/virt/telemetry")
       ]);
+      const failedSources = [
+        ...!vmsRes.ok ? ["vms"] : [],
+        ...!ctsRes.ok ? ["containers"] : [],
+        ...!pciRes.ok ? ["pciDevices"] : [],
+        ...!telRes.ok ? ["telemetry"] : []
+      ];
       const anyDown = !vmsRes.ok && !ctsRes.ok && !telRes.ok;
       payload = {
         vms: vmsRes.ok ? vmsRes.data?.vms ?? [] : [],
         containers: ctsRes.ok ? ctsRes.data?.containers ?? [] : [],
         pciDevices: pciRes.ok ? pciRes.data?.devices ?? [] : [],
         ebpfTelemetry: telRes.ok ? telRes.data : null,
-        ...anyDown ? { daemonDown: true, error: vmsRes.data?.error || "axonwalld unreachable" } : {}
+        ...anyDown ? { daemonDown: true, error: vmsRes.data?.error || "axonwalld unreachable" } : {},
+        ...failedSources.length > 0 && !anyDown ? { partialDaemonFailure: true, failedSources, error: "One or more virt sources failed; the empty lists below are unknown, not empty" } : {}
       };
       break;
     }
@@ -57527,17 +57226,11 @@ async function handleMcpReadResource(uri, env) {
         callAxonwalldApi("GET", "/v1/nas/disks"),
         callAxonwalldApi("GET", "/v1/nas/snapshots")
       ]);
-      const failedSources = [
-        ...!disksRes.ok ? ["disks"] : [],
-        ...!snapsRes.ok ? ["snapshots"] : []
-      ];
       payload = {
         telemetry: telRes.ok ? telRes.data : null,
         disks: disksRes.ok ? disksRes.data?.disks ?? [] : [],
         snapshots: snapsRes.ok ? snapsRes.data?.snapshots ?? [] : [],
-        ...!telRes.ok ? { daemonDown: true, error: telRes.data?.error || "axonwalld unreachable" } : {},
-        ...failedSources.length > 0 && telRes.ok ? { partialDaemonFailure: true, failedSources, error: "One or more NAS sources failed; the empty lists above are unknown, not empty" } : {},
-        ...failedSources.length > 0 && !telRes.ok ? { failedSources } : {}
+        ...!telRes.ok ? { daemonDown: true, error: telRes.data?.error || "axonwalld unreachable" } : {}
       };
       break;
     }
@@ -57671,8 +57364,8 @@ async function handleMcpCallTool(toolName, rawArgs, env) {
       const sigFilter = typeof args.signatureContains === "string" ? args.signatureContains.toLowerCase() : "";
       const matchingAlerts = [];
       try {
-        if (fs8.existsSync("/var/log/suricata/eve.json")) {
-          const lines = fs8.readFileSync("/var/log/suricata/eve.json", "utf8").trim().split("\n");
+        if (fs7.existsSync("/var/log/suricata/eve.json")) {
+          const lines = fs7.readFileSync("/var/log/suricata/eve.json", "utf8").trim().split("\n");
           for (let i = lines.length - 1; i >= 0 && matchingAlerts.length < limit; i--) {
             const line = lines[i];
             if (!line) continue;
@@ -57779,6 +57472,13 @@ async function handleMcpCallTool(toolName, rawArgs, env) {
       if (req.propagateToFleet) {
         const fleetErr = requireScope("mcp:fleet:broadcast", req.audit);
         if (fleetErr) return fleetErr;
+        if (!env.onFleetBroadcastBlock) {
+          return deny(
+            "mcp:fleet:broadcast",
+            "Fleet propagation is unavailable over this transport: the stdio MCP server runs in a separate process from the satellite sockets and cannot broadcast blocks. No block was created. Reconnect over the HTTP MCP endpoint to propagate a block to the fleet, or retry with propagateToFleet: false for a hub-only block.",
+            req.audit
+          );
+        }
       }
       const { ctx, activeLeasesCount } = await buildGuardContext(env.key, env.clientIp);
       if (activeLeasesCount >= env.key.policyLimits.maxActiveLeases) {
@@ -57812,7 +57512,7 @@ async function handleMcpCallTool(toolName, rawArgs, env) {
         fleetPropagatedCount = env.onFleetBroadcastBlock(
           targetCheck.normalizedTarget,
           req.audit.reason,
-          Math.ceil(boundedTtl / 60)
+          boundedTtl
         );
       }
       const auditEntry = recordMcpAuditEntry({
@@ -58085,8 +57785,8 @@ async function handleMcpCallTool(toolName, rawArgs, env) {
         return deny("mcp:traffic:*", "leaseId is required");
       }
       const leasesRes = await callAxonwalldApi("GET", "/v1/mcp/leases");
-      if (leasesRes.ok && Array.isArray(leasesRes.data?.leases)) {
-        const targetLease = leasesRes.data.leases.find((l) => l.id === leaseId);
+      const targetLease = leasesRes.ok && Array.isArray(leasesRes.data?.leases) ? leasesRes.data.leases.find((l) => l.id === leaseId) : void 0;
+      if (targetLease) {
         if (targetLease?.kind && !hasMcpScope(env.key, "mcp:firewall:write")) {
           const requiredForKind = targetLease.kind === "blackhole" ? "mcp:traffic:blackhole" : targetLease.kind === "shape" ? "mcp:traffic:shape" : targetLease.kind === "redirect" || targetLease.kind === "dns_sinkhole" ? "mcp:traffic:redirect" : null;
           if (requiredForKind && !hasMcpScope(env.key, requiredForKind)) {
@@ -58098,6 +57798,10 @@ async function handleMcpCallTool(toolName, rawArgs, env) {
       if (!daemonRes.ok) {
         return deny("mcp:traffic:*", daemonRes.data?.error || `Failed to revert lease '${leaseId}'`);
       }
+      let fleetUnblockedSatellites = 0;
+      if (targetLease?.kind === "blackhole" && targetLease.normalizedTarget && env.onFleetBroadcastUnblock) {
+        fleetUnblockedSatellites = env.onFleetBroadcastUnblock(targetLease.normalizedTarget, reason);
+      }
       recordMcpAuditEntry({
         keyId: env.key.id,
         keyName: env.key.name,
@@ -58106,7 +57810,7 @@ async function handleMcpCallTool(toolName, rawArgs, env) {
         toolName,
         requiredScope: "mcp:traffic:*",
         decision: "allowed",
-        paramsSummary: { leaseId, reason },
+        paramsSummary: { leaseId, reason, fleetUnblockedSatellites },
         leaseId
       });
       return {
@@ -58114,7 +57818,10 @@ async function handleMcpCallTool(toolName, rawArgs, env) {
           {
             type: "text",
             text: JSON.stringify(
-              daemonRes.data,
+              {
+                ...daemonRes.data && typeof daemonRes.data === "object" ? daemonRes.data : {},
+                fleetUnblockedSatellites
+              },
               null,
               2
             )
@@ -58127,6 +57834,10 @@ async function handleMcpCallTool(toolName, rawArgs, env) {
         return deny("mcp:firewall:apply", "Authorization denied: 'mcp_emergency_clear_all' requires scope 'mcp:firewall:apply'");
       }
       const reason = typeof args.reason === "string" ? args.reason.trim() : "Emergency flush via MCP";
+      const leasesBeforeFlush = await callAxonwalldApi("GET", "/v1/mcp/leases");
+      if (!leasesBeforeFlush.ok) {
+        console.error("[MCP] Could not list leases before emergency clear-all; fleet blackhole blocks may survive the flush");
+      }
       const daemonRes = await callAxonwalldApi("POST", "/v1/mcp/flush", {});
       if (!daemonRes.ok) {
         return deny(
@@ -58134,12 +57845,15 @@ async function handleMcpCallTool(toolName, rawArgs, env) {
           daemonRes.data?.error || "Daemon unavailable: emergency clear-all was not applied; tactical leases are still active"
         );
       }
-      const xdpRes = await callAxonwalldApi("DELETE", "/v1/ebpf/xdp/block", { clearAll: true });
-      if (!xdpRes.ok) {
-        return deny(
-          "mcp:firewall:apply",
-          `Emergency clear-all partially applied: tactical leases were flushed (${daemonRes.data?.clearedCount ?? 0} cleared) but the XDP fast-drop clear-all failed (${xdpRes.data?.error || `daemon HTTP ${xdpRes.status}`}); XDP blocks placed via mcp_xdp_fast_drop may still be enforced in the kernel`
-        );
+      await callAxonwalldApi("DELETE", "/v1/ebpf/xdp/block", { clearAll: true });
+      let fleetUnblockedSatellites = 0;
+      if (env.onFleetBroadcastUnblock && leasesBeforeFlush.ok && Array.isArray(leasesBeforeFlush.data?.leases)) {
+        const seenTargets = /* @__PURE__ */ new Set();
+        for (const lease of leasesBeforeFlush.data.leases) {
+          if (lease.kind !== "blackhole" || !lease.normalizedTarget || seenTargets.has(lease.normalizedTarget)) continue;
+          seenTargets.add(lease.normalizedTarget);
+          fleetUnblockedSatellites += env.onFleetBroadcastUnblock(lease.normalizedTarget, reason);
+        }
       }
       recordMcpAuditEntry({
         keyId: env.key.id,
@@ -58159,7 +57873,7 @@ async function handleMcpCallTool(toolName, rawArgs, env) {
               {
                 success: true,
                 clearedCount: daemonRes.data?.clearedCount ?? 0,
-                xdpCleared: true,
+                fleetUnblockedSatellites,
                 reason
               },
               null,
@@ -58333,7 +58047,9 @@ async function handleMcpCallTool(toolName, rawArgs, env) {
           return deny("mcp:firewall:write", "DesiredState file (/etc/axonwall/state.json) not found on appliance", req.audit);
         }
         insertMcpRuleIntoState(fresh, req.rule);
-        persistDesiredStateToDisk(fresh);
+        if (!persistDesiredStateToDisk(fresh)) {
+          return deny("mcp:firewall:write", "Could not persist the proposed rule to disk (DesiredState write failed); nothing was staged or applied", req.audit);
+        }
         liveState = fresh;
       } finally {
         releaseStateLock?.();
@@ -58353,7 +58069,7 @@ async function handleMcpCallTool(toolName, rawArgs, env) {
           confirmTimeoutSeconds: req.confirmTimeoutSeconds,
           files: compiled.files,
           jobId: applyJobId,
-          bundleHash: crypto7.createHash("sha256").update(hashInput).digest("hex"),
+          bundleHash: crypto5.createHash("sha256").update(hashInput).digest("hex"),
           nftablesRuleset: compiled.nftScript,
           reloadServices: compiled.reloadServices,
           commitConfirmTimeoutSec: req.confirmTimeoutSeconds
@@ -58772,6 +58488,13 @@ async function handleMcpCallTool(toolName, rawArgs, env) {
         paramsSummary: { includeBackups, includePci }
       });
       const daemonDown = !vmsRes.ok && !ctsRes.ok && !telRes.ok;
+      const failedSources = [
+        ...!vmsRes.ok ? ["vms"] : [],
+        ...!ctsRes.ok ? ["containers"] : [],
+        ...!telRes.ok ? ["telemetry"] : [],
+        ...includePci && !pciRes.ok ? ["pciDevices"] : [],
+        ...includeBackups && !backupsRes.ok ? ["backups"] : []
+      ];
       return {
         content: [
           {
@@ -58783,7 +58506,8 @@ async function handleMcpCallTool(toolName, rawArgs, env) {
                 ebpfTelemetry: telRes.ok ? telRes.data : null,
                 ...includePci ? { pciDevices: pciRes.ok ? pciRes.data?.devices ?? [] : [] } : {},
                 ...includeBackups ? { backups: backupsRes.ok ? backupsRes.data?.backups ?? [] : [] } : {},
-                ...daemonDown ? { daemonDown: true, error: vmsRes.data?.error || "axonwalld unreachable" } : {}
+                ...daemonDown ? { daemonDown: true, error: vmsRes.data?.error || "axonwalld unreachable" } : {},
+                ...failedSources.length > 0 && !daemonDown ? { partialDaemonFailure: true, failedSources, error: "One or more virt sources failed; the empty lists above are unknown, not empty" } : {}
               },
               null,
               2
@@ -58819,7 +58543,7 @@ async function handleMcpCallTool(toolName, rawArgs, env) {
           }
         }
       }
-      const safetyCheck = validateVirtWorkloadSafety(workloadName, req.action, localState?.hostedEdge?.enabled);
+      const safetyCheck = validateVirtWorkloadSafety(workloadName, req.action, localState?.hostedEdge?.enabled, req.id);
       if (!safetyCheck.valid) {
         return deny("mcp:virt:manage", safetyCheck.reason || "Virtualization action blocked by anti-lockout guard", req.audit);
       }
@@ -58848,7 +58572,7 @@ async function handleMcpCallTool(toolName, rawArgs, env) {
         }
         daemonRes = await callAxonwalldApi("POST", "/v1/virt/backups", {
           action: "restore",
-          archiveName: path7.basename(req.backupArchivePath),
+          archiveName: path6.basename(req.backupArchivePath),
           targetType: req.workloadType,
           targetId: req.id,
           pool: poolCheck.normalizedTarget
@@ -58975,7 +58699,7 @@ async function handleMcpCallTool(toolName, rawArgs, env) {
       }
       let compiledConfig = "";
       let hadPrevBpfToken = false;
-      let prevBpfToken = void 0;
+      let prevBpfToken;
       let releaseLock = null;
       try {
         try {
@@ -59018,7 +58742,9 @@ async function handleMcpCallTool(toolName, rawArgs, env) {
         };
         const compiled = compileLxcContainer(ct);
         compiledConfig = compiled.lxcConfig;
-        persistDesiredStateToDisk(fresh);
+        if (!persistDesiredStateToDisk(fresh)) {
+          return deny("mcp:virt:manage", "Could not persist the BPF_TOKEN delegation to disk (DesiredState write failed); nothing was staged or synced", req.audit);
+        }
       } finally {
         releaseLock?.();
       }
@@ -59036,27 +58762,35 @@ async function handleMcpCallTool(toolName, rawArgs, env) {
         auditViaBpfLsm: true,
         description: `Unprivileged LXC CT ${req.ctid} BPF_TOKEN delegation`
       }) : await callAxonwalldApi("DELETE", `/v1/ebpf/tokens?id=${encodeURIComponent(profileId)}`);
-      if (!daemonRes.ok && daemonRes.status >= 400 && daemonRes.status < 500) {
-        let rbRelease = null;
+      if (!daemonRes.ok) {
+        let releaseRollbackLock = null;
         try {
-          rbRelease = acquireMcpLockFile(desiredStateLockPath());
-          const rbState = loadLocalDesiredState();
-          const rbCt = rbState?.virt?.containers?.find((c) => c.ctid === req.ctid);
-          if (rbCt) {
-            if (hadPrevBpfToken) {
-              rbCt.bpfToken = prevBpfToken;
-            } else {
-              delete rbCt.bpfToken;
-            }
-            persistDesiredStateToDisk(rbState);
+          try {
+            releaseRollbackLock = acquireMcpLockFile(desiredStateLockPath());
+          } catch {
+            console.error("[MCP] Could not lock DesiredState to roll back a BPF_TOKEN delegation whose daemon sync failed; DesiredState still claims the change");
+            releaseRollbackLock = null;
           }
-        } catch {
+          if (releaseRollbackLock) {
+            const rollbackState = loadLocalDesiredState();
+            if (rollbackState) {
+              const rollbackCt = rollbackState.virt?.containers?.find((c) => c.ctid === req.ctid);
+              if (rollbackCt) {
+                if (hadPrevBpfToken) {
+                  rollbackCt.bpfToken = prevBpfToken;
+                } else {
+                  delete rollbackCt.bpfToken;
+                }
+                persistDesiredStateToDisk(rollbackState);
+              }
+            }
+          }
         } finally {
-          rbRelease?.();
+          releaseRollbackLock?.();
         }
         return deny(
           "mcp:ebpf:manage",
-          daemonRes.data?.error || `Daemon rejected LXC BPF_TOKEN delegation (HTTP ${daemonRes.status}); rolled back staged profile`,
+          daemonRes.data?.error || `Daemon ${req.enabled ? "rejected" : "failed to delete"} the BPF_TOKEN profile for CT ${req.ctid}; DesiredState change rolled back`,
           req.audit
         );
       }
@@ -59083,7 +58817,10 @@ async function handleMcpCallTool(toolName, rawArgs, env) {
                 enabled: req.enabled,
                 preset: req.preset,
                 stagedInDesiredState: true,
-                daemonProfileSync: daemonRes.ok ? "synced" : "staged_offline",
+                // B-H5 (round 3): 'staged_offline' is gone — a failed
+                // daemon sync denies above, so reaching here means
+                // the profile is synced.
+                daemonProfileSync: "synced",
                 compiledBpfDirectives: bpfLines,
                 auditEntryHash: auditEntry.recorded ? auditEntry.entryHash : null
               },
@@ -59200,10 +58937,6 @@ async function handleMcpCallTool(toolName, rawArgs, env) {
         decision: "allowed",
         paramsSummary: { includeDisks, includeSnapshots }
       });
-      const failedSources = [
-        ...includeDisks && !disksRes.ok ? ["disks"] : [],
-        ...includeSnapshots && !snapsRes.ok ? ["snapshots"] : []
-      ];
       return {
         content: [
           {
@@ -59213,9 +58946,7 @@ async function handleMcpCallTool(toolName, rawArgs, env) {
                 telemetry: telRes.ok ? telRes.data : null,
                 ...includeDisks ? { disks: disksRes.ok ? disksRes.data?.disks ?? [] : [] } : {},
                 ...includeSnapshots ? { snapshots: snapsRes.ok ? snapsRes.data?.snapshots ?? [] : [] } : {},
-                ...!telRes.ok ? { daemonDown: true, error: telRes.data?.error || "axonwalld unreachable" } : {},
-                ...failedSources.length > 0 && telRes.ok ? { partialDaemonFailure: true, failedSources, error: "One or more NAS sources failed; the empty lists above are unknown, not empty" } : {},
-                ...failedSources.length > 0 && !telRes.ok ? { failedSources } : {}
+                ...!telRes.ok ? { daemonDown: true, error: telRes.data?.error || "axonwalld unreachable" } : {}
               },
               null,
               2
@@ -59464,7 +59195,9 @@ async function handleMcpCallTool(toolName, rawArgs, env) {
           }
           const active = loadLocalDesiredState();
           const nextState = active ? mergeFirewallConfigs(active, report.state) : report.state;
-          persistDesiredStateToDisk(nextState);
+          if (!persistDesiredStateToDisk(nextState)) {
+            return deny("mcp:firewall:write", "Could not persist the imported configuration to disk (DesiredState write failed); nothing was staged", req.audit);
+          }
           staged = true;
         } finally {
           releaseLock?.();
@@ -59544,7 +59277,7 @@ async function processMcpJsonRpcMessage(msg, env) {
             protocolVersion: "2024-11-05",
             serverInfo: {
               name: "axonwall-firewall-mcp",
-              version: "0.11.64"
+              version: resolveMcpServerVersion()
             },
             capabilities: {
               resources: { listChanged: false },
@@ -59625,7 +59358,7 @@ function buildArtifactBundle(jobId, state) {
     files: [...files].sort((a, b) => a.path.localeCompare(b.path)).map((f) => ({ path: f.path, content: f.content, fileMode: f.fileMode })),
     reloadServices: [...reloadServices].sort()
   });
-  const hash2 = crypto8.createHash("sha256").update(hashInput).digest("hex");
+  const hash2 = crypto6.createHash("sha256").update(hashInput).digest("hex");
   return {
     jobId,
     bundleHash: hash2,
@@ -59646,40 +59379,61 @@ function leafChainsToCa(certPath, caPath) {
   }
 }
 function assertNotOperatorCaWithoutKey(caPath, caKeyPath) {
-  if (fs9.existsSync(caPath) && !fs9.existsSync(caKeyPath)) {
+  if (fs8.existsSync(caPath) && !fs8.existsSync(caKeyPath)) {
     throw new Error(
       "[Axonwall Controller] Refusing to mint a self-signed hub certificate: ca.crt exists but no matching on-box CA key was found (operator-CA mode). Install an operator-issued hub.crt/hub.key pair that chains to ca.crt, or remove ca.crt to use appliance-CA provisioning."
     );
   }
 }
 var HUB_CERT_SAN = "DNS:localhost,DNS:axonwall.local,IP:127.0.0.1";
+function certKeyPairMatches(certPath, keyPath) {
+  try {
+    const cert = new crypto6.X509Certificate(fs8.readFileSync(certPath));
+    const key = crypto6.createPrivateKey(fs8.readFileSync(keyPath));
+    const certPub = cert.publicKey.export({ type: "spki", format: "der" });
+    const keyPub = crypto6.createPublicKey(key).export({ type: "spki", format: "der" });
+    return Buffer.compare(certPub, keyPub) === 0;
+  } catch {
+    return null;
+  }
+}
 function generateSelfSignedCert(targetKeyPath, targetCertPath, days) {
-  child_process.execFileSync(
-    "openssl",
-    [
-      "req",
-      "-x509",
-      "-newkey",
-      "rsa:2048",
-      "-nodes",
-      "-keyout",
-      targetKeyPath,
-      "-out",
-      targetCertPath,
-      "-days",
-      days,
-      "-subj",
-      "/O=Axonwall/OU=Appliance/CN=axonwall",
-      "-addext",
-      `subjectAltName=${HUB_CERT_SAN}`
-    ],
-    { timeout: 15e3, stdio: "ignore" }
-  );
+  const tmpKeyPath = `${targetKeyPath}.tmp-${process.pid}`;
+  try {
+    child_process.execFileSync(
+      "openssl",
+      [
+        "req",
+        "-x509",
+        "-newkey",
+        "rsa:2048",
+        "-nodes",
+        "-keyout",
+        tmpKeyPath,
+        "-out",
+        targetCertPath,
+        "-days",
+        days,
+        "-subj",
+        "/O=Axonwall/OU=Appliance/CN=axonwall",
+        "-addext",
+        `subjectAltName=${HUB_CERT_SAN}`
+      ],
+      { timeout: 15e3, stdio: "ignore" }
+    );
+    fs8.renameSync(tmpKeyPath, targetKeyPath);
+  } finally {
+    try {
+      fs8.unlinkSync(tmpKeyPath);
+    } catch {
+    }
+  }
 }
 function generateSignedOrSelfSignedCert(targetKeyPath, targetCertPath, days, caPath, caKeyPath) {
-  if (fs9.existsSync(caPath) && fs9.existsSync(caKeyPath)) {
+  if (fs8.existsSync(caPath) && fs8.existsSync(caKeyPath)) {
     const csrPath = `${targetCertPath}.csr`;
     const extPath = `${targetCertPath}.ext`;
+    const tmpKeyPath = `${targetKeyPath}.tmp-${process.pid}`;
     try {
       child_process.execFileSync(
         "openssl",
@@ -59689,7 +59443,7 @@ function generateSignedOrSelfSignedCert(targetKeyPath, targetCertPath, days, caP
           "rsa:2048",
           "-nodes",
           "-keyout",
-          targetKeyPath,
+          tmpKeyPath,
           "-out",
           csrPath,
           "-subj",
@@ -59697,7 +59451,7 @@ function generateSignedOrSelfSignedCert(targetKeyPath, targetCertPath, days, caP
         ],
         { timeout: 15e3, stdio: "ignore" }
       );
-      fs9.writeFileSync(
+      fs8.writeFileSync(
         extPath,
         `basicConstraints=CA:FALSE
 keyUsage=digitalSignature,keyEncipherment
@@ -59728,13 +59482,18 @@ subjectAltName=${HUB_CERT_SAN}
         ],
         { timeout: 15e3, stdio: "ignore" }
       );
+      fs8.renameSync(tmpKeyPath, targetKeyPath);
     } finally {
       try {
-        fs9.unlinkSync(csrPath);
+        fs8.unlinkSync(csrPath);
       } catch {
       }
       try {
-        fs9.unlinkSync(extPath);
+        fs8.unlinkSync(extPath);
+      } catch {
+      }
+      try {
+        fs8.unlinkSync(tmpKeyPath);
       } catch {
       }
     }
@@ -59743,7 +59502,7 @@ subjectAltName=${HUB_CERT_SAN}
   }
 }
 function verifyFreshLeafOrThrow(certPath, caPath) {
-  if (!fs9.existsSync(caPath)) return;
+  if (!fs8.existsSync(caPath)) return;
   if (leafChainsToCa(certPath, caPath) === false) {
     throw new Error(
       `[Axonwall Controller] Freshly minted hub certificate does not chain to the on-disk CA (${caPath}); refusing to serve it. Regenerate the CA or remove the stale CA certificate.`
@@ -59751,9 +59510,9 @@ function verifyFreshLeafOrThrow(certPath, caPath) {
   }
 }
 function mintEmergencyTlsCert(caPath, caKeyPath) {
-  const tmpDir = fs9.mkdtempSync(path8.join(os.tmpdir(), "axonwall-tls-"));
-  const tmpKey = path8.join(tmpDir, "hub.key");
-  const tmpCert = path8.join(tmpDir, "hub.crt");
+  const tmpDir = fs8.mkdtempSync(path7.join(os.tmpdir(), "axonwall-tls-"));
+  const tmpKey = path7.join(tmpDir, "hub.key");
+  const tmpCert = path7.join(tmpDir, "hub.crt");
   try {
     let caSigned = true;
     try {
@@ -59763,12 +59522,12 @@ function mintEmergencyTlsCert(caPath, caKeyPath) {
       generateSelfSignedCert(tmpKey, tmpCert, "30");
       caSigned = false;
     }
-    if (caSigned && fs9.existsSync(caPath) && leafChainsToCa(tmpCert, caPath) === false) {
+    if (caSigned && fs8.existsSync(caPath) && leafChainsToCa(tmpCert, caPath) === false) {
       console.warn("[Axonwall Controller] Emergency CA-signed certificate does not chain to the on-disk CA; minting a pure self-signed fallback instead.");
       generateSelfSignedCert(tmpKey, tmpCert, "30");
     }
-    const cert = fs9.readFileSync(tmpCert);
-    const key = fs9.readFileSync(tmpKey);
+    const cert = fs8.readFileSync(tmpCert);
+    const key = fs8.readFileSync(tmpKey);
     if (cert.length > 0 && key.length > 0) return { cert, key };
     return null;
   } catch (err) {
@@ -59776,34 +59535,36 @@ function mintEmergencyTlsCert(caPath, caKeyPath) {
     return null;
   } finally {
     try {
-      fs9.unlinkSync(tmpKey);
+      fs8.unlinkSync(tmpKey);
     } catch {
     }
     try {
-      fs9.unlinkSync(tmpCert);
+      fs8.unlinkSync(tmpCert);
     } catch {
     }
     try {
-      fs9.rmdirSync(tmpDir);
+      fs8.rmdirSync(tmpDir);
     } catch {
     }
   }
 }
-function ensureControllerTls(certPath = resolveControllerDirs().certPath, keyPath = resolveControllerDirs().keyPath, caPath = resolveControllerDirs().caPath, caKeyPath = path8.join(path8.dirname(caPath), "ca.key")) {
+function ensureControllerTls(certPath = resolveControllerDirs().certPath, keyPath = resolveControllerDirs().keyPath, caPath = resolveControllerDirs().caPath, caKeyPath = path7.join(path7.dirname(caPath), "ca.key")) {
   if (process.env.AXONWALL_INSECURE_HTTP === "1") {
     console.warn("[Axonwall Controller] AXONWALL_INSECURE_HTTP=1 is set: running in plaintext mode (DEV/TEST ONLY)");
     return null;
   }
-  if (fs9.existsSync(certPath) && fs9.existsSync(keyPath)) {
+  if (fs8.existsSync(certPath) && fs8.existsSync(keyPath)) {
     try {
-      const certStat = fs9.statSync(certPath);
-      const keyStat = fs9.statSync(keyPath);
+      const certStat = fs8.statSync(certPath);
+      const keyStat = fs8.statSync(keyPath);
       if (certStat.size > 0 && keyStat.size > 0) {
-        const cert = fs9.readFileSync(certPath);
-        const key = fs9.readFileSync(keyPath);
-        const ca2 = fs9.existsSync(caPath) ? fs9.readFileSync(caPath) : void 0;
+        const cert = fs8.readFileSync(certPath);
+        const key = fs8.readFileSync(keyPath);
+        const ca2 = fs8.existsSync(caPath) ? fs8.readFileSync(caPath) : void 0;
         if (ca2 && leafChainsToCa(certPath, caPath) === false) {
           console.warn("[Axonwall Controller] Existing hub certificate does not chain to the on-disk CA; ignoring it so it can be re-provisioned instead of served.");
+        } else if (certKeyPairMatches(certPath, keyPath) !== true) {
+          console.warn("[Axonwall Controller] Existing hub certificate and key do not match (or could not be parsed); ignoring the pair so it can be re-provisioned instead of served.");
         } else {
           return { cert, key, ca: ca2 };
         }
@@ -59813,18 +59574,20 @@ function ensureControllerTls(certPath = resolveControllerDirs().certPath, keyPat
     }
   }
   const rotateCandidates = ["/usr/local/bin/axonwall-rotate-hub-cert", "/usr/bin/axonwall-rotate-hub-cert"];
-  const rotateBin = rotateCandidates.find((p) => fs9.existsSync(p));
+  const rotateBin = rotateCandidates.find((p) => fs8.existsSync(p));
   if (rotateBin) {
     try {
       console.log(`[Axonwall Controller] Running ${rotateBin} --ensure to provision hub TLS certificate...`);
       child_process.execFileSync(rotateBin, ["--ensure"], { timeout: 15e3, stdio: "ignore" });
-      if (fs9.existsSync(certPath) && fs9.existsSync(keyPath)) {
-        const cert = fs9.readFileSync(certPath);
-        const key = fs9.readFileSync(keyPath);
+      if (fs8.existsSync(certPath) && fs8.existsSync(keyPath)) {
+        const cert = fs8.readFileSync(certPath);
+        const key = fs8.readFileSync(keyPath);
         if (cert.length > 0 && key.length > 0) {
-          const ca2 = fs9.existsSync(caPath) ? fs9.readFileSync(caPath) : void 0;
+          const ca2 = fs8.existsSync(caPath) ? fs8.readFileSync(caPath) : void 0;
           if (ca2 && leafChainsToCa(certPath, caPath) === false) {
             console.warn("[Axonwall Controller] Rotated hub certificate does not chain to the on-disk CA; ignoring it so it can be re-provisioned instead of served.");
+          } else if (certKeyPairMatches(certPath, keyPath) !== true) {
+            console.warn("[Axonwall Controller] Rotated hub certificate and key do not match; ignoring the pair so it can be re-provisioned instead of served.");
           } else {
             return { cert, key, ca: ca2 };
           }
@@ -59837,21 +59600,23 @@ function ensureControllerTls(certPath = resolveControllerDirs().certPath, keyPat
   assertNotOperatorCaWithoutKey(caPath, caKeyPath);
   let minted = null;
   try {
-    const certDir = path8.dirname(certPath);
-    if (!fs9.existsSync(certDir)) {
-      fs9.mkdirSync(certDir, { recursive: true, mode: 488 });
+    const certDir = path7.dirname(certPath);
+    if (!fs8.existsSync(certDir)) {
+      fs8.mkdirSync(certDir, { recursive: true, mode: 488 });
     }
     generateSignedOrSelfSignedCert(keyPath, certPath, "3650", caPath, caKeyPath);
-    if (fs9.existsSync(certPath) && fs9.existsSync(keyPath)) {
-      const cert = fs9.readFileSync(certPath);
-      const key = fs9.readFileSync(keyPath);
+    if (fs8.existsSync(certPath) && fs8.existsSync(keyPath)) {
+      const cert = fs8.readFileSync(certPath);
+      const key = fs8.readFileSync(keyPath);
       try {
-        fs9.chmodSync(keyPath, 384);
-        fs9.chmodSync(certPath, 420);
+        fs8.chmodSync(keyPath, 384);
+        fs8.chmodSync(certPath, 420);
       } catch {
       }
-      if (cert.length > 0 && key.length > 0) {
+      if (cert.length > 0 && key.length > 0 && certKeyPairMatches(certPath, keyPath) === true) {
         minted = { cert, key };
+      } else if (cert.length > 0 && key.length > 0) {
+        console.warn("[Axonwall Controller] Freshly minted hub certificate and key do not match; ignoring the pair so the emergency fallback is used instead of serving it.");
       }
     }
   } catch (err) {
@@ -59859,12 +59624,12 @@ function ensureControllerTls(certPath = resolveControllerDirs().certPath, keyPat
   }
   if (minted) {
     console.log("[Axonwall Controller] Successfully generated local hub certificate via openssl");
-    const ca2 = fs9.existsSync(caPath) ? fs9.readFileSync(caPath) : void 0;
+    const ca2 = fs8.existsSync(caPath) ? fs8.readFileSync(caPath) : void 0;
     verifyFreshLeafOrThrow(certPath, caPath);
     return { cert: minted.cert, key: minted.key, ca: ca2 };
   }
   assertNotOperatorCaWithoutKey(caPath, caKeyPath);
-  const ca = fs9.existsSync(caPath) ? fs9.readFileSync(caPath) : void 0;
+  const ca = fs8.existsSync(caPath) ? fs8.readFileSync(caPath) : void 0;
   const emergency = mintEmergencyTlsCert(caPath, caKeyPath);
   if (emergency) {
     console.warn(
@@ -59919,7 +59684,7 @@ function secureTokenEquals(presented, expected) {
   const presentedBuf = Buffer.from(presented);
   const expectedBuf = Buffer.from(expected);
   if (presentedBuf.length !== expectedBuf.length) return false;
-  return crypto8.timingSafeEqual(presentedBuf, expectedBuf);
+  return crypto6.timingSafeEqual(presentedBuf, expectedBuf);
 }
 function validateHaTransition(payload, fleetLanVip) {
   const rawRole = String(payload.role ?? payload.state ?? payload.type ?? "").toLowerCase();
@@ -59964,12 +59729,56 @@ function validateHaTransition(payload, fleetLanVip) {
     lanVip
   };
 }
+function validateFleetBlockTarget(payload) {
+  const rawTarget = typeof payload?.target === "string" ? payload.target.trim() : "";
+  const isMac = Boolean(payload?.isMac);
+  if (!rawTarget) {
+    return { ok: false, status: 400, error: "Missing target" };
+  }
+  let target = rawTarget;
+  if (isMac) {
+    const macRegex = /^([0-9a-fA-F]{2}[:-]){5}([0-9a-fA-F]{2})$/;
+    if (!macRegex.test(rawTarget)) {
+      return { ok: false, status: 400, error: "Invalid MAC address target" };
+    }
+    target = rawTarget.toLowerCase().replace(/-/g, ":");
+  } else {
+    const slashParts = rawTarget.split("/");
+    if (slashParts.length > 2) {
+      return { ok: false, status: 400, error: "Invalid IP address or CIDR target" };
+    }
+    const ipPart = slashParts[0] || "";
+    const prefixStr = slashParts[1];
+    const ipFamily = net.isIP(ipPart);
+    if (ipFamily !== 4 && ipFamily !== 6) {
+      return { ok: false, status: 400, error: "Invalid IP address or CIDR target" };
+    }
+    if (prefixStr !== void 0) {
+      if (!/^\d{1,3}$/.test(prefixStr)) {
+        return { ok: false, status: 400, error: "Invalid CIDR prefix length" };
+      }
+      const prefixNum = Number(prefixStr);
+      const maxPrefix = ipFamily === 4 ? 32 : 128;
+      if (prefixNum < 0 || prefixNum > maxPrefix) {
+        return { ok: false, status: 400, error: "Invalid CIDR prefix length" };
+      }
+    }
+  }
+  return { ok: true, target, isMac };
+}
+function parseFleetBlockTtl(payload) {
+  const raw = payload?.ttlSeconds;
+  if (raw === void 0 || raw === null || raw === "") return 0;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0) return 0;
+  return Math.min(Math.floor(n), 604800);
+}
 function loadPersistedHaState() {
   const paths = process.env.AXONWALL_HA_STATE_PATH ? [process.env.AXONWALL_HA_STATE_PATH] : resolveControllerDirs().haStatePaths;
   for (const p of paths) {
     try {
-      if (fs9.existsSync(p)) {
-        const raw = JSON.parse(fs9.readFileSync(p, "utf8"));
+      if (fs8.existsSync(p)) {
+        const raw = JSON.parse(fs8.readFileSync(p, "utf8"));
         if (raw && typeof raw === "object" && (typeof raw.activeHaEdgeId === "string" || raw.activeHaEdgeId === null)) {
           const out = { activeHaEdgeId: raw.activeHaEdgeId ?? null };
           if (typeof raw.sharedWanMac === "string") out.sharedWanMac = raw.sharedWanMac;
@@ -59987,8 +59796,8 @@ function persistHaState(state) {
   const payload = JSON.stringify(state, null, 2);
   for (const p of paths) {
     try {
-      fs9.mkdirSync(path8.dirname(p), { recursive: true, mode: 509 });
-      fs9.writeFileSync(p, payload, { mode: 384 });
+      fs8.mkdirSync(path7.dirname(p), { recursive: true, mode: 509 });
+      fs8.writeFileSync(p, payload, { mode: 384 });
     } catch {
     }
   }
@@ -60009,58 +59818,38 @@ function computeRoutesToDelete(previous, current) {
 }
 function loadPersistedSyncedRoutes() {
   const paths = process.env.AXONWALL_SYNCED_ROUTES_PATH ? [process.env.AXONWALL_SYNCED_ROUTES_PATH] : resolveControllerDirs().syncedRoutesStatePaths;
-  const canonicalPath = paths[0];
-  return readCanonicalConfig({
-    canonicalPath,
-    mirrorPaths: paths.slice(1),
-    parse: (raw) => {
-      try {
-        const parsed = JSON.parse(raw);
-        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
-        const out = {};
-        for (const [satId, routes] of Object.entries(parsed)) {
-          if (!Array.isArray(routes)) continue;
-          out[satId] = routes.filter(
-            (r) => !!r && typeof r === "object" && typeof r.destination === "string" && typeof r.gateway === "string" && (r.device === void 0 || typeof r.device === "string")
-          ).map((r) => ({ destination: r.destination, gateway: r.gateway, ...r.device ? { device: r.device } : {} }));
+  for (const p of paths) {
+    try {
+      if (fs8.existsSync(p)) {
+        const raw = JSON.parse(fs8.readFileSync(p, "utf8"));
+        if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+          const out = {};
+          for (const [satId, routes] of Object.entries(raw)) {
+            if (!Array.isArray(routes)) continue;
+            out[satId] = routes.filter(
+              (r) => !!r && typeof r === "object" && typeof r.destination === "string" && typeof r.gateway === "string" && (r.device === void 0 || typeof r.device === "string")
+            ).map((r) => ({ destination: r.destination, gateway: r.gateway, ...r.device ? { device: r.device } : {} }));
+          }
+          return out;
         }
-        return out;
-      } catch {
-        return null;
       }
-    },
-    label: "synced-routes.json"
-  });
+    } catch {
+    }
+  }
+  return null;
 }
 function persistSyncedRoutes(routes) {
   const paths = process.env.AXONWALL_SYNCED_ROUTES_PATH ? [process.env.AXONWALL_SYNCED_ROUTES_PATH] : resolveControllerDirs().syncedRoutesStatePaths;
   const payload = JSON.stringify(routes, null, 2);
-  try {
-    writeCanonicalConfig({
-      canonicalPath: paths[0],
-      mirrorPaths: paths.slice(1),
-      serialized: payload,
-      mode: 384,
-      label: "synced-routes.json"
-    });
-    return true;
-  } catch (err) {
-    console.error(
-      `[Fleet Manager] FAILED to persist synced-routes record (${err?.message || err}). The in-memory record is authoritative only for this process lifetime; after a controller restart, routes removed while the record was unpersisted will NOT be deleted from edge kernels and will linger there.`
-    );
-    return false;
+  for (const p of paths) {
+    try {
+      fs8.mkdirSync(path7.dirname(p), { recursive: true, mode: 509 });
+      fs8.writeFileSync(p, payload, { mode: 384 });
+    } catch {
+    }
   }
 }
 var PENDING_COMMAND_STALE_MS = 5 * 60 * 1e3;
-var PENDING_COMMAND_SHORT_STALE_MS = 60 * 1e3;
-var SHORT_STALE_COMMANDS = /* @__PURE__ */ new Set(["PROMOTE", "DEMOTE", "BLOCK_TARGET", "UNBLOCK_TARGET"]);
-function pendingCommandStaleMsFor(command) {
-  return SHORT_STALE_COMMANDS.has(command) ? PENDING_COMMAND_SHORT_STALE_MS : PENDING_COMMAND_STALE_MS;
-}
-function missingCommandAckError(command, commandId, sentAtMs, nowMs, staleMs = pendingCommandStaleMsFor(command)) {
-  const waitedSec = Math.round((nowMs - sentAtMs) / 1e3);
-  return `${command}: no COMMAND_ACK received within ${Math.round(staleMs / 1e3)}s of sending ${command} (${commandId}); sent ${waitedSec}s ago \u2014 the command may never have been applied`;
-}
 function buildSatelliteCommandEnvelope(type, payload, commandId) {
   return JSON.stringify({ type, commandId, payload });
 }
@@ -60290,7 +60079,7 @@ async function main() {
   const pendingCommands = /* @__PURE__ */ new Map();
   const sendToSatellite = (sat, type, payload) => {
     if (!sat.ws || sat.ws.readyState !== import_websocket.default.OPEN) return null;
-    const commandId = `cmd_${crypto8.randomUUID()}`;
+    const commandId = `cmd_${crypto6.randomUUID()}`;
     pendingCommands.set(commandId, { satId: sat.id, command: type, sentAt: Date.now() });
     sat.ws.send(buildSatelliteCommandEnvelope(type, payload, commandId));
     return commandId;
@@ -60321,23 +60110,21 @@ async function main() {
     }) !== null;
   };
   function loadLocalDesiredState2() {
-    const dirs = resolveControllerDirs();
-    return readCanonicalConfig({
-      canonicalPath: dirs.stateFile,
-      mirrorPaths: [path8.join(dirs.etcDir, "state.json")],
-      parse: (raw) => {
-        try {
-          const parsed = DesiredStateSchema.safeParse(JSON.parse(raw));
-          return parsed.success ? parsed.data : null;
-        } catch {
-          return null;
+    const candidates = resolveControllerDirs().desiredStateCandidates;
+    for (const p of candidates) {
+      try {
+        if (fs8.existsSync(p)) {
+          const raw = JSON.parse(fs8.readFileSync(p, "utf8"));
+          const parsed = DesiredStateSchema.safeParse(raw);
+          if (parsed.success) return parsed.data;
         }
-      },
-      label: "state.json"
-    });
+      } catch {
+      }
+    }
+    return null;
   }
   function syncSatelliteDesiredState(sat, desiredState) {
-    if (!sat.ws || sat.ws.readyState !== import_websocket.default.OPEN) return;
+    if (!sat.ws || sat.ws.readyState !== import_websocket.default.OPEN) return false;
     const localState = desiredState !== void 0 && desiredState !== null ? desiredState : loadLocalDesiredState2();
     const fleetNode = localState?.fleet?.nodes?.find((n) => n.id === sat.id);
     const hostedEdge = localState?.hostedEdge;
@@ -60363,10 +60150,10 @@ async function main() {
       ]
     };
     const { nftScript } = compileSatelliteNftables(mergedNode);
-    sendToSatellite(sat, "SYNC_NFTABLES", { script: nftScript });
+    const nftSent = sendToSatellite(sat, "SYNC_NFTABLES", { script: nftScript }) !== null;
     if (isEdge && localState === null) {
       console.warn(`[fleet] No DesiredState on disk for satellite ${sat.id}; skipping SYNC_INTERFACES/SYNC_ROUTES (nftables sync still sent)`);
-      return;
+      return nftSent;
     }
     if (isEdge) {
       const wanDev = resolvedWanInterface;
@@ -60417,11 +60204,10 @@ async function main() {
       if (sendToSatellite(sat, "SYNC_ROUTES", { routes: enabledRoutes, routesToDelete }) !== null) {
         sat.lastSyncedRoutes = enabledRoutes;
         persistedSyncedRoutes[sat.id] = enabledRoutes;
-        if (!persistSyncedRoutes(persistedSyncedRoutes)) {
-          console.error(`[Fleet Manager] Synced-routes record for satellite ${sat.id} was NOT persisted to disk; route deletions for this satellite will be lost on controller restart.`);
-        }
+        persistSyncedRoutes(persistedSyncedRoutes);
       }
     }
+    return nftSent;
   }
   const prometheusRegistry = new import_prom_client.default.Registry();
   import_prom_client.default.collectDefaultMetrics({ register: prometheusRegistry });
@@ -60486,7 +60272,7 @@ async function main() {
       return;
     }
     const verifyFleetAuth = (req2, res2) => {
-      if (fs9.existsSync(caPath)) {
+      if (fs8.existsSync(caPath)) {
         const tlsSocket = req2.socket;
         let peerCert = null;
         try {
@@ -60562,54 +60348,63 @@ async function main() {
         if (aborted2) return;
         try {
           const payload = JSON.parse(body);
-          const rawTarget = typeof payload.target === "string" ? payload.target.trim() : "";
-          const isMac = Boolean(payload.isMac);
-          if (!rawTarget) {
-            res.writeHead(400, { "Content-Type": "application/json" });
-            return res.end(JSON.stringify({ error: "Missing target" }));
+          const validation = validateFleetBlockTarget(payload);
+          if (!validation.ok) {
+            res.writeHead(validation.status, { "Content-Type": "application/json" });
+            return res.end(JSON.stringify({ error: validation.error }));
           }
-          let target = rawTarget;
-          if (isMac) {
-            const macRegex = /^([0-9a-fA-F]{2}[:-]){5}([0-9a-fA-F]{2})$/;
-            if (!macRegex.test(rawTarget)) {
-              res.writeHead(400, { "Content-Type": "application/json" });
-              return res.end(JSON.stringify({ error: "Invalid MAC address target" }));
-            }
-            target = rawTarget.toLowerCase().replace(/-/g, ":");
-          } else {
-            const slashParts = rawTarget.split("/");
-            if (slashParts.length > 2) {
-              res.writeHead(400, { "Content-Type": "application/json" });
-              return res.end(JSON.stringify({ error: "Invalid IP address or CIDR target" }));
-            }
-            const ipPart = slashParts[0] || "";
-            const prefixStr = slashParts[1];
-            const ipFamily = net.isIP(ipPart);
-            if (ipFamily !== 4 && ipFamily !== 6) {
-              res.writeHead(400, { "Content-Type": "application/json" });
-              return res.end(JSON.stringify({ error: "Invalid IP address or CIDR target" }));
-            }
-            if (prefixStr !== void 0) {
-              if (!/^\d{1,3}$/.test(prefixStr)) {
-                res.writeHead(400, { "Content-Type": "application/json" });
-                return res.end(JSON.stringify({ error: "Invalid CIDR prefix length" }));
-              }
-              const prefixNum = Number(prefixStr);
-              const maxPrefix = ipFamily === 4 ? 32 : 128;
-              if (prefixNum < 0 || prefixNum > maxPrefix) {
-                res.writeHead(400, { "Content-Type": "application/json" });
-                return res.end(JSON.stringify({ error: "Invalid CIDR prefix length" }));
-              }
-            }
-          }
-          console.log(`[Fleet Manager] AI Copilot requested global block for: ${target} (isMac: ${isMac})`);
+          const { target, isMac } = validation;
+          const ttlSeconds = parseFleetBlockTtl(payload);
+          console.log(`[Fleet Manager] AI Copilot requested global block for: ${target} (isMac: ${isMac}, ttlSeconds: ${ttlSeconds})`);
           let count = 0;
           for (const sat of activeSatellites.values()) {
-            if (sat.ws && sat.ws.readyState === import_websocket.default.OPEN) {
-              sat.ws.send(JSON.stringify({
-                type: "BLOCK_TARGET",
-                payload: { target, isMac }
-              }));
+            if (sendToSatellite(sat, "BLOCK_TARGET", { target, isMac, ttlSeconds }) !== null) {
+              count++;
+            }
+          }
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({
+            success: true,
+            notifiedSatellites: count,
+            ttlSeconds,
+            ...ttlSeconds > 0 ? { expiresAt: new Date(Date.now() + ttlSeconds * 1e3).toISOString() } : {}
+          }));
+        } catch (err) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Invalid JSON" }));
+        }
+      });
+      return;
+    }
+    if (pathname === "/api/v1/fleet/unblock" && req.method === "POST") {
+      if (!verifyFleetAuth(req, res)) return;
+      let body = "";
+      let aborted2 = false;
+      req.on("data", (chunk) => {
+        if (aborted2) return;
+        body += chunk.toString();
+        if (body.length > 65536) {
+          aborted2 = true;
+          res.writeHead(413, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Payload too large" }));
+          req.destroy();
+          return;
+        }
+      });
+      req.on("end", () => {
+        if (aborted2) return;
+        try {
+          const payload = JSON.parse(body);
+          const validation = validateFleetBlockTarget(payload);
+          if (!validation.ok) {
+            res.writeHead(validation.status, { "Content-Type": "application/json" });
+            return res.end(JSON.stringify({ error: validation.error }));
+          }
+          const { target, isMac } = validation;
+          console.log(`[Fleet Manager] AI Copilot requested global unblock for: ${target} (isMac: ${isMac})`);
+          let count = 0;
+          for (const sat of activeSatellites.values()) {
+            if (sendToSatellite(sat, "UNBLOCK_TARGET", { target, isMac }) !== null) {
               count++;
             }
           }
@@ -60732,8 +60527,7 @@ async function main() {
         }
         let synced = 0;
         for (const sat of activeSatellites.values()) {
-          if (sat.ws && sat.ws.readyState === import_websocket.default.OPEN) {
-            syncSatelliteDesiredState(sat, desired);
+          if (syncSatelliteDesiredState(sat, desired)) {
             synced++;
           }
         }
@@ -60821,10 +60615,26 @@ data: /api/v1/mcp
             const rpcResp = await processMcpJsonRpcMessage(rpcPayload, {
               key: authenticatedKey,
               clientIp,
-              onFleetBroadcastBlock: (targetIp) => {
+              // B-H1 (round 3): carry the lease TTL (seconds) into
+              // the BLOCK_TARGET envelope so the satellite expires
+              // its block with the hub lease instead of forever.
+              // The old callback dropped the third argument entirely.
+              onFleetBroadcastBlock: (targetIp, _reason, ttlSeconds) => {
                 let notified = 0;
                 for (const sat of activeSatellites.values()) {
-                  if (sendToSatellite(sat, "BLOCK_TARGET", { target: targetIp, isMac: false }) !== null) {
+                  if (sendToSatellite(sat, "BLOCK_TARGET", { target: targetIp, isMac: false, ttlSeconds }) !== null) {
+                    notified++;
+                  }
+                }
+                return notified;
+              },
+              // B-H1 (round 3): the unblock half — mcp_revert_lease
+              // and mcp_emergency_clear_all call this so a reverted
+              // or flushed hub lease is lifted from the fleet too.
+              onFleetBroadcastUnblock: (targetIp) => {
+                let notified = 0;
+                for (const sat of activeSatellites.values()) {
+                  if (sendToSatellite(sat, "UNBLOCK_TARGET", { target: targetIp, isMac: false }) !== null) {
                     notified++;
                   }
                 }
@@ -60994,7 +60804,7 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
         socket.destroy();
         return;
       }
-      if (fs9.existsSync(caPath)) {
+      if (fs8.existsSync(caPath)) {
         const tlsSocket = socket;
         if (!tlsSocket.authorized) {
           console.log(`[Fleet Manager] Rejected connection: unauthorized client TLS certificate for ${satId}`);
@@ -61118,16 +60928,13 @@ ${headerLines.join("\r\n")}\r
           keepAliveSec: 25
         };
       });
-      sat.ws.send(JSON.stringify({
-        type: "SYNC_WIREGUARD",
-        payload: {
-          interfaceName: "wg-axon0",
-          tunnelIp: sat.tunnelIp,
-          listenPort: 51820,
-          privateKey: sat.wgPrivateKey,
-          peers
-        }
-      }));
+      sendToSatellite(sat, "SYNC_WIREGUARD", {
+        interfaceName: "wg-axon0",
+        tunnelIp: sat.tunnelIp,
+        listenPort: 51820,
+        privateKey: sat.wgPrivateKey,
+        peers
+      });
     }
   }
   const meshPruneTimer = setInterval(() => {
@@ -61143,18 +60950,9 @@ ${headerLines.join("\r\n")}\r
   const heartbeatTimer = setInterval(() => {
     const now = Date.now();
     for (const [commandId, pending] of pendingCommands.entries()) {
-      if (isPendingCommandStale(pending.sentAt, now, pendingCommandStaleMsFor(pending.command))) {
+      if (isPendingCommandStale(pending.sentAt, now)) {
         pendingCommands.delete(commandId);
-        const sat = activeSatellites.get(pending.satId);
-        if (sat) {
-          recordCommandAck(sat, {
-            command: pending.command,
-            commandId,
-            success: false,
-            error: missingCommandAckError(pending.command, commandId, pending.sentAt, now)
-          });
-        }
-        console.warn(`[Fleet Manager] No COMMAND_ACK from ${pending.satId} for ${pending.command} (${commandId}) sent ${Math.round((now - pending.sentAt) / 1e3)}s ago; recorded as lastApplyError for that satellite`);
+        console.warn(`[Fleet Manager] No COMMAND_ACK from ${pending.satId} for ${pending.command} (${commandId}) sent ${Math.round((now - pending.sentAt) / 1e3)}s ago`);
       }
     }
     for (const [id, sat] of activeSatellites.entries()) {
@@ -61210,7 +61008,7 @@ ${headerLines.join("\r\n")}\r
     let wgPrivateKey = existing?.wgPrivateKey;
     let wgPublicKey = existing?.wgPublicKey;
     if (!wgPrivateKey || !wgPublicKey) {
-      const { publicKey, privateKey } = crypto8.generateKeyPairSync("x25519");
+      const { publicKey, privateKey } = crypto6.generateKeyPairSync("x25519");
       const rawPriv = privateKey.export({ type: "pkcs8", format: "der" }).subarray(-32);
       const rawPub = publicKey.export({ type: "spki", format: "der" }).subarray(-32);
       wgPrivateKey = rawPriv.toString("base64");
@@ -61441,7 +61239,6 @@ ${headerLines.join("\r\n")}\r
       } else {
         console.warn(`[Fleet Manager] Not re-asserting HA promotion for ${satId}: no LAN VIP recorded or configured`);
       }
-    } else if (activeHaEdgeId && state.role === "edge-ngfw") {
       sendHaTransition(state, "DEMOTE", "standby");
     }
     broadcastMeshTopology();
@@ -61453,7 +61250,7 @@ ${headerLines.join("\r\n")}\r
 var isDirectExecution = () => {
   if (process.env.NODE_ENV === "test") return false;
   try {
-    return !!process.argv[1] && fileURLToPath3(import.meta.url) === path8.resolve(process.argv[1]);
+    return !!process.argv[1] && fileURLToPath2(import.meta.url) === path7.resolve(process.argv[1]);
   } catch {
     return false;
   }
@@ -61469,7 +61266,6 @@ export {
   MCP_RESOURCES_CATALOG,
   MCP_TOOLS_CATALOG,
   MESH_DISCONNECTED_GRACE_MS,
-  PENDING_COMMAND_SHORT_STALE_MS,
   PENDING_COMMAND_STALE_MS,
   SATELLITE_HEARTBEAT_MS,
   SATELLITE_LAST_SEEN_GRACE_MS,
@@ -61477,6 +61273,7 @@ export {
   authenticateMcpToken,
   buildArtifactBundle,
   buildSatelliteCommandEnvelope,
+  certKeyPairMatches,
   computeRoutesToDelete,
   createHttpRedirectServer,
   createMcpApiKeyRecord,
@@ -61494,27 +61291,23 @@ export {
   listMcpApiKeys,
   loadPersistedHaState,
   loadPersistedSyncedRoutes,
-  missingCommandAckError,
   newMcpApplyJobId,
   normalizeMacAddress,
+  parseFleetBlockTtl,
   parseFleetSyncBody,
-  pendingCommandStaleMsFor,
   persistHaState,
   persistSyncedRoutes,
   processMcpJsonRpcMessage,
   provisionHeadscaleWithRetry,
   queryMcpAuditEntries,
-  readCanonicalConfig,
   recordCommandAck,
   recordMcpAuditEntry,
   revokeMcpApiKeyRecord,
-  saveMcpSettings,
   secureTokenEquals,
   shouldPruneDisconnectedSatellite,
   shouldRefuseFleetSync,
+  validateFleetBlockTarget,
   validateHaTransition,
   verifyFreshLeafOrThrow,
-  verifyMcpAuditChain,
-  writeCanonicalConfig,
-  writeFileAtomicSync
+  verifyMcpAuditChain
 };

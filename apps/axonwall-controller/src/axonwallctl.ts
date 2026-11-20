@@ -23,7 +23,7 @@ import {
   enablePluginWithDependencies,
   disablePluginWithDependents,
 } from '@axonwall/lib/plugins';
-import { getMcpServerStatus, saveMcpSettings, type SaveMcpSettingsResult } from '@axonwall/lib/mcp';
+import { getMcpServerStatus, saveMcpSettings, validateVirtWorkloadSafety, type SaveMcpSettingsResult } from '@axonwall/lib/mcp';
 import { importFirewallConfig, mergeFirewallConfigs, type FirewallVendor } from '@axonwall/lib/import';
 import { isValidDevice } from '@axonwall/lib/util';
 import { acquireMcpLockFile, desiredStateLockPath } from './mcp/lockfile.js';
@@ -845,7 +845,10 @@ async function cmdApply(autoConfirm = true) {
     reloadServices: [...reloadServices].sort(),
   });
   const bundleHash = crypto.createHash('sha256').update(hashInput).digest('hex');
-  const jobId = `cli-${Date.now()}`;
+  // B-L1: a bare Date.now() jobId collides when two applies land in
+  // the same millisecond against the daemon's single pending slot
+  // (the MCP side already carries a random suffix for this reason).
+  const jobId = `cli-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
 
   const filesPayload = [
     ...files.map((f) => ({ ...f, file_mode: f.fileMode })),
@@ -3215,6 +3218,46 @@ async function cmdVirt(args: string[]) {
         console.error(`${cRed}Usage: axonwallctl virt ${sub} <vmid> [--force]${cReset}`);
         process.exit(1);
       }
+      // B-M5: the CLI used to post stop/pause straight to the daemon
+      // with no anti-lockout guard (the MCP tool is the only caller
+      // that had one). Resolve the VM name from the daemon list and
+      // the hosted-edge flag from local DesiredState, and refuse a
+      // guarded stop/pause unless --force is given explicitly.
+      if (sub === 'stop' || sub === 'pause') {
+        const force = args.includes('--force');
+        let workloadName: string | undefined;
+        try {
+          const vmsRes = await sendAgentSocketRequest<any>('/v1/virt/vms', 'GET');
+          workloadName = Array.isArray(vmsRes?.vms)
+            ? vmsRes.vms.find((v: any) => Number(v.vmid) === vmid)?.name
+            : undefined;
+        } catch {
+          // Name unresolvable: the guard below fails closed on it.
+        }
+        let hostedEdgeEnabled: boolean | undefined;
+        try {
+          for (const candidate of [STATE_JSON_PATH, path.join(ETC_DIR, 'state.json')]) {
+            if (fs.existsSync(candidate)) {
+              const parsed = DesiredStateSchema.safeParse(JSON.parse(fs.readFileSync(candidate, 'utf8')));
+              if (parsed.success) {
+                hostedEdgeEnabled = parsed.data.hostedEdge?.enabled;
+                break;
+              }
+            }
+          }
+        } catch {
+          // Best effort: the name-pattern half of the guard still applies.
+        }
+        const safetyCheck = validateVirtWorkloadSafety(workloadName, sub, hostedEdgeEnabled, vmid);
+        if (!safetyCheck.valid && !force) {
+          console.error(`${cRed}[✗] ${safetyCheck.reason || 'Virtualization action blocked by anti-lockout guard'}${cReset}`);
+          console.error(`${cYellow}Re-run with --force if you really mean to ${sub} VM #${vmid}.${cReset}`);
+          process.exit(1);
+        }
+        if (!safetyCheck.valid && force) {
+          console.error(`${cYellow}[!] Overriding anti-lockout guard with --force: ${safetyCheck.reason || ''}${cReset}`);
+        }
+      }
       console.log(
         JSON.stringify(
           await sendAgentSocketRequest<any>('/v1/virt/vms', 'POST', {
@@ -3412,6 +3455,13 @@ async function cmdImport(args: string[]) {
 
   if (doStage) {
     let releaseLock: (() => void) | null = null;
+    // B-M4: the stage used to swallow every write error (`catch {}`)
+    // and print the staged-success line unconditionally, after which
+    // --apply compiled the PREVIOUS on-disk state as if it were the
+    // import. Track whether anything actually landed; a stage that
+    // lands nowhere fails (exit 1) and never applies.
+    let stagedOk = false;
+    const stageFailures: string[] = [];
     try {
       releaseLock = acquireMcpLockFile(desiredStateLockPath());
       const active = cmdValidate(true);
@@ -3425,15 +3475,31 @@ async function cmdImport(args: string[]) {
             fs.writeFileSync(path.join(dir, fn), content, { mode: 0o660 });
           }
           fs.writeFileSync(path.join(dir, 'state.json'), serializedJson, { mode: 0o660 });
-        } catch {}
+          stagedOk = true;
+        } catch {
+          stageFailures.push(dir);
+        }
       }
       try {
         fs.writeFileSync(STATE_JSON_PATH, serializedJson, { mode: 0o660 });
-      } catch {}
+        stagedOk = true;
+      } catch {
+        stageFailures.push(STATE_JSON_PATH);
+      }
       fixSharedConfigOwnership();
-      console.log(`${cGreen}[✓] Staged imported ${report.vendor} configuration into /etc/axonwall/*.yaml.${cReset}`);
+      if (!stagedOk) {
+        console.error(`${cRed}[✗] Failed to stage imported ${report.vendor} configuration to disk (${stageFailures.join(', ')}); nothing was staged and --apply will not run.${cReset}`);
+      } else {
+        if (stageFailures.length > 0) {
+          console.log(`${cYellow}[!] Staged imported configuration, but ${stageFailures.length} target(s) failed to write (${stageFailures.join(', ')}); the staged copy may be incomplete.${cReset}`);
+        }
+        console.log(`${cGreen}[✓] Staged imported ${report.vendor} configuration into /etc/axonwall/*.yaml.${cReset}`);
+      }
     } finally {
       releaseLock?.();
+    }
+    if (!stagedOk) {
+      process.exit(1);
     }
     if (doApply) {
       await cmdApply(true);

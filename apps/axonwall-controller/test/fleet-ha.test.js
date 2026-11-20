@@ -1,11 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import * as fs from 'node:fs';
+import * as https from 'node:https';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { execSync } from 'node:child_process';
 import {
   ensureControllerTls,
+  certKeyPairMatches,
   verifyFreshLeafOrThrow,
   validateHaTransition,
   isValidMacAddress,
@@ -209,6 +211,39 @@ test('B-H3: an existing leaf that does not chain to the on-disk CA is ignored, n
   assert.ok(tlsConfig, 'a replacement certificate must be provisioned');
   assert.ok(!tlsConfig.cert.equals(before), 'the non-chaining leaf must not be served as-is');
   assert.ok(tlsConfig.ca, 'the on-disk CA must be included in the returned config');
+});
+
+test('B-M8: a mismatched cert/key pair is ignored and re-provisioned, never served', (t) => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'axon_tls_bm8_'));
+  const certPath = path.join(tmpDir, 'hub.crt');
+  const keyPath = path.join(tmpDir, 'hub.key');
+  const caPath = path.join(tmpDir, 'ca.crt');
+  const caKeyPath = path.join(tmpDir, 'ca.key');
+  t.after(() => fs.rmSync(tmpDir, { recursive: true, force: true }));
+
+  // Poisoned pair: cert from one keypair, key from another — the
+  // state an interrupted mint leaves behind (new key, old cert).
+  // No CA files, so step 1 is the only gate before re-provisioning.
+  execSync(`openssl req -x509 -newkey rsa:2048 -keyout ${path.join(tmpDir, 'a.key')} -out ${path.join(tmpDir, 'a.crt')} -days 3650 -nodes -subj "/CN=axonwall-a"`, { stdio: 'ignore' });
+  execSync(`openssl req -x509 -newkey rsa:2048 -keyout ${path.join(tmpDir, 'b.key')} -out ${path.join(tmpDir, 'b.crt')} -days 3650 -nodes -subj "/CN=axonwall-b"`, { stdio: 'ignore' });
+  fs.copyFileSync(path.join(tmpDir, 'a.crt'), certPath);
+  fs.copyFileSync(path.join(tmpDir, 'b.key'), keyPath);
+  assert.equal(certKeyPairMatches(certPath, keyPath), false, 'fixture must be a mismatched pair');
+  assert.throws(
+    () => https.createServer({ cert: fs.readFileSync(certPath), key: fs.readFileSync(keyPath) }),
+    /key values mismatch/,
+    'fixture sanity: https.createServer must reject the poisoned pair',
+  );
+
+  const poisonedCert = fs.readFileSync(certPath);
+  const tlsConfig = ensureControllerTls(certPath, keyPath, caPath, caKeyPath);
+  assert.ok(tlsConfig, 'a replacement certificate must be provisioned');
+  assert.ok(!tlsConfig.cert.equals(poisonedCert), 'the poisoned leaf must not be served as-is');
+  assert.equal(certKeyPairMatches(certPath, keyPath), true, 'the on-disk pair must be re-provisioned to a matching one');
+  assert.doesNotThrow(
+    () => https.createServer({ cert: tlsConfig.cert, key: tlsConfig.key }),
+    'the returned pair must be servable by https.createServer',
+  );
 });
 
 test('B2-M9: a freshly minted leaf that does not chain to the CA throws instead of being served', (t) => {

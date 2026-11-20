@@ -4,6 +4,7 @@ import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
 import { FirewallRuleSchema, FORBIDDEN_RING0_BPF_PROGS } from '../schemas/index.js';
+import { HOSTED_EDGE_VM_ID, HOSTED_EDGE_VMID, HOSTED_EDGE_VM_NAME } from '../compile/virt/index.js';
 
 // ============================================================================
 // 1. MCP Capability Scopes & Policy Limits
@@ -394,28 +395,44 @@ export function validateBpfTokenDelegationInput(input: {
 /**
  * Anti-lockout guard for KVM/LXC virtualization actions: refuses to stop, pause,
  * or force-kill Hosted Edge / management NGFW VMs over MCP.
+ *
+ * B-M5: the guard used to fail open in two ways. (1) An unresolvable workload
+ * name (not in local state and the daemon list lookup failed) returned valid,
+ * so a stop proceeded blind — for a destructive action an unknown target is
+ * now refused instead. (2) The check was name-only, so a hosted-edge VM whose
+ * name matches no pattern (e.g. 'fw-01') was unguarded. When hosted edge is
+ * enabled, the workload id/vmid is now also matched against the compiled
+ * hosted-edge VM identity (vmid 100, id 'edge') — pass the caller's id as
+ * `workloadId` for VMs; omit it for containers, which are never the edge VM.
  */
 export function validateVirtWorkloadSafety(
   workloadName: string | undefined,
   action: string,
   hostedEdgeEnabled?: boolean,
+  workloadId?: number | string,
 ): McpValidationResult {
   const destructiveActions = new Set(['stop', 'pause', 'reboot', 'restore', 'rollback', 'live_migrate']);
   if (!destructiveActions.has(action)) {
     return { valid: true };
   }
   const lower = (workloadName || '').trim().toLowerCase();
-  if (hostedEdgeEnabled && !lower) {
+  if (!lower) {
     return {
       valid: false,
-      reason: `Anti-lockout guard: refusing to ${action} an unidentified workload while Hosted Edge is enabled`,
+      reason: `Anti-lockout guard: refusing to ${action} a virtualization workload whose name could not be resolved (not in local state and the daemon list lookup failed); refusing blind rather than risking the Hosted Edge gateway VM`,
     };
   }
+  const idMatchesHostedEdge =
+    hostedEdgeEnabled === true &&
+    (workloadId === HOSTED_EDGE_VMID ||
+      (typeof workloadId === 'string' && workloadId.trim().toLowerCase() === HOSTED_EDGE_VM_ID));
   if (
     lower === 'edge' ||
     lower.startsWith('edge-') ||
     lower.includes('axonwall-edge') ||
-    (hostedEdgeEnabled && lower.includes('ngfw'))
+    lower === HOSTED_EDGE_VM_NAME ||
+    (hostedEdgeEnabled && lower.includes('ngfw')) ||
+    idMatchesHostedEdge
   ) {
     return {
       valid: false,

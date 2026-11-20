@@ -176,25 +176,28 @@ func TestXdpBlockSafetyAndSnapshot(t *testing.T) {
 		t.Fatalf("expected AddXdpBlock(127.0.0.1) to be rejected by safety guard")
 	}
 
-	// Must accept documentation IPv4 & IPv6 addresses
-	if err := mgr.AddXdpBlock("198.51.100.42", 120, XdpReasonMcpTactical, "MCP test IPv4 block"); err != nil {
-		t.Fatalf("AddXdpBlock IPv4 failed: %v", err)
-	}
-	if err := mgr.AddXdpBlock("2001:db8::dead:beef", 120, XdpReasonMcpTactical, "MCP test IPv6 block"); err != nil {
-		t.Fatalf("AddXdpBlock IPv6 failed: %v", err)
+	// A-H3 (round 3): an unstarted manager enforces nothing in the
+	// kernel, so a block must FAIL LOUDLY instead of succeeding and
+	// being listed as active. The old test asserted the lie
+	// (AddXdpBlock succeeding with no eBPF loaded); the accept path
+	// can only be exercised on a host with eBPF loaded.
+	for _, ip := range []string{"198.51.100.42", "2001:db8::dead:beef"} {
+		if err := mgr.AddXdpBlock(ip, 120, XdpReasonMcpTactical, "MCP test block"); err == nil {
+			t.Fatalf("expected AddXdpBlock(%s) on an unstarted manager to fail loudly, got nil", ip)
+		}
 	}
 
 	snap := mgr.GetDataplaneSnapshot(10)
-	if len(snap.ActiveBlocks) != 2 {
-		t.Fatalf("expected 2 active XDP blocks in snapshot, got %d (%+v)", len(snap.ActiveBlocks), snap.ActiveBlocks)
+	if len(snap.ActiveBlocks) != 0 {
+		t.Fatalf("expected 0 active XDP blocks in snapshot for an unenforced manager, got %d (%+v)", len(snap.ActiveBlocks), snap.ActiveBlocks)
 	}
 
 	if err := mgr.RemoveXdpBlock("198.51.100.42"); err != nil {
 		t.Fatalf("RemoveXdpBlock failed: %v", err)
 	}
 	snap2 := mgr.GetDataplaneSnapshot(10)
-	if len(snap2.ActiveBlocks) != 1 {
-		t.Fatalf("expected 1 active XDP block after removal, got %d", len(snap2.ActiveBlocks))
+	if len(snap2.ActiveBlocks) != 0 {
+		t.Fatalf("expected 0 active XDP blocks after removal, got %d", len(snap2.ActiveBlocks))
 	}
 }
 

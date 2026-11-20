@@ -160,8 +160,15 @@ export default function IpsecPage() {
                         {t.localTs.join(', ')} ➔ {t.remoteTs.join(', ')}
                       </td>
                       <td className="px-4 py-3">
-                        <span className="inline-flex items-center gap-1 text-xs text-emerald-400">
-                          <CheckCircle2 className="w-3.5 h-3.5" /> ESTABLISHED
+                        {/* C-M11: tunnels come from config alone — no IKE/SA
+                            status source is consulted on this page, so a
+                            tunnel whose peer is down or whose SA never
+                            established must not render ESTABLISHED. */}
+                        <span
+                          className="inline-flex items-center gap-1 text-xs text-slate-400"
+                          title="Tunnel is configured; live IKE/SA state is not checked on this page"
+                        >
+                          Configured
                         </span>
                       </td>
                       <td className="px-4 py-3 text-right">

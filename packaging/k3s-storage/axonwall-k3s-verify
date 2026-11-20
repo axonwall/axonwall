@@ -3,48 +3,38 @@
 #
 # Ordered AFTER `k3s.service` and `k3s-agent.service` and gated by
 # `/etc/axonwall/.k3s-firstboot`. Polls up to 60s for the K3s control plane
-# (`k3s kubectl get nodes`) or worker agent (service active + stable PID +
-# kubelet /healthz + this node listed by the cluster via
-# `k3s kubectl get node <hostname>` -- liveness alone does not prove the
-# node joined, see R4-D-L7), logs health, and clears
+# (`k3s kubectl get nodes`) or worker agent (service active AND this node
+# registered with the cluster), logs health, and clears
 # `/etc/axonwall/.k3s-firstboot`.
 set -u
 
 MARKER="/etc/axonwall/.k3s-firstboot"
 AGENT_FLAG="/etc/rancher/k3s/agent-mode"
+KUBELET_KUBECONFIG="/var/lib/rancher/k3s/agent/kubelet.kubeconfig"
+K3S_BIN="/usr/local/bin/k3s"
 
 log() { echo "[axonwall-k3s-verify] $*"; }
 
-# R4-D-L7: the agent branch used to clear the marker on liveness alone
-# (service active + stable PID + kubelet /healthz). /healthz is a local
-# kubelet liveness endpoint: it answers 200 while the kubelet is running
-# even when the node has never registered with the API server (e.g. wrong
-# server URL / join token, with the agent process staying up and retrying
-# in-process, so the PID stays stable). Liveness is not membership. Prove
-# membership by reading this node's own Node object through the API
-# server, using the agent's own kubeconfig credentials -- kubelet reads
-# its own Node object with exactly these credentials, so a registered
-# node can always do this and an unregistered one gets NotFound. No
-# --node-name is ever set by firstboot, so the node name is the hostname.
-# Returns 0 only when the node is listed by the cluster.
+# D-M4: membership proof for the agent branch. Liveness alone is not a
+# join proof — with `Restart=always`, a misconfigured agent (wrong or
+# unreachable server URL) retries internally and stays "active" forever
+# without ever joining. The kubelet kubeconfig (system:node credentials)
+# can read exactly this node's own Node object, and the API server only
+# returns it once the kubelet has registered — so a successful lookup
+# proves the agent joined the cluster.
 agent_node_joined() {
-    _k3s_bin=""
-    if [ -x /usr/local/bin/k3s ]; then
-        _k3s_bin="/usr/local/bin/k3s"
-    elif command -v k3s >/dev/null 2>&1; then
-        _k3s_bin="k3s"
-    else
-        return 1
-    fi
-    _node_name="$(hostname 2>/dev/null || true)"
-    [ -n "$_node_name" ] || return 1
-    "$_k3s_bin" kubectl get node "$_node_name" >/dev/null 2>&1
+    _node="$(hostname 2>/dev/null || echo "")"
+    [ -n "$_node" ] || return 1
+    [ -x "$K3S_BIN" ] || return 1
+    [ -s "$KUBELET_KUBECONFIG" ] || return 1
+    "$K3S_BIN" kubectl --kubeconfig="$KUBELET_KUBECONFIG" get node "$_node" >/dev/null 2>&1
 }
 
 if [ -f "$AGENT_FLAG" ]; then
-    log "verifying k3s-agent service liveness (timeout: 60s)..."
+    log "verifying k3s-agent service liveness and cluster membership (timeout: 60s)..."
     _elapsed=0
     while [ "$_elapsed" -lt 60 ]; do
+        _agent_live=0
         if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet k3s-agent; then
             _pid1="$(systemctl show -p MainPID --value k3s-agent 2>/dev/null || echo 0)"
             sleep 3
@@ -53,40 +43,49 @@ if [ -f "$AGENT_FLAG" ]; then
             if systemctl is-active --quiet k3s-agent && [ -n "$_pid1" ] && [ "$_pid1" != "0" ] && [ "$_pid1" = "$_pid2" ]; then
                 if command -v curl >/dev/null 2>&1; then
                     if curl -fsS --max-time 2 http://127.0.0.1:10248/healthz >/dev/null 2>&1; then
-                        if agent_node_joined; then
-                            log "k3s-agent is active, stable (PID=$_pid2), kubelet /healthz is ready, and this node is listed by the cluster"
-                            rm -f "$MARKER"
-                            exit 0
-                        fi
-                        log "k3s-agent is live (PID=$_pid2) but this node is not (yet) listed by the cluster; retaining $MARKER"
+                        _agent_live=1
+                        _live_msg="k3s-agent is active, stable (PID=$_pid2), and kubelet /healthz is ready"
                     fi
                 else
-                    if agent_node_joined; then
-                        log "k3s-agent is active and stable (PID=$_pid2) and this node is listed by the cluster"
-                        rm -f "$MARKER"
-                        exit 0
-                    fi
-                    log "k3s-agent is live (PID=$_pid2) but this node is not (yet) listed by the cluster; retaining $MARKER"
+                    _agent_live=1
+                    _live_msg="k3s-agent is active and stable (PID=$_pid2)"
                 fi
             fi
-            continue
         elif command -v rc-service >/dev/null 2>&1 && rc-service k3s-agent status >/dev/null 2>&1; then
             sleep 3
             _elapsed=$(( _elapsed + 3 ))
             if rc-service k3s-agent status >/dev/null 2>&1; then
-                if agent_node_joined; then
-                    log "k3s-agent (OpenRC) is active, sustained, and this node is listed by the cluster"
-                    rm -f "$MARKER"
-                    exit 0
-                fi
-                log "k3s-agent (OpenRC) is live but this node is not (yet) listed by the cluster; retaining $MARKER"
+                _agent_live=1
+                _live_msg="k3s-agent (OpenRC) is active and sustained"
             fi
-            continue
+        fi
+        # D-M4 + main: liveness is main's PID-stability / kubelet healthz
+        # (systemd) or sustained-status (OpenRC) check; the marker clears
+        # only once the node is ALSO proven registered with the cluster
+        # (agent_node_joined above). Liveness alone is not a join proof.
+        if [ "$_agent_live" -eq 1 ]; then
+            if [ "${_logged_live:-0}" -eq 0 ]; then
+                log "$_live_msg"
+                _logged_live=1
+            fi
+            if agent_node_joined; then
+                _node="$(hostname 2>/dev/null || echo "?")"
+                log "node '${_node}' is registered with the cluster"
+                # Ready status is informative, not gating: a registered node
+                # can legitimately be NotReady while the CNI comes up.
+                _ready="unknown"
+                if [ -n "$_node" ] && [ "$_node" != "?" ]; then
+                    _ready="$("$K3S_BIN" kubectl --kubeconfig="$KUBELET_KUBECONFIG" get node "$_node" -o 'jsonpath={.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || echo unknown)"
+                fi
+                log "node Ready status: ${_ready:-unknown}"
+                rm -f "$MARKER"
+                exit 0
+            fi
         fi
         sleep 2
         _elapsed=$(( _elapsed + 2 ))
     done
-    log "ERROR: k3s-agent failed to stay active and join the cluster within 60s (retaining $MARKER for retry)"
+    log "ERROR: k3s-agent did not join the cluster within 60s (retaining $MARKER for retry)"
     exit 1
 fi
 

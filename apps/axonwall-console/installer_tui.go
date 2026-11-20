@@ -136,12 +136,44 @@ type PartitionLayout struct {
 	ZfsMB   int
 }
 
+// readEditionFile returns the canonical edition from /etc/axonwall/edition,
+// or "" when the file is absent, empty, or does not name a known edition.
+// The updater trusts this file first (D-M9 marker); the installer reads it
+// the same way. Enforcement (failing closed on a garbage value) lives in
+// the shell installer, the updater, and postinst — this reader only
+// agrees with the file when it is valid, and otherwise falls through to
+// the legacy signals.
+func readEditionFile() string {
+	data, err := os.ReadFile("/etc/axonwall/edition")
+	if err != nil {
+		return ""
+	}
+	switch strings.TrimSpace(string(data)) {
+	case "axonwall", "vault", "k3s-storage":
+		return strings.TrimSpace(string(data))
+	default:
+		return ""
+	}
+}
+
 // DefaultInstallerConfig returns the recommended factory defaults for the current runtime.
 func DefaultInstallerConfig() InstallerConfig {
 	edition := "axonwall"
 	hostname := "axonwall"
 	k3sRole := "server"
-	if _, err := os.Stat("/etc/axonwall/.k3s-edition"); err == nil {
+	// D-M9 (marker): the canonical edition file first — when it names a
+	// known edition it is the default and the legacy signals are not
+	// consulted. When it is absent, empty, or invalid, fall through to
+	// the markers and the cmdline as before.
+	if fileEdition := readEditionFile(); fileEdition != "" {
+		edition = fileEdition
+		switch edition {
+		case "k3s-storage":
+			hostname = "axonwall-storage"
+		case "vault":
+			hostname = "axonwall-vault"
+		}
+	} else if _, err := os.Stat("/etc/axonwall/.k3s-edition"); err == nil {
 		edition = "k3s-storage"
 		hostname = "axonwall-storage"
 	} else if _, err := os.Stat("/etc/axonwall/.vault-edition"); err == nil {

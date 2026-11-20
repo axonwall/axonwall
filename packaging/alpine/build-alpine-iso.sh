@@ -456,6 +456,9 @@ else
   echo "axonwall" > "${OVL}/etc/hostname"
   touch "${OVL}/etc/axonwall/.firstboot"
 fi
+# D-M9 (marker): the canonical edition file for the live installer
+# environment. EDITION is validated to axonwall|k3s-storage above.
+printf '%s\n' "${EDITION}" > "${OVL}/etc/axonwall/edition"
 
 printf "%s\n" "${CORE_PKGS[@]}" > "${OVL}/etc/apk/world"
 
@@ -542,6 +545,26 @@ else
 fi
 
 cp "${REPO_ROOT}/packaging/iso/config/includes.chroot/usr/local/bin/axonwall-update" "${OVL}/usr/local/bin/"
+# E-M3 (round-3): ship the release-signing trust anchor so an Alpine
+# box's first .deb update verifies the detached signature instead of
+# falling back to SHA-256 + TLS only. Debian installs get the anchor
+# from the ISO chroot and .deb-maintained systems from the package;
+# Alpine got neither, so the signature the release workflow produces
+# was never checked on the update most likely to carry a waited-for
+# fix. Mirror the keyring directory too (E-M2).
+if [[ -f "${REPO_ROOT}/packaging/iso/config/includes.chroot/etc/axonwall/release-signing.pub" ]]; then
+  mkdir -p "${OVL}/etc/axonwall"
+  cp "${REPO_ROOT}/packaging/iso/config/includes.chroot/etc/axonwall/release-signing.pub" "${OVL}/etc/axonwall/release-signing.pub"
+  chmod 644 "${OVL}/etc/axonwall/release-signing.pub"
+fi
+if [[ -d "${REPO_ROOT}/packaging/iso/config/includes.chroot/etc/axonwall/release-signing.d" ]]; then
+  mkdir -p "${OVL}/etc/axonwall/release-signing.d"
+  for _keyring_pub in "${REPO_ROOT}"/packaging/iso/config/includes.chroot/etc/axonwall/release-signing.d/*.pub; do
+    [[ -f "$_keyring_pub" ]] || continue
+    cp "$_keyring_pub" "${OVL}/etc/axonwall/release-signing.d/"
+    chmod 644 "${OVL}/etc/axonwall/release-signing.d/$(basename "$_keyring_pub")"
+  done
+fi
 if [[ -f "${REPO_ROOT}/packaging/iso/config/includes.chroot/usr/local/bin/axonwall-config" ]]; then
   cp "${REPO_ROOT}/packaging/iso/config/includes.chroot/usr/local/bin/axonwall-config" "${OVL}/usr/local/bin/"
 fi
@@ -551,7 +574,14 @@ fi
 chmod +x "${OVL}/usr/local/bin/axonwall"*
 
 # Version stamp
-VERSION="$(cat "${REPO_ROOT}/VERSION" 2>/dev/null | tr -d '[:space:]' || echo "0.2.2")"
+VERSION="$(cat "${REPO_ROOT}/VERSION" 2>/dev/null | tr -d '[:space:]' || true)"
+if [ -z "$VERSION" ]; then
+  VERSION="$(grep -m1 '"version"' "${REPO_ROOT}/package.json" 2>/dev/null | sed -E 's/.*"version": *"([^"]+)".*/\1/' || true)"
+fi
+if [ -z "$VERSION" ]; then
+  echo "[-] ERROR: cannot determine release version (VERSION file and package.json both missing or unreadable); refusing to stamp a hardcoded fallback version." >&2
+  exit 1
+fi
 echo "${VERSION}" > "${OVL}/etc/axonwall/version"
 
 # Copy compiled Go daemons (axonwalld, axonwall-console, axonwall-satellite)
@@ -787,7 +817,7 @@ if [[ "${EDITION}" == "k3s-storage" ]]; then
   for svc in axonwall-network-setup modules sysctl hostname bootmisc syslog networking zfs-import zfs-mount; do
     ln -sf "/etc/init.d/${svc}" "${OVL}/etc/runlevels/boot/${svc}"
   done
-  for svc in chronyd crond sshd nftables axonwall-firstboot k3s k3s-agent local; do
+  for svc in chronyd crond sshd nftables axonwall-firstboot k3s k3s-agent axonwall-k3s-verify local; do
     ln -sf "/etc/init.d/${svc}" "${OVL}/etc/runlevels/default/${svc}"
   done
 else
@@ -875,6 +905,7 @@ for _boot_file in "vmlinuz-${ALPINE_KERNEL_FLAVOR}" "initramfs-${ALPINE_KERNEL_F
 done
 
 cat << SYSLINUX_EOF > "${WORK_DIR}/iso/boot/syslinux/syslinux.cfg"
+SERIAL 0 9600
 UI vesamenu.c32
 TIMEOUT 50
 PROMPT 0
@@ -893,7 +924,7 @@ LABEL install
   MENU DEFAULT
   KERNEL /boot/vmlinuz-${ALPINE_KERNEL_FLAVOR}
   INITRD /boot/initramfs-${ALPINE_KERNEL_FLAVOR}
-  APPEND modules=${STORAGE_MODULES} ${EDITION_KARG}axonwall_install=1 quiet console=tty0 console=ttyS0,115200
+  APPEND modules=${STORAGE_MODULES} ${EDITION_KARG}axonwall_install=1 quiet console=tty0 console=ttyS0,9600
 SYSLINUX_EOF
 
 if [[ "${EDITION}" == "axonwall" ]]; then
@@ -903,13 +934,13 @@ LABEL install-vault
   MENU LABEL Install Axonwall ^Vault Edition (Immutable S3 Storage)
   KERNEL /boot/vmlinuz-virt
   INITRD /boot/initramfs-virt
-  APPEND modules=loop,squashfs,sd-mod,usb-storage,sr_mod,cdrom,isofs,virtio_blk,virtio_scsi,virtio_pci,nvme,ata_piix,ahci axonwall_edition=vault axonwall_install=1 quiet console=tty0 console=ttyS0,115200
+  APPEND modules=loop,squashfs,sd-mod,usb-storage,sr_mod,cdrom,isofs,virtio_blk,virtio_scsi,virtio_pci,nvme,ata_piix,ahci axonwall_edition=vault axonwall_install=1 quiet console=tty0 console=ttyS0,9600
 
 LABEL install-k3s-storage
   MENU LABEL Install Axonwall ^K3s + ZFS Storage Host (Minimal)
   KERNEL /boot/vmlinuz-virt
   INITRD /boot/initramfs-virt
-  APPEND modules=loop,squashfs,sd-mod,usb-storage,sr_mod,cdrom,isofs,virtio_blk,virtio_scsi,virtio_pci,nvme,ata_piix,ahci axonwall_edition=k3s-storage axonwall_install=1 quiet console=tty0 console=ttyS0,115200
+  APPEND modules=loop,squashfs,sd-mod,usb-storage,sr_mod,cdrom,isofs,virtio_blk,virtio_scsi,virtio_pci,nvme,ata_piix,ahci axonwall_edition=k3s-storage axonwall_install=1 quiet console=tty0 console=ttyS0,9600
 SYSLINUX_EDITIONS_EOF
 sed -i "s|/boot/vmlinuz-virt|/boot/vmlinuz-${ALPINE_KERNEL_FLAVOR}|g; s|/boot/initramfs-virt|/boot/initramfs-${ALPINE_KERNEL_FLAVOR}|g; s|modules=loop,[^ ]*|modules=${STORAGE_MODULES}|g" "${WORK_DIR}/iso/boot/syslinux/syslinux.cfg"
 fi
@@ -920,13 +951,13 @@ LABEL live
   MENU LABEL ${BOOT_LIVE_LABEL}
   KERNEL /boot/vmlinuz-${ALPINE_KERNEL_FLAVOR}
   INITRD /boot/initramfs-${ALPINE_KERNEL_FLAVOR}
-  APPEND modules=${STORAGE_MODULES} ${EDITION_KARG}quiet console=tty0 console=ttyS0,115200
+  APPEND modules=${STORAGE_MODULES} ${EDITION_KARG}quiet console=tty0 console=ttyS0,9600
 
 LABEL unattended
   MENU LABEL ^Zero-Touch Unattended Install (Cloud-Init / NoCloud Seed)
   KERNEL /boot/vmlinuz-${ALPINE_KERNEL_FLAVOR}
   INITRD /boot/initramfs-${ALPINE_KERNEL_FLAVOR}
-  APPEND modules=${STORAGE_MODULES} ${EDITION_KARG}axonwall.unattended=1 quiet console=tty0 console=ttyS0,115200
+  APPEND modules=${STORAGE_MODULES} ${EDITION_KARG}axonwall.unattended=1 quiet console=tty0 console=ttyS0,9600
 SYSLINUX_REST_EOF
 
 cat << GRUB_EOF > "${WORK_DIR}/iso/boot/grub/grub.cfg"
@@ -937,6 +968,7 @@ insmod all_video
 insmod gfxterm
 insmod png
 insmod gfxmenu
+insmod serial
 set gfxmode=640x480,800x600,auto
 
 if [ -f /boot/grub/themes/axonwall/theme.txt ]; then
@@ -948,10 +980,15 @@ fi
 
 set color_normal=light-gray/black
 set color_highlight=light-green/dark-gray
-terminal_output gfxterm
+if serial --unit=0 --speed=9600 --word=8 --parity=no --stop=1; then
+  terminal_input console serial
+  terminal_output gfxterm serial
+else
+  terminal_output gfxterm
+fi
 
 menuentry "${BOOT_GRUB_INSTALL_LABEL}" {
-  linux /boot/vmlinuz-${ALPINE_KERNEL_FLAVOR} modules=${STORAGE_MODULES} ${EDITION_KARG}axonwall_install=1 quiet console=tty0 console=ttyS0,115200
+  linux /boot/vmlinuz-${ALPINE_KERNEL_FLAVOR} modules=${STORAGE_MODULES} ${EDITION_KARG}axonwall_install=1 quiet console=tty0 console=ttyS0,9600
   initrd /boot/initramfs-${ALPINE_KERNEL_FLAVOR}
 }
 GRUB_EOF
@@ -960,12 +997,12 @@ if [[ "${EDITION}" == "axonwall" ]]; then
 cat << GRUB_EDITIONS_EOF >> "${WORK_DIR}/iso/boot/grub/grub.cfg"
 
 menuentry "Install Axonwall Vault Edition (Immutable S3 Storage)" {
-  linux /boot/vmlinuz-${ALPINE_KERNEL_FLAVOR} modules=${STORAGE_MODULES} axonwall_edition=vault axonwall_install=1 quiet console=tty0 console=ttyS0,115200
+  linux /boot/vmlinuz-${ALPINE_KERNEL_FLAVOR} modules=${STORAGE_MODULES} axonwall_edition=vault axonwall_install=1 quiet console=tty0 console=ttyS0,9600
   initrd /boot/initramfs-${ALPINE_KERNEL_FLAVOR}
 }
 
 menuentry "Install Axonwall K3s + ZFS Storage Host (Minimal)" {
-  linux /boot/vmlinuz-${ALPINE_KERNEL_FLAVOR} modules=${STORAGE_MODULES} axonwall_edition=k3s-storage axonwall_install=1 quiet console=tty0 console=ttyS0,115200
+  linux /boot/vmlinuz-${ALPINE_KERNEL_FLAVOR} modules=${STORAGE_MODULES} axonwall_edition=k3s-storage axonwall_install=1 quiet console=tty0 console=ttyS0,9600
   initrd /boot/initramfs-${ALPINE_KERNEL_FLAVOR}
 }
 GRUB_EDITIONS_EOF
@@ -974,12 +1011,12 @@ fi
 cat << GRUB_REST_EOF >> "${WORK_DIR}/iso/boot/grub/grub.cfg"
 
 menuentry "${BOOT_GRUB_LIVE_LABEL}" {
-  linux /boot/vmlinuz-${ALPINE_KERNEL_FLAVOR} modules=${STORAGE_MODULES} ${EDITION_KARG}quiet console=tty0 console=ttyS0,115200
+  linux /boot/vmlinuz-${ALPINE_KERNEL_FLAVOR} modules=${STORAGE_MODULES} ${EDITION_KARG}quiet console=tty0 console=ttyS0,9600
   initrd /boot/initramfs-${ALPINE_KERNEL_FLAVOR}
 }
 
 menuentry "Zero-Touch Unattended Install (Cloud-Init / NoCloud Seed)" {
-  linux /boot/vmlinuz-${ALPINE_KERNEL_FLAVOR} modules=${STORAGE_MODULES} ${EDITION_KARG}axonwall.unattended=1 quiet console=tty0 console=ttyS0,115200
+  linux /boot/vmlinuz-${ALPINE_KERNEL_FLAVOR} modules=${STORAGE_MODULES} ${EDITION_KARG}axonwall.unattended=1 quiet console=tty0 console=ttyS0,9600
   initrd /boot/initramfs-${ALPINE_KERNEL_FLAVOR}
 }
 GRUB_REST_EOF

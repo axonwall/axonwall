@@ -2,12 +2,12 @@ export declare function parseHeadscaleTimestamp(value: unknown): string | undefi
 export declare function listUsers(): Promise<{
     id: any;
     name: any;
-    createdAt: string;
+    createdAt: string | undefined;
 }[]>;
 export declare function createUser(name: string): Promise<{
     id: any;
     name: any;
-    createdAt: string;
+    createdAt: string | undefined;
 }>;
 export declare function deleteUser(name: string): Promise<any>;
 export declare function createPreAuthKey(user: string | number, reusable: boolean, ephemeral: boolean, expiration?: string): Promise<{

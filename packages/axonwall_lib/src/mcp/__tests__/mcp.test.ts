@@ -294,6 +294,22 @@ describe('Axonwall MCP Safety Guard & Blast-Radius Validator', () => {
     expect(validateVirtWorkloadSafety('edge-primary', 'pause', false).valid).toBe(false);
     expect(validateVirtWorkloadSafety('app-worker-01', 'stop', true).valid).toBe(true);
 
+    // B-M5: fail closed when the workload name cannot be resolved —
+    // a destructive action on an unknown target must not proceed blind.
+    expect(validateVirtWorkloadSafety(undefined, 'stop', true).valid).toBe(false);
+    expect(validateVirtWorkloadSafety('', 'pause', false).valid).toBe(false);
+    expect(validateVirtWorkloadSafety(undefined, 'stop', false).valid).toBe(false);
+    // ... but non-destructive actions on an unknown target stay allowed.
+    expect(validateVirtWorkloadSafety(undefined, 'start', true).valid).toBe(true);
+    expect(validateVirtWorkloadSafety(undefined, 'snapshot', true).valid).toBe(true);
+    // B-M5: identity-based guard — a hosted-edge VM renamed to a plain
+    // name is still recognised by its compiled vmid/id when hosted
+    // edge is enabled, and not when it is disabled.
+    expect(validateVirtWorkloadSafety('fw-01', 'stop', true, 100).valid).toBe(false);
+    expect(validateVirtWorkloadSafety('fw-01', 'stop', true, 'edge').valid).toBe(false);
+    expect(validateVirtWorkloadSafety('fw-01', 'stop', false, 100).valid).toBe(true);
+    expect(validateVirtWorkloadSafety('fw-01', 'stop', true, 101).valid).toBe(true);
+
     // ZFS resource sanitization
     expect(validateZfsResourcePath('tank/vms', true).valid).toBe(true);
     expect(validateZfsResourcePath('tank/vms', false).valid).toBe(false);

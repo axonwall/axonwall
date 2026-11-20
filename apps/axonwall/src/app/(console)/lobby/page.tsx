@@ -51,9 +51,10 @@ export default async function LobbyPage() {
           <div>
             <span className="text-xs text-slate-400 block font-medium">Data Plane Engine</span>
             <span className="text-lg font-bold text-white mt-1 block">nftables</span>
-            <span className="text-[11px] text-emerald-400 flex items-center gap-1 mt-1">
-              <CheckCircle2 className="w-3.5 h-3.5" /> Fastpath Active
-            </span>
+            {/* C-M12: no nftables/dataplane check backs this card — the
+                old "Fastpath Active" checkmark asserted a measurement that
+                was never made. */}
+            <span className="text-[11px] text-slate-400 mt-1 block">Fastpath state not measured</span>
           </div>
           <div className="w-10 h-10 rounded-lg bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center text-emerald-400">
             <ShieldCheck className="w-5 h-5" />
@@ -89,7 +90,10 @@ export default async function LobbyPage() {
               }`}
             >
               <CheckCircle2 className="w-3.5 h-3.5" />
-              {slapdRunning ? 'Directory Synced' : 'Unix Shadow DB'}
+              {/* C-M12: slapd being active proves the directory service is
+                  running, not that it is synced (syncrepl state is never
+                  checked). */}
+              {slapdRunning ? 'Directory Service Running' : 'Unix Shadow DB'}
             </span>
           </div>
           <div className="w-10 h-10 rounded-lg bg-indigo-500/10 border border-indigo-500/20 flex items-center justify-center text-indigo-400">
@@ -103,8 +107,15 @@ export default async function LobbyPage() {
             <span className="text-lg font-bold text-white mt-1 block">
               {status.daemonDown ? 'Unknown' : status.pendingConfirm ? 'Pending' : 'Healthy'}
             </span>
+            {/* C-M12: the pending-confirm state is measured; signed-LKG
+                enforcement is not. Render the state itself. R4-C-H1:
+                when the daemon did not answer, the state is unknown. */}
             <span className="text-[11px] text-slate-400 mt-1 block">
-              {status.daemonDown ? 'Daemon unavailable — state unknown' : 'Signed LKG Enforced'}
+              {status.daemonDown
+                ? 'Daemon unavailable — state unknown'
+                : status.pendingConfirm
+                  ? 'Confirmation pending'
+                  : 'No pending confirm'}
             </span>
           </div>
           <div className="w-10 h-10 rounded-lg bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center text-emerald-400">

@@ -42,26 +42,21 @@ export default function K3sWorkloadsPage() {
   const addWorkload = async () => {
     if (!state || !name.trim()) return;
     const next = structuredClone(state);
-    next.k3s = next.k3s || {
-      enabled: true,
-      clusterCidr: '10.42.0.0/16',
-      serviceCidr: '10.43.0.0/16',
-      nodeIpInterface: 'lan',
-      flannelBackend: 'wireguard-native',
-      disableTraefik: false,
-      autoJoinHaPeer: true,
-      openEbs: {
-        enabled: true,
-        zfsLocalPvEnabled: true,
-        zfsLocalPvPool: 'tank',
-        replicatedStorageEnabled: true,
-        defaultReplicaCount: 2,
-        replicatedBackingPool: 'tank/openebs-replicated',
-      },
-      enableUserNamespaces: false,
-      bpfTokenProfiles: [],
-      workloads: [],
-    };
+    // C-M3: deploying a workload cannot invent a whole K3s/OpenEBS cluster
+    // config (CIDRs, pools, replica counts) on a box with no K3s
+    // configuration. Enable K3s from the Cluster page first.
+    if (!next.k3s) {
+      alert('K3s is not configured yet — enable it from the Cluster page first. A workload cannot create a cluster configuration on its own.');
+      return;
+    }
+    // C-M4: replacing an existing workload must be an explicit operator
+    // choice, not a silent upsert.
+    if (
+      next.k3s.workloads.some((w) => w.name === name.trim()) &&
+      !confirm(`Workload "${name.trim()}" already exists in the configuration and will be replaced with the new definition. Continue?`)
+    ) {
+      return;
+    }
     const trimmedIngress = ingressHostname.trim();
     next.k3s.workloads = [
       ...next.k3s.workloads.filter((w) => w.name !== name.trim()),
@@ -226,12 +221,15 @@ export default function K3sWorkloadsPage() {
           onClick={addWorkload}
           className="px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-xs font-semibold text-white"
         >
-          Deploy to K3s Cluster
+          Save Workload Configuration
         </button>
       </div>
 
       <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 space-y-3">
         <h3 className="text-sm font-bold text-white">Declarative Config Workloads (/etc/axonwall/k3s.yaml)</h3>
+        <p className="text-[11px] text-slate-500">
+          Desired-state entries only — deployment status is not checked against the live cluster.
+        </p>
         {(state?.k3s?.workloads ?? []).length === 0 ? (
           <p className="text-xs text-slate-500">No declarative workloads configured yet.</p>
         ) : (

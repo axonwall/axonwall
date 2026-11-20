@@ -202,9 +202,16 @@ jobs:
         run: |
           ./packaging/edge-uki/build-edge-uki.sh --sku sku-vm-virtio --mode full-uki
 
-      - name: Build Debian (.deb) Package
+      - name: Build Debian (.deb) Packages
         run: |
-          ./packaging/debian/build-deb.sh
+          # D-M9: one package per edition. The flavor packages carry
+          # the edition's own payload (no NGFW daemon/UI/controller)
+          # so a flavor update never reintroduces the stripped
+          # payload. The sign/upload/size-guard/release steps below
+          # are glob-based and pick up all three automatically.
+          ./packaging/debian/build-deb.sh --edition axonwall
+          ./packaging/debian/build-deb.sh --edition vault
+          ./packaging/debian/build-deb.sh --edition k3s-storage
 
       - name: Sign Debian Package Checksum (if signing key configured)
         env:
@@ -367,6 +374,44 @@ jobs:
             echo "::error::No qcow2 artifact found in packaging/cloud-image/output/ — the cloud image build produced nothing."
             fail=1
           fi
+          exit $fail
+
+      - name: Enforce Release Asset Size Limits (E-L3)
+        run: |
+          # GitHub releases reject assets over 2 GiB (2,147,483,648
+          # bytes). The qcow2 got a fail-fast check after it actually
+          # exceeded the limit (PR #115, D2-L2); the ISO — the largest
+          # remaining asset — had none, so a future regrowth would fail
+          # only at release upload, after the ~25-minute build. Same
+          # 1.9 GiB threshold leaves headroom under the hard cap. The
+          # .deb and UKI are checked when present (they are far smaller
+          # and unlikely to trip it, but the check is free).
+          max_bytes=$((19 * 1024 * 1024 * 1024 / 10))
+          fail=0
+          found_iso=0
+          for iso in packaging/iso/output/*.iso; do
+            [ -e "$iso" ] || continue
+            found_iso=1
+            size=$(stat -c%s "$iso")
+            echo "ISO $iso: $size bytes (limit $max_bytes)"
+            if [ "$size" -gt "$max_bytes" ]; then
+              echo "::error::ISO $iso is $size bytes, over the $max_bytes byte (1.9 GiB) limit — GitHub releases reject assets over 2 GiB."
+              fail=1
+            fi
+          done
+          if [ "$found_iso" -eq 0 ]; then
+            echo "::error::No ISO artifact found in packaging/iso/output/ — the ISO build produced nothing."
+            fail=1
+          fi
+          for asset in packaging/debian/output/*.deb packaging/edge-uki/output/*.efi; do
+            [ -e "$asset" ] || continue
+            size=$(stat -c%s "$asset")
+            echo "Asset $asset: $size bytes (limit $max_bytes)"
+            if [ "$size" -gt "$max_bytes" ]; then
+              echo "::error::Release asset $asset is $size bytes, over the $max_bytes byte (1.9 GiB) limit — GitHub releases reject assets over 2 GiB."
+              fail=1
+            fi
+          done
           exit $fail
 
       - name: Compute Checksums
@@ -542,7 +587,9 @@ jobs:
               - `axonwall-debian13-amd64-cloud.qcow2`
               - `axonwall-edge-sku-vm-virtio.efi` (Single-File EFI UKI with embedded Go PID 1)
               - `axonwall-edge-sku-vm-virtio-initramfs.cpio.gz`
-              - `axonwall_*.deb`
+              - `axonwall_*.deb` (NGFW edition)
+              - `axonwall-vault_*.deb` (Vault S3 Storage edition)
+              - `axonwall-k3s-storage_*.deb` (K3s-Storage edition)
           prerelease: true
           files: |
             release-assets/*

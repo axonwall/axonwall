@@ -133,6 +133,56 @@ var (
 	}
 )
 
+// k3sJoinedMarkerPath is the durable proof that a secondary node
+// completed a join. It is written only after k3s restarts
+// successfully with a peer token in place (A-H2, round 3), so a
+// daemon restart can tell a completed join apart from a token file
+// that was written before a join was ever attempted. The token file
+// alone is NOT proof: it is written before the join runs.
+func k3sJoinedMarkerPath() string {
+	return filepath.Join(k3sStateDir, "k3s-joined")
+}
+
+// writeK3sJoinedMarker records a completed join durably. A failure
+// is logged, not fatal: the in-memory latch still reflects the join
+// that just happened, but it will not survive a daemon restart.
+func writeK3sJoinedMarker() {
+	if err := os.WriteFile(k3sJoinedMarkerPath(), []byte(time.Now().UTC().Format(time.RFC3339)+"\n"), 0600); err != nil {
+		slog.Warn("Failed to persist K3s HA join marker; join will not survive a daemon restart", "error", err)
+	}
+}
+
+// recordHaJoinedLocked latches the join (caller holds m.mu) and
+// persists the marker. It must only be called AFTER k3s has
+// restarted successfully with the token in place.
+func (m *K3sManager) recordHaJoinedLocked(peerIp string) {
+	m.haAutoJoined = true
+	m.lastMessage = fmt.Sprintf("Auto-joined primary K3s cluster at https://%s with OpenEBS replication", net.JoinHostPort(peerIp, "6443"))
+	writeK3sJoinedMarker()
+}
+
+// clearHaJoinedLocked drops the latch and the marker (caller holds
+// m.mu), e.g. when k3s is disabled or the node stops being a
+// secondary.
+func (m *K3sManager) clearHaJoinedLocked() {
+	m.haAutoJoined = false
+	_ = os.Remove(k3sJoinedMarkerPath())
+}
+
+// RestartK3sAfterTokenFetch reload-or-restarts the k3s unit the
+// manager is configured for. The HA backup poller uses it to restart
+// AFTER fetching a join token, so the join latch is only set once
+// the restart succeeds (A-H2, round 3).
+func (m *K3sManager) RestartK3sAfterTokenFetch() error {
+	m.mu.Lock()
+	unit := resolveK3sSystemdUnit(m.cfg.K3sConfigYaml)
+	m.mu.Unlock()
+	if out, err := exec.Command("systemctl", "--no-ask-password", "reload-or-restart", unit).CombinedOutput(); err != nil {
+		return fmt.Errorf("failed to reload-or-restart %s after retrieving K3s join token: %v (%s)", unit, err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
 // SetK3sPathsForTest redirects K3s and VOW filesystem roots for testing.
 // Returns a cleanup function that restores the prior values.
 func SetK3sPathsForTest(etcDir, manifestDir, stateDir, vowDir string) func() {
@@ -283,6 +333,13 @@ func (m *K3sManager) ApplyConfig(rawJSON []byte) error {
 		if hasK3sAgentServiceUnit() || isK3sEditionAgent() {
 			_ = exec.Command("systemctl", "--no-ask-password", "stop", "k3s-agent").Run()
 		}
+		// A-H2 (round 3): a disabled cluster must not keep
+		// reporting ClusterJoined. The latch used to survive the
+		// disable path untouched.
+		m.mu.Lock()
+		m.clearHaJoinedLocked()
+		m.lastMessage = "K3s plugin is disabled"
+		m.mu.Unlock()
 		return nil
 	}
 
@@ -312,21 +369,25 @@ func (m *K3sManager) ApplyConfig(rawJSON []byte) error {
 	}
 
 	// If this node is the HA secondary/backup and autoJoinHaPeer is enabled, fetch the join token from the primary node
+	// A-H2 (round 3): fetching (or reusing a cached) token only
+	// stages the join. The latch is set at the end of this function,
+	// AFTER the k3s reload-or-restart below succeeds — a token in
+	// hand is not a completed join, and a stale cached token from a
+	// previous failed join must not re-latch "joined" while the peer
+	// is unreachable.
+	tokenFetched := false
 	if (bundle.Role == "backup" || bundle.Role == "secondary") && bundle.AutoJoinHaPeer && bundle.PeerIp != "" {
 		tok, err := FetchPeerClusterToken(bundle.PeerIp, bundle.SyncPort, bundle.AuthToken)
 		if err == nil && tok != "" {
-			_ = os.WriteFile(filepath.Join(k3sStateDir, "k3s-join.token"), []byte(tok+"\n"), 0600)
-			m.mu.Lock()
-			m.haAutoJoined = true
-			m.lastMessage = fmt.Sprintf("Auto-joined primary K3s cluster at https://%s with OpenEBS replication", net.JoinHostPort(bundle.PeerIp, "6443"))
-			m.mu.Unlock()
+			if wErr := os.WriteFile(filepath.Join(k3sStateDir, "k3s-join.token"), []byte(tok+"\n"), 0600); wErr != nil {
+				slog.Warn("Fetched K3s join token from HA primary peer but failed to persist it", "peerIp", bundle.PeerIp, "error", wErr)
+			} else {
+				tokenFetched = true
+			}
 			slog.Info("Fetched K3s join token from HA primary peer", "peerIp", bundle.PeerIp)
 		} else {
 			if existingTok, rErr := os.ReadFile(filepath.Join(k3sStateDir, "k3s-join.token")); rErr == nil && strings.TrimSpace(string(existingTok)) != "" {
-				m.mu.Lock()
-				m.haAutoJoined = true
-				m.lastMessage = fmt.Sprintf("Using cached K3s join token for HA primary https://%s", net.JoinHostPort(bundle.PeerIp, "6443"))
-				m.mu.Unlock()
+				slog.Warn("Could not fetch K3s join token from HA peer; a cached token exists and will be used for the restart, but the node is not latched as joined until that restart succeeds", "peerIp", bundle.PeerIp, "error", err)
 			} else {
 				slog.Warn("Could not fetch K3s join token from HA peer yet; will retry on HA sync cycle", "peerIp", bundle.PeerIp, "error", err)
 			}
@@ -398,6 +459,24 @@ func (m *K3sManager) ApplyConfig(rawJSON []byte) error {
 	// the old manifests or no k3s at all.
 	if out, err := exec.Command("systemctl", "--no-ask-password", "reload-or-restart", k3sServiceUnit).CombinedOutput(); err != nil {
 		return fmt.Errorf("failed to reload-or-restart %s: %v (%s)", k3sServiceUnit, err, strings.TrimSpace(string(out)))
+	}
+
+	// A-H2 (round 3): only NOW — after the restart with the join
+	// token in place succeeded — is the node joined. A fresh fetch
+	// this apply (tokenFetched) or a cached token that survived a
+	// successful restart both qualify; a restart that never ran (or
+	// failed above) never latches.
+	if (bundle.Role == "backup" || bundle.Role == "secondary") && bundle.AutoJoinHaPeer {
+		if tok, rErr := os.ReadFile(filepath.Join(k3sStateDir, "k3s-join.token")); rErr == nil && strings.TrimSpace(string(tok)) != "" {
+			m.mu.Lock()
+			m.recordHaJoinedLocked(bundle.PeerIp)
+			m.mu.Unlock()
+		} else if tokenFetched {
+			// Defensive: the token was fetched but its file vanished
+			// between fetch and restart; do not latch on a token
+			// that is no longer on disk.
+			slog.Warn("K3s join token fetched this apply is no longer on disk after restart; not latching as joined", "peerIp", bundle.PeerIp)
+		}
 	}
 
 	// Ensure /etc/rancher/k3s/k3s.yaml is accessible by admin operators in group axonwall-api
@@ -513,6 +592,9 @@ func (m *K3sManager) TriggerAutoJoin(peerIp string, syncPort int, authToken stri
 	m.haAutoJoined = true
 	m.lastMessage = fmt.Sprintf("Joined K3s HA cluster via https://%s", net.JoinHostPort(peerIp, "6443"))
 	m.mu.Unlock()
+	// A-H2 (round 3): persist the completed join so a daemon restart
+	// can restore the latch from proof, not from token possession.
+	writeK3sJoinedMarker()
 	return nil
 }
 
@@ -623,9 +705,13 @@ func (m *K3sManager) GetStatus() K3sClusterStatus {
 		}
 	}
 
-	// ClusterJoined is the latched join only: a peer IP in config never
-	// proves a join (the token fetch may have failed, and ApplyConfig
-	// only warns about that).
+	// ClusterJoined is the latched join only, and the latch is now
+	// set exclusively after a k3s restart with the token in place
+	// succeeds (ApplyConfig / TriggerAutoJoin / HA poller) or
+	// restored from the durable join marker at startup
+	// (LoadSavedConfig). A peer IP in config, a token file on disk,
+	// or a fetched-but-unrestarted token never proves a join
+	// (A-H2, round 3).
 	role := "primary-server"
 	if joined {
 		role = "secondary-ha-server"
@@ -640,11 +726,16 @@ func (m *K3sManager) GetStatus() K3sClusterStatus {
 		haTopo = "embedded-etcd"
 	}
 
+	// A-L4 (round 3; also fixed on main by fc576368): GetStatus
+	// hardcoded the ZFS local PV pool to "tank" even though the
+	// bundle carries a configurable ZfsLocalPvPool. Report the
+	// configured value; "tank" remains only the default when
+	// nothing is configured. Main's version (with TrimSpace) is
+	// kept as the dedupe.
 	zfsPool := strings.TrimSpace(cfg.ZfsLocalPvPool)
 	if zfsPool == "" {
 		zfsPool = "tank"
 	}
-
 	return K3sClusterStatus{
 		Enabled:         cfg.Enabled,
 		Running:         running,
@@ -733,15 +824,27 @@ func (m *K3sManager) RestoreEtcdSnapshot(snapshotName string) error {
 	if err != nil {
 		return fmt.Errorf("k3s binary not found on system")
 	}
-	_ = exec.Command("systemctl", "--no-ask-password", "stop", "k3s").Run()
+	// A-M9: the stop used to be discarded (`_ =`), so the cluster
+	// reset ran against a possibly still-running etcd when the stop
+	// failed (stuck/masked unit, systemctl error). Fail before the
+	// reset instead. The unit is resolved the same way as the rest
+	// of this file, so k3s-agent editions stop the right unit.
+	// Main's --no-ask-password flag (a648c351) is kept on the stop.
+	m.mu.Lock()
+	configYaml := m.cfg.K3sConfigYaml
+	m.mu.Unlock()
+	k3sUnit := resolveK3sSystemdUnit(configYaml)
+	if out, err := exec.Command("systemctl", "--no-ask-password", "stop", k3sUnit).CombinedOutput(); err != nil {
+		return fmt.Errorf("failed to stop %s before etcd cluster reset: %s (%w)", k3sUnit, strings.TrimSpace(string(out)), err)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 	out, err := exec.CommandContext(ctx, k3sBin, "server", "--cluster-reset", "--cluster-reset-restore-path="+fullPath).CombinedOutput()
 	if err != nil {
-		_ = exec.Command("systemctl", "--no-ask-password", "start", "k3s").Run()
+		_ = exec.Command("systemctl", "--no-ask-password", "start", k3sUnit).Run()
 		return fmt.Errorf("k3s cluster-reset restore failed: %s (%w)", strings.TrimSpace(string(out)), err)
 	}
-	if startOut, startErr := exec.Command("systemctl", "--no-ask-password", "start", "k3s").CombinedOutput(); startErr != nil {
+	if startOut, startErr := exec.Command("systemctl", "--no-ask-password", "start", k3sUnit).CombinedOutput(); startErr != nil {
 		return fmt.Errorf("etcd restored, but failed to restart k3s: %s (%w)", strings.TrimSpace(string(startOut)), startErr)
 	}
 	return nil
@@ -828,7 +931,11 @@ func (m *K3sManager) LoadSavedConfig(rawJSON []byte) {
 	m.mu.Lock()
 	m.cfg = bundle
 	if (bundle.Role == "backup" || bundle.Role == "secondary") && bundle.AutoJoinHaPeer {
-		if existingTok, err := os.ReadFile(filepath.Join(k3sStateDir, "k3s-join.token")); err == nil && strings.TrimSpace(string(existingTok)) != "" {
+		// A-H2 (round 3): a token file on disk is not proof of a
+		// join — it is written BEFORE the join is attempted. Only
+		// the marker, written after a successful k3s restart with
+		// the token in place, restores the latch across a restart.
+		if _, err := os.Stat(k3sJoinedMarkerPath()); err == nil {
 			m.haAutoJoined = true
 			m.lastMessage = fmt.Sprintf("Auto-joined primary K3s cluster at https://%s with OpenEBS replication", net.JoinHostPort(bundle.PeerIp, "6443"))
 		}
@@ -844,11 +951,14 @@ func (m *K3sManager) IsEnabled() bool {
 }
 
 // MarkHaAutoJoined records that the HA backup poller retrieved the peer token and joined the cluster.
+// Callers must only invoke it AFTER the k3s reload-or-restart that
+// follows the token fetch succeeds (see RestartK3sAfterTokenFetch):
+// calling it on token possession alone reintroduces the A-H2 latch
+// lie. It persists the join marker so the latch survives a restart.
 func (m *K3sManager) MarkHaAutoJoined(peerIp string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.haAutoJoined = true
-	m.lastMessage = fmt.Sprintf("Auto-joined primary K3s cluster at https://%s with OpenEBS replication", net.JoinHostPort(peerIp, "6443"))
+	m.recordHaJoinedLocked(peerIp)
 }
 
 // isSystemdServiceActive reports whether a systemd unit is active.
@@ -975,9 +1085,9 @@ func probeK3sNodes(ctx context.Context) ([]K3sNodeInfo, error) {
 }
 
 var (
-	k8sSubdomainRegex    = regexp.MustCompile(`^[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?$`)
-	k8sLabelNameRegex    = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9_.-]{0,61}[A-Za-z0-9])?$`)
-	k8sLabelValueRegex   = regexp.MustCompile(`^([A-Za-z0-9]([A-Za-z0-9_.-]{0,61}[A-Za-z0-9])?)?$`)
+	k8sSubdomainRegex  = regexp.MustCompile(`^[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?$`)
+	k8sLabelNameRegex  = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9_.-]{0,61}[A-Za-z0-9])?$`)
+	k8sLabelValueRegex = regexp.MustCompile(`^([A-Za-z0-9]([A-Za-z0-9_.-]{0,61}[A-Za-z0-9])?)?$`)
 )
 
 func validK8sNodeName(name string) bool {

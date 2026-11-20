@@ -441,13 +441,40 @@ K3S_SERVER_URL=""
 K3S_JOIN_TOKEN=""
 ZFS_ARC_MAX_MB=0
 
-if [ -f /etc/axonwall/.vault-edition ] || grep -qE '(^|[[:space:]])(axonwall_edition=vault|axonwall\.edition=vault)($|[[:space:]])' /proc/cmdline 2>/dev/null; then
-  EDITION_LABEL="Axonwall Vault Edition"
-  INSTALL_EDITION="vault"
-elif [ -f /etc/axonwall/.k3s-edition ] || grep -qE '(^|[[:space:]])(axonwall_edition=k3s-storage|axonwall\.edition=k3s-storage)($|[[:space:]])' /proc/cmdline 2>/dev/null; then
-  EDITION_LABEL="Axonwall K3s + ZFS Storage Host"
-  INSTALL_EDITION="k3s-storage"
-fi
+# D-M9 (marker): the live ISO carries /etc/axonwall/edition (written by
+# the image builder) — trust it first for the default edition, then the
+# legacy markers and the kernel cmdline, in the same order as
+# axonwall-update. A non-empty value that is not a known edition fails
+# the install loudly: the live environment is corrupt, and installing
+# the wrong edition would be worse. (An interactive edition choice
+# later can still override this default.)
+_edition_file="$(tr -d ' \t\r\n' < /etc/axonwall/edition 2>/dev/null || true)"
+case "$_edition_file" in
+  vault)
+    EDITION_LABEL="Axonwall Vault Edition"
+    INSTALL_EDITION="vault"
+    ;;
+  k3s-storage)
+    EDITION_LABEL="Axonwall K3s + ZFS Storage Host"
+    INSTALL_EDITION="k3s-storage"
+    ;;
+  axonwall)
+    INSTALL_EDITION="axonwall"
+    ;;
+  "")
+    if [ -f /etc/axonwall/.vault-edition ] || grep -qE '(^|[[:space:]])(axonwall_edition=vault|axonwall\.edition=vault)($|[[:space:]])' /proc/cmdline 2>/dev/null; then
+      EDITION_LABEL="Axonwall Vault Edition"
+      INSTALL_EDITION="vault"
+    elif [ -f /etc/axonwall/.k3s-edition ] || grep -qE '(^|[[:space:]])(axonwall_edition=k3s-storage|axonwall\.edition=k3s-storage)($|[[:space:]])' /proc/cmdline 2>/dev/null; then
+      EDITION_LABEL="Axonwall K3s + ZFS Storage Host"
+      INSTALL_EDITION="k3s-storage"
+    fi
+    ;;
+  *)
+    echo "[!] ERROR: /etc/axonwall/edition contains '${_edition_file}' (expected axonwall, vault, or k3s-storage); refusing to install with a corrupt edition record." >&2
+    exit 1
+    ;;
+esac
 
 _cmd_k3s_role="$(sed -nE 's/.*(^|[[:space:]])(axonwall\.k3s_role|axonwall_k3s_role)=(server|agent)([[:space:]]|$).*/\3/p' /proc/cmdline 2>/dev/null | head -n1 || true)"
 if [ -n "$_cmd_k3s_role" ]; then
@@ -812,13 +839,30 @@ else
         case "${K3S_ROLE_CHOICE:-1}" in
           2|agent|worker|AGENT)
             K3S_ROLE="agent"
-            printf "Enter K3s Server URL (e.g. https://10.0.0.10:6443): "
-            read -r K3S_SERVER_URL
-            printf "Enter K3s Cluster Join Token: "
-            stty -echo 2>/dev/null || true
-            read -r K3S_JOIN_TOKEN || K3S_JOIN_TOKEN=""
-            stty echo 2>/dev/null || true
-            echo ""
+            # D-M7: an agent with an empty server URL or join token can
+            # never join the cluster, so refuse to record one. Values
+            # already set (kernel cmdline, cloud-init seed, --apply-config)
+            # skip the prompt; without a tty there is nobody to ask, so
+            # fail closed instead of writing an unjoinable agent config.
+            while [ -z "$K3S_SERVER_URL" ]; do
+              if [ ! -t 0 ]; then
+                echo "[!] Error: K3s agent role requires a server URL (provide server_url in the cloud-init seed or --apply-config file)." >&2
+                exit 1
+              fi
+              printf "Enter K3s Server URL (e.g. https://10.0.0.10:6443): "
+              read -r K3S_SERVER_URL || K3S_SERVER_URL=""
+            done
+            while [ -z "$K3S_JOIN_TOKEN" ]; do
+              if [ ! -t 0 ]; then
+                echo "[!] Error: K3s agent role requires a cluster join token (provide join_token in the cloud-init seed or --apply-config file)." >&2
+                exit 1
+              fi
+              printf "Enter K3s Cluster Join Token: "
+              stty -echo 2>/dev/null || true
+              read -r K3S_JOIN_TOKEN || K3S_JOIN_TOKEN=""
+              stty echo 2>/dev/null || true
+              echo ""
+            done
             ;;
           *)
             K3S_ROLE="server"
@@ -1573,7 +1617,9 @@ emit_phase 3 8 "Imaging ${EDITION_LABEL} root filesystem..."
 PRIMARY_EFI=$(part_dev "$PRIMARY_DISK" "$EFI_PART_NUM")
 mkdir -p /mnt/slot_a /mnt/slot_b /mnt/data
 
-INSTALL_VER="0.11.41"
+# D-L3: "unknown" when /etc/axonwall/version is absent -- the version
+# is genuinely unknown then; a stale literal mis-stamps slot data.
+INSTALL_VER="unknown"
 if [ -f /etc/axonwall/version ]; then
   INSTALL_VER="$(head -n1 /etc/axonwall/version | tr -d '\r\n ')"
 fi
@@ -1717,9 +1763,9 @@ resolve_zfs_topology() {
 
   zpool set "bootfs=${INIT_BE}" zroot
   if [ "$OS_FAMILY" = "alpine" ]; then
-    ZBM_CMDLINE="ro rootfstype=zfs modules=sd-mod,usb-storage,virtio_blk,nvme,zfs quiet console=tty0 console=ttyS0,115200"
+    ZBM_CMDLINE="ro rootfstype=zfs modules=sd-mod,usb-storage,virtio_blk,nvme,zfs quiet console=tty0 console=ttyS0,9600"
   else
-    ZBM_CMDLINE="ro quiet splash plymouth.ignore-serial-consoles lsm=landlock,lockdown,yama,integrity,apparmor,bpf console=ttyS0,115200 console=tty0"
+    ZBM_CMDLINE="ro quiet splash plymouth.ignore-serial-consoles lsm=landlock,lockdown,yama,integrity,apparmor,bpf console=ttyS0,9600 console=tty0"
   fi
   zfs set "org.zfsbootmenu:commandline=${ZBM_CMDLINE}" zroot/ROOT
   zfs set "org.axonwall:active_be=${INIT_BE}" zroot/ROOT
@@ -1828,6 +1874,10 @@ emit_phase 4 8 "Configuring fstab, LUKS2/TPM2, Cloud-Init & administrator creden
 mkdir -p /mnt/data/home /mnt/data/ldap /mnt/data/secrets /mnt/data/etc-axonwall /mnt/slot_a/home /mnt/slot_a/etc/axonwall
 echo "${INSTALL_MODE}" > /mnt/slot_a/etc/axonwall/install-mode
 echo "${INSTALL_MODE}" > /mnt/data/install-mode
+# D-M9 (marker): the canonical edition file for the installed slot.
+# INSTALL_EDITION is final here (detection + any interactive choice
+# are done); the updater trusts this file first at update time.
+printf '%s\n' "${INSTALL_EDITION:-axonwall}" > /mnt/slot_a/etc/axonwall/edition
 
 if [ "${INSTALL_EDITION:-axonwall}" = "vault" ] || [ -f /mnt/slot_a/etc/axonwall/.vault-edition ]; then
   ui_echo "[+] Configuring target as Axonwall Vault Edition (hardened immutable S3 storage appliance)..."
@@ -2354,7 +2404,9 @@ fi
 # ==============================================================================
 emit_phase 5 8 "Synchronizing Standby Slot B & recording slot metadata..."
 
-INSTALL_VER="0.11.32"
+# D-L3: "unknown" when /mnt/slot_a/etc/axonwall/version is absent;
+# see the PHASE 3 default above.
+INSTALL_VER="unknown"
 if [ -f /mnt/slot_a/etc/axonwall/version ]; then
   INSTALL_VER="$(head -n1 /mnt/slot_a/etc/axonwall/version | tr -d '\r\n ')"
 fi
@@ -2373,10 +2425,23 @@ if [ "$INSTALL_MODE" = "ab" ] && [ -n "$ROOT_B_DEV" ]; then
       --exclude='/run/*' \
       --exclude='/tmp/*' \
       --exclude='/mnt/*' \
+      --exclude='/etc/machine-id' \
+      --exclude='/etc/ssh/ssh_host_*' \
+      --exclude='/var/lib/dbus/machine-id' \
+      --exclude='/var/lib/cloud/data' \
+      --exclude='/var/lib/cloud/instance' \
+      --exclude='/var/lib/cloud/instances' \
       /mnt/slot_a/ /mnt/slot_b/
   else
     cp -a /mnt/slot_a/. /mnt/slot_b/ 2>/dev/null || true
   fi
+  # D-M1: sanitize machine identity on the standby copy, exactly as the
+  # firstboot clone does, so slot B generates its own machine-id, SSH
+  # host keys and cloud-init state on its first boot (the cp fallback
+  # above copies them verbatim; the rsync branch now excludes them).
+  : > /mnt/slot_b/etc/machine-id 2>/dev/null || true
+  rm -f /mnt/slot_b/var/lib/dbus/machine-id /mnt/slot_b/etc/ssh/ssh_host_* 2>/dev/null || true
+  rm -rf /mnt/slot_b/var/lib/cloud/data /mnt/slot_b/var/lib/cloud/instance /mnt/slot_b/var/lib/cloud/instances 2>/dev/null || true
   sed -i 's/LABEL=axon_root_a/LABEL=axon_root_b/' /mnt/slot_b/etc/fstab
 
   INIT_SLOT_JSON="$(printf '{\n  "slotA": "%s",\n  "slotB": "%s (Factory Standby)",\n  "updatedAt": "%s"\n}\n' "$INSTALL_VER" "$INSTALL_VER" "$(date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || echo "")")"
@@ -2561,6 +2626,7 @@ if [ "$INSTALL_MODE" = "zbm" ]; then
     /mnt/slot_a/boot/efi/EFI/ZBM/initramfs-bootmenu.img
 
   cat << 'ZBM_SYSLINUX_EOF' > /mnt/slot_a/boot/efi/EFI/ZBM/syslinux.cfg
+SERIAL 0 9600
 DEFAULT zbm
 PROMPT 0
 TIMEOUT 5
@@ -2568,23 +2634,30 @@ TIMEOUT 5
 LABEL zbm
   LINUX /EFI/ZBM/vmlinuz-bootmenu
   INITRD /EFI/ZBM/initramfs-bootmenu.img
-  APPEND zfsbootmenu quiet loglevel=3 net.ifnames=0 zbm.timeout=5 zbm.autosize=1 zbm.hookroot=LABEL=AXON_EFI//EFI/ZBM/hooks console=ttyS0,115200 console=tty1
+  APPEND zfsbootmenu quiet loglevel=3 net.ifnames=0 zbm.timeout=5 zbm.autosize=1 zbm.hookroot=LABEL=AXON_EFI//EFI/ZBM/hooks console=ttyS0,9600 console=tty1
 
 LABEL zbm_backup
   LINUX /EFI/ZBM/vmlinuz-bootmenu
   INITRD /EFI/ZBM/initramfs-bootmenu.img
-  APPEND zfsbootmenu zbm.force_import=1 loglevel=3 net.ifnames=0 zbm.timeout=5 zbm.autosize=1 zbm.hookroot=LABEL=AXON_EFI//EFI/ZBM/hooks console=ttyS0,115200 console=tty1
+  APPEND zfsbootmenu zbm.force_import=1 loglevel=3 net.ifnames=0 zbm.timeout=5 zbm.autosize=1 zbm.hookroot=LABEL=AXON_EFI//EFI/ZBM/hooks console=ttyS0,9600 console=tty1
 ZBM_SYSLINUX_EOF
   cp -f /mnt/slot_a/boot/efi/EFI/ZBM/syslinux.cfg /mnt/slot_a/boot/efi/syslinux.cfg 2>/dev/null || true
 
   # Install Syslinux / Extlinux VBR & GPT MBR boot code for Legacy BIOS boot (zero GRUB)
+  # D-H2: the whole legacy-BIOS boot chain used to be swallowed (`|| true`
+  # on every step), so a ZBM box could install with no working BIOS boot
+  # path while the install reported success. Each step now fails the
+  # install loudly (script runs under `set -eu`; the fallback locations
+  # are still tried first). `efibootmgr` below is the deliberate
+  # exception: the EFI installs use --removable, so an NVRAM failure
+  # alone is recoverable and only warns.
   sync
   if command -v extlinux >/dev/null 2>&1; then
-    extlinux --install /mnt/slot_a/boot/efi/EFI/ZBM 2>/dev/null || extlinux --install /mnt/slot_a/boot/efi 2>/dev/null || true
+    extlinux --install /mnt/slot_a/boot/efi/EFI/ZBM || extlinux --install /mnt/slot_a/boot/efi || { echo "[!] ERROR: extlinux install failed for both EFI locations; legacy BIOS boot is unavailable." >&2; exit 1; }
   fi
   umount /mnt/slot_a/boot/efi 2>/dev/null || true
   if command -v syslinux >/dev/null 2>&1; then
-    syslinux --install -d /EFI/ZBM "$PRIMARY_EFI" 2>/dev/null || syslinux --install "$PRIMARY_EFI" 2>/dev/null || true
+    syslinux --install -d /EFI/ZBM "$PRIMARY_EFI" || syslinux --install "$PRIMARY_EFI" || { echo "[!] ERROR: syslinux install failed for ${PRIMARY_EFI}; legacy BIOS boot is unavailable." >&2; exit 1; }
   fi
   if command -v fsck.vfat >/dev/null 2>&1; then
     fsck.vfat -a "$PRIMARY_EFI" >/dev/null 2>&1 || true
@@ -2606,7 +2679,7 @@ ZBM_SYSLINUX_EOF
 
   for sys_disk in $SYSTEM_DISKS; do
     if [ -n "$GPTMBR_BIN" ]; then
-      dd if="$GPTMBR_BIN" of="$sys_disk" bs=440 count=1 conv=notrunc 2>/dev/null || true
+      dd if="$GPTMBR_BIN" of="$sys_disk" bs=440 count=1 conv=notrunc
     fi
     sgdisk --attributes=1:set:2 "$sys_disk" >/dev/null 2>&1 || true
   done
@@ -2616,7 +2689,7 @@ ZBM_SYSLINUX_EOF
   for sys_disk in $SYSTEM_DISKS; do
     if [ "$sys_disk" != "$PRIMARY_DISK" ]; then
       SEC_EFI=$(part_dev "$sys_disk" "$EFI_PART_NUM")
-      dd if="$PRIMARY_EFI" of="$SEC_EFI" bs=1M conv=fsync 2>/dev/null || true
+      dd if="$PRIMARY_EFI" of="$SEC_EFI" bs=1M conv=fsync
     fi
   done
   mount "$PRIMARY_EFI" /mnt/slot_a/boot/efi 2>/dev/null || true
@@ -2624,7 +2697,7 @@ ZBM_SYSLINUX_EOF
   # Register ZFSBootMenu in UEFI NVRAM if booted in UEFI mode
   if [ -d /sys/firmware/efi/efivars ] && command -v efibootmgr >/dev/null 2>&1; then
     for sys_disk in $SYSTEM_DISKS; do
-      efibootmgr -c -d "$sys_disk" -p "$EFI_PART_NUM" -L "Axonwall ZFSBootMenu" -l '\EFI\ZBM\VMLINUZ.EFI' 2>/dev/null || true
+      efibootmgr -c -d "$sys_disk" -p "$EFI_PART_NUM" -L "Axonwall ZFSBootMenu" -l '\EFI\ZBM\VMLINUZ.EFI' 2>/dev/null || echo "[!] WARNING: efibootmgr NVRAM registration failed for ${sys_disk}; the --removable EFI install still boots." >&2
     done
   fi
 
@@ -2633,15 +2706,16 @@ ZBM_SYSLINUX_EOF
     mount --bind "/$m" "/mnt/slot_a/$m" 2>/dev/null || true
   done
   if [ "$OS_FAMILY" = "debian" ]; then
+    # D-H2: update-initramfs fails loudly under set -eu (no || true); the Plymouth theme line stays best-effort.
     chroot /mnt/slot_a /usr/sbin/plymouth-set-default-theme axonwall 2>/dev/null || true
-    chroot /mnt/slot_a update-initramfs -u -k all 2>/dev/null || true
+    chroot /mnt/slot_a update-initramfs -u -k all
   elif [ "$OS_FAMILY" = "alpine" ] && [ -x /mnt/slot_a/sbin/mkinitfs ]; then
     if [ -f /mnt/slot_a/etc/mkinitfs/mkinitfs.conf ] && ! grep -q 'zfs' /mnt/slot_a/etc/mkinitfs/mkinitfs.conf 2>/dev/null; then
       sed -i 's/features="/features="zfs /' /mnt/slot_a/etc/mkinitfs/mkinitfs.conf 2>/dev/null || true
     fi
     KVER_ALPINE=$(ls /mnt/slot_a/lib/modules 2>/dev/null | head -n1 || true)
     if [ -n "$KVER_ALPINE" ]; then
-      chroot /mnt/slot_a /sbin/mkinitfs -o "/boot/initramfs-${KERNEL_FLAVOR}" "$KVER_ALPINE" 2>/dev/null || true
+      chroot /mnt/slot_a /sbin/mkinitfs -o "/boot/initramfs-${KERNEL_FLAVOR}" "$KVER_ALPINE"
     fi
   fi
   for m in run sys proc dev; do
@@ -2652,9 +2726,9 @@ else
 
   mkdir -p /mnt/slot_a/boot/grub
   for sys_disk in $SYSTEM_DISKS; do
-    grub-install --target=i386-pc --boot-directory=/mnt/slot_a/boot "$sys_disk" 2>/dev/null || true
+    grub-install --target=i386-pc --boot-directory=/mnt/slot_a/boot "$sys_disk"
   done
-  grub-install --target=x86_64-efi --efi-directory=/mnt/slot_a/boot/efi --boot-directory=/mnt/slot_a/boot --removable --no-nvram 2>/dev/null || true
+  grub-install --target=x86_64-efi --efi-directory=/mnt/slot_a/boot/efi --boot-directory=/mnt/slot_a/boot --removable --no-nvram
 
   # Copy branded Axonwall splash image, fonts, and theme into installed /boot/grub/
   mkdir -p /mnt/slot_a/boot/grub/themes/axonwall /mnt/slot_a/etc/axonwall/branding
@@ -2769,7 +2843,7 @@ THEME_EOF
   for sys_disk in $SYSTEM_DISKS; do
     if [ "$sys_disk" != "$PRIMARY_DISK" ]; then
       SEC_EFI=$(part_dev "$sys_disk" "$EFI_PART_NUM")
-      dd if="$PRIMARY_EFI" of="$SEC_EFI" bs=1M conv=fsync 2>/dev/null || true
+      dd if="$PRIMARY_EFI" of="$SEC_EFI" bs=1M conv=fsync
     fi
   done
 
@@ -2778,10 +2852,10 @@ THEME_EOF
 
   if [ "$OS_FAMILY" = "alpine" ]; then
     EXTRA_KARGS="modules=sd-mod,usb-storage,ext4,xfs,virtio_blk,nvme,raid1,md-mod"
-    CONSOLE_KARGS="quiet console=tty0 console=ttyS0,115200"
+    CONSOLE_KARGS="quiet console=tty0 console=ttyS0,9600"
   else
     EXTRA_KARGS=""
-    CONSOLE_KARGS="quiet splash plymouth.ignore-serial-consoles lsm=landlock,lockdown,yama,integrity,apparmor,bpf console=ttyS0,115200 console=tty0"
+    CONSOLE_KARGS="quiet splash plymouth.ignore-serial-consoles lsm=landlock,lockdown,yama,integrity,apparmor,bpf console=ttyS0,9600 console=tty0"
   fi
 
   cat << GRUB_EOF > /mnt/slot_a/boot/grub/grub.cfg
@@ -2817,6 +2891,7 @@ fi
 insmod gfxterm
 insmod png
 insmod gfxmenu
+insmod serial
 
 if [ -f /boot/grub/themes/axonwall/theme.txt ]; then
   set theme=/boot/grub/themes/axonwall/theme.txt
@@ -2832,7 +2907,12 @@ fi
 
 set color_normal=light-gray/black
 set color_highlight=light-green/dark-gray
-terminal_output gfxterm
+if serial --unit=0 --speed=9600 --word=8 --parity=no --stop=1; then
+  terminal_input console serial
+  terminal_output gfxterm serial
+else
+  terminal_output gfxterm
+fi
 
 if [ -s \$prefix/grubenv ]; then
   load_env
@@ -2899,8 +2979,9 @@ GRUB_EOF
     for m in dev proc sys run; do
       mount --bind "/$m" "/mnt/slot_a/$m" 2>/dev/null || true
     done
+    # D-H2: update-initramfs fails loudly under set -eu (no || true); the Plymouth theme line stays best-effort.
     chroot /mnt/slot_a /usr/sbin/plymouth-set-default-theme axonwall 2>/dev/null || true
-    chroot /mnt/slot_a update-initramfs -u -k all 2>/dev/null || true
+    chroot /mnt/slot_a update-initramfs -u -k all
     for m in run sys proc dev; do
       umount "/mnt/slot_a/$m" 2>/dev/null || true
     done
@@ -2921,7 +3002,7 @@ GRUB_EOF
       for m in dev proc sys run; do
         mount --bind "/$m" "/mnt/slot_a/$m" 2>/dev/null || true
       done
-      chroot /mnt/slot_a mkinitfs -c /etc/mkinitfs/mkinitfs.conf -o "/boot/initramfs-${K_FLAVOR}" "${K_VER}" 2>/dev/null || true
+      chroot /mnt/slot_a mkinitfs -c /etc/mkinitfs/mkinitfs.conf -o "/boot/initramfs-${K_FLAVOR}" "${K_VER}"
       for m in run sys proc dev; do
         umount "/mnt/slot_a/$m" 2>/dev/null || true
       done

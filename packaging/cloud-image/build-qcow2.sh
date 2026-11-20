@@ -16,7 +16,11 @@ ROOT_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 OUTPUT_DIR="${SCRIPT_DIR}/output"
 WORK_DIR="${SCRIPT_DIR}/build"
 
-VERSION=$(node -p "require('${ROOT_DIR}/package.json').version" 2>/dev/null || echo "0.9.9")
+VERSION=$(node -p "require('${ROOT_DIR}/package.json').version" 2>/dev/null || grep -m1 '"version"' "${ROOT_DIR}/package.json" 2>/dev/null | sed -E 's/.*"version": *"([^"]+)".*/\1/' || true)
+if [ -z "$VERSION" ]; then
+  echo "[-] ERROR: cannot determine release version (package.json missing or unreadable); refusing to stamp a hardcoded fallback version." >&2
+  exit 1
+fi
 IMAGE_BASE="axonwall-debian13-amd64-cloud"
 RAW_IMAGE="${WORK_DIR}/${IMAGE_BASE}.raw"
 QCOW2_IMAGE="${OUTPUT_DIR}/${IMAGE_BASE}.qcow2"
@@ -265,6 +269,9 @@ mount -t sysfs sys "${TARGET}/sys" 2>/dev/null || mount --bind /sys "${TARGET}/s
 mount --bind /run "${TARGET}/run"
 
 # Install GRUB for EFI (removable media target ensures boot on all UEFI firmware)
+# D-H1: a failed bootloader install must fail the build, never ship an
+# unbootable image stamped as success. No `|| true`, no silenced stderr:
+# under `set -euo pipefail` a failure aborts here and the EXIT trap cleans up.
 chroot "${TARGET}" grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=axonwall --recheck --no-nvram --removable
 
 # Install GRUB for Legacy BIOS
@@ -281,6 +288,7 @@ fi
 chroot "${TARGET}" /usr/sbin/plymouth-set-default-theme axonwall 2>/dev/null || true
 
 # Update GRUB configuration & initialize deterministic grubenv A/B state
+# (D-H1: update-grub fails the build on error -- no || true, no silenced stderr.)
 chroot "${TARGET}" update-grub
 if [[ ! -f "${TARGET}/boot/grub/grubenv" ]]; then
   chroot "${TARGET}" grub-editenv /boot/grub/grubenv create

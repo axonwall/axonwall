@@ -92,7 +92,7 @@ lb config \
   --chroot-squashfs-compression-type xz \
   --binary-images iso-hybrid \
   --bootloaders "syslinux,grub-efi" \
-  --bootappend-live "boot=live components quiet splash plymouth.ignore-serial-consoles loglevel=3 systemd.show_status=0 lsm=landlock,lockdown,yama,integrity,apparmor,bpf hostname=${LIVE_HOSTNAME} username=axonwall live-config.user-default-groups=sudo,adm,dialout live-config.nottyautologin console=ttyS0,115200 console=tty0" \
+  --bootappend-live "boot=live components quiet splash plymouth.ignore-serial-consoles loglevel=3 systemd.show_status=0 lsm=landlock,lockdown,yama,integrity,apparmor,bpf hostname=${LIVE_HOSTNAME} username=axonwall live-config.user-default-groups=sudo,adm,dialout live-config.nottyautologin console=ttyS0,9600 console=tty0" \
   --bootappend-install "auto=true priority=critical preseed/file=/preseed.cfg" \
   --debian-installer live \
   --debian-installer-distribution trixie \
@@ -218,6 +218,12 @@ elif [[ "${FLAVOR}" == "k3s-storage" ]]; then
   cp "${SCRIPT_DIR}/../k3s-storage/preseed-k3s-storage.cfg" config/includes.installer/preseed.cfg
   cp "${SCRIPT_DIR}/../k3s-storage/preseed-k3s-storage-binary.cfg" config/includes.binary/preseed.cfg
 fi
+
+# D-M9 (marker): the canonical edition file for the live installer
+# environment (and, via this chroot, for the cloud image and every
+# install the TUI/d-i paths perform from this ISO). FLAVOR is the
+# builder's edition axis, validated to axonwall|vault|k3s-storage.
+printf '%s\n' "${FLAVOR}" > config/includes.chroot/etc/axonwall/edition
 
 # Ensure firstboot marker directory and service enable symlink exist
 mkdir -p config/includes.chroot/etc/axonwall/
@@ -346,7 +352,11 @@ fi
 
 chmod +x config/includes.chroot/usr/local/bin/axonwall-import || true
 
-VERSION=$(node -p "require('${SCRIPT_DIR}/../../package.json').version" 2>/dev/null || grep -m1 '"version"' "${SCRIPT_DIR}/../../package.json" 2>/dev/null | sed -E 's/.*"version": *"([^"]+)".*/\1/' || echo "0.9.2")
+VERSION=$(node -p "require('${SCRIPT_DIR}/../../package.json').version" 2>/dev/null || grep -m1 '"version"' "${SCRIPT_DIR}/../../package.json" 2>/dev/null | sed -E 's/.*"version": *"([^"]+)".*/\1/' || true)
+if [ -z "$VERSION" ]; then
+  echo "[-] ERROR: cannot determine release version (package.json missing or unreadable); refusing to stamp a hardcoded fallback version." >&2
+  exit 1
+fi
 echo "${VERSION}" > config/includes.chroot/etc/axonwall/version
 
 # Copy compiled daemon binaries if present

@@ -423,7 +423,7 @@ def normalize_zbm_cmdline(raw_cmd: str, font: str | None = None) -> str:
             tokens.append(req)
 
     # Critical: console=tty1 MUST come AFTER console=ttyS0 so ZFSBootMenu sets control_term=/dev/tty1
-    tokens.append("console=ttyS0,115200")
+    tokens.append("console=ttyS0,9600")
     tokens.append("console=tty1")
     return " ".join(tokens)
 
@@ -446,6 +446,24 @@ def extract_clean_section(efi_path: str, sec_name: str, out_path: str) -> None:
                 out_f.write(buf[rawptr : rawptr + length])
             return
     subprocess.run(["objcopy", "--dump-section", f"{sec_name}={out_path}", efi_path], check=True)
+
+
+def _atomic_copyfile(src: str, dst: str) -> None:
+    """Copy src onto dst atomically: write a temp file in dst's directory
+    (same filesystem, so the rename is atomic) and rename it into place.
+    An interrupted copy leaves the previous dst intact instead of a
+    partial file. E-L4 (round-3): the old shutil.copyfile overwrote the
+    BIOS kernel/initrd in place on the ESP."""
+    tmp = f"{dst}.tmp-{os.getpid()}"
+    try:
+        shutil.copyfile(src, tmp)
+        os.replace(tmp, dst)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def theme_zbm_uki(
@@ -544,21 +562,36 @@ def theme_zbm_uki(
 
         out_abs = os.path.abspath(out_efi)
         os.makedirs(os.path.dirname(out_abs), exist_ok=True)
-        out_tmp = os.path.join(tmpdir, "out.efi")
+        # E-L4 (round-3): build the UKI in a temp file in the OUTPUT
+        # directory (same filesystem as the ESP) and rename it into
+        # place. The old code built it in the TemporaryDirectory
+        # (/tmp), so shutil.move degraded to a cross-filesystem copy
+        # and an interrupted apply left a partial VMLINUZ.EFI on the
+        # ESP with no intact fallback.
+        out_tmp = os.path.join(
+            os.path.dirname(out_abs), f".{os.path.basename(out_abs)}.tmp-{os.getpid()}"
+        )
         cmd.extend([stub_path, out_tmp])
-        subprocess.run(cmd, check=True)
+        try:
+            subprocess.run(cmd, check=True)
 
-        verify_and_fix_pe_headers(out_tmp, section_sizes)
-        shutil.move(out_tmp, out_abs)
+            verify_and_fix_pe_headers(out_tmp, section_sizes)
+            os.replace(out_tmp, out_abs)
+        except BaseException:
+            try:
+                os.unlink(out_tmp)
+            except OSError:
+                pass
+            raise
 
         # Also update companion Legacy BIOS Syslinux kernel/initramfs if requested or present in same dir
         out_dir = os.path.dirname(out_abs)
         bios_linux = extract_linux or os.path.join(out_dir, "vmlinuz-bootmenu")
         bios_initrd = extract_initrd or os.path.join(out_dir, "initramfs-bootmenu.img")
         if extract_linux or os.path.exists(bios_linux):
-            shutil.copyfile(linux_path, bios_linux)
+            _atomic_copyfile(linux_path, bios_linux)
         if extract_initrd or os.path.exists(bios_initrd):
-            shutil.copyfile(initrd_path, bios_initrd)
+            _atomic_copyfile(initrd_path, bios_initrd)
 
         print(f"[✓] Successfully themed ZBM UKI -> {out_efi} ({os.path.getsize(out_abs):,} bytes)")
 
