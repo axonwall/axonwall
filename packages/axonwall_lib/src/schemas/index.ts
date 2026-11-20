@@ -1101,6 +1101,17 @@ export const PluginBundledDistroPackageBinarySchema = z.object({
   // filenames drop the epoch, e.g. version '1:30.1+1-6' becomes
   // 'emacs-nox_30.1+1-6_amd64.deb' under pool/main/e/emacs/).
   package: z.string().min(1),
+  // Debian *source* package name, e.g. 'gcc-14' for the binary
+  // package libgccjit0, or 'emacs' for emacs-nox /
+  // emacs-bin-common / emacs-common. The pool path is derived from
+  // the source, not the binary package name; when omitted it
+  // defaults to `package`. Required whenever the binary package is
+  // built from a differently-named source (libgccjit0 ← gcc-14,
+  // libisl23 ← isl, libmpc3 ← mpclib3, libmpfr6 ← mpfr4,
+  // libasound2t64 / libasound2-data ← alsa-lib, liblcms2-2 ←
+  // lcms2) — without it the daemon builds the wrong pool URL and
+  // the download 404s.
+  source: z.string().min(1).optional(),
   // Full version including epoch where the distro uses one, e.g.
   // '1:30.1+1-6' for Debian trixie emacs-nox.
   version: z.string().min(1),

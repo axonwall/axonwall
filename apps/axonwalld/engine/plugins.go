@@ -80,7 +80,16 @@ type PluginDefinition struct {
 //     the distro uses one (e.g. "1:30.1+1-6"); the daemon derives the
 //     file name from Package + Version + Arch (Debian filenames drop
 //     the epoch, e.g. "emacs-nox_30.1+1-6_amd64.deb" under
-//     pool/main/e/emacs/).
+//     pool/main/e/emacs/). Source is the Debian *source* package
+//     name, which is usually — but not always — the same as Package:
+//     emacs-nox/emacs-bin-common/emacs-common are all built from
+//     source "emacs"; libgccjit0 is built from source gcc-14,
+//     libisl23 from isl, libmpc3 from mpclib3, libmpfr6 from mpfr4,
+//     libasound2t64 / libasound2-data from alsa-lib, liblcms2-2
+//     from lcms2. The pool path is derived from Source (default:
+//     Package); a distroPackage entry whose binary package comes
+//     from a differently-named source MUST set Source or its
+//     download URL 404s.
 //
 // SHA256 is REQUIRED on every entry. It must be a 64-char hex digest,
 // except for temporary "SHA256_TODO_<name>" markers used while a hash
@@ -102,6 +111,7 @@ type PluginBundledBinary struct {
 	PathInArchive string `json:"pathInArchive,omitempty"`
 	Distro        string `json:"distro,omitempty"`
 	Package       string `json:"package,omitempty"`
+	Source        string `json:"source,omitempty"`
 	Version       string `json:"version,omitempty"`
 	Arch          string `json:"arch,omitempty"`
 }
@@ -316,70 +326,217 @@ func GetExtensionPluginDefinitions() []PluginDefinition {
 			RequiredBinaries: []string{"zsh", "vim", "nvim", "starship", "tmux", "kubectl", "helm"},
 		},
 		{
-			// GNU Emacs, bundled — not system-installed. The three
-			// trixie amd64 .debs are downloaded, sha256-verified, and
+			// GNU Emacs, bundled — not system-installed. The trixie
+			// amd64 .debs are downloaded, sha256-verified, and
 			// extracted (dpkg-deb -x layout) into the plugin's own
 			// directory; nothing is installed into the system, so
 			// DebianPackages/AlpinePackages/ArchPackages are
 			// deliberately empty (ArchPackages is an empty slice, not
 			// nil, per TestArchPluginPackagesAndRootkitScannerSlot).
-			// SHA256 values are SHA256_TODO_* placeholders: a later
-			// worker replaces them with the real digests from the
-			// Debian Packages index; the daemon must fail closed on
-			// them until then. Expected files (epoch dropped from the
-			// filename, per Debian convention) under
-			// pool/main/e/emacs/:
-			//   emacs-nox_30.1+1-6_amd64.deb
-			//   emacs-bin-common_30.1+1-6_amd64.deb
-			//   emacs-common_30.1+1-6_all.deb
-			// UNCERTAIN: live trixie now serves 1:30.1+1-6+deb13u1
-			// (security update, same pool path, filenames with the
-			// +deb13u1 suffix), not the 1:30.1+1-6 pinned here — the
-			// resolving worker must confirm the exact version and
-			// hashes against the Packages index before install.
+			//
+			// VERSION DEVIATION (coordinator decision): pinned
+			// 1:30.1+1-6+deb13u1, the current trixie security
+			// update, NOT the 1:30.1+1-6 named in the original
+			// plan — 1:30.1+1-6 is superseded and only available
+			// from snapshot.debian.org now. All sha256s below were
+			// verified by downloading the .debs and hashing locally
+			// against the live trixie Packages index (research
+			// notes 2026-11-20).
+			//
+			// The three emacs .debs alone do NOT run: the extracted
+			// binary is usr/bin/emacs-nox (dpkg-deb -x runs no
+			// maintainer scripts, so there is no /usr/bin/emacs
+			// alternatives symlink — bin/emacs is a launcher
+			// written at install time, see provisionEmacsPluginFiles)
+			// and it hard-links libgccjit.so.0, libasound.so.2 and
+			// liblcms2.so.2, none of which are in the base image.
+			// So the bundle also carries libgccjit0 (+ its .so
+			// deps libisl23, libmpc3, libmpfr6 — libgmp10,
+			// libzstd1 and zlib1g are already in the image),
+			// libasound2t64 (+ tiny libasound2-data) and
+			// liblcms2-2. The lib .debs' binary packages are built
+			// from differently-named source packages, hence the
+			// Source field on each (pool path is derived from it).
+			// Full bundle: ~35.6 MB download, ~169 MB on disk.
+			//
+			// emacs-el is deliberately SKIPPED: it is only the
+			// .el sources (19.5 MB download / 19.7 MB disk) — the
+			// .elc files live in emacs-common itself. Trade-off:
+			// describe-function cannot show Lisp sources and user
+			// code cannot byte-compile against those sources.
+			//
+			// Native-comp is UNVERIFIED with just this .so set:
+			// libgccjit compiles in-process, but Emacs native-comp
+			// also invokes the assembler/linker for the final .eln
+			// link step and gcc-14/cc1 is NOT in the base image.
+			// A live-box test must byte+natively compile a trivial
+			// .el file; if it fails, the fallback is
+			// native-comp-jit-compilation nil (byte-compiled only).
+			// VERIFIED 2026-11-20 (live extraction + run): JIT
+			// compilation of new code FAILS at the link step —
+			// "ld: cannot find crtbeginS.o" (a gcc-14 /
+			// libgcc-14-dev file, not bundled, and bundling a
+			// compiler toolchain onto the appliance is out of
+			// scope). The plugin therefore ships byte-compiled
+			// only: init.el sets native-comp-jit-compilation to
+			// nil, so emacs never attempts a JIT compile (and
+			// never shows the ld error); the prebuilt .eln files
+			// for the preloaded libs still load, and
+			// native-comp-available-p reports t.
 			ID:               "cli-emacs",
 			Name:             "Emacs Editor (GNU Emacs, no-X) for /etc/axonwall",
 			Version:          "0.1.0",
 			Category:         "extension",
-			Description:      "GNU Emacs (no-X) for editing /etc/axonwall configuration files, bundled with the plugin: the Debian emacs-nox 30.1 tree is downloaded, checksum-verified, and extracted into the plugin's own directory, and its bin directory is added to PATH for daemon invocations and interactive shells. Nothing is installed into the system.",
+			Description:      "GNU Emacs (no-X) for editing /etc/axonwall configuration files, bundled with the plugin: the Debian emacs-nox 30.1 tree plus its missing shared libraries are downloaded, checksum-verified, and extracted into the plugin's own directory, and its bin directory is added to PATH for daemon invocations and interactive shells. Nothing is installed into the system.",
 			Author:           "Axonwall Core",
 			Privileges:       []string{"system.users", "system.config.write"},
 			DebianPackages:   []string{},
 			AlpinePackages:   []string{},
 			ArchPackages:     []string{},
-			RequiredBinaries: []string{"emacs"},
+			RequiredBinaries: []string{"emacs", "emacs-nox"},
 			Binaries: []PluginBundledBinary{
 				{
 					Kind:    "distroPackage",
 					Name:    "emacs-nox",
-					SHA256:  "SHA256_TODO_emacs-nox",
+					SHA256:  "fee9e5bc5d4c0da716e3e12eee8e1b063bd24a58a6ca6755be2516b377d50364",
 					Distro:  "debian",
 					Package: "emacs-nox",
-					Version: "1:30.1+1-6",
+					Source:  "emacs",
+					Version: "1:30.1+1-6+deb13u1",
 					Arch:    "amd64",
 				},
 				{
 					Kind:    "distroPackage",
 					Name:    "emacs-bin-common",
-					SHA256:  "SHA256_TODO_emacs-bin-common",
+					SHA256:  "86ad88ffb8d0024fe22a4b95863918655ecb10523c4bcdd199540da75f67c4db",
 					Distro:  "debian",
 					Package: "emacs-bin-common",
-					Version: "1:30.1+1-6",
+					Source:  "emacs",
+					Version: "1:30.1+1-6+deb13u1",
 					Arch:    "amd64",
 				},
 				{
 					Kind:    "distroPackage",
 					Name:    "emacs-common",
-					SHA256:  "SHA256_TODO_emacs-common",
+					SHA256:  "1a20b06410720a432bd6c82a455a919b7083011e02a3c7b46243e65d8582791b",
 					Distro:  "debian",
 					Package: "emacs-common",
-					Version: "1:30.1+1-6",
+					Source:  "emacs",
+					Version: "1:30.1+1-6+deb13u1",
 					Arch:    "all",
 				},
+				{
+					Kind:    "distroPackage",
+					Name:    "libgccjit0",
+					SHA256:  "cab79f341f9b1ee14a03bc6ca1c1ecdb2d52b2a346d1e011c47682e5f45453f9",
+					Distro:  "debian",
+					Package: "libgccjit0",
+					Source:  "gcc-14",
+					Version: "14.2.0-19",
+					Arch:    "amd64",
+				},
+				{
+					Kind:    "distroPackage",
+					Name:    "libisl23",
+					SHA256:  "ac8518042e81c00de1effb72bba7e88ac4ecd488f7ea8b9e3ebc63159cb53b35",
+					Distro:  "debian",
+					Package: "libisl23",
+					Source:  "isl",
+					Version: "0.27-1",
+					Arch:    "amd64",
+				},
+				{
+					Kind:    "distroPackage",
+					Name:    "libmpc3",
+					SHA256:  "2af0a5c128e03694a41c0b011bd8a958b7297436cdb3a15ddad7866dae8c300b",
+					Distro:  "debian",
+					Package: "libmpc3",
+					Source:  "mpclib3",
+					Version: "1.3.1-1+b3",
+					Arch:    "amd64",
+				},
+				{
+					Kind:    "distroPackage",
+					Name:    "libmpfr6",
+					SHA256:  "75dddce11dabc7fc543712c33dc27b7f2ee66a111763eb5eac654d010b42cd92",
+					Distro:  "debian",
+					Package: "libmpfr6",
+					Source:  "mpfr4",
+					Version: "4.2.2-1",
+					Arch:    "amd64",
+				},
+				{
+					Kind:    "distroPackage",
+					Name:    "libasound2t64",
+					SHA256:  "5495496142d57e5ad6d581ac5456ec3c87f872c109a2bfb815d154b673eebc67",
+					Distro:  "debian",
+					Package: "libasound2t64",
+					Source:  "alsa-lib",
+					Version: "1.2.14-1+deb13u1",
+					Arch:    "amd64",
+				},
+				{
+					Kind:    "distroPackage",
+					Name:    "libasound2-data",
+					SHA256:  "04688afdff3769c0f685541daed7b2f6f0cb946799ddf1d5847ddf11fe245559",
+					Distro:  "debian",
+					Package: "libasound2-data",
+					Source:  "alsa-lib",
+					Version: "1.2.14-1+deb13u1",
+					Arch:    "all",
+				},
+				{
+					Kind:    "distroPackage",
+					Name:    "liblcms2-2",
+					SHA256:  "32e53c2002ccea8c60c02779bea0ba49ac132fef702988a30d64af79b6617806",
+					Distro:  "debian",
+					Package: "liblcms2-2",
+					Source:  "lcms2",
+					Version: "2.16-2+deb13u2",
+					Arch:    "amd64",
+				},
 			},
-			BinDirs: []string{"usr/bin"},
+			// bin/ first: the bin/emacs launcher (written at
+			// install time) wins over the raw usr/bin/emacs-nox
+			// for PATH resolution and for RequiredBinaries checks.
+			BinDirs: []string{"bin", "usr/bin"},
 			Env: map[string]string{
-				"EMACSDATA": "${PLUGIN_DIR}/usr/share/emacs/30.1",
+				// EMACSDATA is the *etc* directory, not the
+				// version directory: data-directory IS the etc
+				// dir (GNU Emacs FAQ), and the startup charsets
+				// check looks for <EMACSDATA>/charsets — i.e.
+				// <plugindir>/usr/share/emacs/30.1/etc/charsets.
+				// Pointing it at the version dir makes that check
+				// fail ("Emacs will not function correctly
+				// without the character map files"), verified
+				// live 2026-11-20.
+				"EMACSDATA": "${PLUGIN_DIR}/usr/share/emacs/30.1/etc",
+				// EMACSPATH is the arch-dependent (libexec) dir:
+				// it silences the "arch-dependent data dir"
+				// warning and lets emacs find hexl/rcs2log. It
+				// does NOT redirect the pdmp lookup — the pdmp
+				// is only found next to the binary or at the
+				// compiled-in libexec path, so install time
+				// symlinks it to usr/bin/emacs-nox.pdmp (see
+				// provisionEmacsPluginFiles).
+				"EMACSPATH": "${PLUGIN_DIR}/usr/libexec/emacs/30.1/x86_64-linux-gnu",
+				// EMACSLOADPATH is the lisp tree: the dumped
+				// load-path still names the compiled-in
+				// /usr/share/emacs/30.1/lisp, which does not
+				// exist on the appliance, so without this emacs
+				// cannot find simple.el or any mode (verified
+				// live 2026-11-20). Startup adds the lisp
+				// subdirectories (progmodes, textmodes, vc, ...)
+				// automatically; only the two top dirs are needed.
+				"EMACSLOADPATH": "${PLUGIN_DIR}/usr/share/emacs/30.1/lisp:${PLUGIN_DIR}/usr/share/emacs/site-lisp",
+				// The bundled lib .debs extract to
+				// <plugindir>/usr/lib/x86_64-linux-gnu/ — the
+				// loader does NOT search there by default, so
+				// daemon invocations need it on
+				// LD_LIBRARY_PATH. The bin/emacs launcher sets
+				// the same value for interactive shells (the
+				// shell PATH snippets carry PATH only, not Env).
+				"LD_LIBRARY_PATH": "${PLUGIN_DIR}/usr/lib/x86_64-linux-gnu",
 			},
 		},
 		{
@@ -510,7 +667,7 @@ func GetExtensionPluginDefinitions() []PluginDefinition {
 		{
 			ID:               "rosenpass",
 			Name:             "Rosenpass Post-Quantum WireGuard (McEliece + ML-KEM)",
-			Version:          "0.2.2",
+			Version:          "0.2.3",
 			Category:         "extension",
 			Description:      "Hybrid Dual-KEM post-quantum key exchange daemon (Classic McEliece 460896 static authentication + ephemeral ML-KEM-512 forward secrecy) that rotates kernel WireGuard pre-shared keys every 120s with fail-closed boot protection.",
 			Author:           "Rosenpass Project / Axonwall Core",
@@ -520,6 +677,44 @@ func GetExtensionPluginDefinitions() []PluginDefinition {
 			AlpinePackages:   []string{"rosenpass", "wireguard-tools"},
 			ArchPackages:     []string{"rosenpass", "wireguard-tools"},
 			RequiredBinaries: []string{"rosenpass", "wg"},
+			// Bundled (was: unverified `curl | tar` into
+			// /usr/local/bin at install time). The v0.2.3 release
+			// tarball is now downloaded, sha256-verified, and
+			// extracted into the plugin's own directory
+			// (<plugindir>/bin/rosenpass); the systemd unit's
+			// ExecStart points there, and gen-keys runs the
+			// plugin-dir binary (see rosenpass.go). Behaviour
+			// change: the binary moves from /usr/local/bin to the
+			// plugin dir; same version (0.2.3), same unit
+			// semantics. Uninstall removes the legacy
+			// /usr/local/bin/rosenpass and /usr/local/bin/rp if
+			// present.
+			//
+			// CHECKSUM CAVEAT: rosenpass publishes NO checksum
+			// for this tarball (no .sha256, no SHA256SUMS, no hash
+			// in the release notes — verified 2026-11-20). The
+			// sha256 below was computed locally from the bytes
+			// GitHub served for that asset URL on 2026-11-20
+			// (asset size 4,802,560 bytes). Do NOT claim it is an
+			// official published checksum — it is not published
+			// anywhere upstream. If the release asset were ever
+			// replaced, the pinned hash fails closed, as intended.
+			//
+			// No second entry for `rp`: the tarball also contains
+			// bin/rp (a Bourne shell script), but `rp` is used
+			// nowhere in the codebase — the only reference was
+			// the old curl|tar copy block — so it is not bundled.
+			Binaries: []PluginBundledBinary{
+				{
+					Kind:          "archive",
+					Name:          "rosenpass",
+					SHA256:        "53158a8c339e3be1a9520b91c33a9e83eab05ea49af346cdb7e6eec522f2318b",
+					URL:           "https://github.com/rosenpass/rosenpass/releases/download/v0.2.3/rosenpass-x86_64-linux-0.2.3.tar",
+					Format:        "tar",
+					PathInArchive: "bin/rosenpass",
+				},
+			},
+			BinDirs: []string{"bin"},
 		},
 		{
 			ID:               "vigilant-octo-waffle",
@@ -855,8 +1050,8 @@ func (pm *PluginManager) validateBundledBinaries(def PluginDefinition) error {
 			if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 				return fmt.Errorf("bundled binary %q (archive): url %q must be an http(s) URL", b.Name, b.URL)
 			}
-			if b.Distro != "" || b.Package != "" || b.Version != "" || b.Arch != "" {
-				return fmt.Errorf("bundled binary %q (archive): distro/package/version/arch must be empty for kind archive", b.Name)
+			if b.Distro != "" || b.Package != "" || b.Source != "" || b.Version != "" || b.Arch != "" {
+				return fmt.Errorf("bundled binary %q (archive): distro/package/source/version/arch must be empty for kind archive", b.Name)
 			}
 			switch strings.ToLower(strings.TrimSpace(b.Format)) {
 			case "", "tar", "tar.gz", "tgz", "zip":
@@ -892,6 +1087,9 @@ func (pm *PluginManager) validateBundledBinaries(def PluginDefinition) error {
 			}
 			if !debNamePattern.MatchString(b.Package) {
 				return fmt.Errorf("bundled binary %q (distroPackage): package %q is not a valid Debian package name", b.Name, b.Package)
+			}
+			if b.Source != "" && !debNamePattern.MatchString(b.Source) {
+				return fmt.Errorf("bundled binary %q (distroPackage): source %q is not a valid Debian source package name", b.Name, b.Source)
 			}
 			if !debVersionPattern.MatchString(b.Version) || strings.ContainsAny(b.Version, `/\`) {
 				return fmt.Errorf("bundled binary %q (distroPackage): version %q is not a valid Debian version", b.Name, b.Version)
@@ -995,18 +1193,18 @@ func downloadVerified(rawURL, wantSHA256, tmpDir string) (string, error) {
 //
 // where <dir> is the source package's first letter ("lib" + first
 // letter for lib* sources, per the pool layout) and the epoch
-// ("1:" in "1:30.1+1-6") is dropped from the filename.
-//
-// LIMITATION: the manifest schema has no source-package field, so
-// this assumes source == package name (the source directory is the
-// package name). That holds for emacs-nox/emacs-bin-common/
-// emacs-common (source package "emacs") and for most binary
-// packages, but NOT for packages built from a differently-named
-// source (e.g. a binary whose source package differs). Such an
-// entry would 404 at download time and fail closed; a source field
-// must be added to the schema before those packages can be bundled.
+// ("1:" in "1:30.1+1-6") is dropped from the filename. The source
+// package is b.Source when set, else the binary package name —
+// the two differ for the bundled libraries (libgccjit0 is built
+// from source gcc-14, libisl23 from isl, libmpc3 from mpclib3,
+// libmpfr6 from mpfr4, libasound2t64/libasound2-data from alsa-lib,
+// liblcms2-2 from lcms2), and the pool directory is derived from
+// the source, not the binary package name.
 func debianPoolURL(b PluginBundledBinary) (string, error) {
-	source := b.Package // see LIMITATION above: source == package name
+	source := b.Source
+	if source == "" {
+		source = b.Package
+	}
 	if source == "" {
 		return "", fmt.Errorf("bundled binary %q: package is empty", b.Name)
 	}
@@ -1332,8 +1530,14 @@ func (pm *PluginManager) installBundledBinaries(def PluginDefinition) error {
 // A distroPackage entry provides no single binary by name — its
 // package name (e.g. "emacs-nox") is not a file — so its expected
 // binaries are the plugin's RequiredBinaries under its BinDirs
-// (for cli-emacs: usr/bin/emacs). That is what verify checks for
-// distroPackage entries.
+// (for cli-emacs: bin/emacs — the launcher — and usr/bin/emacs-nox,
+// the real extracted binary). A required binary counts as expected
+// at the FIRST BinDir that holds it: BinDirs are alternatives in
+// priority order (bin/ wins over usr/bin/), not every combination —
+// a binary present in one BinDir must not fail verification for
+// being absent from another. When a required binary is in NO
+// BinDir, the path under the first BinDir is returned so the
+// failure names a concrete missing location.
 func (pm *PluginManager) expectedBundledBinaries(def PluginDefinition) []string {
 	pluginDir, err := pm.pluginDir(def.ID)
 	if err != nil {
@@ -1346,8 +1550,20 @@ func (pm *PluginManager) expectedBundledBinaries(def PluginDefinition) []string 
 			out = append(out, filepath.Join(pluginDir, "bin", b.Name))
 		case "distroPackage":
 			for _, bin := range def.RequiredBinaries {
+				found := ""
 				for _, binDir := range def.BinDirs {
-					out = append(out, filepath.Join(pluginDir, filepath.FromSlash(binDir), bin))
+					candidate := filepath.Join(pluginDir, filepath.FromSlash(binDir), bin)
+					if isExecutableFile(candidate) {
+						found = candidate
+						break
+					}
+				}
+				if found != "" {
+					out = append(out, found)
+					continue
+				}
+				if len(def.BinDirs) > 0 {
+					out = append(out, filepath.Join(pluginDir, filepath.FromSlash(def.BinDirs[0]), bin))
 				}
 			}
 		}
@@ -1780,6 +1996,15 @@ func (pm *PluginManager) EnablePlugin(pluginID string) PluginActionResponse {
 }
 
 func (pm *PluginManager) DisablePlugin(pluginID string) PluginActionResponse {
+	// Dependency guard: refuse while any other currently-enabled
+	// plugin depends on this one — disabling it would break the
+	// dependent. Runs before the cli-workstation special case.
+	if dependents := pm.enabledDependentsOf(pluginID); len(dependents) > 0 {
+		return PluginActionResponse{
+			Success: false,
+			Message: fmt.Sprintf("Cannot disable plugin %s: enabled plugin(s) %s depend on it. Disable %s first.", pluginID, strings.Join(dependents, ", "), strings.Join(dependents, ", ")),
+		}
+	}
 	if pluginID == "cli-workstation" {
 		_ = os.MkdirAll("/etc/axonwall", 0755)
 		_ = os.WriteFile("/etc/axonwall/workstation.disabled", []byte("disabled=true\n"), 0644)
@@ -1843,6 +2068,38 @@ func (pm *PluginManager) DisablePlugin(pluginID string) PluginActionResponse {
 func systemctlAvailable() bool {
 	_, err := exec.LookPath("systemctl")
 	return err == nil
+}
+
+// enabledDependentsOf returns the IDs of currently-enabled plugins
+// that declare pluginID in their Dependencies (sorted). It is the
+// guard for DisablePlugin/UninstallPlugin: a plugin another enabled
+// plugin depends on must not be turned off or removed underneath
+// it — e.g. once Doom/Spacemacs declare dependencies:
+// ["cli-emacs"], cli-emacs cannot be disabled while either is
+// enabled. It reads definitions generically; no plugin ID is
+// hardcoded here.
+func (pm *PluginManager) enabledDependentsOf(pluginID string) []string {
+	var out []string
+	for _, d := range GetExtensionPluginDefinitions() {
+		if d.ID == pluginID {
+			continue
+		}
+		depends := false
+		for _, dep := range d.Dependencies {
+			if dep == pluginID {
+				depends = true
+				break
+			}
+		}
+		if !depends {
+			continue
+		}
+		if pm.IsPluginEnabled(d.ID) {
+			out = append(out, d.ID)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // findExtensionPluginDefinition returns the definition for an extension
@@ -2084,6 +2341,36 @@ func (pm *PluginManager) InstallPlugin(pluginID string) PluginActionResponse {
 		}
 	}
 
+	// cli-emacs post-install: the bundled tree is extracted, so
+	// (1) ldd-check the real binary (usr/bin/emacs-nox) for
+	// missing shared libraries, and (2) write the bin/emacs
+	// launcher + config/init.el. The ldd check runs first: on
+	// failure the plugin tree is removed again so ListPlugins
+	// cannot report the plugin installed on a tree whose binary
+	// cannot start, and the install fails loudly listing the
+	// missing libraries. The launcher/config files are generated
+	// locally from repo constants (not downloaded), so they are
+	// not part of bundled.json — verify checks bin/emacs exists
+	// and is executable, but does not hash it.
+	if pluginID == "cli-emacs" {
+		failEmacsInstall := func(err error) PluginActionResponse {
+			if dir, derr := pm.pluginDir(pluginID); derr == nil {
+				_ = os.RemoveAll(dir)
+			}
+			return PluginActionResponse{
+				Success: false,
+				Message: fmt.Sprintf("Bundled emacs post-install failed for plugin %s: %v", pluginID, err),
+				Output:  output.String(),
+			}
+		}
+		if err := pm.checkEmacsBundledLibraries(); err != nil {
+			return failEmacsInstall(err)
+		}
+		if err := pm.provisionEmacsPluginFiles(); err != nil {
+			return failEmacsInstall(err)
+		}
+	}
+
 	// Post-install configuration hooks
 	if pluginID == "cli-workstation" || pluginID == "vigilant-octo-waffle" {
 		if _, err := exec.LookPath("kubectl"); err != nil {
@@ -2110,12 +2397,11 @@ func (pm *PluginManager) InstallPlugin(pluginID string) PluginActionResponse {
 		}
 	}
 	if pluginID == "rosenpass" {
-		if _, err := exec.LookPath("rosenpass"); err != nil {
-			dlCmd := exec.Command("sh", "-c", "tmpd=$(mktemp -d) && curl -fsSL https://github.com/rosenpass/rosenpass/releases/download/v0.2.3/rosenpass-x86_64-linux-0.2.3.tar | tar -xf - -C \"$tmpd\" && find \"$tmpd\" -type f \\( -name rosenpass -o -name rp \\) -exec cp -f {} /usr/local/bin/ \\; && chmod 755 /usr/local/bin/rosenpass /usr/local/bin/rp 2>/dev/null; rm -rf \"$tmpd\"")
-			if out, err := dlCmd.CombinedOutput(); err != nil {
-				log.Printf("[PluginManager] Warning downloading rosenpass release binary: %v (%s)", err, string(out))
-			}
-		}
+		// The rosenpass binary now arrives via the generic
+		// bundled-binaries flow above (verified archive extract
+		// into <plugindir>/bin/) — the old unverified
+		// `curl | tar` into /usr/local/bin is deleted. Only the
+		// keypair/unit provisioning remains here.
 		if err := ProvisionRosenpassEnvironment(DefaultRosenpassDir); err != nil {
 			log.Printf("[PluginManager] Warning provisioning Rosenpass PQ keys: %v", err)
 		}
@@ -2170,6 +2456,15 @@ func (pm *PluginManager) InstallPlugin(pluginID string) PluginActionResponse {
 }
 
 func (pm *PluginManager) UninstallPlugin(pluginID string) PluginActionResponse {
+	// Dependency guard: refuse while any other currently-enabled
+	// plugin depends on this one — uninstalling it would break the
+	// dependent. Runs at the top, before the core-role early return.
+	if dependents := pm.enabledDependentsOf(pluginID); len(dependents) > 0 {
+		return PluginActionResponse{
+			Success: false,
+			Message: fmt.Sprintf("Cannot uninstall plugin %s: enabled plugin(s) %s depend on it. Disable %s first.", pluginID, strings.Join(dependents, ", "), strings.Join(dependents, ", ")),
+		}
+	}
 	if strings.HasPrefix(pluginID, "core-") {
 		pm.mu.Lock()
 		pm.disabledMap[pluginID] = true
@@ -2275,6 +2570,20 @@ func (pm *PluginManager) UninstallPlugin(pluginID string) PluginActionResponse {
 	}
 
 	// Post-removal cleanup hooks
+	if pluginID == "rosenpass" {
+		// Legacy cleanup: before the bundled-binaries migration
+		// the rosenpass binary (and `rp`) lived in /usr/local/bin.
+		// Remove them on uninstall so a stale copy cannot shadow
+		// — or be mistaken for — the plugin-dir binary. Only
+		// regular files/symlinks are removed, never directories.
+		for _, legacy := range []string{"/usr/local/bin/rosenpass", "/usr/local/bin/rp"} {
+			if info, err := os.Lstat(legacy); err == nil && !info.IsDir() {
+				if err := os.Remove(legacy); err != nil {
+					log.Printf("[PluginManager] Warning: failed to remove legacy rosenpass binary %s: %v", legacy, err)
+				}
+			}
+		}
+	}
 	if pluginID == "cli-workstation" {
 		pm.mu.Lock()
 		pm.disabledMap[pluginID] = true
