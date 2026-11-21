@@ -289,7 +289,10 @@ func RebuildPluginShellPaths(pm *PluginManager) error {
 	}
 	var errs []error
 	wanted := make(map[string]bool)
-	for _, def := range GetExtensionPluginDefinitions() {
+	// Core definitions first (core-k3s), then extensions: both get
+	// shell PATH snippets when enabled.
+	allDefs := append(append([]PluginDefinition{}, GetCorePluginDefinitions()...), GetExtensionPluginDefinitions()...)
+	for _, def := range allDefs {
 		if !validPluginShellID(def.ID) || len(def.BinDirs) == 0 {
 			continue
 		}
@@ -430,7 +433,9 @@ func pluginShellDir(pm *PluginManager, pluginID string) (string, error) {
 // unknown plugin yields an empty slice (and no error) so the caller
 // removes any stale snippet for it.
 func resolvePluginShellBinDirs(pm *PluginManager, pluginID string) ([]string, error) {
-	def, ok := findExtensionPluginDefinition(pluginID)
+	// Unified finder: core definitions (core-k3s) as well as
+	// extension ones, so core plugins get shell PATH snippets too.
+	def, ok := findPluginDefinition(pluginID)
 	if !ok {
 		return nil, nil
 	}
