@@ -362,8 +362,6 @@ export const BUILTIN_PLUGINS: PluginManifest[] = [
     packages: {
       debian: [
         'zsh',
-        'vim',
-        'neovim',
         'tmux',
         'zsh-autosuggestions',
         'zsh-syntax-highlighting',
@@ -408,6 +406,37 @@ export const BUILTIN_PLUGINS: PluginManifest[] = [
       ],
     },
     cliBinaries: ['zsh', 'vim', 'nvim', 'starship', 'tmux', 'kubectl', 'helm'],
+    // VIM + NEOVIM ARE BUNDLED, NOT SYSTEM-INSTALLED — Debian only.
+    // vim is DROPPED entirely: vi/vim become symlinks to the bundled
+    // nvim in the plugin's bin/ dir, so the vim .deb set is not
+    // bundled. packages.debian therefore drops 'vim'/'neovim';
+    // alpine/arch keep them (old behavior) because the nvim tarball
+    // is glibc-linked and cannot run on Alpine (musl), and the
+    // archive entry is gated to debian via `oses` — on Alpine/Arch
+    // it is skipped at install and ignored by verification.
+    // CHECKSUM CAVEAT: neovim publishes NO checksum for this tarball;
+    // the sha256 below was computed locally from the bytes GitHub
+    // served on 2026-11-20 (asset size 11,404,582 bytes). Do NOT claim
+    // it is an official published checksum. TREE extraction: the
+    // tarball wraps everything under 'nvim-linux-x86_64/', so
+    // stripComponents 1 lands bin/nvim, lib/... and share/... at the
+    // plugin root (nvim needs its runtime + parsers from the same
+    // tree). cliBinaries keeps 'vim'/'nvim': both resolve via the
+    // plugin-local bin dir (vi/vim symlinks to the executable nvim),
+    // or from the system PATH on Alpine/Arch.
+    binaries: [
+      {
+        kind: 'archive',
+        name: 'nvim',
+        sha256: '474430d53e6264f6d6dd18db42d6dc9df3a1b56ca9e88a325bbf860e1a811d87',
+        url: 'https://github.com/neovim/neovim/releases/download/v0.12.6/nvim-linux-x86_64.tar.gz',
+        format: 'tar.gz',
+        extract: 'tree',
+        stripComponents: 1,
+        oses: ['debian'],
+      },
+    ],
+    binDirs: ['bin'],
   },
   {
     // GNU Emacs, bundled — not system-installed. The trixie amd64

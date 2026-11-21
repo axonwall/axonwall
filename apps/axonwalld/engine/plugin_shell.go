@@ -44,12 +44,11 @@
 //     /etc/zsh/zprofile, and grep finds no /etc/profile.d reference
 //     anywhere in the repo.
 //   - /etc/zsh/axonwall.zsh is sourced by ~/.zshrc (interactive
-//     shells only) and hard-resets PATH:
-//     `export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"`
-//     (plugins.go, in the zshConf literal). That reset runs BEFORE
-//     the workstation.disabled early-return, so it wipes any PATH
-//     added earlier in the same shell — including anything a
-//     zshenv snippet added.
+//     shells only) and used to hard-reset PATH; the cli-workstation
+//     migration replaced that reset with an idempotent prepend loop
+//     (each system dir added only if missing), so it now preserves
+//     any PATH added earlier in the same shell — including anything
+//     a zshenv snippet added.
 //   - /etc/zsh/zshenv is unconditionally OVERWRITTEN by
 //     provisionWorkstationConfigs with a single STARSHIP_CONFIG line
 //     (plugins.go: `_ = os.WriteFile("/etc/zsh/zshenv", ...)`).

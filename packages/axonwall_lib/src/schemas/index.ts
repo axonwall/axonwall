@@ -1055,6 +1055,13 @@ export type PluginLdapIntegrationSpec = z.infer<typeof PluginLdapIntegrationSpec
 // 'k3s'); for `kind: 'distroPackage'` it is the distro package name
 // (e.g. 'emacs-nox') — the binaries it contributes are found via
 // `binDirs` after extraction, not via `name`.
+// An archive entry extracts exactly one binary by default
+// (`extract: 'binary'`); with `extract: 'tree'` the whole archive is
+// extracted into the plugin dir after stripping `stripComponents`
+// leading path components, and every extracted file is recorded in
+// bundled.json. `oses` gates an entry to the listed host OS families;
+// a gated-out entry is skipped at install and ignored by
+// verification, never an error.
 // The `kind` discriminator is what lets the daemon tell the source
 // kinds apart unambiguously: an archive entry MUST carry `url` and
 // MUST NOT carry distro fields; a raw-binary entry MUST carry `url`
@@ -1077,22 +1084,48 @@ export const PluginBundledBinarySha256Schema = z
     'sha256 must be a 64-char hex digest, or a temporary SHA256_TODO_<name> marker to be replaced before install',
   );
 
-export const PluginBundledArchiveBinarySchema = z.object({
-  kind: z.literal('archive'),
-  name: z.string().min(1),
-  url: z
-    .string()
-    .min(1)
-    .regex(/^https?:\/\//, 'archive url must be an http(s) URL'),
-  sha256: PluginBundledBinarySha256Schema,
-  // Archive container: 'tar' (uncompressed tar, e.g. the rosenpass
-  // v0.2.3 release tarball), 'tar.gz'/'tgz', or 'zip'. Defaults to
-  // 'tar' when omitted.
-  format: z.enum(['tar', 'tar.gz', 'tgz', 'zip']).optional(),
-  // Path of the binary inside the archive, relative, no '..'. Defaults
-  // to `name` when omitted.
-  pathInArchive: z.string().min(1).optional(),
-});
+export const PluginBundledArchiveBinarySchema = z
+  .object({
+    kind: z.literal('archive'),
+    name: z.string().min(1),
+    url: z
+      .string()
+      .min(1)
+      .regex(/^https?:\/\//, 'archive url must be an http(s) URL'),
+    sha256: PluginBundledBinarySha256Schema,
+    // Archive container: 'tar' (uncompressed tar, e.g. the rosenpass
+    // v0.2.3 release tarball), 'tar.gz'/'tgz', or 'zip'. Defaults to
+    // 'tar' when omitted.
+    format: z.enum(['tar', 'tar.gz', 'tgz', 'zip']).optional(),
+    // Path of the binary inside the archive, relative, no '..'. Defaults
+    // to `name` when omitted. Must be omitted with extract 'tree'
+    // (the strip selects the tree root there).
+    pathInArchive: z.string().min(1).optional(),
+    // Extraction mode: 'binary' (default — exactly one member,
+    // pathInArchive, into bin/) or 'tree' (the whole archive into
+    // the plugin dir, preserving member paths after stripping
+    // stripComponents leading components — e.g. the neovim release
+    // tarball wraps everything under 'nvim-linux-x86_64/', so
+    // stripComponents 1 lands bin/nvim, lib/... and share/... at
+    // the plugin root). The whole tree is recorded in bundled.json
+    // and re-verified on use.
+    extract: z.enum(['binary', 'tree']).optional(),
+    // Leading path components stripped from every member during
+    // tree extraction. Only meaningful with extract 'tree'.
+    stripComponents: z.number().int().min(0).max(8).optional(),
+    // Host OS families this entry applies to ('debian', 'alpine',
+    // 'arch'). Omitted means every OS. An entry gated away from
+    // this host is skipped at install and ignored by verification
+    // (e.g. the glibc-linked neovim tarball is debian-only; on
+    // Alpine/Arch vim/neovim keep coming from the system packages).
+    oses: z.array(z.enum(['debian', 'alpine', 'arch'])).optional(),
+  })
+  .refine((v) => v.extract !== 'tree' || v.pathInArchive === undefined, {
+    message: 'pathInArchive must be omitted with extract "tree" (the strip selects the tree root)',
+  })
+  .refine((v) => v.extract === 'tree' || v.stripComponents === undefined, {
+    message: 'stripComponents is only meaningful with extract "tree"',
+  });
 export type PluginBundledArchiveBinary = z.infer<typeof PluginBundledArchiveBinarySchema>;
 
 // Raw single-file binary: a direct download (no archive container),

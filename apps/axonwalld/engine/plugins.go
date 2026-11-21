@@ -71,7 +71,34 @@ type PluginDefinition struct {
 //     https://github.com/rosenpass/rosenpass/releases/download/v0.2.3/rosenpass-x86_64-linux-0.2.3.tar).
 //     Format is the container ("tar", "tar.gz"/"tgz", "zip"; default
 //     "tar"). PathInArchive is the binary's path inside the archive,
-//     relative with no ".."; it defaults to Name.
+//     relative with no ".."; it defaults to Name. By default an
+//     archive entry extracts exactly that one binary into
+//     <plugindir>/bin/<name> (Extract "" or "binary"); with
+//     Extract "tree" the WHOLE archive is extracted into the plugin
+//     dir, preserving member paths (bin/, lib/, share/, ...), after
+//     stripping StripComponents leading path components — e.g. the
+//     neovim release tarball wraps everything under a single
+//     top-level "nvim-linux-x86_64/" dir, so StripComponents 1
+//     lands the tree at <plugindir>/bin/nvim,
+//     <plugindir>/lib/..., <plugindir>/share/... . Tree extraction
+//     follows the same safety rules as single-binary extraction
+//     (no symlinks/hardlinks/devices, no absolute or ".." members,
+//     no member escaping the plugin dir); a tree member that would
+//     be dropped by the strip (a regular file at or above the strip
+//     depth) fails the install instead of being silently skipped.
+//     PathInArchive must be empty for a tree entry: the strip is
+//     the mechanism that selects the tree root, not a member path.
+//     OSes, when non-empty, gates the entry to the listed host OS
+//     families ("debian", "alpine", "arch" — the DetectOSFamily
+//     values): an entry whose OS list does not include this host is
+//     SKIPPED at install and ignored by verification, so a
+//     Debian-only artifact (a glibc-linked tarball) never fails an
+//     Alpine/Arch install. An empty OSes means every OS. A plugin
+//     whose every entry is gated out on this host verifies trivially
+//     (nothing bundled to check) and its binaries keep resolving
+//     from the system packages, which must then still provide them
+//     — see cli-workstation: vim/neovim stay in AlpinePackages and
+//     ArchPackages for exactly this reason.
 //   - "binary": a downloadable raw single file (no archive
 //     container). URL is required; Distro / Package / Version /
 //     Arch / Format / PathInArchive must be empty. The verified
@@ -116,11 +143,50 @@ type PluginBundledBinary struct {
 	URL           string `json:"url,omitempty"`
 	Format        string `json:"format,omitempty"`
 	PathInArchive string `json:"pathInArchive,omitempty"`
-	Distro        string `json:"distro,omitempty"`
-	Package       string `json:"package,omitempty"`
-	Source        string `json:"source,omitempty"`
-	Version       string `json:"version,omitempty"`
-	Arch          string `json:"arch,omitempty"`
+	// Extract selects the archive extraction mode: "" or "binary"
+	// (default — exactly one member, PathInArchive, into bin/) or
+	// "tree" (the whole archive into the plugin dir, after
+	// stripping StripComponents leading components). Meaningless
+	// for kinds other than "archive" and must be empty there.
+	Extract string `json:"extract,omitempty"`
+	// StripComponents is the number of leading path components
+	// stripped from every member during tree extraction. Only
+	// meaningful with Extract "tree" and must be 0 otherwise.
+	StripComponents int `json:"stripComponents,omitempty"`
+	// OSes gates the entry to the listed host OS families. Empty
+	// means every OS. A gated-out entry is skipped at install and
+	// ignored by verification (see the type doc above).
+	OSes    []string `json:"oses,omitempty"`
+	Distro  string   `json:"distro,omitempty"`
+	Package string   `json:"package,omitempty"`
+	Source  string   `json:"source,omitempty"`
+	Version string   `json:"version,omitempty"`
+	Arch    string   `json:"arch,omitempty"`
+}
+
+// bundledEntryAppliesToOS reports whether a bundled-binary entry
+// applies on a host of the given OS family: true when the entry
+// carries no OS gate, or when the host's family is listed.
+func bundledEntryAppliesToOS(b PluginBundledBinary, osFamily string) bool {
+	if len(b.OSes) == 0 {
+		return true
+	}
+	for _, o := range b.OSes {
+		if o == osFamily {
+			return true
+		}
+	}
+	return false
+}
+
+// validOSFamilyName reports whether s is a known host OS family
+// value (the DetectOSFamily values).
+func validOSFamilyName(s string) bool {
+	switch s {
+	case "debian", "alpine", "arch":
+		return true
+	}
+	return false
 }
 
 type PluginStatus struct {
@@ -378,10 +444,55 @@ func GetExtensionPluginDefinitions() []PluginDefinition {
 			Author:         "Axonwall Core",
 			DefaultEnabled: true,
 			Privileges:     []string{"system.users", "system.hardware"},
+			// VIM + NEOVIM ARE BUNDLED, NOT SYSTEM-INSTALLED — Debian
+			// only (coordinator decisions 1–2, 2026-11-20). vim is
+			// DROPPED entirely: vi/vim become symlinks to the
+			// bundled nvim in the plugin's bin/ dir (see
+			// ensureWorkstationNvimSymlinks), so the vim .deb set
+			// (vim + vim-runtime + vim-common + libgpm2 +
+			// libsodium23) is not bundled — neovim is already the
+			// default editor and vim.basic adds nothing once vi/vim
+			// point at nvim. DebianPackages therefore drops "vim"
+			// and "neovim" below; AlpinePackages/ArchPackages keep
+			// them (old behavior) because the nvim tarball is
+			// glibc-linked and cannot run on Alpine (musl), and
+			// the archive entry is gated to debian via OSes — on
+			// Alpine/Arch it is skipped at install and ignored by
+			// verification, and vim/nvim keep resolving from the
+			// system packages.
+			//
+			// CHECKSUM CAVEAT: neovim publishes NO checksum for
+			// this tarball (no .sha256, no SHA256SUMS, no hash in
+			// the release notes — checked for v0.12.6 and the four
+			// releases before it, 2026-11-20). The sha256 below
+			// was computed locally from the bytes GitHub served
+			// for that asset URL on 2026-11-20 (asset size
+			// 11,404,582 bytes; re-verified against the research
+			// scratch copy). Do NOT claim it is an official
+			// published checksum — it is not published anywhere
+			// upstream. If the release asset were ever replaced,
+			// the pinned hash fails closed, as intended.
+			//
+			// TREE, NOT SINGLE BINARY: nvim alone is not a
+			// working install — it needs share/nvim/runtime and
+			// lib/nvim/parser/*.so from the same tarball (verified
+			// live 2026-11-20: bin/nvim needs only libm/libgcc_s/
+			// libc, all in the base image, and resolves its
+			// runtime relative to its own location). Extract
+			// "tree" with StripComponents 1 strips the tarball's
+			// single top-level dir ("nvim-linux-x86_64/") so the
+			// tree lands at <plugindir>/bin/nvim,
+			// <plugindir>/lib/..., <plugindir>/share/... ; the
+			// whole tree (2,228 files, ~40 MB extracted) is
+			// recorded in bundled.json and re-verified on use.
+			// RequiredBinaries keeps listing "vim" and "nvim":
+			// both resolve via the plugin-local lookup
+			// (hasPluginBinaryForPlugin checks BinDirs with
+			// os.Stat, which follows the vi/vim symlinks to the
+			// executable nvim), and on Alpine/Arch they resolve
+			// from the system PATH as before.
 			DebianPackages: []string{
 				"zsh",
-				"vim",
-				"neovim",
 				"starship",
 				"tmux",
 				"zsh-autosuggestions",
@@ -427,6 +538,19 @@ func GetExtensionPluginDefinitions() []PluginDefinition {
 				"helm",
 			},
 			RequiredBinaries: []string{"zsh", "vim", "nvim", "starship", "tmux", "kubectl", "helm"},
+			Binaries: []PluginBundledBinary{
+				{
+					Kind:            "archive",
+					Name:            "nvim",
+					SHA256:          "474430d53e6264f6d6dd18db42d6dc9df3a1b56ca9e88a325bbf860e1a811d87",
+					URL:             "https://github.com/neovim/neovim/releases/download/v0.12.6/nvim-linux-x86_64.tar.gz",
+					Format:          "tar.gz",
+					Extract:         "tree",
+					StripComponents: 1,
+					OSes:            []string{"debian"},
+				},
+			},
+			BinDirs: []string{"bin"},
 		},
 		{
 			// GNU Emacs, bundled — not system-installed. The trixie
@@ -1201,7 +1325,9 @@ func hasPluginBinary(osFamily, bin string) bool {
 // extracted merged into it with `dpkg-deb -x`, so a .deb's usr/bin,
 // usr/share/... land directly under the plugin dir. Archive entries
 // extract into <plugindir>/bin/, their declared binary landing at
-// <plugindir>/bin/<name> unless PathInArchive says otherwise, and
+// <plugindir>/bin/<name> unless PathInArchive says otherwise — or,
+// with Extract "tree", the whole archive lands in the plugin dir
+// after stripping StripComponents leading path components — and
 // binary entries are placed there directly.
 // BinDirs are relative to the plugin dir (e.g. "usr/bin") and are
 // prepended to PATH for daemon invocations of that plugin's commands.
@@ -1209,7 +1335,8 @@ func hasPluginBinary(osFamily, bin string) bool {
 // Trust model: nothing under a plugin dir is trusted on the strength
 // of having been downloaded once. Install sha256-verifies every
 // artifact before extraction and writes bundled.json (one record per
-// installed file); every later use re-verifies bundled.json and the
+// installed file — for a tree archive entry, every file in the
+// tree); every later use re-verifies bundled.json and the
 // manifest's expected binaries before exec, and ListPlugins reports
 // the plugin uninstalled while verification fails. A plugin whose
 // manifest still carries SHA256_TODO_* placeholders can never
@@ -1278,6 +1405,20 @@ func (pm *PluginManager) validateBundledBinaries(def PluginDefinition) error {
 		if !sha256HexPattern.MatchString(b.SHA256) {
 			return fmt.Errorf("bundled binary %q: sha256 must be a 64-char hex digest (placeholders are not installable)", b.Name)
 		}
+		// OS gate: every listed family must be a known one, with
+		// no duplicates. An entry gated away from this host is
+		// skipped at install, not an error — the gate is checked
+		// here only for shape, never for a match against this host.
+		seenOSes := make(map[string]bool, len(b.OSes))
+		for _, o := range b.OSes {
+			if !validOSFamilyName(o) {
+				return fmt.Errorf("bundled binary %q: os %q is not a known OS family (want debian, alpine or arch)", b.Name, o)
+			}
+			if seenOSes[o] {
+				return fmt.Errorf("bundled binary %q: duplicate os %q", b.Name, o)
+			}
+			seenOSes[o] = true
+		}
 		switch b.Kind {
 		case "archive":
 			if b.URL == "" {
@@ -1294,6 +1435,28 @@ func (pm *PluginManager) validateBundledBinaries(def PluginDefinition) error {
 			case "", "tar", "tar.gz", "tgz", "zip":
 			default:
 				return fmt.Errorf("bundled binary %q (archive): unsupported format %q (want tar, tar.gz, tgz or zip)", b.Name, b.Format)
+			}
+			// Extraction mode: ""/"binary" extracts exactly one
+			// member (PathInArchive, default Name) into bin/;
+			// "tree" extracts the whole archive into the plugin
+			// dir after stripping StripComponents leading path
+			// components. A tree entry takes no PathInArchive —
+			// the strip selects the tree root — and a strip only
+			// makes sense for a tree.
+			switch strings.ToLower(strings.TrimSpace(b.Extract)) {
+			case "", "binary", "tree":
+			default:
+				return fmt.Errorf("bundled binary %q (archive): unsupported extract %q (want binary or tree)", b.Name, b.Extract)
+			}
+			isTree := strings.EqualFold(strings.TrimSpace(b.Extract), "tree")
+			if b.StripComponents < 0 || b.StripComponents > 8 {
+				return fmt.Errorf("bundled binary %q (archive): stripComponents %d out of range (want 0-8)", b.Name, b.StripComponents)
+			}
+			if !isTree && b.StripComponents != 0 {
+				return fmt.Errorf("bundled binary %q (archive): stripComponents is only meaningful with extract \"tree\"", b.Name)
+			}
+			if isTree && b.PathInArchive != "" {
+				return fmt.Errorf("bundled binary %q (archive): pathInArchive must be empty with extract \"tree\" (the strip selects the tree root)", b.Name)
 			}
 			if b.PathInArchive != "" {
 				if filepath.IsAbs(b.PathInArchive) || strings.Contains(b.PathInArchive, "\\") {
@@ -1321,6 +1484,12 @@ func (pm *PluginManager) validateBundledBinaries(def PluginDefinition) error {
 			}
 			if b.PathInArchive != "" {
 				return fmt.Errorf("bundled binary %q (binary): pathInArchive must be empty for kind binary (a raw file has no member path)", b.Name)
+			}
+			if b.Extract != "" {
+				return fmt.Errorf("bundled binary %q (binary): extract must be empty for kind binary (a raw file has no archive to extract)", b.Name)
+			}
+			if b.StripComponents != 0 {
+				return fmt.Errorf("bundled binary %q (binary): stripComponents must be 0 for kind binary (a raw file has no archive members)", b.Name)
 			}
 		case "distroPackage":
 			if b.URL != "" {
@@ -1350,6 +1519,12 @@ func (pm *PluginManager) validateBundledBinaries(def PluginDefinition) error {
 			}
 			if !debArchPattern.MatchString(b.Arch) {
 				return fmt.Errorf("bundled binary %q (distroPackage): arch %q is not valid", b.Name, b.Arch)
+			}
+			if b.Extract != "" {
+				return fmt.Errorf("bundled binary %q (distroPackage): extract must be empty for kind distroPackage (a .deb extracts as a merged tree by definition)", b.Name)
+			}
+			if b.StripComponents != 0 {
+				return fmt.Errorf("bundled binary %q (distroPackage): stripComponents must be 0 for kind distroPackage", b.Name)
 			}
 		default:
 			return fmt.Errorf("bundled binary %q: unknown kind %q (want archive, binary or distroPackage)", b.Name, b.Kind)
@@ -1633,6 +1808,178 @@ func extractArchiveBinary(archivePath, format, want, name, pluginDir string) (st
 	return relDest, nil
 }
 
+// stripArchiveComponents drops the first strip leading components
+// of a cleaned archive member path (e.g. strip 1 turns
+// "nvim-linux-x86_64/bin/nvim" into "bin/nvim"). It reports false
+// when the member sits at or above the strip depth — the member IS
+// (part of) the stripped prefix itself, so there is nothing left to
+// place. Callers skip such directories and fail on such regular
+// files (a file the strip would silently drop is a manifest/archive
+// mismatch, not something to ignore).
+func stripArchiveComponents(cleaned string, strip int) (string, bool) {
+	if strip <= 0 {
+		return cleaned, true
+	}
+	parts := strings.Split(cleaned, "/")
+	if len(parts) <= strip {
+		return "", false
+	}
+	return strings.Join(parts[strip:], "/"), true
+}
+
+// extractArchiveTree extracts the WHOLE archive into pluginDir,
+// preserving member paths after stripping StripComponents leading
+// components (see stripArchiveComponents). It is the extraction
+// mode for archives that are a working tree, not a single binary:
+// the neovim release tarball is bin/nvim plus the lib/ parsers and
+// share/nvim/runtime it needs to run, and extracting nvim alone
+// would leave it runtime-less. Every member is written (no
+// exclusion list — the whole tree is the install, icons/man
+// included: 8 small files in the nvim tarball, not worth a filter
+// that could silently drop a file a future release adds under a
+// path the filter did not expect). Safety follows
+// extractArchiveBinary: a symlink/hardlink/device member anywhere
+// in the archive fails the install (never followed or created), an
+// absolute or ".." member fails it, a member that would land
+// outside pluginDir fails it, and a duplicate member (two members
+// stripping to the same destination) fails it. Directories are
+// created as needed; regular files are written with O_EXCL and the
+// archive's mode (masked to 0755 at most — never setuid/setgid).
+// The caller records the extracted files (recordInstalledFiles);
+// the named binary's executability is then checked by
+// expectedBundledBinaries as for a single-binary entry.
+func extractArchiveTree(archivePath, format string, strip int, pluginDir string) error {
+	format = strings.ToLower(strings.TrimSpace(format))
+	if format == "" {
+		format = "tar"
+	}
+
+	writeMember := func(rel string, mode os.FileMode, r io.Reader) error {
+		dest := filepath.Join(pluginDir, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(dest), 0755); err != nil {
+			return err
+		}
+		perm := mode.Perm() & 0755
+		if perm == 0 {
+			perm = 0644
+		}
+		f, err := os.OpenFile(dest, os.O_CREATE|os.O_EXCL|os.O_WRONLY, perm)
+		if err != nil {
+			return err
+		}
+		if _, err := io.Copy(f, r); err != nil {
+			f.Close()
+			os.Remove(dest)
+			return err
+		}
+		if err := f.Close(); err != nil {
+			os.Remove(dest)
+			return err
+		}
+		return nil
+	}
+
+	// One member: clean + strip it, then either skip it (a
+	// directory at/below the strip depth), write it (a regular
+	// file), or fail the install (a link/device, or a regular file
+	// the strip would drop). Returns false when the member is a
+	// directory that was skipped.
+	placeMember := func(name string, isDir bool, isLink bool, mode os.FileMode, r io.Reader) error {
+		cleaned, ok := safeArchiveName(name)
+		if !ok {
+			return fmt.Errorf("extract archive tree: refusing unsafe member %q", name)
+		}
+		if isLink {
+			return fmt.Errorf("extract archive tree: refusing link member %q", name)
+		}
+		rel, ok := stripArchiveComponents(cleaned, strip)
+		if !ok {
+			if isDir {
+				return nil
+			}
+			return fmt.Errorf("extract archive tree: member %q would be dropped by stripComponents %d; refusing to silently drop a file", name, strip)
+		}
+		if isDir {
+			return os.MkdirAll(filepath.Join(pluginDir, filepath.FromSlash(rel)), 0755)
+		}
+		return writeMember(rel, mode, r)
+	}
+
+	switch format {
+	case "zip":
+		zr, err := zip.OpenReader(archivePath)
+		if err != nil {
+			return fmt.Errorf("extract archive tree: %w", err)
+		}
+		defer zr.Close()
+		for _, member := range zr.File {
+			mode := member.FileInfo().Mode()
+			if member.FileInfo().IsDir() {
+				if err := placeMember(member.Name, true, false, mode, nil); err != nil {
+					return err
+				}
+				continue
+			}
+			if mode&os.ModeSymlink != 0 || !mode.IsRegular() {
+				return fmt.Errorf("extract archive tree: refusing non-regular member %q", member.Name)
+			}
+			rc, err := member.Open()
+			if err != nil {
+				return fmt.Errorf("extract archive tree: %w", err)
+			}
+			err = placeMember(member.Name, false, false, mode, rc)
+			rc.Close()
+			if err != nil {
+				return err
+			}
+		}
+	case "tar", "tar.gz", "tgz":
+		f, err := os.Open(archivePath)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		var tr *tar.Reader
+		if format == "tar" {
+			tr = tar.NewReader(f)
+		} else {
+			gz, err := gzip.NewReader(f)
+			if err != nil {
+				return fmt.Errorf("extract archive tree: %w", err)
+			}
+			defer gz.Close()
+			tr = tar.NewReader(gz)
+		}
+		for {
+			hdr, err := tr.Next()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				return fmt.Errorf("extract archive tree: %w", err)
+			}
+			switch hdr.Typeflag {
+			case tar.TypeDir:
+				if err := placeMember(hdr.Name, true, false, hdr.FileInfo().Mode(), nil); err != nil {
+					return err
+				}
+			case tar.TypeReg:
+				if err := placeMember(hdr.Name, false, false, hdr.FileInfo().Mode(), tr); err != nil {
+					return err
+				}
+			default:
+				// Symlinks, hardlinks, devices, and anything
+				// else non-regular: never follow or create
+				// them from an untrusted archive.
+				return fmt.Errorf("extract archive tree: refusing non-regular member %q", hdr.Name)
+			}
+		}
+	default:
+		return fmt.Errorf("extract archive tree: unsupported format %q", format)
+	}
+	return nil
+}
+
 // recordInstalledFiles walks pluginDir after an entry was extracted
 // and records every regular file not yet recorded, attributed to
 // that entry, hashing the bytes on disk. It runs per entry, so files
@@ -1700,13 +2047,15 @@ func installRawBinary(tmpPath, name, pluginDir string) (string, error) {
 
 // installBundledBinaries downloads, sha256-verifies and extracts
 // every Binaries entry of def into the plugin dir. Archive entries
-// land in <plugindir>/bin/; binary entries are placed there
-// directly; distroPackage entries are extracted merged into the
-// plugin dir with `dpkg-deb -x` (the one shell-out allowed here —
-// dpkg-deb itself is the format's extractor, and a missing dpkg-deb
-// fails closed). On any error the install aborts and bundled.json
-// is NOT written, so a half-extracted tree can never pass
-// verifyBundledBinaries. Callers must validate first.
+// land in <plugindir>/bin/ — or, with Extract "tree", the whole
+// archive lands in the plugin dir after the strip; binary entries
+// are placed in bin/ directly; distroPackage entries are extracted
+// merged into the plugin dir with `dpkg-deb -x` (the one shell-out
+// allowed here — dpkg-deb itself is the format's extractor, and a
+// missing dpkg-deb fails closed). Entries gated away from this host
+// by OSes are skipped, never downloaded. On any error the install
+// aborts and bundled.json is NOT written, so a half-extracted tree
+// can never pass verifyBundledBinaries. Callers must validate first.
 func (pm *PluginManager) installBundledBinaries(def PluginDefinition) error {
 	pluginDir, err := pm.pluginDir(def.ID)
 	if err != nil {
@@ -1731,15 +2080,42 @@ func (pm *PluginManager) installBundledBinaries(def PluginDefinition) error {
 	var records []bundledBinaryRecord
 	seen := make(map[string]bool)
 	for _, b := range def.Binaries {
+		// OS gate: an entry that does not apply on this host is
+		// skipped outright — never downloaded, never extracted,
+		// never recorded. A plugin whose entries are all gated
+		// out installs an (empty) plugin dir with an empty
+		// bundled.json; verify treats that as trivially verified
+		// (see verifyBundledBinaries) and the plugin's binaries
+		// keep resolving from the system packages.
+		if !bundledEntryAppliesToOS(b, pm.osFamily) {
+			continue
+		}
 		switch b.Kind {
 		case "archive":
-			want := b.PathInArchive
-			if want == "" {
-				want = b.Name
-			}
 			tmpPath, err := downloadVerified(b.URL, b.SHA256, tmpDir)
 			if err != nil {
 				return fmt.Errorf("bundled binary %q: %w", b.Name, err)
+			}
+			if strings.EqualFold(strings.TrimSpace(b.Extract), "tree") {
+				// Whole-tree extraction: the archive IS the
+				// install (bin/ + lib/ + share/ after the
+				// strip). Record every extracted file, exactly
+				// as distroPackage entries do, so verify-on-use
+				// covers the runtime and parsers too — not
+				// just the bin/nvim binary.
+				if err := extractArchiveTree(tmpPath, b.Format, b.StripComponents, pluginDir); err != nil {
+					os.Remove(tmpPath)
+					return fmt.Errorf("bundled binary %q: %w", b.Name, err)
+				}
+				os.Remove(tmpPath)
+				if err := recordInstalledFiles(pluginDir, b, seen, &records); err != nil {
+					return fmt.Errorf("bundled binary %q: %w", b.Name, err)
+				}
+				continue
+			}
+			want := b.PathInArchive
+			if want == "" {
+				want = b.Name
 			}
 			rel, err := extractArchiveBinary(tmpPath, b.Format, want, b.Name, pluginDir)
 			os.Remove(tmpPath)
@@ -1905,6 +2281,95 @@ func (pm *PluginManager) ensureCoreK3sBinSymlinks() error {
 	return nil
 }
 
+// ensureWorkstationNvimSymlinks creates the vi/vim symlinks in the
+// cli-workstation plugin bin dir, pointing at the bundled nvim.
+// The links use the RELATIVE target "nvim" (same dir), so the
+// plugin dir stays relocatable (state-dir override, restore) and
+// the links keep working wherever the dir moves. They live INSIDE
+// the plugin dir on purpose — the old kubectl precedent wrote a
+// system symlink (/usr/local/bin/kubectl) that uninstall/disable
+// never removed; these die with the plugin dir on uninstall
+// (UninstallPlugin removes the dir for plugins with Binaries) and
+// leave PATH on disable (DisablePlugin removes the shell snippet,
+// and the daemon resolves them only through the plugin's BinDirs).
+// An existing real file under either name is left alone, never
+// overwritten; a stale symlink pointing elsewhere is replaced. The
+// bundled nvim must exist and be executable first — on Alpine/Arch
+// there is no bundled nvim (the archive entry is Debian-gated), so
+// callers must not invoke this there: system vi/vim are the editors
+// on those hosts and this helper would fail closed.
+func (pm *PluginManager) ensureWorkstationNvimSymlinks() error {
+	pluginDir, err := pm.pluginDir("cli-workstation")
+	if err != nil {
+		return err
+	}
+	nvimBin := filepath.Join(pluginDir, "bin", "nvim")
+	if !isExecutableFile(nvimBin) {
+		return fmt.Errorf("cli-workstation bundled nvim %q is missing or not executable; cannot create vi/vim symlinks", filepath.ToSlash(filepath.Join("cli-workstation", "bin", "nvim")))
+	}
+	for _, link := range []string{"vi", "vim"} {
+		p := filepath.Join(pluginDir, "bin", link)
+		if info, err := os.Lstat(p); err == nil {
+			if info.Mode()&os.ModeSymlink != 0 {
+				if target, rerr := os.Readlink(p); rerr == nil && target == "nvim" {
+					continue
+				}
+				_ = os.Remove(p)
+			} else {
+				continue
+			}
+		}
+		if err := os.Symlink("nvim", p); err != nil {
+			return fmt.Errorf("cli-workstation: failed to create symlink %q: %w", link, err)
+		}
+	}
+	return nil
+}
+
+// checkWorkstationNvimLibraries runs `ldd` on the bundled nvim
+// binary and fails loudly listing any shared library reported "not
+// found" — a missing lib means the binary cannot start at all, and
+// the install must fail rather than record a broken plugin. The
+// nvim tarball needs only libm/libgcc_s/libc (verified live
+// 2026-11-20), all in the base image, so this is expected to pass;
+// it is the tripwire if a future neovim release gains a dependency
+// the image does not carry. No LD_LIBRARY_PATH is needed: the
+// bundled tree carries no .so files outside lib/nvim/parser (loaded
+// by nvim itself, not the dynamic loader). If `ldd` itself is
+// absent, this logs a warning and continues — a missing ldd must
+// not block the install; the failure will surface at first launch
+// instead. (Same shape as checkEmacsBundledLibraries.)
+func (pm *PluginManager) checkWorkstationNvimLibraries() error {
+	lddPath, err := exec.LookPath("ldd")
+	if err != nil {
+		log.Printf("[Plugins] Warning: ldd is not available; skipping bundled-library check for cli-workstation nvim (a missing shared library will fail at first launch instead)")
+		return nil
+	}
+	pluginDir, err := pm.pluginDir("cli-workstation")
+	if err != nil {
+		return err
+	}
+	binary := filepath.Join(pluginDir, "bin", "nvim")
+	cmd := exec.Command(lddPath, binary)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("ldd %s failed: %w (output: %s)", binary, err, strings.TrimSpace(string(out)))
+	}
+	var missing []string
+	for _, line := range strings.Split(string(out), "\n") {
+		if !strings.Contains(line, "not found") {
+			continue
+		}
+		if fields := strings.Fields(strings.TrimSpace(line)); len(fields) > 0 {
+			missing = append(missing, fields[0])
+		}
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("bundled nvim binary %s is missing shared libraries: %s; refusing to install a plugin whose binary cannot start", binary, strings.Join(missing, ", "))
+	}
+	return nil
+}
+
 // expectedBundledBinary returns the on-disk location of the binary a
 // manifest entry provides, and whether that location is meaningful
 // to check. Archive and binary entries provide
@@ -1927,6 +2392,9 @@ func (pm *PluginManager) expectedBundledBinaries(def PluginDefinition) []string 
 	}
 	var out []string
 	for _, b := range def.Binaries {
+		if !bundledEntryAppliesToOS(b, pm.osFamily) {
+			continue
+		}
 		switch b.Kind {
 		case "archive", "binary":
 			out = append(out, filepath.Join(pluginDir, "bin", b.Name))
@@ -1971,6 +2439,9 @@ func (pm *PluginManager) bundledBinariesVerifiedNames(def PluginDefinition) []st
 		}
 	}
 	for _, b := range def.Binaries {
+		if !bundledEntryAppliesToOS(b, pm.osFamily) {
+			continue
+		}
 		switch b.Kind {
 		case "archive", "binary":
 			if isExecutableFile(filepath.Join(pluginDir, "bin", b.Name)) {
@@ -2008,6 +2479,21 @@ func isExecutableFile(path string) bool {
 // caller can never exec a binary it has not just verified.
 func (pm *PluginManager) verifyBundledBinaries(def PluginDefinition) error {
 	if len(def.Binaries) == 0 {
+		return nil
+	}
+	// OS gate: a plugin whose every entry is gated away from this
+	// host bundles nothing here — there is nothing to verify, and
+	// requiring a bundled.json would wrongly fail the install on
+	// that host (the plugin's binaries resolve from the system
+	// packages instead; see cli-workstation on Alpine/Arch).
+	applicable := false
+	for _, b := range def.Binaries {
+		if bundledEntryAppliesToOS(b, pm.osFamily) {
+			applicable = true
+			break
+		}
+	}
+	if !applicable {
 		return nil
 	}
 	pluginDir, err := pm.pluginDir(def.ID)
@@ -2799,6 +3285,41 @@ func (pm *PluginManager) InstallPlugin(pluginID string) PluginActionResponse {
 		}
 	}
 	if pluginID == "cli-workstation" {
+		// Debian-only nvim post-install: the bundled tree is
+		// extracted, so (1) ldd-check the real binary (bin/nvim)
+		// for missing shared libraries, and (2) create the
+		// bin/vi + bin/vim symlinks to it. The ldd check runs
+		// first: on failure the plugin tree is removed again so
+		// ListPlugins cannot report the plugin installed on a
+		// tree whose binary cannot start. On Alpine/Arch there
+		// is no bundled nvim (the archive entry is Debian-gated
+		// and skipped), so this whole block is a no-op there and
+		// vi/vim keep resolving from the system packages. The
+		// symlinks are generated locally (not downloaded), so
+		// they are not part of bundled.json — verify checks
+		// bin/nvim exists and is executable, but does not hash
+		// them; hasPluginBinaryForPlugin resolves vim/nvim
+		// through them because os.Stat follows a symlink to an
+		// executable target (verified by reasoning + the
+		// isExecutableFile definition, not by a live launch).
+		if pm.osFamily == "debian" {
+			failWorkstationNvimInstall := func(err error) PluginActionResponse {
+				if dir, derr := pm.pluginDir(pluginID); derr == nil {
+					_ = os.RemoveAll(dir)
+				}
+				return PluginActionResponse{
+					Success: false,
+					Message: fmt.Sprintf("Bundled nvim post-install failed for plugin %s: %v", pluginID, err),
+					Output:  output.String(),
+				}
+			}
+			if err := pm.checkWorkstationNvimLibraries(); err != nil {
+				return failWorkstationNvimInstall(err)
+			}
+			if err := pm.ensureWorkstationNvimSymlinks(); err != nil {
+				return failWorkstationNvimInstall(err)
+			}
+		}
 		_ = os.Remove("/etc/axonwall/workstation.disabled")
 		pm.mu.Lock()
 		delete(pm.disabledMap, pluginID)
@@ -3092,6 +3613,17 @@ func (pm *PluginManager) ReconfigurePlugin(pluginID string) PluginActionResponse
 		delete(pm.disabledMap, pluginID)
 		pm.saveState()
 		pm.mu.Unlock()
+		// Re-create the bin/vi + bin/vim symlinks if they were
+		// deleted (soft-fail, like the core-k3s multicall
+		// symlinks in the core-k3s branch above): reconfigure
+		// repairs, only a reinstall restores a missing nvim
+		// tree. Debian only — on Alpine/Arch there is no bundled
+		// nvim and the helper would fail closed.
+		if pm.osFamily == "debian" {
+			if err := pm.ensureWorkstationNvimSymlinks(); err != nil {
+				log.Printf("[PluginManager] Warning: failed to create cli-workstation vi/vim symlinks: %v", err)
+			}
+		}
 		if err := pm.provisionWorkstationConfigs(); err != nil {
 			return PluginActionResponse{
 				Success: false,
@@ -3449,7 +3981,17 @@ export _AXONWALL_ZSH_LOADED=1
 export EDITOR="vim"
 export VISUAL="vim"
 export PAGER="less -FRX"
-export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+# Preserve any PATH entries added earlier (e.g. plugin bin dirs from
+# /etc/zsh/zshenv): add each system dir only if missing, instead of
+# resetting PATH outright. The old hard reset wiped plugin PATH
+# entries in non-login interactive zsh (tmux panes, 'zsh' started
+# from another shell), which zlogin never heals — only login shells
+# were restored. This loop is idempotent and preserves order.
+for _d in /bin /sbin /usr/bin /usr/sbin /usr/local/bin /usr/local/sbin; do
+  case ":$PATH:" in *":$_d:"*) ;; *) PATH="$_d:$PATH";; esac
+done
+export PATH
+unset _d
 
 if [[ -z "${KUBECONFIG:-}" ]] && [[ -r /etc/rancher/k3s/k3s.yaml ]]; then
   export KUBECONFIG="/etc/rancher/k3s/k3s.yaml"
