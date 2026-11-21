@@ -24,12 +24,10 @@ import {
 //     DAEMON's validation that rejects it. Only the raw-binary
 //     schema is `.strict()` and rejects meaningless fields itself.
 //
-// NOTE: this suite is currently UNRUNNABLE in this sandbox (no
-// node_modules in the worktree and no pinned pnpm 12.9.1 to install
-// with — pnpm install is broken on the workspace mount). It was
-// verified by parse-only check, not by a vitest run; run
-// `pnpm test` / `vitest run src/schemas/plugin-bundled-binaries.test.ts`
-// from packages/axonwall_lib once dependencies are installed.
+// NOTE: zod v4 stringifies a ZodError's message as JSON, so the
+// refine messages' quotes come back backslash-escaped
+// (extract \"tree\"); the toThrow regexes below match only the
+// unquoted prefix for that reason.
 
 const HEX64 = 'a'.repeat(64);
 
@@ -135,7 +133,7 @@ describe('PluginBundledBinarySchema (bundled binaries)', () => {
         extract: 'tree',
         pathInArchive: 'bin/rosenpass',
       }),
-    ).toThrow(/pathInArchive must be omitted with extract "tree"/);
+    ).toThrow(/pathInArchive must be omitted with extract/);
   });
 
   it('rejects stripComponents without tree extraction', () => {
@@ -144,7 +142,7 @@ describe('PluginBundledBinarySchema (bundled binaries)', () => {
         ...validArchive,
         stripComponents: 1,
       }),
-    ).toThrow(/stripComponents is only meaningful with extract "tree"/);
+    ).toThrow(/stripComponents is only meaningful with extract/);
   });
 
   it('accepts tree extraction with stripComponents', () => {
