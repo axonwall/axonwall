@@ -320,6 +320,22 @@ export function generateDynamicFlag(prefix = 'kctf', challengeName = '') {
 /**
  * Generates Kubernetes YAML manifest strings for a kCTF Challenge
  */
+function assertValidKctfName(rawValue, label) {
+  const str = String(rawValue ?? '').trim();
+  if (!str || /[./\\\s\u0000-\u001f]/.test(str)) {
+    throw new Error(`Invalid ${label} '${rawValue}': must be a valid DNS label`);
+  }
+  return assertDnsLabel(str.toLowerCase().replace(/[^a-z0-9-]/g, '-'), label);
+}
+
+function assertValidPort(rawPort, fallbackPort) {
+  const port = rawPort !== null && rawPort !== undefined && rawPort !== '' ? Number(rawPort) : fallbackPort;
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error(`Invalid port '${rawPort}': expected an integer between 1 and 65535`);
+  }
+  return port;
+}
+
 export function generateChallengeManifest({
   templateId = 'pwn-nsjail-echo',
   customName = null,
@@ -330,17 +346,17 @@ export function generateChallengeManifest({
   namespace = 'kctf'
 } = {}) {
   const tpl = CHALLENGE_TEMPLATES.find(t => t.id === templateId) || CHALLENGE_TEMPLATES[0];
-  const name = (customName || tpl.id).toLowerCase().replace(/[^a-z0-9-]/g, '-');
+  const name = customName ? assertValidKctfName(customName, 'challengeName') : assertDnsLabel(tpl.id, 'challengeName');
   // Namespace, category, and pow land in the manifest as raw YAML scalars
   // and label values: validate/sanitize them like the name above instead
   // of interpolating caller text into an applied manifest.
-  assertDnsLabel(namespace, 'namespace');
-  const category = String(customCategory || tpl.category).toLowerCase().replace(/[^a-z0-9-]/g, '-');
+  const cleanNamespace = assertDnsLabel(namespace, 'namespace');
+  const category = customCategory ? assertValidKctfName(customCategory, 'category') : assertDnsLabel(tpl.category, 'category');
   const powDifficulty = Number(powDifficultySeconds);
   if (!Number.isFinite(powDifficulty) || powDifficulty < 0) {
     throw new Error(`Invalid powDifficultySeconds '${powDifficultySeconds}': expected a non-negative number`);
   }
-  const port = customPort ? parseInt(customPort, 10) : tpl.port;
+  const port = assertValidPort(customPort, tpl.port);
   const flag = customFlag || tpl.defaultFlag;
   const targetPort = tpl.containerConfig?.ports?.[0] || port;
   const containerImage = tpl.image || 'busybox:latest';
@@ -368,7 +384,7 @@ export function generateChallengeManifest({
 kind: Challenge
 metadata:
   name: ${name}
-  namespace: ${namespace}
+  namespace: ${cleanNamespace}
   labels:
     app.kubernetes.io/name: ${appLabel}
     kctf.dev/category: ${category}
@@ -395,7 +411,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: ${appLabel}
-  namespace: ${namespace}
+  namespace: ${cleanNamespace}
   labels:
     app.kubernetes.io/name: ${appLabel}
     kctf.dev/challenge: ${name}
@@ -459,52 +475,55 @@ export async function spinUpChallenge({
   clusterName = 'vigilante-dev',
   onLog = null
 } = {}) {
+  const cleanNamespace = assertDnsLabel(namespace, 'namespace');
+  const cleanCluster = assertDnsLabel(clusterName, 'clusterName');
   const tpl = CHALLENGE_TEMPLATES.find(t => t.id === templateId) || CHALLENGE_TEMPLATES[0];
-  const name = (customName || tpl.id).toLowerCase().replace(/[^a-z0-9-]/g, '-');
-  const port = customPort ? parseInt(customPort, 10) : tpl.port;
+  const name = customName ? assertValidKctfName(customName, 'challengeName') : assertDnsLabel(tpl.id, 'challengeName');
+  const category = customCategory ? assertValidKctfName(customCategory, 'category') : assertDnsLabel(tpl.category, 'category');
+  const port = assertValidPort(customPort, tpl.port);
   const flag = customFlag || generateDynamicFlag('kctf', name);
 
   if (onLog) {
-    onLog(`[kctf] Generating manifest for challenge '${name}' (category: ${tpl.category}, port: ${port})...`);
+    onLog(`[kctf] Generating manifest for challenge '${name}' (category: ${category}, port: ${port})...`);
   }
 
   const manifest = generateChallengeManifest({
     templateId,
     customName: name,
-    customCategory: customCategory || tpl.category,
+    customCategory: category,
     customPort: port,
     customFlag: flag,
     powDifficultySeconds,
-    namespace
+    namespace: cleanNamespace
   });
 
   try {
     if (onLog) {
-      onLog(`[kctf] Applying Challenge '${name}' into namespace '${namespace}' on cluster '${clusterName}'...`);
+      onLog(`[kctf] Applying Challenge '${name}' into namespace '${cleanNamespace}' on cluster '${cleanCluster}'...`);
     }
 
     await execa('kubectl', [
       'apply',
-      '--context', `k3d-${clusterName}`,
-      '-n', namespace,
+      '--context', `k3d-${cleanCluster}`,
+      '-n', cleanNamespace,
       '-f', '-'
     ], {
       input: manifest
     });
 
     if (onLog) {
-      onLog(`[kctf] Successfully deployed challenge '${name}'! Port: ${port} | Category: ${tpl.category}`);
+      onLog(`[kctf] Successfully deployed challenge '${name}'! Port: ${port} | Category: ${category}`);
     }
 
     return {
       success: true,
       name,
-      category: customCategory || tpl.category,
+      category,
       port,
       flag,
       powDifficultySeconds,
-      namespace,
-      clusterName,
+      namespace: cleanNamespace,
+      clusterName: cleanCluster,
       templateId
     };
   } catch (err) {
@@ -527,30 +546,30 @@ export async function spinUpChallenge({
 export async function listActiveChallenges({
   namespace = 'kctf',
   clusterName = 'vigilante-dev',
-  domain = 'vigilante.local'
+  domain = 'vigilante.local',
+  includeFlags = false
 } = {}) {
+  const cleanNamespace = assertDnsLabel(namespace, 'namespace');
+  const cleanCluster = clusterName ? assertDnsLabel(clusterName, 'clusterName') : '';
+  if (domain && !isValidHostname(domain) && !net.isIP(domain)) {
+    throw new Error(`Invalid domain '${domain}': must be a valid hostname or IP`);
+  }
   const challenges = [];
 
   try {
     // 1. Query kctf Challenge CRDs
-    const { stdout: chalJson } = await execa('kubectl', [
-      'get', 'challenges.kctf.dev',
-      '-n', namespace,
-      '--context', `k3d-${clusterName}`,
-      '--request-timeout=4s',
-      '-o', 'json'
-    ]).catch(() => ({ stdout: '{"items":[]}' }));
+    const chalArgs = ['get', 'challenges.kctf.dev', '-n', cleanNamespace];
+    if (cleanCluster) chalArgs.push('--context', `k3d-${cleanCluster}`);
+    chalArgs.push('--request-timeout=4s', '-o', 'json');
+    const { stdout: chalJson } = await execa('kubectl', chalArgs).catch(() => ({ stdout: '{"items":[]}' }));
 
     const parsedChals = JSON.parse(chalJson);
 
     // 2. Query Pods in namespace
-    const { stdout: podJson } = await execa('kubectl', [
-      'get', 'pods',
-      '-n', namespace,
-      '--context', `k3d-${clusterName}`,
-      '--request-timeout=4s',
-      '-o', 'json'
-    ]).catch(() => ({ stdout: '{"items":[]}' }));
+    const podArgs = ['get', 'pods', '-n', cleanNamespace];
+    if (cleanCluster) podArgs.push('--context', `k3d-${cleanCluster}`);
+    podArgs.push('--request-timeout=4s', '-o', 'json');
+    const { stdout: podJson } = await execa('kubectl', podArgs).catch(() => ({ stdout: '{"items":[]}' }));
 
     const parsedPods = JSON.parse(podJson);
 
@@ -574,10 +593,11 @@ export async function listActiveChallenges({
       const isReady = pod?.status?.containerStatuses?.every(c => c.ready) || false;
       const restarts = pod?.status?.containerStatuses?.reduce((acc, c) => acc + c.restartCount, 0) || 0;
 
-      // Extract flag if set in env
+      // Extract flag if set in env (redacted by default unless explicitly requested)
       const containerEnv = pod?.spec?.containers?.[0]?.env || [];
       const flagEnv = containerEnv.find(e => e.name === 'CTF_FLAG' || e.name === 'FLAG');
-      const flag = flagEnv ? flagEnv.value : 'Protected in container';
+      const rawFlag = flagEnv ? flagEnv.value : 'Protected in container';
+      const flag = includeFlags ? rawFlag : '[REDACTED]';
 
       const connCommand = category === 'web' || port === 80 || port === 8080 || port === 8081 || port === 8082
         ? `http://${domain}:${port}`
@@ -614,7 +634,7 @@ export async function listActiveChallenges({
       status: 'Template Ready',
       podName: null,
       restarts: 0,
-      flag: t.defaultFlag,
+      flag: includeFlags ? t.defaultFlag : '[REDACTED]',
       connectionString: t.category === 'web' ? `http://${domain}:${t.port}` : `nc ${domain} ${t.port}`,
       createdAt: new Date().toISOString()
     }));
@@ -633,45 +653,48 @@ export async function deleteChallenge({
   onLog = null
 } = {}) {
   if (!challengeName) return { success: false, error: 'Challenge name required' };
+  const cleanName = assertDnsLabel(challengeName, 'challengeName');
+  const cleanNamespace = assertDnsLabel(namespace, 'namespace');
+  const cleanCluster = assertDnsLabel(clusterName, 'clusterName');
 
   if (onLog) {
-    onLog(`[kctf] Deleting challenge '${challengeName}' from namespace '${namespace}'...`);
+    onLog(`[kctf] Deleting challenge '${cleanName}' from namespace '${cleanNamespace}'...`);
   }
 
   try {
-    const appLabel = `chal-${challengeName}`;
+    const appLabel = `chal-${cleanName}`;
 
     // 1. Delete Challenge CRD
     await execa('kubectl', [
-      'delete', 'challenge.kctf.dev', challengeName,
-      '-n', namespace,
-      '--context', `k3d-${clusterName}`,
+      'delete', 'challenge.kctf.dev', cleanName,
+      '-n', cleanNamespace,
+      '--context', `k3d-${cleanCluster}`,
       '--ignore-not-found=true'
     ]);
 
     // 2. Delete Deployment
     await execa('kubectl', [
       'delete', 'deployment', appLabel,
-      '-n', namespace,
-      '--context', `k3d-${clusterName}`,
+      '-n', cleanNamespace,
+      '--context', `k3d-${cleanCluster}`,
       '--ignore-not-found=true'
     ]);
 
     // 3. Delete Service
     await execa('kubectl', [
       'delete', 'service', appLabel,
-      '-n', namespace,
-      '--context', `k3d-${clusterName}`,
+      '-n', cleanNamespace,
+      '--context', `k3d-${cleanCluster}`,
       '--ignore-not-found=true'
     ]);
 
     if (onLog) {
-      onLog(`[kctf] Challenge '${challengeName}' and associated resources deleted successfully.`);
+      onLog(`[kctf] Challenge '${cleanName}' and associated resources deleted successfully.`);
     }
 
-    return { success: true, name: challengeName };
+    return { success: true, name: cleanName };
   } catch (err) {
-    logger.error('KCTF:DELETE', `Error deleting challenge ${challengeName}: ${err.message}`);
+    logger.error('KCTF:DELETE', `Error deleting challenge ${cleanName}: ${err.message}`);
     return { success: false, error: err.message };
   }
 }
@@ -685,26 +708,31 @@ export async function toggleChallengeStatus({
   namespace = 'kctf',
   clusterName = 'vigilante-dev'
 } = {}) {
+  const cleanName = assertDnsLabel(challengeName, 'challengeName');
+  const cleanNamespace = assertDnsLabel(namespace, 'namespace');
+  const cleanCluster = assertDnsLabel(clusterName, 'clusterName');
+  const isDeployed = Boolean(deployed);
+
   try {
-    const appLabel = `chal-${challengeName}`;
-    const replicas = deployed ? '1' : '0';
+    const appLabel = `chal-${cleanName}`;
+    const replicas = isDeployed ? '1' : '0';
 
     await execa('kubectl', [
       'scale', 'deployment', appLabel,
       `--replicas=${replicas}`,
-      '-n', namespace,
-      '--context', `k3d-${clusterName}`
+      '-n', cleanNamespace,
+      '--context', `k3d-${cleanCluster}`
     ]);
 
     await execa('kubectl', [
-      'patch', 'challenge.kctf.dev', challengeName,
+      'patch', 'challenge.kctf.dev', cleanName,
       '--type=merge',
-      `-p={"spec":{"deployed":${deployed}}}`,
-      '-n', namespace,
-      '--context', `k3d-${clusterName}`
+      `-p=${JSON.stringify({ spec: { deployed: isDeployed } })}`,
+      '-n', cleanNamespace,
+      '--context', `k3d-${cleanCluster}`
     ]).catch(() => {});
 
-    return { success: true, name: challengeName, deployed };
+    return { success: true, name: cleanName, deployed: isDeployed };
   } catch (err) {
     return { success: false, error: err.message };
   }

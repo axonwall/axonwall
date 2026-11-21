@@ -71,12 +71,69 @@ type XdpBlockSnapshotEntry struct {
 	ExpiresAt   string `json:"expiresAt,omitempty"`
 }
 
+type XdpPerCpuTelemetry struct {
+	Cpu           int    `json:"cpu"`
+	RxPackets     uint64 `json:"rxPackets"`
+	RxBytes       uint64 `json:"rxBytes"`
+	XdpPass       uint64 `json:"xdpPass"`
+	XdpDrop       uint64 `json:"xdpDrop"`
+	Ipv4Packets   uint64 `json:"ipv4Packets"`
+	Ipv6Packets   uint64 `json:"ipv6Packets"`
+	VlanPackets   uint64 `json:"vlanPackets"`
+	TcpSynPackets uint64 `json:"tcpSynPackets"`
+	LpmCidrDrops  uint64 `json:"lpmCidrDrops"`
+	SynFloodDrops uint64 `json:"synFloodDrops"`
+}
+
+type XdpProtocolSummary struct {
+	Protocol  uint8  `json:"protocol"`
+	ProtoName string `json:"protoName"`
+	Flows     int    `json:"flows"`
+	Packets   uint64 `json:"packets"`
+	Bytes     uint64 `json:"bytes"`
+}
+
+type XdpPortSummary struct {
+	Port       uint16 `json:"port"`
+	Service    string `json:"service"`
+	Protocol   uint8  `json:"protocol"`
+	ProtoName  string `json:"protoName"`
+	Flows      int    `json:"flows"`
+	Packets    uint64 `json:"packets"`
+	Bytes      uint64 `json:"bytes"`
+	SynPackets uint64 `json:"synPackets"`
+	RstPackets uint64 `json:"rstPackets"`
+}
+
+type XdpVlanSummary struct {
+	VlanID  uint16 `json:"vlanId"`
+	Flows   int    `json:"flows"`
+	Packets uint64 `json:"packets"`
+	Bytes   uint64 `json:"bytes"`
+}
+
+type XdpSynMeterEntry struct {
+	IP             string `json:"ip"`
+	Family         int    `json:"family"`
+	SynCount       uint64 `json:"synCount"`
+	DroppedPackets uint64 `json:"droppedPackets"`
+	WindowAgeMs    int64  `json:"windowAgeMs"`
+}
+
 type EbpfDataplaneSnapshot struct {
 	Running            bool                    `json:"running"`
 	AttachedInterfaces []string                `json:"attachedInterfaces"`
 	ClickHouseEnabled  bool                    `json:"clickHouseEnabled"`
 	SynFloodLimitPps   uint64                  `json:"synFloodLimitPps"`
 	Stats              XdpVerdictTelemetry     `json:"stats"`
+	PerCpuStats        []XdpPerCpuTelemetry    `json:"perCpuStats"`
+	TotalFlowCount     int                     `json:"totalFlowCount"`
+	TotalFlowCountV4   int                     `json:"totalFlowCountV4"`
+	TotalFlowCountV6   int                     `json:"totalFlowCountV6"`
+	ProtocolBreakdown  []XdpProtocolSummary    `json:"protocolBreakdown"`
+	TopPorts           []XdpPortSummary        `json:"topPorts"`
+	VlanBreakdown      []XdpVlanSummary        `json:"vlanBreakdown"`
+	SynRateMeters      []XdpSynMeterEntry      `json:"synRateMeters"`
 	TopFlows           []XdpFlowSnapshotEntry  `json:"topFlows"`
 	ActiveBlocks       []XdpBlockSnapshotEntry `json:"activeBlocks"`
 	Timestamp          string                  `json:"timestamp"`
@@ -870,6 +927,11 @@ func (m *EBPFManager) GetDataplaneSnapshot(maxFlows int) EbpfDataplaneSnapshot {
 	}
 	snap := EbpfDataplaneSnapshot{
 		AttachedInterfaces: []string{},
+		PerCpuStats:        []XdpPerCpuTelemetry{},
+		ProtocolBreakdown:  []XdpProtocolSummary{},
+		TopPorts:           []XdpPortSummary{},
+		VlanBreakdown:      []XdpVlanSummary{},
+		SynRateMeters:      []XdpSynMeterEntry{},
 		TopFlows:           []XdpFlowSnapshotEntry{},
 		ActiveBlocks:       []XdpBlockSnapshotEntry{},
 		Timestamp:          time.Now().UTC().Format(time.RFC3339),
@@ -887,11 +949,12 @@ func (m *EBPFManager) GetDataplaneSnapshot(maxFlows int) EbpfDataplaneSnapshot {
 
 	nowKtime := ktimeMonotonicNs()
 
-	// 1. Sum per-CPU XDP stats
+	// 1. Sum per-CPU XDP stats and capture per-core distribution
 	if m.objs.XdpStatsMap != nil {
 		var perCpu []ebpf.FlowTrackerXdpDatastats
 		if err := m.objs.XdpStatsMap.Lookup(uint32(0), &perCpu); err == nil {
-			for _, cpuStat := range perCpu {
+			snap.PerCpuStats = make([]XdpPerCpuTelemetry, 0, len(perCpu))
+			for cpuIdx, cpuStat := range perCpu {
 				snap.Stats.RxPackets += cpuStat.RxPackets
 				snap.Stats.RxBytes += cpuStat.RxBytes
 				snap.Stats.XdpPass += cpuStat.XdpPass
@@ -902,6 +965,19 @@ func (m *EBPFManager) GetDataplaneSnapshot(maxFlows int) EbpfDataplaneSnapshot {
 				snap.Stats.TcpSynPackets += cpuStat.TcpSynPackets
 				snap.Stats.LpmCidrDrops += cpuStat.LpmCidrDrops
 				snap.Stats.SynFloodDrops += cpuStat.SynFloodDrops
+				snap.PerCpuStats = append(snap.PerCpuStats, XdpPerCpuTelemetry{
+					Cpu:           cpuIdx,
+					RxPackets:     cpuStat.RxPackets,
+					RxBytes:       cpuStat.RxBytes,
+					XdpPass:       cpuStat.XdpPass,
+					XdpDrop:       cpuStat.XdpDrop,
+					Ipv4Packets:   cpuStat.Ipv4Packets,
+					Ipv6Packets:   cpuStat.Ipv6Packets,
+					VlanPackets:   cpuStat.VlanPackets,
+					TcpSynPackets: cpuStat.TcpSynPackets,
+					LpmCidrDrops:  cpuStat.LpmCidrDrops,
+					SynFloodDrops: cpuStat.SynFloodDrops,
+				})
 			}
 		}
 	}
@@ -913,6 +989,7 @@ func (m *EBPFManager) GetDataplaneSnapshot(maxFlows int) EbpfDataplaneSnapshot {
 		var k ebpf.FlowTrackerFlowKey
 		var v ebpf.FlowTrackerFlowVal
 		for iter.Next(&k, &v) {
+			snap.TotalFlowCountV4++
 			ageMs := int64(0)
 			if nowKtime > 0 && v.LastSeenNs > 0 && nowKtime >= v.LastSeenNs {
 				ageMs = int64((nowKtime - v.LastSeenNs) / 1_000_000)
@@ -940,6 +1017,7 @@ func (m *EBPFManager) GetDataplaneSnapshot(maxFlows int) EbpfDataplaneSnapshot {
 		var k6 ebpf.FlowTrackerFlow6Key
 		var v6 ebpf.FlowTrackerFlowVal
 		for iter6.Next(&k6, &v6) {
+			snap.TotalFlowCountV6++
 			ageMs := int64(0)
 			if nowKtime > 0 && v6.LastSeenNs > 0 && nowKtime >= v6.LastSeenNs {
 				ageMs = int64((nowKtime - v6.LastSeenNs) / 1_000_000)
@@ -962,12 +1040,71 @@ func (m *EBPFManager) GetDataplaneSnapshot(maxFlows int) EbpfDataplaneSnapshot {
 			})
 		}
 	}
+	snap.TotalFlowCount = snap.TotalFlowCountV4 + snap.TotalFlowCountV6
+	snap.ProtocolBreakdown, snap.TopPorts, snap.VlanBreakdown = summarizeXdpFlows(flows)
 	sort.Slice(flows, func(i, j int) bool { return flows[i].Bytes > flows[j].Bytes })
 	if len(flows) > maxFlows {
 		flows = flows[:maxFlows]
 	}
 	if len(flows) > 0 {
 		snap.TopFlows = flows
+	}
+
+	// 2b. Collect live TCP SYN rate-meter entries from IPv4/IPv6 SYN maps
+	var synMeters []XdpSynMeterEntry
+	if m.objs.SynMeter4Map != nil {
+		iterSyn4 := m.objs.SynMeter4Map.Iterate()
+		var ipUint uint32
+		var mv ebpf.FlowTrackerSynMeterVal
+		for iterSyn4.Next(&ipUint, &mv) {
+			if mv.SynCount == 0 && mv.DroppedPackets == 0 {
+				continue
+			}
+			ageMs := int64(0)
+			if nowKtime > 0 && mv.WindowStartNs > 0 && nowKtime >= mv.WindowStartNs {
+				ageMs = int64((nowKtime - mv.WindowStartNs) / 1_000_000)
+			}
+			synMeters = append(synMeters, XdpSynMeterEntry{
+				IP:             ipv4FromUint32(ipUint).String(),
+				Family:         4,
+				SynCount:       mv.SynCount,
+				DroppedPackets: mv.DroppedPackets,
+				WindowAgeMs:    ageMs,
+			})
+		}
+	}
+	if m.objs.SynMeter6Map != nil {
+		iterSyn6 := m.objs.SynMeter6Map.Iterate()
+		var k6 ebpf.FlowTrackerIpv6AddrKey
+		var mv ebpf.FlowTrackerSynMeterVal
+		for iterSyn6.Next(&k6, &mv) {
+			if mv.SynCount == 0 && mv.DroppedPackets == 0 {
+				continue
+			}
+			ageMs := int64(0)
+			if nowKtime > 0 && mv.WindowStartNs > 0 && nowKtime >= mv.WindowStartNs {
+				ageMs = int64((nowKtime - mv.WindowStartNs) / 1_000_000)
+			}
+			synMeters = append(synMeters, XdpSynMeterEntry{
+				IP:             net.IP(k6.Addr[:]).String(),
+				Family:         6,
+				SynCount:       mv.SynCount,
+				DroppedPackets: mv.DroppedPackets,
+				WindowAgeMs:    ageMs,
+			})
+		}
+	}
+	if len(synMeters) > 0 {
+		sort.Slice(synMeters, func(i, j int) bool {
+			if synMeters[i].DroppedPackets != synMeters[j].DroppedPackets {
+				return synMeters[i].DroppedPackets > synMeters[j].DroppedPackets
+			}
+			return synMeters[i].SynCount > synMeters[j].SynCount
+		})
+		if len(synMeters) > 25 {
+			synMeters = synMeters[:25]
+		}
+		snap.SynRateMeters = synMeters
 	}
 
 	// 3. Collect active XDP host & LPM CIDR blocklist entries
@@ -1200,4 +1337,157 @@ func (m *EBPFManager) ClearBlocklist() {
 	if cleared > 0 {
 		log.Printf("XDP Mitigation: Cleared %d entries from XDP blocklist maps", cleared)
 	}
+}
+
+func serviceNameForPort(port uint16, proto uint8) string {
+	switch port {
+	case 22:
+		return "SSH"
+	case 53:
+		return "DNS"
+	case 67, 68:
+		return "DHCP"
+	case 80:
+		return "HTTP"
+	case 123:
+		return "NTP"
+	case 179:
+		return "BGP"
+	case 443:
+		if proto == 17 {
+			return "QUIC/HTTP3"
+		}
+		return "HTTPS"
+	case 500, 4500:
+		return "IPsec/IKE"
+	case 2049:
+		return "NFS"
+	case 2379, 2380:
+		return "etcd"
+	case 2966:
+		return "Axonwall UI"
+	case 3306:
+		return "MySQL"
+	case 3389:
+		return "RDP"
+	case 4444:
+		return "Canary/Trap"
+	case 5432:
+		return "PostgreSQL"
+	case 6379:
+		return "Redis"
+	case 6443:
+		return "K3s API"
+	case 8080, 8443:
+		return "HTTP-Alt"
+	case 8472:
+		return "Flannel VXLAN"
+	case 9000:
+		return "ClickHouse"
+	case 9092:
+		return "Kafka"
+	case 51820:
+		return "WireGuard"
+	default:
+		return ""
+	}
+}
+
+type portAggKey struct {
+	port  uint16
+	proto uint8
+}
+
+func summarizeXdpFlows(flows []XdpFlowSnapshotEntry) ([]XdpProtocolSummary, []XdpPortSummary, []XdpVlanSummary) {
+	protos := []XdpProtocolSummary{}
+	topPorts := []XdpPortSummary{}
+	vlans := []XdpVlanSummary{}
+	if len(flows) == 0 {
+		return protos, topPorts, vlans
+	}
+
+	protoMap := make(map[uint8]*XdpProtocolSummary)
+	portMap := make(map[portAggKey]*XdpPortSummary)
+	vlanMap := make(map[uint16]*XdpVlanSummary)
+
+	for _, f := range flows {
+		pName := f.ProtoName
+		if pName == "" {
+			pName = protocolName(f.Protocol)
+		}
+		ps, ok := protoMap[f.Protocol]
+		if !ok {
+			ps = &XdpProtocolSummary{Protocol: f.Protocol, ProtoName: pName}
+			protoMap[f.Protocol] = ps
+		}
+		ps.Flows++
+		ps.Packets += f.Packets
+		ps.Bytes += f.Bytes
+
+		if f.DstPort > 0 {
+			pk := portAggKey{port: f.DstPort, proto: f.Protocol}
+			pt, ok := portMap[pk]
+			if !ok {
+				pt = &XdpPortSummary{
+					Port:      f.DstPort,
+					Service:   serviceNameForPort(f.DstPort, f.Protocol),
+					Protocol:  f.Protocol,
+					ProtoName: pName,
+				}
+				portMap[pk] = pt
+			}
+			pt.Flows++
+			pt.Packets += f.Packets
+			pt.Bytes += f.Bytes
+			pt.SynPackets += f.SynPackets
+			pt.RstPackets += f.RstPackets
+		}
+
+		vl, ok := vlanMap[f.VlanID]
+		if !ok {
+			vl = &XdpVlanSummary{VlanID: f.VlanID}
+			vlanMap[f.VlanID] = vl
+		}
+		vl.Flows++
+		vl.Packets += f.Packets
+		vl.Bytes += f.Bytes
+	}
+
+	for _, ps := range protoMap {
+		protos = append(protos, *ps)
+	}
+	sort.Slice(protos, func(i, j int) bool {
+		if protos[i].Bytes != protos[j].Bytes {
+			return protos[i].Bytes > protos[j].Bytes
+		}
+		return protos[i].Protocol < protos[j].Protocol
+	})
+
+	for _, pt := range portMap {
+		topPorts = append(topPorts, *pt)
+	}
+	sort.Slice(topPorts, func(i, j int) bool {
+		if topPorts[i].Bytes != topPorts[j].Bytes {
+			return topPorts[i].Bytes > topPorts[j].Bytes
+		}
+		return topPorts[i].Port < topPorts[j].Port
+	})
+	if len(topPorts) > 12 {
+		topPorts = topPorts[:12]
+	}
+
+	for _, vl := range vlanMap {
+		vlans = append(vlans, *vl)
+	}
+	sort.Slice(vlans, func(i, j int) bool {
+		if vlans[i].Bytes != vlans[j].Bytes {
+			return vlans[i].Bytes > vlans[j].Bytes
+		}
+		return vlans[i].VlanID < vlans[j].VlanID
+	})
+	if len(vlans) > 16 {
+		vlans = vlans[:16]
+	}
+
+	return protos, topPorts, vlans
 }

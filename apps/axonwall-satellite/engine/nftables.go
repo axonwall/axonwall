@@ -3,6 +3,7 @@ package engine
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -11,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -391,12 +393,63 @@ func (e *NftablesEngine) UnblockTarget(target string, isMac bool) error {
 	return nil
 }
 
-// unblockTargetLocked deletes one set element via the nft CLI.
-// Callers hold e.mu. The netlink layer in this package has no set
-// element delete yet, and the CLI form handles interval sets
-// (singleton IPs inserted as [ip, ip+1), CIDRs as [start, end)) as
-// well as plain MAC sets.
+// unblockTargetLocked deletes one set element via pure-Go Netlink first
+// (required for zero-binary Edge UKI appliances where /usr/sbin/nft is absent),
+// falling back to the nft CLI if Netlink is unavailable or unsupported.
 func (e *NftablesEngine) unblockTargetLocked(entry *fleetBlockEntry) error {
+	target := strings.TrimSpace(entry.Target)
+	if entry.IsMac {
+		if hw, err := net.ParseMAC(target); err == nil {
+			if nlErr := DeleteSetElementNetlink("axonwall", entry.SetName, hw); nlErr == nil {
+				return nil
+			} else if !errors.Is(nlErr, syscall.ENOENT) {
+				if _, lookErr := exec.LookPath("nft"); lookErr != nil {
+					return nlErr
+				}
+			} else {
+				return nil
+			}
+		}
+	} else if ip := net.ParseIP(target); ip != nil {
+		var keyBytes []byte
+		if v4 := ip.To4(); v4 != nil {
+			keyBytes = []byte(v4)
+		} else {
+			keyBytes = []byte(ip.To16())
+		}
+		if nlErr := DeleteSetElementNetlink("axonwall", entry.SetName, keyBytes); nlErr == nil {
+			return nil
+		} else if errors.Is(nlErr, syscall.ENOENT) {
+			return nil
+		} else if _, lookErr := exec.LookPath("nft"); lookErr != nil {
+			return nlErr
+		}
+	} else if _, ipNet, err := net.ParseCIDR(target); err == nil && ipNet != nil {
+		var startBytes, maskBytes []byte
+		if ip4 := ipNet.IP.To4(); ip4 != nil {
+			startBytes = []byte(ip4)
+			maskBytes = []byte(ipNet.Mask)
+		} else if ip6 := ipNet.IP.To16(); ip6 != nil {
+			startBytes = []byte(ip6)
+			maskBytes = []byte(ipNet.Mask)
+		}
+		if len(startBytes) == len(maskBytes) {
+			bcast := make([]byte, len(startBytes))
+			for i := range startBytes {
+				bcast[i] = startBytes[i] | ^maskBytes[i]
+			}
+			if endBytes, ok := incrementIPBytes(bcast); ok {
+				if nlErr := DeleteIntervalSetElementNetlink("axonwall", entry.SetName, startBytes, endBytes); nlErr == nil {
+					return nil
+				} else if errors.Is(nlErr, syscall.ENOENT) {
+					return nil
+				} else if _, lookErr := exec.LookPath("nft"); lookErr != nil {
+					return nlErr
+				}
+			}
+		}
+	}
+
 	nftBin, lookErr := exec.LookPath("nft")
 	if lookErr != nil {
 		return fmt.Errorf("no nft binary installed to remove element %s from set %s", entry.Target, entry.SetName)
@@ -507,10 +560,12 @@ func (e *NftablesEngine) RestoreFleetBlocks() {
 	if e.fleetBlocks == nil {
 		e.fleetBlocks = make(map[string]*fleetBlockEntry)
 	}
+	now := time.Now()
 	for _, persisted := range e.loadFleetBlocks() {
 		entry := persisted
 		key := fleetBlockKey(entry.SetName, entry.Target)
-		if !entry.ExpiresAt.After(time.Now()) {
+		rem := entry.ExpiresAt.Sub(now)
+		if rem <= 0 {
 			if err := e.unblockTargetLocked(&entry); err != nil {
 				slog.Warn("Failed to remove already-expired persisted fleet block", "target", entry.Target, "set", entry.SetName, "error", err)
 			} else {
@@ -518,7 +573,11 @@ func (e *NftablesEngine) RestoreFleetBlocks() {
 			}
 			continue
 		}
-		if err := e.blockTargetLocked(entry.Target, entry.IsMac, int(time.Until(entry.ExpiresAt)/time.Second)); err != nil {
+		ttlSec := int((rem + time.Second - 1) / time.Second)
+		if ttlSec < 1 {
+			ttlSec = 1
+		}
+		if err := e.blockTargetLocked(entry.Target, entry.IsMac, ttlSec); err != nil {
 			slog.Warn("Failed to re-insert persisted fleet block; keeping its expiry timer for the next restore", "target", entry.Target, "set", entry.SetName, "error", err)
 			kept := entry
 			if old, ok := e.fleetBlocks[key]; ok && old.timer != nil {

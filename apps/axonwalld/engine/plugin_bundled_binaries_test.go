@@ -48,6 +48,19 @@ func newBundledTestPM(t *testing.T) *PluginManager {
 	return NewPluginManager(dir)
 }
 
+func shOnlyPATH(t *testing.T) string {
+	t.Helper()
+	binDir := t.TempDir()
+	shPath := "/bin/sh"
+	if p, err := exec.LookPath("sh"); err == nil && p != "" {
+		shPath = p
+	}
+	if err := os.Symlink(shPath, filepath.Join(binDir, "sh")); err != nil {
+		t.Fatalf("symlink sh into temp PATH: %v", err)
+	}
+	return binDir
+}
+
 func sha256HexBytes(b []byte) string {
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:])
@@ -71,6 +84,44 @@ func stagePluginFile(t *testing.T, pm *PluginManager, pluginID, rel, content str
 	return sha256HexBytes([]byte(content))
 }
 
+func overridePluginDefsForTest(t *testing.T, defs ...PluginDefinition) {
+	t.Helper()
+	origLookup := lookupPluginDefinition
+	origList := listExtensionPluginDefinitions
+	overrides := make(map[string]PluginDefinition, len(defs))
+	for _, d := range defs {
+		overrides[d.ID] = d
+	}
+	lookupPluginDefinition = func(pluginID string) (PluginDefinition, bool) {
+		if d, ok := overrides[pluginID]; ok {
+			return d, true
+		}
+		return origLookup(pluginID)
+	}
+	listExtensionPluginDefinitions = func() []PluginDefinition {
+		base := origList()
+		out := make([]PluginDefinition, len(base))
+		copy(out, base)
+		seen := make(map[string]bool, len(base))
+		for i, d := range out {
+			seen[d.ID] = true
+			if ov, ok := overrides[d.ID]; ok {
+				out[i] = ov
+			}
+		}
+		for _, d := range defs {
+			if !seen[d.ID] {
+				out = append(out, d)
+			}
+		}
+		return out
+	}
+	t.Cleanup(func() {
+		lookupPluginDefinition = origLookup
+		listExtensionPluginDefinitions = origList
+	})
+}
+
 func writeBundledJSON(t *testing.T, pm *PluginManager, pluginID string, recs []bundledBinaryRecord) {
 	t.Helper()
 	dir, err := pm.pluginDir(pluginID)
@@ -80,7 +131,16 @@ func writeBundledJSON(t *testing.T, pm *PluginManager, pluginID string, recs []b
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		t.Fatalf("mkdir %s: %v", dir, err)
 	}
-	data, err := json.MarshalIndent(bundledBinariesFile{PluginID: pluginID, Files: recs}, "", "  ")
+	var sources map[string]string
+	if def, ok := lookupPluginDefinition(pluginID); ok && len(def.Binaries) > 0 {
+		sources = make(map[string]string)
+		for _, b := range def.Binaries {
+			if b.SHA256 != "" {
+				sources[b.Name] = strings.ToLower(strings.TrimSpace(b.SHA256))
+			}
+		}
+	}
+	data, err := json.MarshalIndent(bundledBinariesFile{PluginID: pluginID, Sources: sources, Files: recs}, "", "  ")
 	if err != nil {
 		t.Fatalf("marshal bundled.json: %v", err)
 	}
@@ -181,6 +241,15 @@ func stageCliEmacsTree(t *testing.T, pm *PluginManager) string {
 		"#!/bin/sh\necho fake-emacs \"$@\"\n", 0755)
 	noxSum := stagePluginFile(t, pm, "cli-emacs", "usr/bin/emacs-nox",
 		"#!/bin/sh\necho fake-emacs-nox \"$@\"\n", 0755)
+	realDef, ok := findExtensionPluginDefinition("cli-emacs")
+	if !ok {
+		t.Fatalf("cli-emacs definition not found")
+	}
+	synth := realDef
+	synth.Binaries = []PluginBundledBinary{
+		{Kind: "distroPackage", Name: "emacs-nox", SHA256: noxSum, Package: "emacs-nox", Version: "1:30.1+1-6+deb13u1", Arch: "amd64"},
+	}
+	overridePluginDefsForTest(t, synth)
 	writeBundledJSON(t, pm, "cli-emacs", []bundledBinaryRecord{
 		{Path: "bin/emacs", SHA256: emacsSum, Entry: "emacs-nox", Kind: "distroPackage"},
 		{Path: "usr/bin/emacs-nox", SHA256: noxSum, Entry: "emacs-nox", Kind: "distroPackage"},
@@ -203,7 +272,7 @@ func TestListPlugins_CliEmacsBundledInstalledNoSystemEmacs(t *testing.T) {
 	pm := newBundledTestPM(t)
 	stageCliEmacsTree(t, pm)
 
-	def, ok := findExtensionPluginDefinition("cli-emacs")
+	def, ok := lookupPluginDefinition("cli-emacs")
 	if !ok {
 		t.Fatalf("cli-emacs definition not found")
 	}
@@ -247,7 +316,7 @@ func TestListPlugins_CliEmacsMissingWithoutStagedTree(t *testing.T) {
 
 func TestCommandForPlugin_CliEmacsBundledEmacs(t *testing.T) {
 	// PATH has sh (so the test can run commands) but no emacs.
-	t.Setenv("PATH", t.TempDir()+":/usr/bin:/bin")
+	t.Setenv("PATH", shOnlyPATH(t))
 	if _, err := exec.LookPath("emacs"); err == nil {
 		t.Fatalf("precondition failed: emacs unexpectedly on PATH")
 	}
@@ -380,10 +449,10 @@ func TestCommandForPlugin_DoesNotGateOnEnabled(t *testing.T) {
 
 func TestVerifyBundledBinaries_TamperedBinaryFailsClosed(t *testing.T) {
 	// PATH has sh (to run the failing command) but no emacs.
-	t.Setenv("PATH", t.TempDir()+":/usr/bin:/bin")
+	t.Setenv("PATH", shOnlyPATH(t))
 	pm := newBundledTestPM(t)
 	pluginDir := stageCliEmacsTree(t, pm)
-	def, _ := findExtensionPluginDefinition("cli-emacs")
+	def, _ := lookupPluginDefinition("cli-emacs")
 
 	// Flip one byte of the staged launcher after install.
 	launcher := filepath.Join(pluginDir, "bin", "emacs")
@@ -419,7 +488,7 @@ func TestVerifyBundledBinaries_TamperedBinaryFailsClosed(t *testing.T) {
 func TestVerifyBundledBinaries_WrongRecordHashFailsClosed(t *testing.T) {
 	pm := newBundledTestPM(t)
 	stageCliEmacsTree(t, pm)
-	def, _ := findExtensionPluginDefinition("cli-emacs")
+	def, _ := lookupPluginDefinition("cli-emacs")
 
 	// Rewrite bundled.json with a wrong hash for one file (the
 	// bytes on disk are untouched — the record itself lies).
@@ -649,14 +718,23 @@ func TestInstallBundledBinaries_RosenpassStyleArchiveWrongSHARefuses(t *testing.
 // the daemon path once a verified tree is staged (same staging shape
 // as cli-emacs in (a)).
 func TestCommandForPlugin_RosenpassBundledBinary(t *testing.T) {
-	t.Setenv("PATH", t.TempDir()+":/usr/bin:/bin")
+	t.Setenv("PATH", shOnlyPATH(t))
 	pm := newBundledTestPM(t)
 	sum := stagePluginFile(t, pm, "rosenpass", "bin/rosenpass",
 		"#!/bin/sh\necho rosenpass-fake \"$@\"\n", 0755)
+	realDef, ok := findExtensionPluginDefinition("rosenpass")
+	if !ok {
+		t.Fatalf("rosenpass definition not found")
+	}
+	synth := realDef
+	synth.Binaries = []PluginBundledBinary{
+		{Kind: "archive", Name: "rosenpass", SHA256: sum, URL: "https://example.invalid/rosenpass.tar.zst", Format: "tar.zst"},
+	}
+	overridePluginDefsForTest(t, synth)
 	writeBundledJSON(t, pm, "rosenpass", []bundledBinaryRecord{
 		{Path: "bin/rosenpass", SHA256: sum, Entry: "rosenpass", Kind: "archive"},
 	})
-	def, _ := findExtensionPluginDefinition("rosenpass")
+	def, _ := lookupPluginDefinition("rosenpass")
 	if err := pm.verifyBundledBinaries(def); err != nil {
 		t.Fatalf("staged rosenpass tree should verify: %v", err)
 	}
@@ -1073,6 +1151,13 @@ func stageCoreK3sTree(t *testing.T, pm *PluginManager) string {
 		"#!/bin/sh\necho fake-k3s \"$@\"\n", 0755)
 	k9sSum := stagePluginFile(t, pm, "core-k3s", "bin/k9s",
 		"#!/bin/sh\necho fake-k9s \"$@\"\n", 0755)
+	realDef := GetCorePluginDefinitions()[0]
+	synth := realDef
+	synth.Binaries = []PluginBundledBinary{
+		{Kind: "binary", Name: "k3s", SHA256: k3sSum, URL: "https://example.invalid/k3s"},
+		{Kind: "archive", Name: "k9s", SHA256: k9sSum, URL: "https://example.invalid/k9s.tar.gz", Format: "tar.gz"},
+	}
+	overridePluginDefsForTest(t, synth)
 	writeBundledJSON(t, pm, "core-k3s", []bundledBinaryRecord{
 		{Path: "bin/k3s", SHA256: k3sSum, Entry: "k3s", Kind: "binary"},
 		{Path: "bin/k9s", SHA256: k9sSum, Entry: "k9s", Kind: "archive"},
@@ -1085,7 +1170,7 @@ func stageCoreK3sTree(t *testing.T, pm *PluginManager) string {
 }
 
 func TestCoreK3s_BundledBinariesResolveWithoutSystemBinaries(t *testing.T) {
-	t.Setenv("PATH", t.TempDir()+":/usr/bin:/bin")
+	t.Setenv("PATH", shOnlyPATH(t))
 	for _, bin := range []string{"k3s", "k9s", "kubectl"} {
 		if _, err := exec.LookPath(bin); err == nil {
 			t.Fatalf("precondition failed: %s unexpectedly on PATH", bin)
@@ -1093,9 +1178,9 @@ func TestCoreK3s_BundledBinariesResolveWithoutSystemBinaries(t *testing.T) {
 	}
 	pm := newBundledTestPM(t)
 	pluginDir := stageCoreK3sTree(t, pm)
-	def := GetCorePluginDefinitions()[0]
-	if def.ID != "core-k3s" {
-		t.Fatalf("first core definition is %q, want core-k3s", def.ID)
+	def, ok := lookupPluginDefinition("core-k3s")
+	if !ok || def.ID != "core-k3s" {
+		t.Fatalf("core-k3s definition lookup failed: %+v", def)
 	}
 	if err := pm.ensureBundledBinaries(def); err != nil {
 		t.Fatalf("ensureBundledBinaries on a healthy staged tree: %v", err)
@@ -1210,10 +1295,12 @@ func TestEnsureBundledBinaries_NoNetworkWhenHealthyRedownloadsWhenMissing(t *tes
 	if got, _ := os.ReadFile(k3sPath); string(got) != string(k3sBytes) {
 		t.Fatalf("re-downloaded k3s bytes differ from the served bytes")
 	}
-	// The real definition verifies against the same staged tree
-	// (records carry Path+SHA256; Entry/Kind names do not matter).
-	if err := pm.verifyBundledBinaries(GetCorePluginDefinitions()[0]); err != nil {
-		t.Fatalf("real core-k3s definition should verify the synthetically installed tree: %v", err)
+	// D-H2: The real core-k3s definition must FAIL closed against a tree
+	// staged from synthetic non-pinned hashes (source pin mismatch).
+	if err := pm.verifyBundledBinaries(GetCorePluginDefinitions()[0]); err == nil {
+		t.Fatalf("real core-k3s definition must fail source pin check against synthetic tree")
+	} else if !strings.Contains(err.Error(), "source pin mismatch") {
+		t.Fatalf("expected source pin mismatch error, got: %v", err)
 	}
 }
 
@@ -1231,6 +1318,13 @@ func stageWorkstationNvimTree(t *testing.T, pm *PluginManager) string {
 		"fake runtime\n", 0644)
 	parserSum := stagePluginFile(t, pm, "cli-workstation", "lib/nvim/parser/c.so",
 		"fake-parser", 0644)
+	if realDef, ok := findExtensionPluginDefinition("cli-workstation"); ok {
+		synth := realDef
+		synth.Binaries = []PluginBundledBinary{
+			{Kind: "archive", Name: "nvim", SHA256: nvimSum, URL: "https://example.invalid/nvim.tar.gz", Format: "tar.gz", OSes: []string{"debian"}},
+		}
+		overridePluginDefsForTest(t, synth)
+	}
 	writeBundledJSON(t, pm, "cli-workstation", []bundledBinaryRecord{
 		{Path: "bin/nvim", SHA256: nvimSum, Entry: "nvim", Kind: "archive"},
 		{Path: "lib/nvim/parser/c.so", SHA256: parserSum, Entry: "nvim", Kind: "archive"},
@@ -1249,7 +1343,10 @@ func TestWorkstation_NvimSymlinksResolveViVim(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
 	pm := newBundledTestPM(t)
 	pluginDir := stageWorkstationNvimTree(t, pm)
-	def := extDef(t, "cli-workstation")
+	def, ok := lookupPluginDefinition("cli-workstation")
+	if !ok {
+		t.Fatalf("cli-workstation definition not found")
+	}
 	if err := pm.verifyBundledBinaries(def); err != nil {
 		t.Fatalf("staged workstation tree should verify: %v", err)
 	}

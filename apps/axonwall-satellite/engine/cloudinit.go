@@ -385,19 +385,27 @@ func ApplyCloudInitUserData(cfg *EdgeBootConfig, raw string, rootDir string) err
 	flushBlockScalar()
 	flushPendingItems()
 
-	// Write any inline certificates to /etc/axonwall/certs
-	certsDir := filepath.Join(rootDir, "etc", "axonwall", "certs")
+	// Write any inline certificates through the symlink-safe O_NOFOLLOW helper
 	if caCertPEM != "" {
-		_ = os.MkdirAll(certsDir, 0700)
-		_ = os.WriteFile(filepath.Join(certsDir, "ca.crt"), []byte(strings.TrimSpace(caCertPEM)+"\n"), 0600)
+		_ = writeCloudInitFile(cfg, CloudInitWriteFile{
+			Path:        "/etc/axonwall/certs/ca.crt",
+			Content:     strings.TrimSpace(caCertPEM) + "\n",
+			Permissions: "0600",
+		}, rootDir)
 	}
 	if clientCertPEM != "" {
-		_ = os.MkdirAll(certsDir, 0700)
-		_ = os.WriteFile(filepath.Join(certsDir, "satellite.crt"), []byte(strings.TrimSpace(clientCertPEM)+"\n"), 0600)
+		_ = writeCloudInitFile(cfg, CloudInitWriteFile{
+			Path:        "/etc/axonwall/certs/satellite.crt",
+			Content:     strings.TrimSpace(clientCertPEM) + "\n",
+			Permissions: "0600",
+		}, rootDir)
 	}
 	if clientKeyPEM != "" {
-		_ = os.MkdirAll(certsDir, 0700)
-		_ = os.WriteFile(filepath.Join(certsDir, "satellite.key"), []byte(strings.TrimSpace(clientKeyPEM)+"\n"), 0600)
+		_ = writeCloudInitFile(cfg, CloudInitWriteFile{
+			Path:        "/etc/axonwall/certs/satellite.key",
+			Content:     strings.TrimSpace(clientKeyPEM) + "\n",
+			Permissions: "0600",
+		}, rootDir)
 	}
 
 	// Process write_files entries
@@ -1137,18 +1145,28 @@ func applyWriteFileKV(wf *CloudInitWriteFile, line string) bool {
 func writeCloudInitFile(cfg *EdgeBootConfig, wf CloudInitWriteFile, rootDir string) error {
 	cleanRel := filepath.Clean("/" + strings.TrimSpace(wf.Path))
 	// Restrict cloud-init write_files to safe configuration paths in RAM
-	allowedPrefixes := []string{
-		"/etc/axonwall/",
-		"/etc/wireguard/",
+	allowedExactFiles := []string{
 		"/etc/nftables.conf",
 		"/etc/resolv.conf",
 		"/etc/hosts",
 	}
+	allowedDirPrefixes := []string{
+		"/etc/axonwall/",
+		"/etc/wireguard/",
+	}
 	allowed := false
-	for _, prefix := range allowedPrefixes {
-		if cleanRel == prefix || strings.HasPrefix(cleanRel, prefix) {
+	for _, f := range allowedExactFiles {
+		if cleanRel == f {
 			allowed = true
 			break
+		}
+	}
+	if !allowed {
+		for _, prefix := range allowedDirPrefixes {
+			if strings.HasPrefix(cleanRel, prefix) {
+				allowed = true
+				break
+			}
 		}
 	}
 	if !allowed {
@@ -1337,19 +1355,68 @@ func applyCloudInitJSON(cfg *EdgeBootConfig, rawJSON, rootDir string) error {
 	if err := json.Unmarshal([]byte(rawJSON), &doc); err != nil {
 		return err
 	}
-	if ax, ok := doc["axonwall"].(map[string]interface{}); ok {
-		applyCloudInitJSONMap(cfg, ax)
-	}
-	for k, v := range doc {
-		// A-L37: the top-level loop also dropped numbers and lists.
-		switch tv := v.(type) {
-		case string:
-			applyScalarConfigKV(cfg, k, tv)
-		case float64:
-			applyScalarConfigKV(cfg, k, strconv.FormatFloat(tv, 'f', -1, 64))
-		case []interface{}:
-			applyCloudInitJSONArray(cfg, k, tv)
+	writeInlineCert := func(normKey, val string) bool {
+		switch normKey {
+		case "cacert", "cacertpem":
+			_ = writeCloudInitFile(cfg, CloudInitWriteFile{
+				Path:        "/etc/axonwall/certs/ca.crt",
+				Content:     strings.TrimSpace(val) + "\n",
+				Permissions: "0600",
+			}, rootDir)
+			return true
+		case "clientcert", "clientcertpem", "satellitecert":
+			_ = writeCloudInitFile(cfg, CloudInitWriteFile{
+				Path:        "/etc/axonwall/certs/satellite.crt",
+				Content:     strings.TrimSpace(val) + "\n",
+				Permissions: "0600",
+			}, rootDir)
+			return true
+		case "clientkey", "clientkeypem", "satellitekey":
+			_ = writeCloudInitFile(cfg, CloudInitWriteFile{
+				Path:        "/etc/axonwall/certs/satellite.key",
+				Content:     strings.TrimSpace(val) + "\n",
+				Permissions: "0600",
+			}, rootDir)
+			return true
 		}
+		return false
+	}
+	processDoc := func(m map[string]interface{}) {
+		for k, v := range m {
+			normKey := strings.ReplaceAll(strings.ToLower(strings.TrimSpace(k)), "_", "")
+			switch tv := v.(type) {
+			case string:
+				if !writeInlineCert(normKey, tv) {
+					applyScalarConfigKV(cfg, k, tv)
+				}
+			case bool:
+				applyScalarConfigKV(cfg, k, strconv.FormatBool(tv))
+			case float64:
+				applyScalarConfigKV(cfg, k, strconv.FormatFloat(tv, 'f', -1, 64))
+			case []interface{}:
+				if normKey == "writefiles" {
+					for _, item := range tv {
+						raw, err := json.Marshal(item)
+						if err != nil {
+							continue
+						}
+						var wf CloudInitWriteFile
+						if err := json.Unmarshal(raw, &wf); err != nil || wf.Path == "" {
+							continue
+						}
+						if err := writeCloudInitFile(cfg, wf, rootDir); err != nil {
+							slog.Warn("Skipped JSON cloud-init write_files entry", "path", wf.Path, "error", err)
+						}
+					}
+				} else {
+					applyCloudInitJSONArray(cfg, k, tv)
+				}
+			}
+		}
+	}
+	processDoc(doc)
+	if ax, ok := doc["axonwall"].(map[string]interface{}); ok {
+		processDoc(ax)
 	}
 	return nil
 }

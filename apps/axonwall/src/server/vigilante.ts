@@ -12,6 +12,8 @@ import { getCurrentDesiredState, applyDesiredState } from './agent';
 import { callAgentApi, callAgentApiResponse } from './agent-client';
 import { getSession } from './auth';
 import { assertActionPermitted } from './auth-guard';
+import { getDesiredStateInternal } from './desired-state-internal';
+import { queryDataLakeMetrics, type DataLakeMetricsSnapshot } from './clickhouse';
 
 function validateIpOrCidr(raw: string): string {
   const trimmed = (raw || '').trim();
@@ -521,30 +523,10 @@ export async function getPurpleTeamMatrixAction(): Promise<{
   };
 }
 
-export async function getDataLakeMetricsAction(): Promise<{
-  tables: Array<{ name: string; rows: number; bytes: number; compressedRatio: string }>;
-  totalEvents24h: number;
-  eventsPerSecond: number;
-  storageUsedBytes: number;
-}> {
+export async function getDataLakeMetricsAction(): Promise<DataLakeMetricsSnapshot> {
   const session = await getSession();
   assertActionPermitted(session);
 
-  const tables = [
-    { name: 'vigilante.suricata_eve', rows: 1420500, bytes: 485000000, compressedRatio: '4.2x (ZSTD)' },
-    { name: 'vigilante.zeek_conn', rows: 3890200, bytes: 890000000, compressedRatio: '5.1x (ZSTD)' },
-    { name: 'vigilante.falco_events', rows: 125400, bytes: 32000000, compressedRatio: '3.8x (ZSTD)' },
-    { name: 'vigilante.wazuh_alerts', rows: 89200, bytes: 24000000, compressedRatio: '3.5x (ZSTD)' },
-    { name: 'vigilante.honeynet_trips', rows: 4210, bytes: 1200000, compressedRatio: '2.9x (ZSTD)' },
-    { name: 'vigilante.soar_audit_log', rows: 1840, bytes: 540000, compressedRatio: '3.1x (ZSTD)' },
-  ];
-
-  const totalBytes = tables.reduce((acc, t) => acc + t.bytes, 0);
-
-  return {
-    tables,
-    totalEvents24h: 5531150,
-    eventsPerSecond: 64,
-    storageUsedBytes: totalBytes,
-  };
+  const state = await getDesiredStateInternal().catch(() => null);
+  return queryDataLakeMetrics(state?.observability?.clickhouse);
 }

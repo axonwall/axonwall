@@ -18,10 +18,25 @@ spec:
         app.kubernetes.io/instance: {{ .Release.Name }}
     spec:
       hostNetwork: true
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+        - key: CriticalAddonsOnly
+          operator: Exists
+          effect: NoExecute
       containers:
         - name: axonwalld
           image: "{{ .Values.nodeFirewall.image.repository }}:{{ .Values.nodeFirewall.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy | default "IfNotPresent" }}
+          env:
+            - name: AXONWALL_SOCKET_GROUP
+              value: "1001"
+            - name: AXONWALL_AGENT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.auth.existingSecret | default "axonwall-auth-secret" }}
+                  key: {{ .Values.auth.agentTokenKey | default "agent-token" }}
           securityContext:
             capabilities:
               add:
@@ -33,6 +48,9 @@ spec:
               mountPath: /run/axonwalld
             - name: var-lib-axonwall
               mountPath: /var/lib/axonwall
+            - name: lib-modules
+              mountPath: /lib/modules
+              readOnly: true
       volumes:
         - name: run-axonwalld
           hostPath:
@@ -41,6 +59,10 @@ spec:
         - name: var-lib-axonwall
           hostPath:
             path: /var/lib/axonwall
+            type: DirectoryOrCreate
+        - name: lib-modules
+          hostPath:
+            path: /lib/modules
             type: DirectoryOrCreate
 ---
 {{- end }}
@@ -67,10 +89,35 @@ spec:
         - name: axonwall-ui
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy | default "IfNotPresent" }}
+          env:
+            - name: AGENT_API_SOCKET
+              value: /run/axonwalld/agent-api.sock
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.auth.existingSecret | default "axonwall-auth-secret" }}
+                  key: {{ .Values.auth.jwtSecretKey | default "jwt-secret" }}
+            - name: AXONWALL_AGENT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.auth.existingSecret | default "axonwall-auth-secret" }}
+                  key: {{ .Values.auth.agentTokenKey | default "agent-token" }}
+            - name: LDAP_URL
+              value: "ldap://{{ .Values.ldap.host | default "axonwall-ldap" }}:{{ .Values.ldap.port | default 389 }}"
+            - name: LDAP_BASE_DN
+              value: {{ .Values.ldap.baseDn | default "dc=axonwall,dc=internal" | quote }}
+          volumeMounts:
+            - name: run-axonwalld
+              mountPath: /run/axonwalld
           ports:
             - name: http
               containerPort: {{ .Values.service.port | default 3000 }}
               protocol: TCP
+      volumes:
+        - name: run-axonwalld
+          hostPath:
+            path: /run/axonwalld
+            type: DirectoryOrCreate
 ---
 apiVersion: v1
 kind: Service

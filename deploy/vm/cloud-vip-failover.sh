@@ -42,13 +42,22 @@ case "${PROVIDER}" in
     ROUTE_NAME="${5:-axonwall-default-route}"
     INSTANCE_NAME="${6:-axonwall-node-01}"
     ZONE="${7:-us-central1-a}"
+    NETWORK="${8:-default}"
     if [[ "${ACTION}" == "master" ]]; then
-      echo "[gcp] Updating route ${ROUTE_NAME} next hop instance to ${INSTANCE_NAME}..."
-      gcloud compute routes delete "${ROUTE_NAME}" --quiet || true
-      gcloud compute routes create "${ROUTE_NAME}" \
+      TS="$(date +%s)"
+      NEW_ROUTE="${ROUTE_NAME}-${TS}"
+      echo "[gcp] Creating failover route ${NEW_ROUTE} (network=${NETWORK}) next hop instance ${INSTANCE_NAME}..."
+      gcloud compute routes create "${NEW_ROUTE}" \
+        --network "${NETWORK}" \
         --destination-range "0.0.0.0/0" \
+        --priority 900 \
         --next-hop-instance "${INSTANCE_NAME}" \
         --next-hop-instance-zone "${ZONE}"
+      # Remove superseded routes only after replacement succeeds (no blackhole window)
+      EXISTING_ROUTES="$(gcloud compute routes list --filter="name~^${ROUTE_NAME}(-[0-9]+)?\$ AND name!=${NEW_ROUTE}" --format='value(name)' || true)"
+      for old_route in ${EXISTING_ROUTES}; do
+        gcloud compute routes delete "${old_route}" --quiet || true
+      done
     fi
     ;;
 

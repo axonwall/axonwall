@@ -195,6 +195,32 @@ export interface YamlValidationResult {
   errors: YamlValidationIssue[];
 }
 
+const FORBIDDEN_MERGE_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+
+function isPlainObject(val: unknown): val is Record<string, unknown> {
+  if (!val || typeof val !== 'object' || Array.isArray(val)) return false;
+  const proto = Object.getPrototypeOf(val);
+  return proto === Object.prototype || proto === null;
+}
+
+function deepMergeConfig(target: Record<string, unknown>, source: Record<string, unknown>): void {
+  for (const [k, v] of Object.entries(source)) {
+    if (v === undefined || FORBIDDEN_MERGE_KEYS.has(k)) continue;
+    const existing = target[k];
+    if (isPlainObject(v) && isPlainObject(existing)) {
+      const clone: Record<string, unknown> = { ...existing };
+      deepMergeConfig(clone, v);
+      target[k] = clone;
+    } else if (isPlainObject(v)) {
+      const clone: Record<string, unknown> = {};
+      deepMergeConfig(clone, v);
+      target[k] = clone;
+    } else {
+      target[k] = v;
+    }
+  }
+}
+
 /**
  * Parses and merges a map of YAML filename -> YAML content into a validated DesiredState.
  * Supports both the 10 modular domain files and optional conf.d/*.yaml or axonwall.yaml overrides.
@@ -203,7 +229,7 @@ export function validateYamlConfigFiles(
   files: Record<string, string>,
   fallbackState?: Partial<DesiredState>
 ): YamlValidationResult {
-  const mergedRaw: Record<string, unknown> = fallbackState ? { ...fallbackState } : {};
+  const mergedRaw: Record<string, unknown> = fallbackState ? structuredClone(fallbackState) : {};
   const errors: YamlValidationIssue[] = [];
   const keyToSourceFile = new Map<string, string>();
 
@@ -222,9 +248,10 @@ export function validateYamlConfigFiles(
     try {
       const parsed = parseYaml(content);
       if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-        for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
-          if (v !== undefined) {
-            mergedRaw[k] = v;
+        const rec = parsed as Record<string, unknown>;
+        deepMergeConfig(mergedRaw, rec);
+        for (const [k, v] of Object.entries(rec)) {
+          if (v !== undefined && !FORBIDDEN_MERGE_KEYS.has(k)) {
             keyToSourceFile.set(k, filename);
           }
         }

@@ -329,6 +329,12 @@ func TestDetectLiveMode(t *testing.T) {
 			want:    false,
 		},
 		{
+			name:    "Installed Btrfs + Snapper root=LABEL=axon_btrfs",
+			cmdline: "root=LABEL=axon_btrfs rootflags=subvol=@ ro rootfstype=btrfs quiet",
+			statFn:  statSet("/usr/local/bin/axonwall-install"),
+			want:    false,
+		},
+		{
 			name:    "Installed /etc/axonwall/install-mode marker with neutral cmdline",
 			cmdline: "quiet",
 			statFn:  statSet("/usr/local/bin/axonwall-install", "/etc/axonwall/install-mode"),

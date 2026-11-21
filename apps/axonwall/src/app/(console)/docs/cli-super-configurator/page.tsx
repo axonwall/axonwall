@@ -5,7 +5,7 @@ import { CodeBlock } from '../components/CodeBlock';
 export const metadata = {
   title: 'Neovim Super Configurator, axonwall-tui, axonwallctl & ZSH Workstation | Axonwall Documentation',
   description:
-    'Configure every Axonwall v0.11.68 subsystem from SSH or serial console using the 12-domain Neovim Super Configurator (axonwall-config), standalone 11-tab axonwall-tui + NastyMap simulator, axonwallctl CLI, and ZSH workstation.',
+    'Configure every Axonwall v0.13.0 subsystem from SSH or serial console using the 12-domain Neovim Super Configurator (axonwall-config), standalone axonwall-tui + Btrfs Snapper + NastyMap simulator, axonwallctl CLI, and ZSH workstation.',
 };
 
 export default function CliSuperConfiguratorDocPage() {
@@ -15,7 +15,7 @@ export default function CliSuperConfiguratorDocPage() {
       <div className="space-y-4 border-b border-slate-800/80 pb-8">
         <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-950/60 border border-emerald-500/30 text-emerald-400 text-xs font-semibold">
           <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-          Terminal UX • 12-Domain Neovim TUI, axonwall-tui &amp; ZSH Workstation • v0.11.68
+          Terminal UX • 12-Domain Neovim TUI, axonwall-tui &amp; ZSH Workstation • v0.13.0
         </div>
         <h1 className="text-3xl sm:text-5xl font-extrabold text-white tracking-tight">
           Neovim Super Configurator, axonwall-tui &amp; CLI Reference
@@ -116,7 +116,7 @@ axonwall-config vigilante    # Vigilante Autonomous SOC & SOAR`}
             <p><span className="text-emerald-400">[7]</span> OpenZFS NAS Pools &amp; Snapshots</p>
             <p><span className="text-emerald-400">[8]</span> K3s Pods &amp; KVM/LXC Guests</p>
             <p><span className="text-emerald-400">[9]</span> NastyMap Topology &amp; Packet Simulator</p>
-            <p><span className="text-emerald-400">[u]</span> ZFSBootMenu / A-B Boot Slots &amp; Updates</p>
+            <p><span className="text-emerald-400">[u]</span> ZFSBootMenu, Btrfs Snapper (<code className="text-cyan-300">[s]/[r]/[x]/[g]</code>) &amp; A/B Slots</p>
             <p><span className="text-emerald-400">[0]</span> System, Plugins, GitOps &amp; Ops</p>
           </div>
 
@@ -154,10 +154,11 @@ sudo axonwallctl apply --no-confirm        # Apply and commit immediately (autom
 sudo axonwallctl confirm                   # Confirm pending Commit-Confirm transaction before timeout
 sudo axonwallctl rollback [revision]       # Roll back to previous or specific GitOps SHA revision
 axonwallctl zbm <list|snapshot|clone|activate|delete|delete-snapshot>
+sudo axonwall-btrfs-grub <sync|rollback N|create-snapshot>             # Btrfs + Snapper GRUB menu & atomic rollback
 axonwallctl kernel detect [--json]         # Inventory CPU flags, IOMMU, TPM2, NVMe, NICs & lsmod
 axonwallctl kernel audit [--json]          # Run 25-check KSPP + k3s + OpenZFS + nftables + eBPF audit
 axonwallctl kernel config [--mode universal|stripped] [--output-dir <dir>]
-sudo axonwallctl update [--apt] [--version <ver>] [--slot <A|B>]
+sudo axonwallctl update [--btrfs] [--apt] [--version <ver>] [--slot <A|B>]
 sudo axonwallctl plugin <list|enable|disable|install|remove|re-sync> <id>
 axonwallctl kubeconfig [--vip]             # Export local or VRRP VIP-bound K3s ~/.kube/config
 axonwallctl ebpf overview [--json]         # Dual-Stack VLAN XDP counters, SYN shield, BPF-LSM & BPF_TOKEN mounts
@@ -187,9 +188,10 @@ axonwallctl completion <zsh|bash|fish>     # Generate shell tab-completion scrip
           <Command className="w-6 h-6 text-emerald-400" /> 4. ZSH Power-User Shell (<code className="font-mono text-emerald-400">cli-workstation</code>)
         </h2>
         <p className="text-sm text-slate-300 leading-relaxed">
-          Enabled by default on every Axonwall appliance, <code className="text-emerald-400 font-mono">cli-workstation</code>{' '}
+          Enabled by default on standard Axonwall editions, <code className="text-emerald-400 font-mono">cli-workstation</code>{' '}
           configures <code className="text-white font-mono">zsh</code> with Oh My Zsh, syntax highlighting, autosuggestions, Tmux, bundled{' '}
-          <code className="text-emerald-400 font-mono">kubectl</code>, <code className="text-emerald-400 font-mono">k9s</code> (v0.51.0), &amp; <code className="text-emerald-400 font-mono">helm</code> v3, tactical aliases (<code className="text-slate-200 font-mono">ax</code> for <code className="text-slate-200 font-mono">axonwallctl</code>, <code className="text-slate-200 font-mono">axc</code> for <code className="text-slate-200 font-mono">axonwall-config</code>, <code className="text-slate-200 font-mono">axt</code> for <code className="text-slate-200 font-mono">axonwall-tui</code>, <code className="text-slate-200 font-mono">k</code> for <code className="text-slate-200 font-mono">kubectl</code>, <code className="text-slate-200 font-mono">k9</code> for <code className="text-slate-200 font-mono">k9s</code>), a custom <strong>Starship</strong> prompt that displays a flashing red{' '}
+          <code className="text-emerald-400 font-mono">vim</code>, <code className="text-emerald-400 font-mono">neovim</code>,{' '}
+          <code className="text-emerald-400 font-mono">kubectl</code>, <code className="text-emerald-400 font-mono">k9s</code> (v0.51.0, bundled via <code className="font-mono text-slate-200">core-k3s</code>), &amp; <code className="text-emerald-400 font-mono">helm</code> v3 (with automatic per-plugin <code className="font-mono text-slate-200">PATH</code> snippets covering opt-in bundled plugins such as <code className="font-mono text-slate-200">cli-emacs</code> / <code className="font-mono text-slate-200">cli-emacs-doom</code> / <code className="font-mono text-slate-200">cli-emacs-spacemacs</code>), tactical aliases (<code className="text-slate-200 font-mono">ax</code> for <code className="text-slate-200 font-mono">axonwallctl</code>, <code className="text-slate-200 font-mono">axc</code> for <code className="text-slate-200 font-mono">axonwall-config</code>, <code className="text-slate-200 font-mono">axt</code> for <code className="text-slate-200 font-mono">axonwall-tui</code>, <code className="text-slate-200 font-mono">k</code> for <code className="text-slate-200 font-mono">kubectl</code>, <code className="text-slate-200 font-mono">k9</code> for <code className="text-slate-200 font-mono">k9s</code>), a custom <strong>Starship</strong> prompt that displays a flashing red{' '}
           <code className="text-rose-400 font-mono">COMMIT-CONFIRM (120s)</code> badge whenever a rollback timer is
           pending, and complete tab-completions for <code className="text-white font-mono">axonwallctl</code>,{' '}
           <code className="text-white font-mono">axonwall-config</code>, <code className="text-white font-mono">axonwall-tui</code>, <code className="text-white font-mono">kubectl</code>,{' '}

@@ -1,4 +1,5 @@
 import { createRemoteJWKSet, jwtVerify, type JWTPayload } from 'jose';
+import { getDesiredStateInternal } from './desired-state-internal';
 
 /**
  * OIDC helpers for SSO sign-in.
@@ -14,21 +15,108 @@ import { createRemoteJWKSet, jwtVerify, type JWTPayload } from 'jose';
 
 export const OIDC_STATE_COOKIE = 'axonwall_oidc_state';
 
+export interface OidcRoleMapping {
+  idpGroup: string;
+  role: 'admin' | 'operator' | 'readonly';
+}
+
 export interface OidcConfig {
   issuerUrl: string;
   clientId: string;
   clientSecret?: string;
+  redirectUri?: string;
+  scopes?: string[];
+  groupClaim?: string;
+  roleMappings?: OidcRoleMapping[];
 }
 
-export function getOidcConfig(): OidcConfig | null {
-  const issuerUrl = process.env.OIDC_ISSUER_URL;
-  const clientId = process.env.OIDC_CLIENT_ID;
-  if (!issuerUrl || !clientId) return null;
-  return {
-    issuerUrl: issuerUrl.replace(/\/$/, ''),
-    clientId,
-    clientSecret: process.env.OIDC_CLIENT_SECRET || undefined,
-  };
+export async function getOidcConfig(): Promise<OidcConfig | null> {
+  const envIssuerUrl = process.env.OIDC_ISSUER_URL?.trim();
+  const envClientId = process.env.OIDC_CLIENT_ID?.trim();
+  if (envIssuerUrl && envClientId) {
+    return {
+      issuerUrl: envIssuerUrl.replace(/\/+$/, ''),
+      clientId: envClientId,
+      clientSecret: process.env.OIDC_CLIENT_SECRET?.trim() || undefined,
+      redirectUri: process.env.OIDC_REDIRECT_URI?.trim() || undefined,
+    };
+  }
+
+  try {
+    const state = await getDesiredStateInternal();
+    const sso = state?.sso;
+    if (
+      sso?.enabled &&
+      sso.provider === 'oidc' &&
+      sso.issuerUrl?.trim() &&
+      sso.clientId?.trim()
+    ) {
+      return {
+        issuerUrl: sso.issuerUrl.trim().replace(/\/+$/, ''),
+        clientId: sso.clientId.trim(),
+        clientSecret: sso.clientSecret?.trim() || undefined,
+        redirectUri: sso.redirectUri?.trim() || undefined,
+        scopes: Array.isArray(sso.scopes) && sso.scopes.length > 0 ? sso.scopes : undefined,
+        groupClaim: sso.groupClaim?.trim() || undefined,
+        roleMappings: Array.isArray(sso.roleMappings) ? sso.roleMappings : undefined,
+      };
+    }
+  } catch {
+    // DesiredState unreadable -> treat SSO as unconfigured rather than throwing.
+  }
+
+  return null;
+}
+
+const SAFE_FORWARDED_HOST_RE = /^(?:\[[0-9a-fA-F:]+\]|[a-zA-Z0-9.-]+)(?::\d{1,5})?$/;
+
+/**
+ * Resolves the external browser-facing origin behind a reverse proxy (e.g. axonwall-controller
+ * on :2966 forwarding to Next.js on 127.0.0.1:3000) rather than using internal request.nextUrl.origin.
+ */
+export function resolvePublicOrigin(
+  reqHeaders: Pick<Headers, 'get'>,
+  fallbackOrigin: string,
+  configuredRedirectUri?: string
+): string {
+  for (const candidate of [configuredRedirectUri, process.env.AXONWALL_PUBLIC_URL]) {
+    const trimmed = candidate?.trim();
+    if (!trimmed) continue;
+    try {
+      const u = new URL(trimmed);
+      if (u.protocol === 'https:' || u.protocol === 'http:') {
+        return u.origin;
+      }
+    } catch {}
+  }
+
+  const rawFwdHost = reqHeaders.get('x-forwarded-host')?.split(',')[0]?.trim();
+  const rawHost = rawFwdHost || reqHeaders.get('host')?.split(',')[0]?.trim();
+  if (rawHost && SAFE_FORWARDED_HOST_RE.test(rawHost)) {
+    const rawProto = reqHeaders.get('x-forwarded-proto')?.split(',')[0]?.trim().toLowerCase();
+    const proto =
+      rawProto === 'http' || rawProto === 'https'
+        ? rawProto
+        : fallbackOrigin.startsWith('http://')
+          ? 'http'
+          : 'https';
+    return `${proto}://${rawHost}`;
+  }
+
+  return fallbackOrigin;
+}
+
+export function resolveOidcRedirectUri(publicOrigin: string, configuredRedirectUri?: string): string {
+  const trimmed = configuredRedirectUri?.trim();
+  if (trimmed) {
+    try {
+      const u = new URL(trimmed);
+      if (u.protocol === 'https:' || u.protocol === 'http:') {
+        return u.toString();
+      }
+    } catch {}
+  }
+  return `${publicOrigin.replace(/\/+$/, '')}/api/auth/callback/oidc`;
 }
 
 interface OidcDiscovery {
@@ -111,7 +199,10 @@ export async function exchangeCodeForIdentity(
     issuer: cfg.issuerUrl,
     audience: cfg.clientId,
   });
-  if (expectedNonce && payload.nonce !== expectedNonce) {
+  if (!expectedNonce || !expectedNonce.trim()) {
+    throw new Error('OIDC nonce missing');
+  }
+  if (payload.nonce !== expectedNonce) {
     throw new Error('OIDC nonce mismatch');
   }
   return payload;
@@ -121,7 +212,10 @@ export async function exchangeCodeForIdentity(
  * Map verified IdP group claims to an Axonwall RBAC role. Anything
  * unrecognized fails closed to the least-privileged role.
  */
-export function roleFromGroups(groups: unknown): 'admin' | 'operator' | 'readonly' {
+export function roleFromGroups(
+  groups: unknown,
+  roleMappings?: OidcRoleMapping[]
+): 'admin' | 'operator' | 'readonly' {
   const list = Array.isArray(groups)
     ? groups.filter((g): g is string => typeof g === 'string')
     : [];
@@ -144,6 +238,15 @@ export function roleFromGroups(groups: unknown): 'admin' | 'operator' | 'readonl
     envOperatorGroups.length > 0
       ? new Set(envOperatorGroups)
       : new Set(['axonwall-operator', 'axonwall-operators']);
+
+  if (Array.isArray(roleMappings)) {
+    for (const m of roleMappings) {
+      const g = m?.idpGroup?.trim().toLowerCase();
+      if (!g) continue;
+      if (m.role === 'admin') adminSet.add(g);
+      else if (m.role === 'operator') operatorSet.add(g);
+    }
+  }
 
   const normalizedList = list.map((g) => g.trim().toLowerCase());
 

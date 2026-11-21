@@ -1,14 +1,14 @@
-# Axonwall OpenLDAP Bootstrap Data
-dn: ou=users,dc=axonwall,dc=local
+# Axonwall OpenLDAP Bootstrap Data (accounts disabled until password set via ldappasswd)
+dn: ou=users,dc=axonwall,dc=internal
 objectClass: organizationalUnit
 ou: users
 
-dn: ou=groups,dc=axonwall,dc=local
+dn: ou=groups,dc=axonwall,dc=internal
 objectClass: organizationalUnit
 ou: groups
 
 # Admin User
-dn: uid=admin,ou=users,dc=axonwall,dc=local
+dn: uid=admin,ou=users,dc=axonwall,dc=internal
 objectClass: inetOrgPerson
 objectClass: posixAccount
 objectClass: shadowAccount
@@ -19,11 +19,11 @@ uidNumber: 10001
 gidNumber: 10001
 homeDirectory: /home/admin
 loginShell: /bin/bash
-mail: admin@axonwall.local
-userPassword: axonwalladmin
+mail: admin@axonwall.internal
+userPassword: {SSHA}DISABLED_SET_VIA_LDAPPASSWD
 
 # Operator User
-dn: uid=operator,ou=users,dc=axonwall,dc=local
+dn: uid=operator,ou=users,dc=axonwall,dc=internal
 objectClass: inetOrgPerson
 objectClass: posixAccount
 objectClass: shadowAccount
@@ -34,19 +34,19 @@ uidNumber: 10002
 gidNumber: 10002
 homeDirectory: /home/operator
 loginShell: /bin/bash
-mail: operator@axonwall.local
-userPassword: axonwalloperator
+mail: operator@axonwall.internal
+userPassword: {SSHA}DISABLED_SET_VIA_LDAPPASSWD
 
 # Admins Group
-dn: cn=admins,ou=groups,dc=axonwall,dc=local
+dn: cn=admins,ou=groups,dc=axonwall,dc=internal
 objectClass: groupOfNames
 cn: admins
 description: Axonwall Full Administrators Group
-member: uid=admin,ou=users,dc=axonwall,dc=local
+member: uid=admin,ou=users,dc=axonwall,dc=internal
 
 # Operators Group
-dn: cn=operators,ou=groups,dc=axonwall,dc=local
+dn: cn=operators,ou=groups,dc=axonwall,dc=internal
 objectClass: groupOfNames
 cn: operators
 description: Axonwall Network Operators Group
-member: uid=operator,ou=users,dc=axonwall,dc=local
+member: uid=operator,ou=users,dc=axonwall,dc=internal

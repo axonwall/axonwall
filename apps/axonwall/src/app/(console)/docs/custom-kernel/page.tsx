@@ -141,6 +141,7 @@ export default function CustomKernelDocPage() {
             </div>
             <ul className="space-y-1 text-slate-300 list-disc pl-4">
               <li><code className="font-mono text-slate-200"># CONFIG_TRIM_UNUSED_KSYMS is not set</code> + <code className="font-mono">CONFIG_KALLSYMS=y</code> (required for ZFS DKMS)</li>
+              <li><code className="font-mono text-slate-200">CONFIG_BTRFS_FS=y</code> &amp; <code className="font-mono text-slate-200">CONFIG_BTRFS_FS_POSIX_ACL=y</code> (<code className="font-mono">03-storage-zfs.config</code>, for Btrfs + Snapper Root)</li>
               <li><code className="font-mono text-slate-200">NVME_CORE</code> / <code className="font-mono">BLK_DEV_NVME</code> &amp; NVMe-oF TCP multipath</li>
               <li><code className="font-mono text-slate-200">DM_CRYPT</code>, <code className="font-mono">DM_THIN_PROVISIONING</code>, <code className="font-mono">MD</code> RAID</li>
               <li><code className="font-mono text-slate-200">EXT4_FS</code>, <code className="font-mono">XFS_FS</code>, <code className="font-mono">ISCSI_TCP</code>, <code className="font-mono">NFSD</code></li>
@@ -239,6 +240,10 @@ lsmod > /tmp/host-lsmod.txt
             the built <code className="font-mono">linux-image-*</code> and <code className="font-mono">linux-headers-*</code>{' '}
             <code className="font-mono">.deb</code> packages inside the staged BE, and arms one-shot boot verification. If the
             new kernel fails to report healthy, ZFSBootMenu or the hardware watchdog falls back to the prior BE automatically.
+          </li>
+          <li>
+            <strong className="text-white">Btrfs + Snapper (<code className="font-mono">btrfs</code> mode):</strong>{' '}
+            <code className="font-mono">axonwalld</code> creates a pre-kernel Snapper snapshot on <code className="font-mono">@</code> before installing the new <code className="font-mono">.deb</code> packages with <code className="font-mono">dpkg -i</code>, then runs <code className="font-mono">SyncBtrfsGrubMenu()</code> so prior snapshots remain bootable from GRUB&apos;s <strong>Axonwall Btrfs Snapshots</strong> submenu.
           </li>
           <li>
             <strong className="text-white">Standard A/B &amp; Rolling Installs (<code className="font-mono">ab</code> / <code className="font-mono">rolling</code>):</strong>{' '}

@@ -47,7 +47,7 @@ export async function authenticateLdap(
 
     // 2. Search for the user DN
     const safeUsername = escapeLdapFilter(username);
-    const filter = config.userSearchFilter.replace(/{{username}}/g, safeUsername);
+    const filter = config.userSearchFilter.replace(/\{\{username\}\}/g, () => safeUsername);
     const searchRes = await client.search(config.baseDn, {
       filter,
       scope: 'sub',
@@ -56,6 +56,9 @@ export async function authenticateLdap(
 
     if (searchRes.searchEntries.length === 0) {
       return { success: false, error: 'User not found in LDAP directory' };
+    }
+    if (searchRes.searchEntries.length !== 1) {
+      return { success: false, error: 'Ambiguous LDAP user match: multiple directory entries returned' };
     }
 
     const userEntry = searchRes.searchEntries[0];
@@ -82,30 +85,36 @@ export async function authenticateLdap(
       groups = raw.map((g) => {
         // extract CN if full DN
         const match = /cn=([^,]+)/i.exec(String(g));
-        return match ? match[1].toLowerCase() : String(g).toLowerCase();
+        return (match ? match[1] : String(g)).trim().toLowerCase();
       });
     } else {
       // Query groupOfNames by member
       const safeUserDn = escapeLdapFilter(userDn);
-      const groupFilter = config.groupSearchFilter.replace(/{{userDn}}/g, safeUserDn);
+      const groupFilter = config.groupSearchFilter.replace(/\{\{userDn\}\}/g, () => safeUserDn);
       const groupSearch = await client.search(config.baseDn, {
         filter: groupFilter,
         scope: 'sub',
         attributes: ['cn'],
       });
-      groups = groupSearch.searchEntries.map((e) => String(e.cn).toLowerCase());
+      groups = groupSearch.searchEntries
+        .map((e) => (e.cn ? String(e.cn).trim().toLowerCase() : ''))
+        .filter(Boolean);
     }
 
     // 5. Map LDAP groups to Axonwall roles and privileges
-    const roleMap = config.groupRoleMap || {
+    const rawRoleMap = config.groupRoleMap || {
       admins: 'admin',
       operators: 'operator',
       readonly: 'readonly',
     };
+    const roleMap: Record<string, string> = {};
+    for (const [k, v] of Object.entries(rawRoleMap)) {
+      roleMap[k.trim().toLowerCase()] = v;
+    }
 
     const roles = new Set<string>();
     for (const g of groups) {
-      if (roleMap[g]) {
+      if (Object.prototype.hasOwnProperty.call(roleMap, g)) {
         roles.add(roleMap[g]);
       }
     }

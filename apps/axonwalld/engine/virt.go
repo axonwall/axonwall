@@ -27,6 +27,11 @@ import (
 // VirtSpecsPath is the persistent file storing compiled VM specifications across daemon restarts.
 var VirtSpecsPath = "/var/lib/axonwall/virt-specs.json"
 
+var (
+	virtQmpSocketDir = "/run/axonwall/qmp"
+	virtQgaSocketDir = "/run/axonwall/qga"
+)
+
 type VMStatus struct {
 	VMID          int    `json:"vmid"`
 	Name          string `json:"name"`
@@ -197,11 +202,11 @@ type CompiledCtSpec struct {
 }
 
 func NewVirtManager(taskMgr *TaskManager, nasMgr *NasManager) *VirtManager {
-	_ = os.MkdirAll("/run/axonwall/qmp", 0755)
+	_ = os.MkdirAll(virtQmpSocketDir, 0755)
 	_ = os.MkdirAll("/run/axonwall/vnc", 0755)
 	_ = os.MkdirAll("/run/axonwall/serial", 0755)
 	_ = os.MkdirAll("/run/axonwall/pids", 0755)
-	_ = os.MkdirAll("/run/axonwall/qga", 0755)
+	_ = os.MkdirAll(virtQgaSocketDir, 0755)
 	_ = os.MkdirAll("/run/axonwall/lxc", 0755)
 	_ = os.MkdirAll("/run/axonwall/fwcfg", 0700)
 	_ = os.MkdirAll("/var/lib/axonwall/nvram", 0755)
@@ -284,38 +289,159 @@ func (m *VirtManager) loadPersistedSpecs() {
 	}
 }
 
+func normalizeQemuFlag(raw string) (string, string, bool) {
+	trimmed := strings.TrimSpace(raw)
+	flag := trimmed
+	inlineVal := ""
+	hasInline := false
+	if eq := strings.IndexByte(trimmed, '='); eq >= 0 {
+		flag = trimmed[:eq]
+		inlineVal = trimmed[eq+1:]
+		hasInline = true
+	}
+	if strings.HasPrefix(flag, "--") {
+		flag = "-" + strings.TrimPrefix(flag, "--")
+	}
+	return flag, inlineVal, hasInline
+}
+
+func isAllowedQemuDrivePath(rawPath string) bool {
+	if strings.TrimSpace(rawPath) == "" || strings.Contains(rawPath, "..") {
+		return false
+	}
+	// Disallow non-local URI prefixes (e.g. nbd:, exec:) or weird schemes
+	if strings.Contains(rawPath, ":") {
+		return false
+	}
+	clean := filepath.Clean(strings.TrimSpace(rawPath))
+	for _, prefix := range []string{
+		"/dev/zvol/",
+		"/var/lib/axonwall/",
+		"/var/lib/vz/",
+		"/mnt/",
+		"/usr/share/OVMF/",
+		"/run/axonwall/fwcfg/",
+		"/run/axonwall/edge/",
+		"/run/axonwall/cloudinit/",
+	} {
+		if strings.HasPrefix(clean, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func isAllowedQemuFwCfgPath(rawPath string) bool {
+	if strings.TrimSpace(rawPath) == "" || strings.Contains(rawPath, "..") {
+		return false
+	}
+	clean := filepath.Clean(strings.TrimSpace(rawPath))
+	for _, prefix := range []string{
+		"/run/axonwall/fwcfg/",
+		"/run/axonwall/edge/",
+		"/run/axonwall/cloudinit/",
+		"/var/lib/axonwall/cloudinit/",
+		"/var/lib/axonwall/edge/",
+	} {
+		if strings.HasPrefix(clean, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func validateLxcConfig(content string) error {
+	if strings.ContainsRune(content, '\x00') {
+		return fmt.Errorf("LXC config contains NUL byte")
+	}
+	for lineNo, raw := range strings.Split(content, "\n") {
+		line := strings.TrimSpace(raw)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		eq := strings.IndexByte(line, '=')
+		if eq < 0 {
+			continue
+		}
+		key := strings.ToLower(strings.TrimSpace(line[:eq]))
+		val := strings.TrimSpace(line[eq+1:])
+		if strings.HasPrefix(key, "lxc.hook.") {
+			return fmt.Errorf("lxc.conf line %d: %s is not permitted", lineNo+1, key)
+		}
+		switch key {
+		case "lxc.include":
+			clean := filepath.Clean(val)
+			if !strings.HasPrefix(clean, "/usr/share/lxc/config/") || strings.Contains(val, "..") {
+				return fmt.Errorf("lxc.conf line %d: lxc.include path %q is outside /usr/share/lxc/config/", lineNo+1, val)
+			}
+		case "lxc.init.cmd":
+			switch val {
+			case "/sbin/init", "/lib/systemd/systemd", "/usr/lib/systemd/systemd":
+			default:
+				return fmt.Errorf("lxc.conf line %d: lxc.init.cmd %q is not permitted", lineNo+1, val)
+			}
+		case "lxc.execute.cmd":
+			return fmt.Errorf("lxc.conf line %d: lxc.execute.cmd is not permitted", lineNo+1)
+		case "lxc.mount.entry":
+			fields := strings.Fields(val)
+			if len(fields) < 3 {
+				return fmt.Errorf("lxc.conf line %d: malformed lxc.mount.entry", lineNo+1)
+			}
+			src, dst, fsType := fields[0], fields[1], fields[2]
+			if fsType == "bpf" && src == "bpffs" && dst == "sys/fs/bpf" {
+				continue
+			}
+			cleanSrc := filepath.Clean(src)
+			if strings.Contains(src, "..") || (!strings.HasPrefix(cleanSrc, "/mnt/") && !strings.HasPrefix(cleanSrc, "/var/lib/axonwall/")) {
+				return fmt.Errorf("lxc.conf line %d: lxc.mount.entry source %q is outside permitted paths (/mnt/, /var/lib/axonwall/)", lineNo+1, src)
+			}
+		}
+	}
+	return nil
+}
+
 func validateSafeQemuArgs(args []string) error {
 	disallowedFlags := map[string]bool{
 		"-gdb": true, "-s": true, "-plugin": true, "-virtfs": true, "-fsdev": true,
 		"-D": true, "-loadvm": true, "-incoming": true,
 		"-chroot": true, "-run-with": true, "-semihosting-config": true,
+		"-readconfig": true, "-writeconfig": true,
 	}
 	for i := 0; i < len(args); i++ {
 		trimmed := strings.TrimSpace(args[i])
-		if disallowedFlags[trimmed] {
+		flag, inlineVal, hasInline := normalizeQemuFlag(trimmed)
+		if disallowedFlags[flag] {
 			return fmt.Errorf("disallowed QEMU flag: %s", trimmed)
 		}
-		if trimmed == "-pidfile" {
-			if i+1 >= len(args) {
-				return fmt.Errorf("disallowed bare QEMU -pidfile flag")
+		if flag == "-pidfile" {
+			rawVal := inlineVal
+			if !hasInline {
+				if i+1 >= len(args) {
+					return fmt.Errorf("disallowed bare QEMU -pidfile flag")
+				}
+				rawVal = args[i+1]
+				i++
 			}
-			pf := filepath.Clean(strings.TrimSpace(args[i+1]))
+			pf := filepath.Clean(strings.TrimSpace(rawVal))
 			if !strings.HasPrefix(pf, "/run/axonwall/pids/vm-") || !strings.HasSuffix(pf, ".pid") {
 				return fmt.Errorf("disallowed QEMU -pidfile path: %s", pf)
 			}
-			i++
 			continue
 		}
-		if trimmed == "-fw_cfg" {
-			if i+1 >= len(args) {
-				return fmt.Errorf("disallowed bare QEMU -fw_cfg flag")
+		if flag == "-fw_cfg" {
+			rawSpec := inlineVal
+			if !hasInline {
+				if i+1 >= len(args) {
+					return fmt.Errorf("disallowed bare QEMU -fw_cfg flag")
+				}
+				rawSpec = args[i+1]
+				i++
 			}
-			fwSpec := strings.TrimSpace(args[i+1])
+			fwSpec := strings.TrimSpace(rawSpec)
 			hasSafeFile := false
 			for _, part := range strings.Split(fwSpec, ",") {
 				if strings.HasPrefix(part, "file=") {
-					fp := filepath.Clean(strings.TrimPrefix(part, "file="))
-					if (strings.HasPrefix(fp, "/var/lib/axonwall/") || strings.HasPrefix(fp, "/run/axonwall/")) && !strings.Contains(fp, "..") {
+					if isAllowedQemuFwCfgPath(strings.TrimPrefix(part, "file=")) {
 						hasSafeFile = true
 					}
 				}
@@ -323,7 +449,25 @@ func validateSafeQemuArgs(args []string) error {
 			if !hasSafeFile {
 				return fmt.Errorf("disallowed QEMU -fw_cfg target: %s", fwSpec)
 			}
-			i++
+			continue
+		}
+		if flag == "-drive" {
+			rawSpec := inlineVal
+			if !hasInline {
+				if i+1 >= len(args) {
+					return fmt.Errorf("disallowed bare QEMU -drive flag")
+				}
+				rawSpec = args[i+1]
+				i++
+			}
+			for _, part := range strings.Split(strings.TrimSpace(rawSpec), ",") {
+				if strings.HasPrefix(part, "file=") {
+					rawFile := strings.TrimPrefix(part, "file=")
+					if !isAllowedQemuDrivePath(rawFile) {
+						return fmt.Errorf("disallowed QEMU -drive file path: %s", rawFile)
+					}
+				}
+			}
 			continue
 		}
 		for _, part := range strings.Split(trimmed, ",") {
@@ -332,6 +476,9 @@ func validateSafeQemuArgs(args []string) error {
 			}
 			if strings.HasPrefix(part, "downscript=") && part != "downscript=no" {
 				return fmt.Errorf("disallowed QEMU netdev downscript parameter: %s", part)
+			}
+			if strings.HasPrefix(part, "helper=") {
+				return fmt.Errorf("disallowed QEMU netdev helper parameter: %s", part)
 			}
 		}
 	}
@@ -410,6 +557,11 @@ func (m *VirtManager) ApplyVirtBundleJSON(rawJSON []byte) error {
 	}
 	keepCTs := make(map[int]bool, len(payload.Containers))
 	for _, ct := range payload.Containers {
+		if ct.LxcConfig != "" {
+			if err := validateLxcConfig(ct.LxcConfig); err != nil {
+				return fmt.Errorf("CT %d spec rejected: %w", ct.CTID, err)
+			}
+		}
 		if ct.Hostname == "" && ct.Name != "" {
 			ct.Hostname = ct.Name
 		}
@@ -579,8 +731,8 @@ func sanitizeCloudInitScalar(s string) string {
 func writeFwCfgFiles(fwCfg map[string]string) error {
 	for rawPath, content := range fwCfg {
 		cleanPath := filepath.Clean(strings.TrimSpace(rawPath))
-		if !strings.HasPrefix(cleanPath, "/run/axonwall/") && !strings.HasPrefix(cleanPath, "/var/lib/axonwall/cloudinit/") {
-			return fmt.Errorf("fw_cfg file path %q is outside permitted directories (/run/axonwall/, /var/lib/axonwall/cloudinit/)", cleanPath)
+		if !isAllowedQemuFwCfgPath(cleanPath) {
+			return fmt.Errorf("fw_cfg file path %q is outside permitted directories (/run/axonwall/{fwcfg,edge,cloudinit}/, /var/lib/axonwall/{cloudinit,edge}/)", cleanPath)
 		}
 		if err := os.MkdirAll(filepath.Dir(cleanPath), 0700); err != nil {
 			return fmt.Errorf("failed to create fw_cfg directory for %s: %w", cleanPath, err)
@@ -933,7 +1085,7 @@ func (m *VirtManager) StartVM(vmid int, user string) (string, error) {
 		}
 
 		// 3. Clear stale sockets
-		_ = os.Remove(fmt.Sprintf("/run/axonwall/qmp/vm-%d.sock", vmid))
+		_ = os.Remove(filepath.Join(virtQmpSocketDir, fmt.Sprintf("vm-%d.sock", vmid)))
 		_ = os.Remove(fmt.Sprintf("/run/axonwall/vnc/vm-%d.sock", vmid))
 		_ = os.Remove(fmt.Sprintf("/run/axonwall/serial/vm-%d.sock", vmid))
 		_ = os.Remove(pidFile)
@@ -990,7 +1142,7 @@ func (m *VirtManager) StartVM(vmid int, user string) (string, error) {
 		}
 
 		// Wait briefly and verify QMP socket
-		qmpSock := fmt.Sprintf("/run/axonwall/qmp/vm-%d.sock", vmid)
+		qmpSock := filepath.Join(virtQmpSocketDir, fmt.Sprintf("vm-%d.sock", vmid))
 		// A-M25: a missing QMP socket means QEMU died after
 		// daemonizing (the parent exits 0 once the child forks), so
 		// this must fail the start task instead of warning and
@@ -1012,7 +1164,7 @@ func (m *VirtManager) StartVM(vmid int, user string) (string, error) {
 
 // StopVM initiates graceful shutdown via QMP or immediate termination
 func (m *VirtManager) StopVM(vmid int, force bool, user string) (string, error) {
-	qmpSock := fmt.Sprintf("/run/axonwall/qmp/vm-%d.sock", vmid)
+	qmpSock := filepath.Join(virtQmpSocketDir, fmt.Sprintf("vm-%d.sock", vmid))
 	pidFile := fmt.Sprintf("/run/axonwall/pids/vm-%d.pid", vmid)
 	pid := readPidFile(pidFile)
 
@@ -1067,21 +1219,21 @@ func (m *VirtManager) StopVM(vmid int, force bool, user string) (string, error) 
 
 // ResetVM issues hardware reset via QMP
 func (m *VirtManager) ResetVM(vmid int) error {
-	qmpSock := fmt.Sprintf("/run/axonwall/qmp/vm-%d.sock", vmid)
+	qmpSock := filepath.Join(virtQmpSocketDir, fmt.Sprintf("vm-%d.sock", vmid))
 	_, err := SendQMPCommand(qmpSock, "system_reset", nil)
 	return err
 }
 
 // PauseVM suspends VM execution via QMP
 func (m *VirtManager) PauseVM(vmid int) error {
-	qmpSock := fmt.Sprintf("/run/axonwall/qmp/vm-%d.sock", vmid)
+	qmpSock := filepath.Join(virtQmpSocketDir, fmt.Sprintf("vm-%d.sock", vmid))
 	_, err := SendQMPCommand(qmpSock, "stop", nil)
 	return err
 }
 
 // ResumeVM resumes suspended VM execution via QMP
 func (m *VirtManager) ResumeVM(vmid int) error {
-	qmpSock := fmt.Sprintf("/run/axonwall/qmp/vm-%d.sock", vmid)
+	qmpSock := filepath.Join(virtQmpSocketDir, fmt.Sprintf("vm-%d.sock", vmid))
 	_, err := SendQMPCommand(qmpSock, "cont", nil)
 	return err
 }
@@ -1107,10 +1259,10 @@ func (m *VirtManager) ListVMs() []VMStatus {
 			}
 		}
 
-		qmpSock := fmt.Sprintf("/run/axonwall/qmp/vm-%d.sock", vmid)
+		qmpSock := filepath.Join(virtQmpSocketDir, fmt.Sprintf("vm-%d.sock", vmid))
 		vncSock := fmt.Sprintf("/run/axonwall/vnc/vm-%d.sock", vmid)
 		serialSock := fmt.Sprintf("/run/axonwall/serial/vm-%d.sock", vmid)
-		qgaSock := fmt.Sprintf("/run/axonwall/qga/vm-%d.sock", vmid)
+		qgaSock := filepath.Join(virtQgaSocketDir, fmt.Sprintf("vm-%d.sock", vmid))
 
 		agentRunning := false
 		if _, err := os.Stat(qgaSock); err == nil {
@@ -1158,6 +1310,9 @@ func (m *VirtManager) StartContainer(ctid int, user string) (string, error) {
 				}
 			}
 			if spec.LxcConfig != "" {
+				if err := validateLxcConfig(spec.LxcConfig); err != nil {
+					return err
+				}
 				ctDir := fmt.Sprintf("/var/lib/lxc/%d", ctid)
 				_ = os.MkdirAll(ctDir, 0750)
 				_ = os.WriteFile(filepath.Join(ctDir, "config"), []byte(spec.LxcConfig), 0640)
@@ -1679,7 +1834,7 @@ func IsQgaGuestError(err error) bool {
 
 // SendQGACommand executes a QEMU Guest Agent JSON-RPC command over /run/axonwall/qga/vm-<vmid>.sock.
 func SendQGACommand(vmid int, command string, args map[string]any) (map[string]any, error) {
-	sockPath := fmt.Sprintf("/run/axonwall/qga/vm-%d.sock", vmid)
+	sockPath := filepath.Join(virtQgaSocketDir, fmt.Sprintf("vm-%d.sock", vmid))
 	conn, err := net.DialTimeout("unix", sockPath, 2*time.Second)
 	if err != nil {
 		return nil, fmt.Errorf("qga socket connect failed for VM %d: %w", vmid, err)
@@ -2207,7 +2362,7 @@ func (m *VirtManager) LiveMigrateVM(vmid int, targetPeerIP string, user string) 
 	if parsed == nil || parsed.IsLoopback() || parsed.IsUnspecified() {
 		return "", fmt.Errorf("invalid target peer IP %q for live migration", targetPeerIP)
 	}
-	qmpSock := fmt.Sprintf("/run/axonwall/qmp/vm-%d.sock", vmid)
+	qmpSock := filepath.Join(virtQmpSocketDir, fmt.Sprintf("vm-%d.sock", vmid))
 	if _, err := os.Stat(qmpSock); err != nil {
 		return "", fmt.Errorf("VM %d is not running (QMP socket %s missing)", vmid, qmpSock)
 	}

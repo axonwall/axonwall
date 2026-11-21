@@ -98,14 +98,14 @@ case "${EDITION}" in
     PKG_DESC_LONG=$' Lean K3s + OpenZFS + OpenEBS storage host.\n No firewall daemon, web console, or controller — the NGFW payload\n is absent, not disabled.'
     ;;
   minimal)
-    PKG_DEPENDS="nftables (>= 1.1.0), iproute2, conntrack, nodejs (>= 22.0.0), openssh-server, openssh-client, slapd, ldap-utils, sssd-ldap, sssd-tools, libnss-sss, libpam-sss, libpam-modules, chrony, openssl, curl, wget, jq, ca-certificates, rsync, python3, sqlite3, ethtool, pciutils, kmod, procps, iputils-ping, nano, less, binutils, zstd, xz-utils, bzip2, unzip"
+    PKG_DEPENDS="nftables (>= 1.1.0), iproute2, conntrack, nodejs (>= 20.0.0), openssh-server, openssh-client, slapd, ldap-utils, sssd-ldap, sssd-tools, libnss-sss, libpam-sss, libpam-modules, chrony, openssl, curl, wget, jq, ca-certificates, rsync, python3, sqlite3, ethtool, pciutils, kmod, procps, iputils-ping, nano, less, binutils, zstd, xz-utils, bzip2, unzip"
     PKG_RECOMMENDS="zfsutils-linux, zfs-initramfs, mdadm, gdisk, parted, smartmontools, xfsprogs, cryptsetup, tpm2-tools, cloud-init, cloud-guest-utils, plymouth, plymouth-label"
     PKG_CONFLICTS="axonwall, axonwall-vault, axonwall-k3s-storage"
     PKG_DESC="Axonwall Minimal Edition — Reduced Attack Surface Core Appliance"
     PKG_DESC_LONG=$' Hardened minimal bootable Axonwall host containing only the core\n control plane, Web UI, OpenLDAP/SSSD directory stack, and base OS tooling.\n Roles and plugins can be installed on demand after deployment.'
     ;;
   *)
-    PKG_DEPENDS="nftables (>= 1.1.0), iproute2, wireguard-tools, keepalived, conntrack, conntrackd, nodejs (>= 22.0.0), openssh-server, openssh-client, slapd, ldap-utils, sssd-ldap, sssd-tools, libnss-sss, libpam-sss, libpam-modules, chrony, openssl, curl, wget, jq, ca-certificates, rsync, python3, sqlite3, ethtool, pciutils, tcpdump, kmod, procps, iputils-ping, nano, less, binutils, zstd, xz-utils, bzip2, unzip, zsh, zsh-autosuggestions, zsh-syntax-highlighting, vim, neovim, tmux, fzf, ripgrep, fd-find, bat, mtr-tiny, btop, htop, sysstat, iotop, iftop, slurm, net-tools, dnsutils, bind9-host, nmap, kubectl, mkcert"
+    PKG_DEPENDS="nftables (>= 1.1.0), iproute2, wireguard-tools, keepalived, conntrack, conntrackd, nodejs (>= 20.0.0), openssh-server, openssh-client, slapd, ldap-utils, sssd-ldap, sssd-tools, libnss-sss, libpam-sss, libpam-modules, chrony, openssl, curl, wget, jq, ca-certificates, rsync, python3, sqlite3, ethtool, pciutils, tcpdump, kmod, procps, iputils-ping, nano, less, binutils, zstd, xz-utils, bzip2, unzip, zsh, zsh-autosuggestions, zsh-syntax-highlighting, vim, neovim, tmux, fzf, ripgrep, fd-find, bat, mtr-tiny, btop, htop, sysstat, iotop, iftop, slurm, net-tools, dnsutils, bind9-host, nmap, kubectl, mkcert"
     PKG_RECOMMENDS="starship, zoxide, unbound, kea-dhcp4-server, frr, suricata, strongswan, openvpn, etckeeper, git, qemu-system-x86, qemu-utils, ovmf, xorriso, bridge-utils, libvirt-clients, lxc, zfsutils-linux, zfs-initramfs, mdadm, gdisk, parted, smartmontools, xfsprogs, cryptsetup, tpm2-tools, samba, nfs-kernel-server, open-iscsi, tgt, cloud-init, cloud-guest-utils, rkhunter, chkrootkit, yara, unhide, lynis, debsums, bpftool, python3-drgn, linux-perf, plymouth, plymouth-label"
     PKG_CONFLICTS="axonwall-minimal, axonwall-vault, axonwall-k3s-storage"
     PKG_DESC="Modern Linux Router & Next-Gen Firewall"
@@ -303,13 +303,21 @@ fi
 # neither is — a plugin dir with no binaries must never ship a
 # record blessing an empty tree.
 write_core_k3s_bundled_json() {
-  local _dir="$1" _k3s_sum="" _k9s_sum="" _n=0
+  local _dir="$1"
+  local _k3s_src_sum="${2:-${K3S_SHA256:-}}"
+  local _k9s_src_sum="${3:-${K9S_SHA256:-}}"
+  local _k3s_sum="" _k9s_sum="" _n=0
   if [[ -x "${_dir}/bin/k3s" ]]; then
     _k3s_sum="$(sha256sum "${_dir}/bin/k3s" | awk '{print $1}')"
+    _k3s_src_sum="${_k3s_src_sum:-${_k3s_sum}}"
     _n=$((_n + 1))
   fi
   if [[ -x "${_dir}/bin/k9s" ]]; then
     _k9s_sum="$(sha256sum "${_dir}/bin/k9s" | awk '{print $1}')"
+    if [[ -z "${_k9s_src_sum}" ]]; then
+      echo "[!] ERROR: core-k3s plugin dir ${_dir} stages bin/k9s without pinned archive checksum K9S_SHA256." >&2
+      return 1
+    fi
     _n=$((_n + 1))
   fi
   if [[ "${_n}" -eq 0 ]]; then
@@ -317,7 +325,15 @@ write_core_k3s_bundled_json() {
     return 1
   fi
   {
-    printf '{\n  "pluginId": "core-k3s",\n  "files": [\n'
+    printf '{\n  "pluginId": "core-k3s",\n  "sources": {\n'
+    if [[ -n "${_k3s_sum}" ]]; then
+      printf '    "k3s": "%s"' "${_k3s_src_sum}"
+      if [[ -n "${_k9s_sum}" ]]; then printf ',\n'; fi
+    fi
+    if [[ -n "${_k9s_sum}" ]]; then
+      printf '    "k9s": "%s"' "${_k9s_src_sum}"
+    fi
+    printf '\n  },\n  "files": [\n'
     if [[ -n "${_k3s_sum}" ]]; then
       printf '    {\n      "path": "bin/k3s",\n      "sha256": "%s",\n      "entry": "k3s",\n      "kind": "binary"\n    }' "${_k3s_sum}"
       if [[ -n "${_k9s_sum}" ]]; then printf ',\n'; fi
@@ -391,7 +407,7 @@ for _klink in kubectl crictl ctr; do
   ln -sf k3s "${WORK_DIR}/var/lib/axonwall/core-k3s/bin/${_klink}"
 done
 # Verification record for the staged tree (see the helper above).
-write_core_k3s_bundled_json "${WORK_DIR}/var/lib/axonwall/core-k3s"
+write_core_k3s_bundled_json "${WORK_DIR}/var/lib/axonwall/core-k3s" "${K3S_SHA256:-}" "${K9S_SHA256:-}"
 fi
 
 # 5. Copy System Scripts & Terminal Configs
@@ -411,6 +427,7 @@ BIN_SCRIPTS=(
   axonwall-install
   axonwall-kubeconfig
   axonwall-zbm-theme
+  axonwall-btrfs-grub
 )
 if [[ "${EDITION}" != "minimal" ]]; then
   BIN_SCRIPTS+=(
@@ -753,7 +770,7 @@ fi # EDITION == axonwall|minimal: end of Next.js + controller bundle
 # (Main's fc576368 excludes the same two files; the grep -vE form below
 # is its equivalent implementation.)
 if [[ -d "${WORK_DIR}/etc" ]]; then
-  (cd "${WORK_DIR}" && find etc -type f | sed 's|^|/|' | grep -vE '^/etc/axonwall/(version|release-signing\.pub)$' | LC_ALL=C sort) > "${WORK_DIR}/DEBIAN/conffiles"
+  (cd "${WORK_DIR}" && find etc -type f | sed 's|^|/|' | grep -vE '^/etc/axonwall/(version|edition|\.(minimal|vault|k3s)-edition|workstation\.disabled|release-signing\.pub|release-signing\.d/.*)$' | LC_ALL=C sort) > "${WORK_DIR}/DEBIAN/conffiles"
   chmod 0644 "${WORK_DIR}/DEBIAN/conffiles"
 fi
 

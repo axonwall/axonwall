@@ -40,11 +40,18 @@ export function computeSetDiff(
   currentElements: string[],
   newElements: string[]
 ): SetDiff {
-  const currentSet = new Set(currentElements);
-  const targetSet = new Set(newElements);
+  const identRe = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
+  if (!identRe.test(tableName) || !identRe.test(setName)) {
+    throw new Error(`Invalid nftables identifier: table=${tableName}, set=${setName}`);
+  }
+  const validEl = (el: string) => isValidCIDR(el) || isValidIPv4(el);
+  const safeCurrent = currentElements.filter(validEl);
+  const safeNew = newElements.filter(validEl);
+  const currentSet = new Set(safeCurrent);
+  const targetSet = new Set(safeNew);
 
-  const toAdd = newElements.filter((el) => !currentSet.has(el));
-  const toDelete = currentElements.filter((el) => !targetSet.has(el));
+  const toAdd = safeNew.filter((el) => !currentSet.has(el));
+  const toDelete = safeCurrent.filter((el) => !targetSet.has(el));
 
   const nftStatements: string[] = [];
 

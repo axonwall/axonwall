@@ -31,6 +31,7 @@ import {
 } from '@/server/agent';
 import type { K3sClusterPulse } from '@/components/k3s/types';
 import { useDesiredStateApply } from '@/lib/use-desired-state-apply';
+import { executePluginAction } from '@/server/plugins';
 import { K3sConfigSchema, type DesiredState } from '@axonwall/lib/schemas';
 
 const SYSTEM_CONDITION_TAINT_KEYS = new Set([
@@ -91,6 +92,7 @@ export default function K3sClusterPage() {
   const [editEnableLb, setEditEnableLb] = useState<'auto' | 'true' | 'false'>('auto');
   const [editUnschedulable, setEditUnschedulable] = useState(false);
   const [editTaints, setEditTaints] = useState<K3sNodeTaintItem[]>([]);
+  const [initialEditableTaints, setInitialEditableTaints] = useState<K3sNodeTaintItem[]>([]);
   const [newTaintKey, setNewTaintKey] = useState('');
   const [newTaintVal, setNewTaintVal] = useState('');
   const [newTaintEffect, setNewTaintEffect] = useState<'NoSchedule' | 'PreferNoSchedule' | 'NoExecute'>('NoSchedule');
@@ -122,7 +124,9 @@ export default function K3sClusterPage() {
     setEditRoles(roleList);
     setEditEnableLb(lbVal === 'true' ? 'true' : lbVal === 'false' ? 'false' : 'auto');
     setEditUnschedulable(Boolean(node.unschedulable));
-    setEditTaints(editableTaints.map((t) => ({ ...t })));
+    const clonedTaints = editableTaints.map((t) => ({ ...t }));
+    setEditTaints(clonedTaints);
+    setInitialEditableTaints(clonedTaints);
     setEditCustomLabels(custom);
     setInitialCustomLabelKeys(Object.keys(custom));
     setNewTaintKey('');
@@ -172,12 +176,20 @@ export default function K3sClusterPage() {
         removeLabels.push('svclb.k3s.cattle.io/enablelb');
       }
 
+      const currentTaintSet = new Set(
+        editTaints.map((t) => `${t.key}\0${t.value ?? ''}\0${t.effect}`)
+      );
+      const removeTaints: K3sNodeTaintItem[] = initialEditableTaints.filter(
+        (t) => !currentTaintSet.has(`${t.key}\0${t.value ?? ''}\0${t.effect}`)
+      );
+
       const res = await updateK3sNodeSchedulingAction({
         nodeName: editingNode.name,
         roles: editRoles,
         customLabels,
         removeLabels,
         taints: editTaints,
+        removeTaints,
         unschedulable: editUnschedulable,
       });
       if (!res.success) {
@@ -231,6 +243,7 @@ export default function K3sClusterPage() {
 
   const handleSaveConfig = async () => {
     if (!state) return;
+    const wasK3sEnabled = Boolean(state.capabilities?.k3sEnabled ?? state.k3s?.enabled);
     const next = structuredClone(state);
     next.capabilities = {
       firewallEnabled: next.capabilities?.firewallEnabled !== false,
@@ -239,6 +252,14 @@ export default function K3sClusterPage() {
       virtEnabled: Boolean(next.capabilities?.virtEnabled ?? next.virt?.enabled),
       vigilanteEnabled: Boolean(next.capabilities?.vigilanteEnabled ?? next.vigilante?.enabled),
     };
+    const nextPlugins = next.plugins ? [...next.plugins] : [];
+    const k3sIdx = nextPlugins.findIndex((p) => p.id === 'core-k3s');
+    if (k3sIdx >= 0) {
+      nextPlugins[k3sIdx] = { ...nextPlugins[k3sIdx], id: 'core-k3s', enabled: true };
+    } else {
+      nextPlugins.push({ id: 'core-k3s', enabled: true });
+    }
+    next.plugins = nextPlugins;
     // C-M3: never invent a full K3s/OpenEBS config here. When no K3s
     // config exists yet, materialize the schema's own defaults (cluster /
     // service CIDRs, CNI) and leave openEbs unset — no pool names, replica
@@ -248,6 +269,16 @@ export default function K3sClusterPage() {
     // C2: a fingerprint mismatch (or any apply failure) must be visible,
     // not an unhandled rejection — the save did not happen.
     try {
+      if (!wasK3sEnabled) {
+        const installRes = await executePluginAction('core-k3s', 'install');
+        if (!installRes.success) {
+          setMsg({
+            ok: false,
+            text: `Failed to install core-k3s binaries: ${installRes.message}`,
+          });
+          return;
+        }
+      }
       const res = await applyState(next);
       setState(next);
       setMsg({ ok: true, text: `K3s control plane configuration applied (${res.message})` });

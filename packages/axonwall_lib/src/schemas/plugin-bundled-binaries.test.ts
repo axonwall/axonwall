@@ -233,6 +233,28 @@ describe('PluginBundledBinarySchema (bundled binaries)', () => {
       PluginBundledDistroPackageBinarySchema.parse({ ...validDistro, distro: 'windows' }),
     ).toThrow();
   });
+
+  it('accepts oses gating on raw and distroPackage entries and rejects traversal', () => {
+    expect(
+      PluginBundledRawBinarySchema.parse({ ...validRaw, oses: ['debian'] }),
+    ).toMatchObject({ oses: ['debian'] });
+    expect(
+      PluginBundledDistroPackageBinarySchema.parse({ ...validDistro, oses: ['debian'] }),
+    ).toMatchObject({ oses: ['debian'] });
+    expect(() =>
+      PluginBundledArchiveBinarySchema.parse({ ...validArchive, name: '../evil' }),
+    ).toThrow();
+    expect(() =>
+      PluginBundledArchiveBinarySchema.parse({ ...validArchive, pathInArchive: '../../etc/passwd' }),
+    ).toThrow();
+    expect(() =>
+      PluginManifestSchema.parse({
+        id: '../escape',
+        name: 'Bad',
+        version: '1.0.0',
+      }),
+    ).toThrow();
+  });
 });
 
 describe('PluginBinDirSchema', () => {

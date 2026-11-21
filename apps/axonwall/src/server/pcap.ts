@@ -1,4 +1,5 @@
 import { getSession } from './auth';
+import { isPasswordChangeEnforced } from './auth-guard';
 import { callAgentApi } from './agent-client';
 import fs from 'fs';
 import path from 'path';
@@ -158,7 +159,7 @@ export async function runLivePacketCapture({
   if (!session || !session.roles.includes('admin')) {
     throw new Error('Unauthorized: Admin credentials required');
   }
-  if (session.passwordChangeRequired) {
+  if (isPasswordChangeEnforced(session)) {
     throw new Error('Password change required before performing this action');
   }
 

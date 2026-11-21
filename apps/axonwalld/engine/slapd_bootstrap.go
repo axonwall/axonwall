@@ -519,7 +519,7 @@ func ResolveOrCreateBaseDN(domain string) (string, string, error) {
 		}
 	}
 	baseDN, firstDC := DeriveBaseDN(domain)
-	if err := os.MkdirAll(LDAPBaseDir, 0750); err != nil {
+	if err := os.MkdirAll(LDAPBaseDir, 0755); err != nil {
 		return baseDN, firstDC, err
 	}
 	_ = os.WriteFile(LDAPBaseDNFile, []byte(baseDN+"\n"), 0644)
@@ -576,9 +576,14 @@ func EnsureOpenLDAPBootstrapped(domain string, serverID int, policy PasswordPoli
 		return "", fmt.Errorf("slapd binary not installed: %w", err)
 	}
 
-	// Ensure /var/lib/axonwall is traversable by openldap and SSSD/SSH users while keeping group write for axonwall-api
+	// Ensure /var/lib/axonwall is traversable by openldap and SSSD/SSH users while keeping group write for axonwall-api.
+	// LDAPBaseDir stays 0755 so unprivileged AuthorizedKeysCommandUser (nobody) can read 0644 BASE_DN, while
+	// sensitive slapd config/data/log/backup subdirectories remain 0750.
 	_ = os.Chmod("/var/lib/axonwall", 0775|os.ModeSetgid)
-	for _, dir := range []string{LDAPBaseDir, LDAPConfigDir, LDAPDataDir, LDAPAccessLogDir, LDAPBackupsDir} {
+	if err := os.MkdirAll(LDAPBaseDir, 0755); err != nil {
+		return "", fmt.Errorf("failed to create %s: %w", LDAPBaseDir, err)
+	}
+	for _, dir := range []string{LDAPConfigDir, LDAPDataDir, LDAPAccessLogDir, LDAPBackupsDir} {
 		if err := os.MkdirAll(dir, 0750); err != nil {
 			return "", fmt.Errorf("failed to create %s: %w", dir, err)
 		}
@@ -631,11 +636,11 @@ func EnsureOpenLDAPBootstrapped(domain string, serverID int, policy PasswordPoli
 	}
 
 	chownOpenLDAPRecursive(LDAPBaseDir)
-	// Ownership without mode is not enough: re-assert 0750 on the ldap
-	// directories so slapd (running as the unprivileged slapd user) can
-	// always read its own config tree, even on images whose shipped
-	// directory modes were looser or tighter than intended.
-	for _, dir := range []string{LDAPBaseDir, LDAPConfigDir, LDAPDataDir, LDAPAccessLogDir, LDAPBackupsDir} {
+	// Ownership without mode is not enough: keep LDAPBaseDir 0755 (for BASE_DN) and
+	// re-assert 0750 on sensitive ldap subdirectories so slapd (running as the
+	// unprivileged slapd user) can read its own config tree.
+	_ = os.Chmod(LDAPBaseDir, 0755)
+	for _, dir := range []string{LDAPConfigDir, LDAPDataDir, LDAPAccessLogDir, LDAPBackupsDir} {
 		_ = os.Chmod(dir, 0750)
 	}
 	for _, rdir := range []string{"/run/slapd", "/run/openldap", "/var/lib/openldap/run"} {

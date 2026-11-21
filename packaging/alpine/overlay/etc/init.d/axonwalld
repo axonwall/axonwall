@@ -35,6 +35,8 @@ start_pre() {
         mkdir -p /var/lib/openldap/run /run/openldap
         chown -R ldap:ldap /var/lib/openldap/run /run/openldap 2>/dev/null || true
     fi
+    _ed_now="$(tr -d ' \t\r\n' < /etc/axonwall/edition 2>/dev/null || true)"
+    if [ ! -f /etc/axonwall/.minimal-edition ] && [ "$_ed_now" != "minimal" ]; then
     if [ -x /bin/zsh ]; then
         # Full build: the real zsh is /bin/zsh; /usr/bin/zsh must resolve
         # to it (see firstboot-alpine). An ash symlink here makes busybox
@@ -42,8 +44,11 @@ start_pre() {
         if [ -L /usr/bin/zsh ] || [ ! -x /usr/bin/zsh ]; then
             ln -sf /bin/zsh /usr/bin/zsh 2>/dev/null || true
         fi
-    elif [ ! -x /usr/bin/zsh ] && [ -x /bin/ash ]; then
-        ln -sf /bin/ash /usr/bin/zsh 2>/dev/null || true
+    elif [ ! -f /etc/axonwall/.minimal-edition ] && { [ -L /usr/bin/zsh ] || [ ! -x /usr/bin/zsh ]; }; then
+        rm -f /usr/bin/zsh 2>/dev/null || true
+        printf '#!/bin/sh\nif [ -x /bin/bash ]; then exec /bin/bash "$@"; fi\nexec /bin/ash "$@"\n' > /usr/bin/zsh 2>/dev/null || true
+        chmod 0755 /usr/bin/zsh 2>/dev/null || true
+    fi
     fi
     # B-12 upgrade migration (idempotent): split the ZTP token out of a
     # monolith axonwall.env written before the service-identity split and

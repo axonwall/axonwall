@@ -11,6 +11,10 @@ import {
   deleteZbmBootEnvironment,
   deleteZbmSnapshot,
   rollbackZbmSnapshot,
+  createBtrfsSnapshot,
+  deleteBtrfsSnapshot,
+  rollbackBtrfsSnapshot,
+  syncBtrfsGrubSnapshots,
 } from '@/server/agent';
 
 export const dynamic = 'force-dynamic';
@@ -58,6 +62,10 @@ export async function POST(req: NextRequest) {
       'zbm-clone',
       'zbm-activate',
       'zbm-delete',
+      'btrfs-snapshot',
+      'btrfs-delete-snapshot',
+      'btrfs-rollback-snapshot',
+      'btrfs-sync-grub',
     ];
     if (typeof action !== 'string' || !knownActions.includes(action)) {
       return NextResponse.json(
@@ -153,6 +161,30 @@ export async function POST(req: NextRequest) {
 
     if (action === 'zbm-delete') {
       const result = await deleteZbmBootEnvironment(body?.beName || '');
+      const status = result.success ? 200 : result.message.includes('Unauthorized') ? 401 : 400;
+      return NextResponse.json(result, { status });
+    }
+
+    if (action === 'btrfs-snapshot') {
+      const result = await createBtrfsSnapshot(String(body?.description || ''), Boolean(body?.important));
+      const status = result.success ? 200 : result.message.includes('Unauthorized') ? 401 : 400;
+      return NextResponse.json(result, { status });
+    }
+
+    if (action === 'btrfs-delete-snapshot') {
+      const result = await deleteBtrfsSnapshot(Number(body?.snapshotId));
+      const status = result.success ? 200 : result.message.includes('Unauthorized') ? 401 : 400;
+      return NextResponse.json(result, { status });
+    }
+
+    if (action === 'btrfs-rollback-snapshot') {
+      const result = await rollbackBtrfsSnapshot(Number(body?.snapshotId));
+      const status = result.success ? 200 : result.message.includes('Unauthorized') ? 401 : 400;
+      return NextResponse.json(result, { status });
+    }
+
+    if (action === 'btrfs-sync-grub') {
+      const result = await syncBtrfsGrubSnapshots();
       const status = result.success ? 200 : result.message.includes('Unauthorized') ? 401 : 400;
       return NextResponse.json(result, { status });
     }

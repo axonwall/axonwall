@@ -82,18 +82,31 @@ export default async function LobbyPage() {
           <div>
             <span className="text-xs text-slate-400 block font-medium">Identity & Auth</span>
             <span className="text-lg font-bold text-white mt-1 block">
-              {slapdRunning ? 'OpenLDAP' : 'Local Auth'}
+              {status.daemonDown || services.length === 0
+                ? 'Unknown'
+                : slapdRunning
+                  ? 'OpenLDAP'
+                  : 'Local Auth'}
             </span>
             <span
               className={`text-[11px] flex items-center gap-1 mt-1 ${
-                slapdRunning ? 'text-emerald-400' : 'text-slate-400'
+                status.daemonDown || services.length === 0
+                  ? 'text-amber-400'
+                  : slapdRunning
+                    ? 'text-emerald-400'
+                    : 'text-slate-400'
               }`}
             >
-              <CheckCircle2 className="w-3.5 h-3.5" />
-              {/* C-M12: slapd being active proves the directory service is
-                  running, not that it is synced (syncrepl state is never
-                  checked). */}
-              {slapdRunning ? 'Directory Service Running' : 'Unix Shadow DB'}
+              {status.daemonDown || services.length === 0 ? (
+                <XCircle className="w-3.5 h-3.5" />
+              ) : (
+                <CheckCircle2 className="w-3.5 h-3.5" />
+              )}
+              {status.daemonDown || services.length === 0
+                ? 'Daemon unavailable — auth status unknown'
+                : slapdRunning
+                  ? 'Directory Service Running'
+                  : 'Unix Shadow DB'}
             </span>
           </div>
           <div className="w-10 h-10 rounded-lg bg-indigo-500/10 border border-indigo-500/20 flex items-center justify-center text-indigo-400">

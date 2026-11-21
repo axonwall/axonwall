@@ -293,12 +293,15 @@ export const McpConfigureLxcBpfTokenRequestSchema = z.object({
 });
 export type McpConfigureLxcBpfTokenRequest = z.infer<typeof McpConfigureLxcBpfTokenRequestSchema>;
 
+const k8sDnsLabelRe = /^[a-z0-9]([-a-z0-9]*[a-z0-9])?$/;
+const containerImageRe = /^[A-Za-z0-9._/:@-]+$/;
+
 export const McpRenderK3sBpfTokenRequestSchema = z.object({
   profileId: z.string().min(2).max(63).regex(/^[a-z0-9][a-z0-9._-]*$/).default('k3s-net-dataplane'),
   preset: z.enum(['socket-observability', 'network-dataplane', 'cgroup-microsegmentation']).default('network-dataplane'),
-  workloadName: z.string().min(2).max(63).default('ebpf-packet-inspector'),
-  namespace: z.string().min(1).max(63).default('default'),
-  image: z.string().min(3).max(255).default('ghcr.io/cilium/cilium:v1.16.4'),
+  workloadName: z.string().min(1).max(63).regex(k8sDnsLabelRe).default('ebpf-packet-inspector'),
+  namespace: z.string().min(1).max(63).regex(k8sDnsLabelRe).default('default'),
+  image: z.string().min(3).max(255).regex(containerImageRe).default('ghcr.io/cilium/cilium:v1.16.4'),
   kind: z.enum(['Pod', 'DaemonSet']).default('Pod'),
 });
 export type McpRenderK3sBpfTokenRequest = z.infer<typeof McpRenderK3sBpfTokenRequestSchema>;

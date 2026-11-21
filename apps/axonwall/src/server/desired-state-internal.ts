@@ -6,7 +6,7 @@ import {
   type DesiredState,
   type InterfaceRole,
 } from '@axonwall/lib/schemas';
-import { isValidDevice } from '@axonwall/lib/util';
+import { isValidDevice, isValidIPv4, isValidIPv6 } from '@axonwall/lib/util';
 import {
   AXONWALL_YAML_FILENAMES,
   parseDesiredStateFromYamlFiles,
@@ -389,13 +389,21 @@ export function syncNetworkInterfacesFiles(state: DesiredState): { ifacesContent
     return iface.device;
   };
 
+  const safeIpv4 = (val?: string | null): string => {
+    const trimmed = typeof val === 'string' ? val.trim() : '';
+    return trimmed && isValidIPv4(trimmed) ? trimmed : '';
+  };
+  const validDnsServers = (state.system?.dnsServers || [])
+    .map((s) => (typeof s === 'string' ? s.trim() : ''))
+    .filter((s) => s.length > 0 && (isValidIPv4(s) || isValidIPv6(s)));
+
   const confLines = [
     `WAN_INTERFACE=${cleanDev(wanIface)}`,
     `WAN_MODE=${wanIface?.type || 'dhcp'}`,
     `WAN_IPV4_ADDRESS=${wanIface?.ipv4Address || ''}`,
-    `WAN_IPV4_GATEWAY=${wanIface?.ipv4Gateway || ''}`,
-    `WAN_DNS1=${state.system?.dnsServers?.[0] || '1.1.1.1'}`,
-    `WAN_DNS2=${state.system?.dnsServers?.[1] || '8.8.8.8'}`,
+    `WAN_IPV4_GATEWAY=${safeIpv4(wanIface?.ipv4Gateway)}`,
+    `WAN_DNS1=${validDnsServers[0] || '1.1.1.1'}`,
+    `WAN_DNS2=${validDnsServers[1] || '8.8.8.8'}`,
     `LAN_INTERFACE=${cleanDev(lanIface)}`,
     `LAN_MODE=${lanIface?.type || 'static'}`,
     `LAN_IPV4_ADDRESS=${lanIface?.ipv4Address || '192.168.1.1/24'}`,
@@ -422,7 +430,7 @@ export function syncNetworkInterfacesFiles(state: DesiredState): { ifacesContent
     confLines.push(`${keyPrefix}_ROLE=${role}`);
     confLines.push(`${keyPrefix}_MODE=${iface.type}`);
     confLines.push(`${keyPrefix}_IPV4_ADDRESS=${iface.ipv4Address || ''}`);
-    confLines.push(`${keyPrefix}_IPV4_GATEWAY=${iface.ipv4Gateway || ''}`);
+    confLines.push(`${keyPrefix}_IPV4_GATEWAY=${safeIpv4(iface.ipv4Gateway)}`);
     confLines.push(`${keyPrefix}_DHCP_SERVER=${authDhcp ? 'true' : 'false'}`);
   }
 
@@ -454,11 +462,12 @@ export function syncNetworkInterfacesFiles(state: DesiredState): { ifacesContent
       s += `iface ${ifaceObj.device} inet static\n`;
       s += `    address ${ip}\n`;
       s += `    netmask ${cidrToNetmask(cidr)}\n`;
-      if (ifaceObj.ipv4Gateway) {
-        s += `    gateway ${ifaceObj.ipv4Gateway}\n`;
+      const gw = safeIpv4(ifaceObj.ipv4Gateway);
+      if (gw) {
+        s += `    gateway ${gw}\n`;
       }
-      if (state.system?.dnsServers && state.system.dnsServers.length > 0) {
-        s += `    dns-nameservers ${state.system.dnsServers.join(' ')}\n`;
+      if (validDnsServers.length > 0) {
+        s += `    dns-nameservers ${validDnsServers.join(' ')}\n`;
       }
     } else {
       s += `iface ${ifaceObj.device} inet dhcp\n`;

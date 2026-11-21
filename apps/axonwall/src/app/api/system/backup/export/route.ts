@@ -1,16 +1,18 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSession } from '@/server/auth';
+import { isPasswordChangeEnforced } from '@/server/auth-guard';
 import { createEncryptedBackup } from '@/server/backup';
 import { getCurrentDesiredState } from '@/server/agent';
 
 export async function POST(request: NextRequest) {
   const session = await getSession();
-  if (!session || session.passwordChangeRequired || !session.roles.includes('admin')) {
+  const pwdEnforced = isPasswordChangeEnforced(session);
+  if (!session || pwdEnforced || !session.roles.includes('admin')) {
     return new NextResponse(
-      session?.passwordChangeRequired
+      pwdEnforced
         ? 'Forbidden: Password change required'
         : 'Unauthorized: Admin access required',
-      { status: session?.passwordChangeRequired ? 403 : 401 }
+      { status: pwdEnforced ? 403 : 401 }
     );
   }
 

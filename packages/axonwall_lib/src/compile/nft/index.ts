@@ -10,6 +10,7 @@ import {
   normalizeAntiLockoutInterfaces,
   inferInterfaceRole,
   isValidFirewallEndpoint,
+  isValidPortSpec,
 } from '../../schemas/index.js';
 import { sanitizeIdentifier, isValidDevice, isValidIPv4, isValidIPv6, isValidCIDR, isValidMAC, isValidPortRange } from '../../util/index.js';
 import { resolveCapabilities } from '../../plugins/index.js';
@@ -126,8 +127,14 @@ function buildNasAndK3sInputRules(
     hostRules.push(`    ${devSet}meta l4proto { tcp, udp } th dport { 111, 2049 } accept comment "nas-nfsv4"`);
     hostRules.push(`    ${devSet}tcp dport 3260 accept comment "nas-iscsi"`);
     if (state.nas?.s3?.enabled) {
-      const s3Port = state.nas.s3.listenPort || 9000;
-      const s3Console = state.nas.s3.consolePort || 9001;
+      const s3Port =
+        Number.isInteger(state.nas.s3.listenPort) && state.nas.s3.listenPort >= 1 && state.nas.s3.listenPort <= 65535
+          ? state.nas.s3.listenPort
+          : 9000;
+      const s3Console =
+        Number.isInteger(state.nas.s3.consolePort) && state.nas.s3.consolePort >= 1 && state.nas.s3.consolePort <= 65535
+          ? state.nas.s3.consolePort
+          : 9001;
       hostRules.push(`    ${devSet}tcp dport { ${s3Port}, ${s3Console} } accept comment "nas-s3-minio"`);
     }
   }
@@ -278,8 +285,9 @@ function compileMiniupnpdConf(cfg: UpnpConfig, ifDeviceMap: Map<string, string>)
     const safePorts = acl.externalPorts.replace(/[^0-9-]/g, '');
     const safeIntPorts = (acl.internalPorts || '1024-65535').replace(/[^0-9-]/g, '');
     const safeSub = acl.internalCidr.replace(/[^0-9a-fA-F:./]/g, '');
-    if (safePorts && safeSub) {
-      lines.push(`${acl.action} ${safePorts} ${safeSub} ${safeIntPorts}`);
+    const safeAction = acl.action === 'deny' ? 'deny' : 'allow';
+    if (safePorts && safeIntPorts && isValidPortRange(safePorts) && isValidPortRange(safeIntPorts) && isValidCIDR(safeSub)) {
+      lines.push(`${safeAction} ${safePorts} ${safeSub} ${safeIntPorts}`);
     }
   }
   lines.push('deny 0-65535 0.0.0.0/0 0-65535', '');
@@ -1176,6 +1184,10 @@ export function compileNftables(state: DesiredState): CompileResult {
     }
 
     if (nat.type !== 'dnat') continue;
+    if (!isValidIPv4(nat.targetIp) && !isValidIPv6(nat.targetIp)) continue;
+    if (nat.sourcePort && nat.sourcePort !== 'any' && !isValidPortSpec(nat.sourcePort)) continue;
+    if (nat.destinationPort && nat.destinationPort !== 'any' && !isValidPortSpec(nat.destinationPort)) continue;
+    if (nat.targetPort && nat.targetPort !== 'any' && !isValidPortRange(nat.targetPort)) continue;
     if (nat.sourcePort?.startsWith('$') && emittedSets.get(`set_${sanitizeIdentifier(nat.sourcePort.slice(1))}`)?.setType !== 'inet_service') continue;
     if (nat.destinationPort?.startsWith('$') && emittedSets.get(`set_${sanitizeIdentifier(nat.destinationPort.slice(1))}`)?.setType !== 'inet_service') continue;
 
@@ -1415,7 +1427,7 @@ export function compileNftables(state: DesiredState): CompileResult {
   }
 
   if (state.system.flowtableOffload && enabledDevices.length > 0) {
-    lines.push('    meta l4proto { tcp, udp } flow add @ft_fastpath');
+    lines.push('    meta l4proto { tcp, udp } ct state established flow add @ft_fastpath');
   }
   lines.push('    ct state established,related accept');
   lines.push('    ct state invalid drop');
@@ -1546,11 +1558,13 @@ export function compileNftables(state: DesiredState): CompileResult {
     if (nat.type === 'masquerade') {
       lines.push(`    ${matchClauses.join(' ')} masquerade comment "outbound-nat"`);
     } else if (nat.type === 'snat' && nat.targetIp) {
-      let resolvedTarget = nat.targetIp;
+      let resolvedTarget = nat.targetIp.trim();
       if (resolvedTarget === 'wan_ip') {
         resolvedTarget = resolveWanIpv4(nat.interface);
       }
-      if (!resolvedTarget || /[;\r\n#{}'"]/.test(resolvedTarget)) continue;
+      if (!resolvedTarget || !(isValidIPv4(resolvedTarget) || isValidIPv6(resolvedTarget) || isValidCIDR(resolvedTarget))) {
+        continue;
+      }
       const family = resolvedTarget.includes(':') ? 'ip6' : 'ip';
       lines.push(`    ${matchClauses.join(' ')} snat ${family} to ${resolvedTarget} comment "outbound-snat"`);
     }
@@ -1656,15 +1670,32 @@ export function compileNftables(state: DesiredState): CompileResult {
     },
     addrDir: 'saddr' | 'daddr',
   ): string => {
-    const parts: string[] = [];
-    if (sgRule.cidr && sgRule.cidr !== 'any' && !/[;\r\n#{}'"]/.test(sgRule.cidr)) {
-      const fam = sgRule.cidr.includes(':') ? 'ip6' : 'ip';
-      parts.push(`${fam} ${addrDir} ${sgRule.cidr}`);
+    if (sgRule.action !== 'accept' && sgRule.action !== 'drop' && sgRule.action !== 'reject') {
+      return '';
     }
-    const hasPort = Boolean(sgRule.port && sgRule.port !== 'any' && !/[;\r\n#{}'"]/.test(sgRule.port));
-    if (hasPort && sgRule.port.startsWith('$')) {
-      const setName = `set_${sanitizeIdentifier(sgRule.port.slice(1))}`;
-      if (emittedSets.get(setName)?.setType !== 'inet_service') return '';
+    if (
+      sgRule.protocol !== 'any' &&
+      sgRule.protocol !== 'tcp' &&
+      sgRule.protocol !== 'udp' &&
+      sgRule.protocol !== 'icmp' &&
+      sgRule.protocol !== 'ipv6-icmp'
+    ) {
+      return '';
+    }
+    const parts: string[] = [];
+    if (sgRule.cidr && sgRule.cidr !== 'any') {
+      const cidrVal = sgRule.cidr.trim();
+      if (!(isValidIPv4(cidrVal) || isValidIPv6(cidrVal) || isValidCIDR(cidrVal))) return '';
+      const fam = cidrVal.includes(':') ? 'ip6' : 'ip';
+      parts.push(`${fam} ${addrDir} ${cidrVal}`);
+    }
+    const hasPort = Boolean(sgRule.port && sgRule.port !== 'any');
+    if (hasPort) {
+      if (!isValidPortSpec(sgRule.port)) return '';
+      if (sgRule.port.startsWith('$')) {
+        const setName = `set_${sanitizeIdentifier(sgRule.port.slice(1))}`;
+        if (emittedSets.get(setName)?.setType !== 'inet_service') return '';
+      }
     }
     if (sgRule.protocol === 'tcp' || sgRule.protocol === 'udp') {
       if (hasPort) {
@@ -1689,7 +1720,8 @@ export function compileNftables(state: DesiredState): CompileResult {
     lines.push('    ct state established,related accept');
     lines.push('    ct state invalid drop');
     for (const rule of (sg.rules ?? []).filter((r) => r.direction === 'in')) {
-      lines.push(`    ${formatSgRule(rule, 'saddr')}`);
+      const stmt = formatSgRule(rule, 'saddr');
+      if (stmt) lines.push(`    ${stmt}`);
     }
     lines.push('  }');
     lines.push('');
@@ -1698,7 +1730,8 @@ export function compileNftables(state: DesiredState): CompileResult {
     lines.push('    ct state established,related accept');
     lines.push('    ct state invalid drop');
     for (const rule of (sg.rules ?? []).filter((r) => r.direction === 'out')) {
-      lines.push(`    ${formatSgRule(rule, 'daddr')}`);
+      const stmt = formatSgRule(rule, 'daddr');
+      if (stmt) lines.push(`    ${stmt}`);
     }
     lines.push('  }');
     lines.push('');
@@ -1842,7 +1875,7 @@ export function compileSatelliteNftables(node: any): CompileResult {
       if (!pf || (pf.proto !== 'tcp' && pf.proto !== 'udp')) continue;
       if (!Number.isInteger(pf.wanPort) || pf.wanPort < 1 || pf.wanPort > 65535) continue;
       if (!Number.isInteger(pf.targetPort) || pf.targetPort < 1 || pf.targetPort > 65535) continue;
-      if (!pf.targetIp || /[;\r\n#{}'"]/.test(pf.targetIp)) continue;
+      if (!pf.targetIp || !isValidIPv4(pf.targetIp)) continue;
       const safeComment = pf.comment
         ? pf.comment.replace(/[\r\n]+/g, ' ').replace(/[\\"]/g, "'").trim()
         : `port-forward-${pf.wanPort}`;
@@ -1946,7 +1979,7 @@ export function compileSatelliteNftables(node: any): CompileResult {
     for (const pf of portForwards) {
       if (!pf || (pf.proto !== 'tcp' && pf.proto !== 'udp')) continue;
       if (!Number.isInteger(pf.targetPort) || pf.targetPort < 1 || pf.targetPort > 65535) continue;
-      if (!pf.targetIp || /[;\r\n#{}'"]/.test(pf.targetIp)) continue;
+      if (!pf.targetIp || !isValidIPv4(pf.targetIp)) continue;
       const safeComment = pf.comment
         ? pf.comment.replace(/[\r\n]+/g, ' ').replace(/[\\"]/g, "'").trim()
         : `allow-dnat-${pf.wanPort}`;
@@ -1956,13 +1989,20 @@ export function compileSatelliteNftables(node: any): CompileResult {
     }
 
     for (const rule of ipv6Allow) {
-      if (!rule || !rule.dstIp6 || /[;\r\n#{}'"]/.test(rule.dstIp6)) continue;
+      if (
+        !rule ||
+        !rule.dstIp6 ||
+        !(isValidIPv6(rule.dstIp6) || (rule.dstIp6.includes(':') && isValidCIDR(rule.dstIp6)))
+      ) {
+        continue;
+      }
       const safeComment = rule.comment
         ? rule.comment.replace(/[\r\n]+/g, ' ').replace(/[\\"]/g, "'").trim()
         : 'ipv6-pinhole';
       if (rule.proto === 'ipv6-icmp') {
         lines.push(`    ip6 daddr ${rule.dstIp6} meta l4proto ipv6-icmp accept comment "${safeComment}"`);
-      } else if ((rule.proto === 'tcp' || rule.proto === 'udp') && rule.dstPort) {
+      } else if ((rule.proto === 'tcp' || rule.proto === 'udp') && rule.dstPort !== undefined) {
+        if (!Number.isInteger(rule.dstPort) || rule.dstPort < 1 || rule.dstPort > 65535) continue;
         lines.push(`    ip6 daddr ${rule.dstIp6} ${rule.proto} dport ${rule.dstPort} accept comment "${safeComment}"`);
       } else if (rule.proto === 'tcp' || rule.proto === 'udp') {
         lines.push(`    ip6 daddr ${rule.dstIp6} meta l4proto ${rule.proto} accept comment "${safeComment}"`);
@@ -2071,6 +2111,10 @@ function resolveEndpointClause(
     return `ip ${dir} ${op}${lanCidr}`;
   }
 
+  if (!(isValidIPv4(endpoint) || isValidIPv6(endpoint) || isValidCIDR(endpoint))) {
+    return null;
+  }
+
   if (endpoint.includes(':')) {
     return `ip6 ${dir} ${op}${endpoint}`;
   }
@@ -2120,8 +2164,8 @@ function formatSingleRuleStatement(
   if (
     (rule.source && (!isValidFirewallEndpoint(rule.source) || /[;\r\n#{}'"]/.test(rule.source))) ||
     (rule.destination && (!isValidFirewallEndpoint(rule.destination) || /[;\r\n#{}'"]/.test(rule.destination))) ||
-    (rule.sourcePort && /[;\r\n#{}'"]/.test(rule.sourcePort)) ||
-    (rule.destinationPort && /[;\r\n#{}'"]/.test(rule.destinationPort))
+    (rule.sourcePort && rule.sourcePort !== 'any' && !isValidPortSpec(rule.sourcePort)) ||
+    (rule.destinationPort && rule.destinationPort !== 'any' && !isValidPortSpec(rule.destinationPort))
   ) {
     return '';
   }

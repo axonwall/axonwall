@@ -407,10 +407,10 @@ function berDecodeLength(buf, offset) {
     return { length: first, bytesRead: 1 };
   }
   const numBytes = first & 0x7f;
-  if (numBytes === 0 || offset + 1 + numBytes > buf.length) return null;
+  if (numBytes === 0 || numBytes > 3 || offset + 1 + numBytes > buf.length) return null;
   let length = 0;
   for (let i = 0; i < numBytes; i++) {
-    length = (length << 8) | buf[offset + 1 + i];
+    length = ((length << 8) | buf[offset + 1 + i]) >>> 0;
   }
   return { length, bytesRead: 1 + numBytes };
 }
@@ -419,10 +419,10 @@ function berReadElement(buf, offset = 0) {
   if (offset >= buf.length) return null;
   const tag = buf[offset];
   const lenInfo = berDecodeLength(buf, offset + 1);
-  if (!lenInfo) return null;
+  if (!lenInfo || lenInfo.length < 0) return null;
   const valueStart = offset + 1 + lenInfo.bytesRead;
   const valueEnd = valueStart + lenInfo.length;
-  if (valueEnd > buf.length) return null;
+  if (valueEnd < valueStart || valueEnd > buf.length) return null;
   return {
     tag,
     length: lenInfo.length,
@@ -738,8 +738,8 @@ function buildFilterFromTemplate(template, replacements) {
   for (const [k, v] of Object.entries(replacements)) {
     const escaped = escapeLdapFilter(v);
     out = out
-      .replace(new RegExp(`\\{\\{${k}\\}\\}`, 'g'), escaped)
-      .replace(new RegExp(`\\{${k}\\}`, 'g'), escaped);
+      .replace(new RegExp(`\\{\\{${k}\\}\\}`, 'g'), () => escaped)
+      .replace(new RegExp(`\\{${k}\\}`, 'g'), () => escaped);
   }
   return out;
 }

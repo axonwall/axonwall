@@ -5,7 +5,7 @@ import {
   type Interface,
   inferInterfaceRole,
 } from '../../schemas/index.js';
-import { isValidDevice } from '../../util/index.js';
+import { isValidCIDR, isValidDevice } from '../../util/index.js';
 
 export interface KeaCompileResult {
   keaDhcp4Config: string;
@@ -289,6 +289,7 @@ export function compileKeaDhcp6AndRadvd(
     const lines: string[] = ['# Axonwall Auto-Generated IPv6 Router Advertisement (radvd) Configuration'];
     for (const sub of raSubnets) {
       const dev = ifDeviceMap.get(sub.interface) || sub.interface;
+      if (!isValidDevice(dev) || !isValidCIDR(sub.subnet)) continue;
       const managed = sub.raMode === 'managed' || sub.raMode === 'assisted' ? 'on' : 'off';
       const otherCfg =
         sub.raMode === 'managed' || sub.raMode === 'assisted' || sub.raMode === 'stateless_dhcp' ? 'on' : 'off';

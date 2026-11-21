@@ -5,9 +5,9 @@ import { Callout } from '../components/Callout';
 import { CodeBlock } from '../components/CodeBlock';
 
 export const metadata = {
-  title: 'Next-Gen Installer, Multi-Disk RAID, LUKS2+TPM2 & ZFSBootMenu | Axonwall Documentation',
+  title: 'Next-Gen Installer, Multi-Disk RAID, LUKS2+TPM2, Btrfs & ZFSBootMenu | Axonwall Documentation',
   description:
-    'Documentation for Axonwall v0.11.68 bare-metal installation: axonwall-console --install Express/Custom TUI, --unattended automation, unified Vault edition, Smart Disk Tiering, LUKS2 + TPM 2.0 PCR 0+2+7 auto-unlock, and ZFSBootMenu v3.1.0 Boot Environments.',
+    'Documentation for Axonwall v0.13.0 bare-metal installation: axonwall-console --install Express/Custom TUI, --unattended automation, 4 unified editions (axonwall, minimal, vault, k3s-storage), Smart Disk Tiering, LUKS2 + TPM 2.0 PCR 0+2+7 auto-unlock, Btrfs + Snapper Root RAID-1, and ZFSBootMenu v3.1.0 Boot Environments.',
 };
 
 export default function InstallerRaidZfsDocPage() {
@@ -17,13 +17,13 @@ export default function InstallerRaidZfsDocPage() {
       <div className="space-y-4 border-b border-slate-800/80 pb-8">
         <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-950/60 border border-emerald-500/30 text-emerald-400 text-xs font-semibold">
           <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-          Bare-Metal Installer &amp; Boot Engines • v0.11.68
+          Bare-Metal Installer &amp; Boot Engines • v0.13.0
         </div>
         <h1 className="text-3xl sm:text-5xl font-extrabold text-white tracking-tight">
-          Next-Gen Installer, Multi-Disk RAID &amp; ZFSBootMenu
+          Next-Gen Installer, Multi-Disk RAID, Btrfs &amp; ZFSBootMenu
         </h1>
         <p className="text-base sm:text-lg text-slate-400 leading-relaxed max-w-3xl">
-          Deploy unbrickable bare-metal appliances via the interactive <code className="text-emerald-400 font-mono">axonwall-console --install</code> TUI or zero-touch <code className="text-emerald-400 font-mono">--unattended</code> manifests. Choose between unified <code className="text-slate-200 font-mono">axonwall</code> (NGFW), <code className="text-slate-200 font-mono">vault</code> (Immutable S3 Backup), and <code className="text-cyan-300 font-mono">k3s-storage</code> (Barebones K3s + OpenZFS/OpenEBS) editions, Smart NVMe/SSD/HDD disk tiering, LUKS2 encryption with TPM 2.0 auto-unlock, <code className="text-emerald-400 font-mono">mdadm</code> RAID-1 A/B slots, or native ZFSBootMenu v3.1.0 Root-on-ZFS Boot Environments.
+          Deploy unbrickable bare-metal appliances via the interactive <code className="text-emerald-400 font-mono">axonwall-console --install</code> TUI or zero-touch <code className="text-emerald-400 font-mono">--unattended</code> manifests. Choose across four unified editions—<code className="text-slate-200 font-mono">axonwall</code> (Converged NGFW), <code className="text-amber-300 font-mono">minimal</code> (Reduced Attack Surface), <code className="text-slate-200 font-mono">vault</code> (Immutable S3 Backup), and <code className="text-cyan-300 font-mono">k3s-storage</code> (Barebones K3s + OpenZFS/OpenEBS)—paired with Smart NVMe/SSD/HDD tiering, LUKS2 + TPM 2.0 auto-unlock, <code className="text-emerald-400 font-mono">mdadm</code> RAID-1 A/B slots, in-kernel <strong className="text-cyan-300">Btrfs + Snapper Root</strong>, or native ZFSBootMenu v3.1.0 Root-on-ZFS Boot Environments.
         </p>
       </div>
 
@@ -42,7 +42,7 @@ export default function InstallerRaidZfsDocPage() {
             <div className="font-bold text-emerald-400 text-sm">Express 1-Click vs. 5-Step Custom Wizard</div>
             <p className="text-slate-400 leading-relaxed">
               <strong>Express Mode</strong> inspects hardware topology and provisions optimal defaults in a single confirmation.{' '}
-              <strong>5-Step Custom Wizard</strong> walks operators through (1) Edition (<code className="text-slate-200 font-mono">axonwall</code> NGFW/Converged, <code className="text-slate-200 font-mono">vault</code> S3 Immutable Backup, or <code className="text-cyan-300 font-mono">k3s-storage</code> Barebones K3s + OpenZFS/OpenEBS Host), (2) Boot Mode (<code className="text-slate-200 font-mono">ab-dual-root</code>, <code className="text-slate-200 font-mono">zbm</code>, or <code className="text-slate-200 font-mono">rolling</code>), (3) Smart Disk Tiering, (4) LUKS2 + TPM 2.0 Encryption, and (5) Initial Management NIC &amp; Credentials.
+              <strong>5-Step Custom Wizard</strong> walks operators through (1) Edition (<code className="text-slate-200 font-mono">axonwall</code> NGFW/Converged, <code className="text-slate-200 font-mono">minimal</code> Reduced Attack Surface, <code className="text-slate-200 font-mono">vault</code> S3 Immutable Backup, or <code className="text-cyan-300 font-mono">k3s-storage</code> Barebones K3s + OpenZFS/OpenEBS Host), (2) Boot Mode (<code className="text-slate-200 font-mono">ab</code>, <code className="text-slate-200 font-mono">zbm</code>, <code className="text-slate-200 font-mono">btrfs</code>, or <code className="text-slate-200 font-mono">rolling</code>), (3) Smart Disk Tiering, (4) LUKS2 + TPM 2.0 Encryption, and (5) Initial Management NIC &amp; Credentials.
             </p>
           </div>
 
@@ -232,7 +232,7 @@ Enter ZFS pool name [default: tank]: tank`}
               <span>Native Boot Environments (BEs)</span>
             </div>
             <p className="text-xs text-slate-400 leading-relaxed">
-              System root datasets reside in <code className="text-slate-200 font-mono">zroot/ROOT/&lt;be_name&gt;</code>. OTA firmware updates snapshot the active BE (e.g. <code className="text-slate-200 font-mono">zroot/ROOT/axonwall-0.11.67@pre-update-v0.11.68</code>) and clone it instantaneously with zero wasted disk space into a new target BE (<code className="text-slate-200 font-mono">zroot/ROOT/axonwall-0.11.68</code>).
+              System root datasets reside in <code className="text-slate-200 font-mono">zroot/ROOT/&lt;be_name&gt;</code>. OTA firmware updates snapshot the active BE (e.g. <code className="text-slate-200 font-mono">zroot/ROOT/axonwall-0.12.4@pre-update-v0.13.0</code>) and clone it instantaneously with zero wasted disk space into a new target BE (<code className="text-slate-200 font-mono">zroot/ROOT/axonwall-0.13.0</code>).
             </p>
             <ul className="text-xs text-slate-300 list-disc list-inside space-y-1">
               <li>Instantaneous atomic updates and rollbacks via <code className="font-mono text-emerald-300">axonwallctl zbm</code></li>
@@ -272,9 +272,9 @@ Enter ZFS pool name [default: tank]: tank`}
 Dataset Hierarchy:
 zroot
 ├── ROOT
-│   ├── axonwall-0.11.67          (mountpoint=/, org.zfsbootmenu:commandline="...")
-│   │   └── @pre-update-v0.11.68  (Point-in-time snapshot)
-│   └── axonwall-0.11.68          (mountpoint=/, clone/promoted next-boot BE)
+│   ├── axonwall-0.12.4           (mountpoint=/, org.zfsbootmenu:commandline="...")
+│   │   └── @pre-update-v0.13.0   (Point-in-time snapshot)
+│   └── axonwall-0.13.0           (mountpoint=/, clone/promoted next-boot BE)
 └── data
     └── axonwall                  (mountpoint=/var/lib/axonwall, persistent config & logs)`}
         />
@@ -286,18 +286,19 @@ zroot
 axonwallctl zbm list
 
 # Create a point-in-time snapshot, clone into a new BE, and activate for next boot
-sudo axonwallctl zbm snapshot axonwall-0.11.68 pre-change
-sudo axonwallctl zbm clone axonwall-0.11.68@pre-change axonwall-canary
+sudo axonwallctl zbm snapshot axonwall-0.13.0 pre-change
+sudo axonwallctl zbm clone axonwall-0.13.0@pre-change axonwall-canary
 sudo axonwallctl zbm activate axonwall-canary
 
 # Prune obsolete Boot Environments or snapshots
-sudo axonwallctl zbm delete axonwall-0.11.62
-sudo axonwallctl zbm delete-snapshot axonwall-0.11.68@pre-change
+sudo axonwallctl zbm delete axonwall-0.12.2
+sudo axonwallctl zbm delete-snapshot axonwall-0.13.0@pre-change
 
 # Stage cryptographically verified OTA firmware update (SHA-256 + OpenSSL .sig
 # verified against /etc/axonwall/release-signing.pub before writing standby slot/BE)
-sudo axonwallctl update --version 0.11.68
-sudo axonwallctl update --version 0.11.68 --slot B
+sudo axonwallctl update --version 0.13.0
+sudo axonwallctl update --version 0.13.0 --slot B
+sudo axonwallctl update --btrfs --version 0.13.0  # Btrfs + Snapper pre/post mode
 sudo axonwallctl update --apt   # Rolling single-root APT upgrade mode`}
         />
 
@@ -349,6 +350,95 @@ sudo axonwall-zbm-theme set-splash /root/custom-brand.png
 # Re-embed UKI .splash section and sync EFI/ZBM/VMLINUZ.EFI across all mirrored ESP partitions
 sudo axonwall-zbm-theme apply`}
           />
+        </div>
+      </section>
+
+      {/* Btrfs + Snapper Mode */}
+      <section id="btrfs-snapper" className="space-y-6 pt-6 border-t border-slate-800/80">
+        <h2 className="text-2xl font-bold text-white flex items-center gap-2">
+          <Layers className="w-6 h-6 text-cyan-400" /> Btrfs + Snapper Root Mode (<code className="font-mono text-cyan-300">installMode: "btrfs"</code>)
+        </h2>
+        <p className="text-sm text-slate-300 leading-relaxed">
+          For systems seeking a lightweight, in-kernel Copy-on-Write alternative to ZFSBootMenu—without external DKMS modules—select{' '}
+          <strong className="text-white">Btrfs + Snapper Root</strong> (<code className="text-cyan-300 font-mono">installMode: "btrfs"</code>). Single-disk targets use standard Btrfs with DUP metadata and <code className="text-slate-200 font-mono">compress=zstd:1</code>, while multi-disk system targets automatically provision native{' '}
+          <strong className="text-white">Btrfs RAID-1</strong> (<code className="text-slate-200 font-mono">-d raid1 -m raid1</code>) across system drives.
+        </p>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+          <div className="p-6 rounded-2xl bg-slate-900 border border-slate-800 space-y-3">
+            <div className="flex items-center gap-2 font-bold text-white text-base">
+              <CheckCircle2 className="w-5 h-5 text-cyan-400" />
+              <span>Flat Subvolume Isolation</span>
+            </div>
+            <p className="text-xs text-slate-400 leading-relaxed">
+              The active OS root resides on subvolume <code className="text-slate-200 font-mono">@</code>, while snapshots, logs, and persistent appliance state live on sibling subvolumes so rolling back the OS never erases audit logs, snapshots, or configuration:
+            </p>
+            <ul className="text-xs text-slate-300 list-disc list-inside space-y-1">
+              <li><code className="font-mono text-cyan-300">@</code> &rarr; <code className="font-mono">/</code> (Root filesystem)</li>
+              <li><code className="font-mono text-cyan-300">@snapshots</code> &rarr; <code className="font-mono">/.snapshots</code> (Snapper timelines &amp; pre/post pairs)</li>
+              <li><code className="font-mono text-cyan-300">@var_log</code> &rarr; <code className="font-mono">/var/log</code> (Audit &amp; syslog persistence)</li>
+              <li><code className="font-mono text-cyan-300">@var_lib_axonwall</code> &rarr; <code className="font-mono">/var/lib/axonwall</code> (or LUKS2 <code className="font-mono">axon_data</code>)</li>
+            </ul>
+          </div>
+
+          <div className="p-6 rounded-2xl bg-slate-900 border border-slate-800 space-y-3">
+            <div className="flex items-center gap-2 font-bold text-white text-base">
+              <ShieldAlert className="w-5 h-5 text-cyan-400" />
+              <span>Pre/Post Updates &amp; GRUB Rollback</span>
+            </div>
+            <p className="text-xs text-slate-400 leading-relaxed">
+              Every firmware update (<code className="text-slate-200 font-mono">axonwall-update --btrfs</code>) and Kernel Studio installation automatically takes a pre-change Snapper snapshot, applies the change onto <code className="text-slate-200 font-mono">@</code>, takes a paired post snapshot, and regenerates <code className="text-slate-200 font-mono">/boot/grub/btrfs-snapshots.cfg</code>.
+            </p>
+            <ul className="text-xs text-slate-300 list-disc list-inside space-y-1">
+              <li>Boot any historical read-only snapshot from GRUB submenu <strong>Axonwall Btrfs Snapshots</strong></li>
+              <li>Atomic subvolume promotion via Web UI, <code className="font-mono text-cyan-300">axonwall-tui</code>, or <code className="font-mono text-cyan-300">axonwall-btrfs-grub rollback &lt;id&gt;</code></li>
+              <li>Optional dedicated extra disks still provision OpenZFS pool <code className="font-mono text-slate-200">tank</code></li>
+            </ul>
+          </div>
+        </div>
+
+        <CodeBlock
+          title="Btrfs + Snapper Partition Layout & Atomic Rollback CLI"
+          language="bash"
+          code={`# GPT Partition Layout (Single or Dual-Disk Native Btrfs RAID-1):
+#   p1: 1MiB-4MiB    bios_grub   (Legacy BIOS GRUB support)
+#   p2: 4MiB-516MiB  AXON_EFI    (512 MiB FAT32 ESP, mirrored across system disks)
+#   p3: [optional]   axon_data   (4096 MiB LUKS2 AES-XTS-512 when encryption enabled)
+#   pN: remaining    axon_btrfs  (Single Btrfs volume or native RAID-1 mirror)
+
+# Create manual checkpoint, refresh GRUB menu, or atomically roll back to Snapshot #1
+sudo snapper -c root create --description "Pre-maintenance checkpoint"
+sudo axonwall-btrfs-grub sync
+sudo axonwall-btrfs-grub rollback 1`}
+        />
+      </section>
+
+      {/* Minimal Reduced-Attack-Surface Edition */}
+      <section id="minimal-edition" className="space-y-6 pt-6 border-t border-slate-800/80">
+        <h2 className="text-2xl font-bold text-white flex items-center gap-2">
+          <Lock className="w-6 h-6 text-amber-400" /> Minimal Reduced-Attack-Surface Edition (<code className="font-mono text-amber-300">minimal</code>)
+        </h2>
+        <p className="text-sm text-slate-300 leading-relaxed">
+          When minimal attack surface matters most, select the <strong className="text-white">Minimal Edition</strong> (<code className="text-amber-300 font-mono">minimal</code>) in the GRUB2/ISOLINUX boot menu, <code className="text-emerald-400 font-mono">axonwall-console --install</code> wizard, Debian d-i preseed (<code className="text-slate-200 font-mono">preseed-minimal.cfg</code>), Cloud-Init schema, or install <code className="text-slate-200 font-mono">axonwall-minimal_0.13.0_amd64.deb</code> directly. It provisions only the core boot, management, and firewall baseline while letting operators add capabilities on demand later.
+        </p>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
+          <div className="p-5 rounded-xl bg-slate-900 border border-amber-500/30 space-y-2">
+            <div className="font-bold text-amber-300 text-sm">Stripped Baseline &amp; Hardened Defaults</div>
+            <ul className="space-y-1.5 text-slate-300 list-disc list-inside">
+              <li>Boots cleanly with minimal package footprint; optional packages and workstation extras are purged on target</li>
+              <li>DHCP, DNS, OpenZFS NAS, and KVM/LXC roles remain disabled unless explicitly enabled</li>
+              <li>Cleanly falls back to <code className="font-mono text-slate-200">/bin/bash</code> across OpenLDAP/SSSD directory templates when <code className="font-mono text-slate-200">zsh</code> is absent</li>
+              <li>Dedicated updater track via <code className="font-mono text-slate-200">/etc/axonwall/edition</code> across A/B, ZFSBootMenu, Btrfs + Snapper, and Rolling slots</li>
+            </ul>
+          </div>
+
+          <div className="p-5 rounded-xl bg-slate-900 border border-slate-800 space-y-2">
+            <div className="font-bold text-emerald-400 text-sm">On-Demand Role &amp; Plugin Provisioning</div>
+            <p className="text-slate-400 leading-relaxed">
+              Whenever you later need Kubernetes (<code className="font-mono text-slate-200">core-k3s</code>), OpenZFS NAS (<code className="font-mono text-slate-200">core-nas</code>), workstation shells (<code className="font-mono text-slate-200">cli-workstation</code>), or GNU Emacs/Rosenpass, enable or install them on demand from <strong>System &rarr; Plugins</strong> (<code className="font-mono text-emerald-300">/system/plugins</code>), <code className="font-mono text-emerald-300">/v1/system/plugins/action</code>, or <code className="font-mono text-emerald-300">axonwallctl plugin install &lt;id&gt;</code>. Plugins with SHA-256-verified bundled binaries self-stage into isolated <code className="font-mono text-slate-200">bin/</code> trees automatically.
+            </p>
+          </div>
         </div>
       </section>
 

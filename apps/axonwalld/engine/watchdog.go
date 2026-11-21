@@ -3,7 +3,9 @@ package engine
 import (
 	"bufio"
 	"bytes"
+	"encoding/csv"
 	"encoding/json"
+	"encoding/xml"
 	"fmt"
 	"log"
 	"net"
@@ -12,6 +14,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -58,25 +61,41 @@ type ZfsBootEnvironment struct {
 	SnapshotDetails []ZfsSnapshotDetail `json:"snapshotDetails,omitempty"`
 }
 
-// PartitionStatus details the state of the A/B dual-root, Rolling single-root, or ZFSBootMenu system and boot watchdog.
+// BtrfsSnapperSnapshot describes a Snapper-managed Btrfs root snapshot under /.snapshots/<ID>.
+type BtrfsSnapperSnapshot struct {
+	ID          int    `json:"id"`
+	Type        string `json:"type"` // "single", "pre", "post"
+	PreNum      int    `json:"preNum,omitempty"`
+	Date        string `json:"date"`
+	Description string `json:"description"`
+	Cleanup     string `json:"cleanup,omitempty"`
+	Important   bool   `json:"important,omitempty"`
+	Bootable    bool   `json:"bootable"`
+	Subvolume   string `json:"subvolume"`
+}
+
+// PartitionStatus details the state of the A/B dual-root, Rolling, ZFSBootMenu, or Btrfs + Snapper system and boot watchdog.
 type PartitionStatus struct {
-	InstallMode      string               `json:"installMode"`      // "ab", "rolling", or "zbm"
-	ActiveSlot       string               `json:"activeSlot"`       // "A" or "B" (or "ZBM")
-	InactiveSlot     string               `json:"inactiveSlot"`     // "B" or "A"
-	ActiveRootDevice string               `json:"activeRootDevice"` // e.g. "/dev/sda2" or "zroot/ROOT/axonwall-0.11.30"
-	BootCount        int                  `json:"bootCount"`        // Current boot attempt count
-	BootLimit        int                  `json:"bootLimit"`        // Maximum attempts before fallback
-	HealthVerified   bool                 `json:"healthVerified"`   // True once quorum passes and bootcount is cleared
-	LastVerifiedAt   time.Time            `json:"lastVerifiedAt"`   // Time verification finished
-	KernelVersion    string               `json:"kernelVersion"`    // Linux kernel release
-	OsVersion        string               `json:"osVersion"`        // OS release string
-	SlotAVersion     string               `json:"slotAVersion"`     // Installed OS version on Slot A / Active BE
-	SlotBVersion     string               `json:"slotBVersion"`     // Installed OS version on Slot B / Standby BE
-	Checks           []HealthCheckResult  `json:"checks"`
-	ZbmPoolName      string               `json:"zbmPoolName,omitempty"`
-	ZbmPoolTopology  string               `json:"zbmPoolTopology,omitempty"`
-	ZbmPoolHealth    string               `json:"zbmPoolHealth,omitempty"`
-	BootEnvironments []ZfsBootEnvironment `json:"bootEnvironments,omitempty"`
+	InstallMode      string                 `json:"installMode"`      // "ab", "rolling", "zbm", or "btrfs"
+	ActiveSlot       string                 `json:"activeSlot"`       // "A" or "B" (or "ZBM")
+	InactiveSlot     string                 `json:"inactiveSlot"`     // "B" or "A"
+	ActiveRootDevice string                 `json:"activeRootDevice"` // e.g. "/dev/sda2" or "zroot/ROOT/axonwall-0.11.30"
+	BootCount        int                    `json:"bootCount"`        // Current boot attempt count
+	BootLimit        int                    `json:"bootLimit"`        // Maximum attempts before fallback
+	HealthVerified   bool                   `json:"healthVerified"`   // True once quorum passes and bootcount is cleared
+	LastVerifiedAt   time.Time              `json:"lastVerifiedAt"`   // Time verification finished
+	KernelVersion    string                 `json:"kernelVersion"`    // Linux kernel release
+	OsVersion        string                 `json:"osVersion"`        // OS release string
+	SlotAVersion     string                 `json:"slotAVersion"`     // Installed OS version on Slot A / Active BE
+	SlotBVersion     string                 `json:"slotBVersion"`     // Installed OS version on Slot B / Standby BE
+	Checks           []HealthCheckResult    `json:"checks"`
+	ZbmPoolName      string                 `json:"zbmPoolName,omitempty"`
+	ZbmPoolTopology  string                 `json:"zbmPoolTopology,omitempty"`
+	ZbmPoolHealth    string                 `json:"zbmPoolHealth,omitempty"`
+	BootEnvironments []ZfsBootEnvironment   `json:"bootEnvironments,omitempty"`
+	BtrfsLabel       string                 `json:"btrfsLabel,omitempty"`
+	BtrfsTopology    string                 `json:"btrfsTopology,omitempty"`
+	BtrfsSnapshots   []BtrfsSnapperSnapshot `json:"btrfsSnapshots,omitempty"`
 }
 
 type PersistedSlotVersions struct {
@@ -103,6 +122,10 @@ type WatchdogEngine struct {
 	readInstalledVer    func() string
 	runZfsCmd           func(args ...string) ([]byte, error)
 	runZpoolCmd         func(args ...string) ([]byte, error)
+	runSnapperCmd       func(args ...string) ([]byte, error)
+	runBtrfsCmd         func(args ...string) ([]byte, error)
+	runBtrfsGrubCmd     func(args ...string) ([]byte, error)
+	snapshotsDir        string
 }
 
 // NewWatchdogEngine initializes the A/B system watchdog engine with default paths.
@@ -122,6 +145,7 @@ func NewWatchdogEngineCustom(grubenvPath string, cmdlinePath string) *WatchdogEn
 		slotVersionsPath: slotVersionsPath,
 		stopChan:         make(chan struct{}),
 		updaterPaths:     []string{"/usr/local/bin/axonwall-update", "/usr/sbin/axonwall-update"},
+		snapshotsDir:     "/.snapshots",
 	}
 	we.checkInterfaces = we.verifyInterfaces
 	we.checkNftables = we.verifyNftables
@@ -133,6 +157,15 @@ func NewWatchdogEngineCustom(grubenvPath string, cmdlinePath string) *WatchdogEn
 	}
 	we.runZpoolCmd = func(args ...string) ([]byte, error) {
 		return exec.Command("zpool", args...).CombinedOutput()
+	}
+	we.runSnapperCmd = func(args ...string) ([]byte, error) {
+		return exec.Command("snapper", args...).CombinedOutput()
+	}
+	we.runBtrfsCmd = func(args ...string) ([]byte, error) {
+		return exec.Command("btrfs", args...).CombinedOutput()
+	}
+	we.runBtrfsGrubCmd = func(args ...string) ([]byte, error) {
+		return exec.Command("/usr/local/bin/axonwall-btrfs-grub", args...).CombinedOutput()
 	}
 	we.detectInitialState()
 	return we
@@ -409,6 +442,9 @@ func detectInstallModeCustom(cmdlinePath string) string {
 			if strings.Contains(content, "zbm") || strings.Contains(content, "zfsbootmenu") {
 				return "zbm"
 			}
+			if strings.Contains(content, "btrfs") || strings.Contains(content, "snapper") {
+				return "btrfs"
+			}
 			if strings.Contains(content, "rolling") {
 				return "rolling"
 			}
@@ -421,6 +457,9 @@ func detectInstallModeCustom(cmdlinePath string) string {
 		cmdline := string(cmdlineBytes)
 		if strings.Contains(cmdline, "zfs=") || strings.Contains(cmdline, "zroot/ROOT") || strings.Contains(cmdline, "boot=zfs") {
 			return "zbm"
+		}
+		if strings.Contains(cmdline, "axon_btrfs") || strings.Contains(cmdline, "rootfstype=btrfs") || strings.Contains(cmdline, "subvol=@") {
+			return "btrfs"
 		}
 		if strings.Contains(cmdline, "rolling") {
 			return "rolling"
@@ -438,6 +477,9 @@ func detectInstallModeCustom(cmdlinePath string) string {
 			if len(fields) >= 3 && fields[1] == "/" {
 				if fields[2] == "zfs" || strings.Contains(fields[0], "zroot/ROOT") {
 					return "zbm"
+				}
+				if fields[2] == "btrfs" {
+					return "btrfs"
 				}
 				break
 			}
@@ -469,6 +511,10 @@ func (we *WatchdogEngine) detectInitialState() {
 	} else if installMode == "zbm" {
 		activeSlot = "A"
 		inactiveSlot = "B"
+	} else if installMode == "btrfs" {
+		activeSlot = "A"
+		inactiveSlot = "A"
+		rootDevice = "/dev/disk/by-label/axon_btrfs"
 	}
 
 	// 2. Read boot-counting parameters
@@ -489,6 +535,8 @@ func (we *WatchdogEngine) detectInitialState() {
 				bootLimit = l
 			}
 		}
+	} else if installMode == "btrfs" {
+		bootCount = 0
 	} else {
 		grubEnv := we.readGrubEnvInternal()
 		if val, ok := grubEnv["bootcount"]; ok {
@@ -525,10 +573,22 @@ func (we *WatchdogEngine) detectInitialState() {
 
 	var zbmPoolName, zbmPoolTopology, zbmPoolHealth string
 	var bootEnvironments []ZfsBootEnvironment
+	var btrfsLabel, btrfsTopology string
+	var btrfsSnapshots []BtrfsSnapperSnapshot
 
 	if installMode == "rolling" {
 		slotAVer = appVer
 		slotBVer = "Rolling (Single-Root)"
+	} else if installMode == "btrfs" {
+		btrfsLabel = "axon_btrfs"
+		btrfsTopology = we.detectBtrfsTopologyLocked()
+		btrfsSnapshots = we.listBtrfsSnapshotsLocked()
+		slotAVer = appVer
+		if len(btrfsSnapshots) > 0 {
+			slotBVer = fmt.Sprintf("Snapper #%d", btrfsSnapshots[0].ID)
+		} else if slotBVer == "" {
+			slotBVer = "Btrfs + Snapper"
+		}
 	} else if installMode == "zbm" {
 		zbmPoolName = "zroot"
 		// E2-9: topology/health deliberately stay empty when the
@@ -595,6 +655,8 @@ func (we *WatchdogEngine) detectInitialState() {
 		osVer = fmt.Sprintf("Axonwall OS v%s (Rolling)", activeVer)
 	} else if installMode == "zbm" {
 		osVer = fmt.Sprintf("Axonwall OS v%s (Root-on-ZFS)", activeVer)
+	} else if installMode == "btrfs" {
+		osVer = fmt.Sprintf("Axonwall OS v%s (Btrfs + Snapper)", activeVer)
 	}
 
 	we.status = PartitionStatus{
@@ -614,6 +676,9 @@ func (we *WatchdogEngine) detectInitialState() {
 		ZbmPoolTopology:  zbmPoolTopology,
 		ZbmPoolHealth:    zbmPoolHealth,
 		BootEnvironments: bootEnvironments,
+		BtrfsLabel:       btrfsLabel,
+		BtrfsTopology:    btrfsTopology,
+		BtrfsSnapshots:   btrfsSnapshots,
 	}
 	we.saveSlotVersionsLocked()
 }
@@ -711,6 +776,26 @@ func (we *WatchdogEngine) GetStatus() PartitionStatus {
 		we.status.SlotAVersion = appVer
 		we.status.SlotBVersion = "Rolling (Single-Root)"
 		we.status.OsVersion = fmt.Sprintf("Axonwall OS v%s (Rolling)", appVer)
+		return we.status
+	} else if we.status.InstallMode == "btrfs" {
+		we.status.ActiveSlot = "A"
+		we.status.InactiveSlot = "A"
+		we.status.BtrfsLabel = "axon_btrfs"
+		if top := we.detectBtrfsTopologyLocked(); top != "" {
+			we.status.BtrfsTopology = top
+		}
+		snaps := we.listBtrfsSnapshotsLocked()
+		if len(snaps) > 0 {
+			we.status.BtrfsSnapshots = snaps
+			we.status.SlotBVersion = fmt.Sprintf("Snapper #%d", snaps[0].ID)
+		} else {
+			we.status.BtrfsSnapshots = nil
+			if we.status.SlotBVersion == "" {
+				we.status.SlotBVersion = "Btrfs + Snapper"
+			}
+		}
+		we.status.SlotAVersion = appVer
+		we.status.OsVersion = fmt.Sprintf("Axonwall OS v%s (Btrfs + Snapper)", appVer)
 		return we.status
 	} else if we.status.InstallMode == "zbm" {
 		we.status.ActiveSlot = "A"
@@ -1458,6 +1543,10 @@ func (we *WatchdogEngine) runVerificationSequence() {
 					_, _ = we.runZfsCmd("set", "org.axonwall:active_be="+activeBe, "zroot/ROOT")
 				}
 			}
+		} else if we.status.InstallMode == "btrfs" {
+			// GRUB save_env fails with "sparse file not allowed" on Btrfs, so grubenv is disabled.
+			commitOK = true
+			log.Printf("[Watchdog] Health quorum verified on Btrfs + Snapper root subvolume @.")
 		} else {
 			// Reset bootcount in GRUB environment
 			if err := we.writeGrubEnvKey("bootcount", "0"); err != nil {
@@ -1743,6 +1832,9 @@ func (we *WatchdogEngine) TriggerRollback() error {
 	if mode == "rolling" {
 		return fmt.Errorf("A/B partition rollback is not available on Rolling Single-Root installations")
 	}
+	if mode == "btrfs" {
+		return fmt.Errorf("A/B slot rollback is not used on Btrfs + Snapper; select a Snapper snapshot in /system/updates or run 'axonwall-btrfs-grub rollback <snapshot-id>'")
+	}
 
 	if mode == "zbm" {
 		fallbackOut, err := we.runZfsCmd("get", "-H", "-o", "value", "org.axonwall:fallback_be", "zroot/ROOT")
@@ -1839,6 +1931,9 @@ func (we *WatchdogEngine) ActivateSlot(targetSlot string) error {
 	if mode == "rolling" {
 		return fmt.Errorf("A/B partition slot switching is not available on Rolling Single-Root installations")
 	}
+	if mode == "btrfs" {
+		return fmt.Errorf("A/B partition slot switching is not available on Btrfs + Snapper installations; select a Snapper snapshot to roll back")
+	}
 
 	if mode == "zbm" {
 		targetBE := strings.TrimSpace(targetSlot)
@@ -1916,10 +2011,12 @@ func (we *WatchdogEngine) ApplyFirmwareUpdate(targetSlot, targetVersion string) 
 	we.mu.RLock()
 	currMode := we.status.InstallMode
 	we.mu.RUnlock()
-	isZbm := currMode == "zbm" || detectInstallModeCustom(we.cmdlinePath) == "zbm"
-	isRolling := currMode == "rolling" || detectInstallModeCustom(we.cmdlinePath) == "rolling"
+	detectedMode := detectInstallModeCustom(we.cmdlinePath)
+	isZbm := currMode == "zbm" || detectedMode == "zbm"
+	isBtrfs := !isZbm && (currMode == "btrfs" || detectedMode == "btrfs")
+	isRolling := !isZbm && !isBtrfs && (currMode == "rolling" || detectedMode == "rolling")
 	targetSlot = strings.ToUpper(strings.TrimSpace(targetSlot))
-	if isRolling {
+	if isRolling || isBtrfs {
 		targetSlot = "A"
 	} else if isZbm {
 		targetSlot = "B"
@@ -1946,6 +2043,8 @@ func (we *WatchdogEngine) ApplyFirmwareUpdate(targetSlot, targetVersion string) 
 		var cmd *exec.Cmd
 		if isZbm {
 			cmd = exec.Command(up, "--zbm", "--version", targetVersion)
+		} else if isBtrfs {
+			cmd = exec.Command(up, "--btrfs", "--version", targetVersion)
 		} else if isRolling {
 			cmd = exec.Command(up, "--rolling", "--version", targetVersion)
 		} else {
@@ -1955,7 +2054,7 @@ func (we *WatchdogEngine) ApplyFirmwareUpdate(targetSlot, targetVersion string) 
 		if err != nil {
 			return "", fmt.Errorf("axonwall-update failed for slot %s (v%s): %v: %s", targetSlot, targetVersion, err, strings.TrimSpace(string(out)))
 		}
-		log.Printf("[Watchdog] axonwall-update completed for Slot %s (v%s, rolling=%v, zbm=%v)", targetSlot, targetVersion, isRolling, isZbm)
+		log.Printf("[Watchdog] axonwall-update completed for Slot %s (v%s, rolling=%v, zbm=%v, btrfs=%v)", targetSlot, targetVersion, isRolling, isZbm, isBtrfs)
 		break
 	}
 	if !updaterFound {
@@ -1964,6 +2063,23 @@ func (we *WatchdogEngine) ApplyFirmwareUpdate(targetSlot, targetVersion string) 
 
 	we.mu.Lock()
 	defer we.mu.Unlock()
+
+	if isBtrfs {
+		we.status.InstallMode = "btrfs"
+		we.status.SlotAVersion = targetVersion
+		we.status.BtrfsSnapshots = we.listBtrfsSnapshotsLocked()
+		if len(we.status.BtrfsSnapshots) > 0 {
+			we.status.SlotBVersion = fmt.Sprintf("Snapper #%d", we.status.BtrfsSnapshots[0].ID)
+		} else {
+			we.status.SlotBVersion = "Btrfs + Snapper"
+		}
+		we.saveSlotVersionsLocked()
+		if err := os.MkdirAll("/etc/axonwall", 0770); err == nil {
+			_ = os.WriteFile("/etc/axonwall/version", []byte(targetVersion+"\n"), 0644)
+		}
+		we.status.OsVersion = fmt.Sprintf("Axonwall OS v%s (Btrfs + Snapper)", targetVersion)
+		return fmt.Sprintf("Axonwall v%s updated in-place on Btrfs @ subvolume with pre/post Snapper snapshots.", targetVersion), nil
+	}
 
 	if isRolling {
 		we.status.InstallMode = "rolling"
@@ -2168,4 +2284,305 @@ func writeGrubEnvKeyAtPath(envPath string, currentEnv map[string]string, key, va
 	// Ensure parent dir exists
 	_ = os.MkdirAll(filepath.Dir(envPath), 0755)
 	return os.WriteFile(envPath, buf.Bytes(), 0644)
+}
+
+type snapperInfoXML struct {
+	Type        string `xml:"type"`
+	Num         int    `xml:"num"`
+	PreNum      int    `xml:"pre_num"`
+	Date        string `xml:"date"`
+	Cleanup     string `xml:"cleanup"`
+	Description string `xml:"description"`
+	Userdata    []struct {
+		Key   string `xml:"key"`
+		Value string `xml:"value"`
+	} `xml:"userdata"`
+}
+
+func (we *WatchdogEngine) getSnapshotsDir() string {
+	if we.snapshotsDir != "" {
+		return we.snapshotsDir
+	}
+	return "/.snapshots"
+}
+
+func snapshotBootable(snapshotsDir string, id int) bool {
+	bootDir := filepath.Join(snapshotsDir, strconv.Itoa(id), "snapshot", "boot")
+	if _, err := os.Stat(filepath.Join(bootDir, "vmlinuz")); err == nil {
+		return true
+	}
+	entries, err := os.ReadDir(bootDir)
+	if err != nil {
+		return false
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), "vmlinuz-") && !strings.HasSuffix(entry.Name(), ".old") {
+			return true
+		}
+	}
+	return false
+}
+
+func (we *WatchdogEngine) detectBtrfsTopologyLocked() string {
+	if we.runBtrfsCmd == nil {
+		return ""
+	}
+	out, err := we.runBtrfsCmd("filesystem", "df", "/")
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		trim := strings.TrimSpace(line)
+		if !strings.HasPrefix(trim, "Data,") {
+			continue
+		}
+		colonIdx := strings.IndexByte(trim, ':')
+		if colonIdx <= 5 {
+			continue
+		}
+		profile := strings.TrimSpace(trim[5:colonIdx])
+		if profile != "" {
+			return strings.ToLower(profile)
+		}
+	}
+	return ""
+}
+
+// ListBtrfsSnapshots enumerates live Snapper snapshots from the snapper CLI, falling back to info.xml files.
+func (we *WatchdogEngine) ListBtrfsSnapshots() ([]BtrfsSnapperSnapshot, error) {
+	we.mu.Lock()
+	defer we.mu.Unlock()
+	snaps := we.listBtrfsSnapshotsLocked()
+	we.status.BtrfsSnapshots = snaps
+	return snaps, nil
+}
+
+func (we *WatchdogEngine) listBtrfsSnapshotsLocked() []BtrfsSnapperSnapshot {
+	snapDir := we.getSnapshotsDir()
+	var results []BtrfsSnapperSnapshot
+
+	if we.runSnapperCmd != nil {
+		if out, err := we.runSnapperCmd("-c", "root", "--csvout", "list", "--columns", "number,type,pre-number,date,cleanup,description,userdata"); err == nil {
+			r := csv.NewReader(bytes.NewReader(out))
+			r.FieldsPerRecord = -1
+			if records, csvErr := r.ReadAll(); csvErr == nil {
+				for _, rec := range records {
+					if len(rec) < 6 {
+						continue
+					}
+					id, numErr := strconv.Atoi(strings.TrimSpace(rec[0]))
+					if numErr != nil || id <= 0 {
+						continue
+					}
+					preNum, _ := strconv.Atoi(strings.TrimSpace(rec[2]))
+					important := false
+					if len(rec) >= 7 {
+						important = strings.Contains(strings.ToLower(rec[6]), "important=yes")
+					}
+					results = append(results, BtrfsSnapperSnapshot{
+						ID:          id,
+						Type:        strings.TrimSpace(rec[1]),
+						PreNum:      preNum,
+						Date:        strings.TrimSpace(rec[3]),
+						Cleanup:     strings.TrimSpace(rec[4]),
+						Description: strings.TrimSpace(rec[5]),
+						Important:   important,
+						Bootable:    snapshotBootable(snapDir, id),
+						Subvolume:   fmt.Sprintf("@snapshots/%d/snapshot", id),
+					})
+				}
+			}
+		}
+	}
+
+	if len(results) == 0 {
+		entries, err := os.ReadDir(snapDir)
+		if err == nil {
+			for _, ent := range entries {
+				if !ent.IsDir() {
+					continue
+				}
+				id, numErr := strconv.Atoi(ent.Name())
+				if numErr != nil || id <= 0 {
+					continue
+				}
+				xmlBytes, readErr := os.ReadFile(filepath.Join(snapDir, ent.Name(), "info.xml"))
+				if readErr != nil {
+					continue
+				}
+				var parsed snapperInfoXML
+				if xmlErr := xml.Unmarshal(xmlBytes, &parsed); xmlErr != nil {
+					continue
+				}
+				if parsed.Num > 0 {
+					id = parsed.Num
+				}
+				important := false
+				for _, ud := range parsed.Userdata {
+					if strings.EqualFold(strings.TrimSpace(ud.Key), "important") && strings.EqualFold(strings.TrimSpace(ud.Value), "yes") {
+						important = true
+					}
+				}
+				results = append(results, BtrfsSnapperSnapshot{
+					ID:          id,
+					Type:        strings.TrimSpace(parsed.Type),
+					PreNum:      parsed.PreNum,
+					Date:        strings.TrimSpace(parsed.Date),
+					Cleanup:     strings.TrimSpace(parsed.Cleanup),
+					Description: strings.TrimSpace(parsed.Description),
+					Important:   important,
+					Bootable:    snapshotBootable(snapDir, id),
+					Subvolume:   fmt.Sprintf("@snapshots/%d/snapshot", id),
+				})
+			}
+		}
+	}
+
+	sort.Slice(results, func(i, j int) bool {
+		return results[i].ID > results[j].ID
+	})
+	return results
+}
+
+func sanitizeSnapshotDescription(raw string) string {
+	var b strings.Builder
+	for _, r := range raw {
+		if r == '\r' || r == '\n' || r == '\t' || r < 32 {
+			b.WriteByte(' ')
+			continue
+		}
+		b.WriteRune(r)
+	}
+	clean := strings.TrimSpace(b.String())
+	if len(clean) > 120 {
+		clean = strings.TrimSpace(clean[:120])
+	}
+	if clean == "" {
+		return "Manual snapshot"
+	}
+	return clean
+}
+
+// CreateBtrfsSnapshot creates a read-only Btrfs Snapper snapshot of / and refreshes the GRUB snapshot menu.
+func (we *WatchdogEngine) CreateBtrfsSnapshot(description string, important bool) (int, error) {
+	desc := sanitizeSnapshotDescription(description)
+	snapID := 0
+
+	if we.runSnapperCmd != nil {
+		args := []string{"-c", "root", "create", "--type", "single", "--print-number", "--cleanup-algorithm", "number", "--description", desc}
+		if important {
+			args = append(args, "--userdata", "important=yes")
+		}
+		if out, err := we.runSnapperCmd(args...); err == nil {
+			if id, pErr := strconv.Atoi(strings.TrimSpace(string(out))); pErr == nil && id > 0 {
+				snapID = id
+			}
+		}
+	}
+
+	if snapID == 0 {
+		if we.runBtrfsGrubCmd == nil {
+			return 0, fmt.Errorf("neither snapper nor axonwall-btrfs-grub created snapshot")
+		}
+		args := []string{"create-snapshot", "--type", "single", "--description", desc}
+		if important {
+			args = append(args, "--important")
+		}
+		out, err := we.runBtrfsGrubCmd(args...)
+		if err != nil {
+			return 0, fmt.Errorf("create btrfs snapshot failed: %v (%s)", err, strings.TrimSpace(string(out)))
+		}
+		lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+		id, pErr := strconv.Atoi(strings.TrimSpace(lines[len(lines)-1]))
+		if pErr != nil || id <= 0 {
+			return 0, fmt.Errorf("create btrfs snapshot returned invalid ID: %q", strings.TrimSpace(string(out)))
+		}
+		snapID = id
+	}
+
+	if we.runBtrfsGrubCmd != nil {
+		if out, err := we.runBtrfsGrubCmd("sync"); err != nil {
+			log.Printf("[Watchdog] Warning: failed to refresh /boot/grub/btrfs-snapshots.cfg: %v (%s)", err, strings.TrimSpace(string(out)))
+		}
+	}
+
+	we.mu.Lock()
+	we.status.BtrfsSnapshots = we.listBtrfsSnapshotsLocked()
+	we.mu.Unlock()
+	return snapID, nil
+}
+
+// DeleteBtrfsSnapshot removes a Snapper snapshot by numeric ID and refreshes the GRUB snapshot menu.
+func (we *WatchdogEngine) DeleteBtrfsSnapshot(id int) error {
+	if id < 1 {
+		return fmt.Errorf("invalid snapshot ID %d: must be >= 1", id)
+	}
+	deleted := false
+	var lastErr error
+	if we.runSnapperCmd != nil {
+		out, err := we.runSnapperCmd("-c", "root", "delete", "--sync", strconv.Itoa(id))
+		if err == nil {
+			deleted = true
+		} else {
+			lastErr = fmt.Errorf("snapper delete failed: %v (%s)", err, strings.TrimSpace(string(out)))
+		}
+	}
+	if !deleted {
+		snapDir := we.getSnapshotsDir()
+		entryDir := filepath.Join(snapDir, strconv.Itoa(id))
+		subvolPath := filepath.Join(entryDir, "snapshot")
+		if we.runBtrfsCmd != nil {
+			if out, err := we.runBtrfsCmd("subvolume", "delete", subvolPath); err != nil {
+				if lastErr != nil {
+					return fmt.Errorf("%v; fallback btrfs delete failed: %v (%s)", lastErr, err, strings.TrimSpace(string(out)))
+				}
+				return fmt.Errorf("btrfs subvolume delete failed: %v (%s)", err, strings.TrimSpace(string(out)))
+			}
+		}
+		if err := os.RemoveAll(entryDir); err != nil {
+			return fmt.Errorf("failed removing snapshot directory %s: %w", entryDir, err)
+		}
+	}
+
+	if we.runBtrfsGrubCmd != nil {
+		if out, err := we.runBtrfsGrubCmd("sync"); err != nil {
+			log.Printf("[Watchdog] Warning: failed to refresh /boot/grub/btrfs-snapshots.cfg after delete: %v (%s)", err, strings.TrimSpace(string(out)))
+		}
+	}
+
+	we.mu.Lock()
+	we.status.BtrfsSnapshots = we.listBtrfsSnapshotsLocked()
+	we.mu.Unlock()
+	return nil
+}
+
+// RollbackBtrfsSnapshot atomically promotes @snapshots/<id>/snapshot to @ for next reboot.
+func (we *WatchdogEngine) RollbackBtrfsSnapshot(id int) (string, error) {
+	if id < 1 {
+		return "", fmt.Errorf("invalid snapshot ID %d: must be >= 1", id)
+	}
+	if we.runBtrfsGrubCmd == nil {
+		return "", fmt.Errorf("axonwall-btrfs-grub runner is not configured")
+	}
+	out, err := we.runBtrfsGrubCmd("rollback", strconv.Itoa(id))
+	if err != nil {
+		return "", fmt.Errorf("btrfs rollback #%d failed: %v (%s)", id, err, strings.TrimSpace(string(out)))
+	}
+	msg := strings.TrimSpace(string(out))
+	if msg == "" {
+		msg = fmt.Sprintf("Rolled back @ to Snapshot #%d. Reboot to activate restored root subvolume.", id)
+	}
+	return msg, nil
+}
+
+// SyncBtrfsGrubMenu regenerates /boot/grub/btrfs-snapshots.cfg from current snapshots.
+func (we *WatchdogEngine) SyncBtrfsGrubMenu() error {
+	if we.runBtrfsGrubCmd == nil {
+		return fmt.Errorf("axonwall-btrfs-grub runner is not configured")
+	}
+	out, err := we.runBtrfsGrubCmd("sync")
+	if err != nil {
+		return fmt.Errorf("axonwall-btrfs-grub sync failed: %v (%s)", err, strings.TrimSpace(string(out)))
+	}
+	return nil
 }

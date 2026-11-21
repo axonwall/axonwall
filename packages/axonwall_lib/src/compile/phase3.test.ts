@@ -221,7 +221,7 @@ describe('Phase 3: ACME Client & CrowdSec Integration', () => {
     });
 
     expect(res.renewScript).toContain('certbot certonly --webroot -w /var/www/acme-challenge');
-    expect(res.renewScript).toContain('-d gw.axonwall.net -d vpn.axonwall.net');
+    expect(res.renewScript).toContain("-d 'gw.axonwall.net' -d 'vpn.axonwall.net'");
     expect(res.hookScripts.webgui).toContain('systemctl reload-or-restart axonwall');
     expect(res.hookScripts.openvpn).toContain('systemctl reload-or-restart openvpn');
   });

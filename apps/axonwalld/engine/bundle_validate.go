@@ -59,6 +59,11 @@ var smbDeniedDirectives = map[string]bool{
 	"usernamemapscript": true,
 	"shutdownscript": true, "abortshutdownscript": true,
 	"logonscript": true, "magicscript": true,
+	"preloadmodules": true, "winshook": true,
+	"renameuserscript": true, "deleteuserfromgroupscript": true,
+	"logfile": true, "privatedir": true, "statedirectory": true,
+	"cachedirectory": true, "lockdirectory": true, "piddirectory": true,
+	"configbackend": true, "usernamemap": true,
 }
 
 func normalizeSmbKey(raw string) string {
@@ -440,14 +445,8 @@ func walkManifestWithCtx(node any, ctx manifestWalkCtx) error {
 							// 1. Cilium eBPF CNI HelmChart from https://helm.cilium.io/
 							// 2. In-house Vigilante modular SOC HelmCharts from https://charts.vigilante.local
 							specMap, _ := v["spec"].(map[string]any)
-							repo := strings.TrimSpace(fmt.Sprintf("%v", specMap["repo"]))
-							chart := strings.TrimSpace(fmt.Sprintf("%v", specMap["chart"]))
-
-							isCilium := repo == "https://helm.cilium.io/" && chart == "cilium"
-							isVigilante := repo == "https://charts.vigilante.local" && chart != ""
-
-							if !isCilium && !isVigilante {
-								return fmt.Errorf("k3s manifest: untrusted HelmChart (%s / %s) is not permitted in a bundle", repo, chart)
+							if err := validateAllowedHelmChartSpec(specMap); err != nil {
+								return err
 							}
 						} else if k3sDeniedManifestKinds[kLower] {
 							return fmt.Errorf("k3s manifest: resource kind %q is not permitted in a bundle", kStr)
@@ -491,6 +490,66 @@ func walkManifestWithCtx(node any, ctx manifestWalkCtx) error {
 		for _, item := range v {
 			if err := walkManifestWithCtx(item, ctx); err != nil {
 				return err
+			}
+		}
+	}
+	return nil
+}
+
+var helmChartAllowedSpecKeys = map[string]bool{
+	"chart":           true,
+	"repo":            true,
+	"version":         true,
+	"targetNamespace": true,
+	"createNamespace": true,
+	"set":             true,
+	"valuesContent":   true,
+	"values":          true,
+	"repoCA":          true,
+	"helmVersion":     true,
+	"timeout":         true,
+	"failurePolicy":   true,
+	"backOffLimit":    true,
+}
+
+func validateAllowedHelmChartSpec(specMap map[string]any) error {
+	if specMap == nil {
+		return fmt.Errorf("k3s manifest: HelmChart missing spec")
+	}
+	for k := range specMap {
+		if !helmChartAllowedSpecKeys[k] {
+			return fmt.Errorf("k3s manifest: HelmChart spec.%s is not permitted in a bundle", k)
+		}
+	}
+	repo, _ := specMap["repo"].(string)
+	chart, _ := specMap["chart"].(string)
+	repo = strings.TrimSpace(repo)
+	chart = strings.TrimSpace(chart)
+
+	isCilium := repo == "https://helm.cilium.io/" && chart == "cilium"
+	isVigilante := repo == "https://charts.vigilante.local" && chart != ""
+	if !isCilium && !isVigilante {
+		return fmt.Errorf("k3s manifest: untrusted HelmChart (%s / %s) is not permitted in a bundle", repo, chart)
+	}
+	if vcRaw, ok := specMap["valuesContent"]; ok && vcRaw != nil {
+		vcStr, ok := vcRaw.(string)
+		if !ok {
+			return fmt.Errorf("k3s manifest: HelmChart spec.valuesContent must be a string")
+		}
+		dec := yaml.NewDecoder(strings.NewReader(vcStr))
+		for {
+			var doc any
+			err := dec.Decode(&doc)
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			if err != nil {
+				return fmt.Errorf("k3s manifest: HelmChart spec.valuesContent does not parse: %w", err)
+			}
+			if doc != nil {
+				if err := walkManifestWithCtx(doc, manifestWalkCtx{inHelmValues: true}); err != nil {
+					return err
+				}
 			}
 		}
 	}

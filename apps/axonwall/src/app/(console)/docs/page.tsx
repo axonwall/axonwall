@@ -28,7 +28,7 @@ import { CodeBlock } from './components/CodeBlock';
 export const metadata = {
   title: 'Axonwall Documentation | Overview & Quickstart',
   description:
-    'Comprehensive documentation for Axonwall v0.11.71: Linux 6.12 LTS nftables firewall, Super-Slim Edge NGFW UEFI UKI, Blackbox eBPF Threat-LLM Harvester, Custom Hardened Kernels, ZFSBootMenu Root-on-ZFS, KVM/LXC Hypervisor, Vigilante Autonomous SOC, Eluvix Sovereign AI Router & DLP, 2-Host High Availability, Ghost-in-the-Ring rootkit hunter, and Post-Quantum Rosenpass VPN.',
+    'Comprehensive documentation for Axonwall v0.13.0: Linux 6.12 LTS nftables firewall, Super-Slim Edge NGFW UEFI UKI, Blackbox eBPF Threat-LLM Harvester, Custom Hardened Kernels, ZFSBootMenu & Btrfs + Snapper Root, Minimal Edition, Bundled-Binary Plugins, KVM/LXC Hypervisor, Browser K9s, Vigilante Autonomous SOC, Eluvix Sovereign AI Router & DLP, 2-Host High Availability, Ghost-in-the-Ring rootkit hunter, and Post-Quantum Rosenpass VPN.',
 };
 
 export default function DocsOverviewPage() {
@@ -38,7 +38,7 @@ export default function DocsOverviewPage() {
       <div className="space-y-4 border-b border-slate-800/80 pb-8">
         <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-950/60 border border-emerald-500/30 text-emerald-400 text-xs font-semibold">
           <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-          Documentation Portal • v0.11.71
+          Documentation Portal • v0.13.0
         </div>
         <h1 className="text-3xl sm:text-5xl font-extrabold text-white tracking-tight">
           Axonwall Documentation
@@ -239,12 +239,12 @@ export default function DocsOverviewPage() {
             <div className="flex items-center justify-between mb-2">
               <div className="flex items-center gap-2.5 font-bold text-white text-base">
                 <Cpu className="w-4 h-4 text-emerald-400" />
-                <span>Modular Core Roles (5 Core Roles + 15 Plugins)</span>
+                <span>Modular Core Roles (5 Core Roles + 18 Plugins)</span>
               </div>
               <ArrowRight className="w-4 h-4 text-slate-500 group-hover:text-emerald-400 transition transform group-hover:translate-x-1" />
             </div>
             <p className="text-xs text-slate-400 leading-relaxed">
-              Compose all 5 Core Roles (core-firewall, core-nas, core-k3s, core-virt, core-vigilante) and 15 sandboxed extension plugins—from pure Host-Mode ZFS NAS to hyper-converged bare metal.
+              Compose all 5 Core Roles (core-firewall, core-nas, core-k3s, core-virt, core-vigilante) and 18 sandboxed extension plugins (with SHA-256 bundled binaries and Minimal on-demand installation)—from pure Host-Mode ZFS NAS to hyper-converged bare metal.
             </p>
           </Link>
 
@@ -319,12 +319,12 @@ export default function DocsOverviewPage() {
             <div className="flex items-center justify-between mb-2">
               <div className="flex items-center gap-2.5 font-bold text-white text-base">
                 <Download className="w-4 h-4 text-emerald-400" />
-                <span>Multi-Disk RAID &amp; ZFSBootMenu Install</span>
+                <span>Multi-Disk RAID, Btrfs &amp; ZFSBootMenu Install</span>
               </div>
               <ArrowRight className="w-4 h-4 text-slate-500 group-hover:text-emerald-400 transition transform group-hover:translate-x-1" />
             </div>
             <p className="text-xs text-slate-400 leading-relaxed">
-              Choose between ZFSBootMenu v3.1.x Root-on-ZFS Boot Environments (Stripe/Mirror/RAID-Z/dRAID), mdadm RAID-1 A/B Dual-Root slots, or Standard Single-Root rolling Linux mode.
+              Choose between ZFSBootMenu v3.1.x Root-on-ZFS Boot Environments, in-kernel Btrfs + Snapper Root (single-disk or native RAID-1), mdadm RAID-1 A/B Dual-Root slots, or Standard Single-Root rolling Linux mode.
             </p>
           </Link>
 
@@ -466,11 +466,12 @@ export default function DocsOverviewPage() {
         <p className="text-sm text-slate-300 leading-relaxed">
           Axonwall can be installed as bare-metal appliance firmware via bootable UEFI/BIOS ISO (available in both{' '}
           <strong>Debian 13 Trixie</strong> and lightweight <strong>Alpine Linux</strong> flavors—with all{' '}
-          <strong>three appliance editions</strong> unified directly inside{' '}
+          <strong>four appliance editions</strong> unified directly inside{' '}
           <code className="text-emerald-400 font-mono">axonwall-debian13-amd64.iso</code> and selectable from the
           bootloader menu or installer TUI as <code className="text-slate-200 font-mono">axonwall</code> (Converged NGFW),{' '}
+          <code className="text-amber-300 font-mono">minimal</code> (Reduced Attack Surface),{' '}
           <code className="text-slate-200 font-mono">vault</code> (Immutable S3 Backup), or{' '}
-          <code className="text-slate-200 font-mono">k3s-storage</code> (Barebones K3s + OpenZFS/OpenEBS Storage Host)),
+          <code className="text-cyan-300 font-mono">k3s-storage</code> (Barebones K3s + OpenZFS/OpenEBS Storage Host)),
           deployed inside virtualization platforms (Proxmox VE, KVM, ESXi), or installed on existing Debian/Ubuntu systems via{' '}
           <code className="text-emerald-400 font-mono">.deb</code>.
         </p>
@@ -484,19 +485,20 @@ export default function DocsOverviewPage() {
           <CodeBlock
             title="Flash ISO to USB Drive & Verify SHA-256"
             language="bash"
-            code={`# Download and verify the unified v0.11.68 Debian 13 (NGFW, Vault & K3s-Storage) ISO
-wget https://github.com/axonwall/axonwall/releases/download/v0.11.68/axonwall-debian13-amd64.iso
-wget https://github.com/axonwall/axonwall/releases/download/v0.11.68/axonwall-debian13-amd64.iso.sha256
+            code={`# Download and verify the unified v0.13.0 Debian 13 (NGFW, Minimal, Vault & K3s-Storage) ISO
+wget https://github.com/axonwall/axonwall/releases/download/v0.13.0/axonwall-debian13-amd64.iso
+wget https://github.com/axonwall/axonwall/releases/download/v0.13.0/axonwall-debian13-amd64.iso.sha256
 sha256sum -c axonwall-debian13-amd64.iso.sha256
 
 # Replace /dev/sdX with your destination USB drive
 sudo dd if=axonwall-debian13-amd64.iso of=/dev/sdX bs=4M status=progress conv=fsync`}
           />
-          <Callout type="tip" title="Three Editions & Three Partitioning Modes: A/B Dual-Root, ZFSBootMenu (ZBM), or Rolling Single-Root">
+          <Callout type="tip" title="Four Editions & Four Partitioning Modes: A/B Dual-Root, ZFSBootMenu (ZBM), Btrfs + Snapper, or Rolling Single-Root">
             During installation (or via <code className="font-mono">--unattended</code> / <code className="font-mono">cloud-init</code> preseed / GRUB &amp; ISOLINUX boot menu), select the{' '}
             <code className="text-emerald-300 font-mono">axonwall</code> Converged NGFW edition, the{' '}
+            <code className="text-amber-300 font-mono">minimal</code> Reduced Attack Surface edition, the{' '}
             <code className="text-emerald-300 font-mono">vault</code> Immutable S3 Backup edition, or the{' '}
-            <code className="text-cyan-300 font-mono">k3s-storage</code> Barebones K3s + OpenZFS/OpenEBS Storage Host edition, and choose between three
+            <code className="text-cyan-300 font-mono">k3s-storage</code> Barebones K3s + OpenZFS/OpenEBS Storage Host edition, and choose between four
             partitioning layouts:
             <ul className="list-disc list-inside mt-2 space-y-1 text-slate-300">
               <li>
@@ -512,7 +514,11 @@ sudo dd if=axonwall-debian13-amd64.iso of=/dev/sdX bs=4M status=progress conv=fs
                 pre-boot watchdog auto-revert.
               </li>
               <li>
-                <strong>Standard Linux Single-Root Rolling Mode:</strong> Traditional single root filesystem for
+                <strong>Btrfs + Snapper Root Mode (<code className="text-cyan-300 font-mono">btrfs</code>):</strong>{' '}
+                In-kernel Copy-on-Write alternative to ZBM with flat subvolumes (<code className="font-mono">@</code>, <code className="font-mono">@snapshots</code>, <code className="font-mono">@var_log</code>, <code className="font-mono">@var_lib_axonwall</code>), single-disk <code className="font-mono">zstd</code> or native Btrfs RAID-1, pre/post Snapper pairs, and bootable GRUB2 snapshot rollback.
+              </li>
+              <li>
+                <strong>Standard Linux Single-Root Rolling Mode (<code className="text-emerald-300 font-mono">rolling</code>):</strong> Traditional single root filesystem for
                 operators who prefer standard <code className="font-mono">apt</code> rolling upgrades on large single disks.
               </li>
             </ul>
@@ -521,34 +527,35 @@ sudo dd if=axonwall-debian13-amd64.iso of=/dev/sdX bs=4M status=progress conv=fs
           <h3 className="text-base font-semibold text-white pt-4">Option 2: Proxmox VE / KVM Cloud QCOW2 Image &amp; Edge UKI</h3>
           <p className="text-xs text-slate-400">
             Import the pre-built Cloud-Init QCOW2 image (<code className="text-slate-300 font-mono">axonwall-debian13-amd64-cloud.qcow2</code>)
-            or boot the stateless 7 MB <code className="text-slate-300 font-mono">axonwall-edge-sku-vm-virtio.efi</code>{' '}
+            or boot the stateless <code className="text-slate-300 font-mono">axonwall-edge-sku-vm-virtio.efi</code>{' '}
             Unified Kernel Image directly into RAM:
           </p>
           <CodeBlock
             title="Proxmox VE Cloud-Init QCOW2 Import"
             language="bash"
-            code={`wget https://github.com/axonwall/axonwall/releases/download/v0.11.68/axonwall-debian13-amd64-cloud.qcow2
+            code={`wget https://github.com/axonwall/axonwall/releases/download/v0.13.0/axonwall-debian13-amd64-cloud.qcow2
 qm create 9000 --name axonwall-ngfw --memory 4096 --cores 4 --net0 virtio,bridge=vmbr0 --net1 virtio,bridge=vmbr1
 qm importdisk 9000 axonwall-debian13-amd64-cloud.qcow2 local-zfs
 qm set 9000 --scsihw virtio-scsi-single --scsi0 local-zfs:vm-9000-disk-0,discard=on --ide2 local-zfs:cloudinit --boot c --bootdisk scsi0`}
           />
 
-          <h3 className="text-base font-semibold text-white pt-4">Option 3: Debian / Ubuntu Package (.deb)</h3>
+          <h3 className="text-base font-semibold text-white pt-4">Option 3: Debian / Ubuntu Packages (.deb)</h3>
           <p className="text-xs text-slate-400">
             For existing Debian 12 (Bookworm) / 13 (Trixie) or Ubuntu 24.04 LTS servers, install Axonwall directly using
-            the official standalone package:
+            the official standalone package (edition packages <code className="font-mono text-slate-300">axonwall-minimal</code>,{' '}
+            <code className="font-mono text-slate-300">axonwall-vault</code>, and <code className="font-mono text-slate-300">axonwall-k3s-storage</code> are also published per release):
           </p>
           <CodeBlock
             title="Install Debian Package"
             language="bash"
             code={`# Download the latest .deb release artifact from GitHub Releases
-wget https://github.com/axonwall/axonwall/releases/download/v0.11.68/axonwall_0.11.68_amd64.deb
-wget https://github.com/axonwall/axonwall/releases/download/v0.11.68/axonwall_0.11.68_amd64.deb.sha256
-sha256sum -c axonwall_0.11.68_amd64.deb.sha256
+wget https://github.com/axonwall/axonwall/releases/download/v0.13.0/axonwall_0.13.0_amd64.deb
+wget https://github.com/axonwall/axonwall/releases/download/v0.13.0/axonwall_0.13.0_amd64.deb.sha256
+sha256sum -c axonwall_0.13.0_amd64.deb.sha256
 
 # Install package with dependencies
 sudo apt-get update
-sudo apt-get install -y ./axonwall_0.11.68_amd64.deb
+sudo apt-get install -y ./axonwall_0.13.0_amd64.deb
 
 # Verify running services
 sudo systemctl status axonwalld axonwall-ui axonwall-controller`}
@@ -560,7 +567,7 @@ sudo systemctl status axonwalld axonwall-ui axonwall-controller`}
             language="yaml"
             code={`services:
   axonwall:
-    image: ghcr.io/axonwall/axonwall:v0.11.68
+    image: ghcr.io/axonwall/axonwall:v0.13.0
     cap_add:
       - NET_ADMIN
       - NET_RAW

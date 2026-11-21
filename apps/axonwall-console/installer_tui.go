@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -83,7 +84,7 @@ type DiskProbeInput struct {
 type InstallerConfig struct {
 	Edition        string   // "axonwall", "minimal", "vault", or "k3s-storage"
 	OSFamily       string   // "debian" or "alpine"
-	InstallMode    string   // "ab", "zbm", "rolling"
+	InstallMode    string   // "ab", "zbm", "btrfs", "rolling"
 	SlotMB         int      // 2048, 4096, 8192, 16384
 	RootFSType     string   // "ext4" or "xfs"
 	DataFSType     string   // "ext4" or "xfs"
@@ -134,6 +135,7 @@ type PartitionLayout struct {
 	LogsMB  int
 	DataMB  int
 	ZfsMB   int
+	BtrfsMB int
 }
 
 // readEditionFile returns the canonical edition from /etc/axonwall/edition,
@@ -158,50 +160,66 @@ func readEditionFile() string {
 
 // DefaultInstallerConfig returns the recommended factory defaults for the current runtime.
 func DefaultInstallerConfig() InstallerConfig {
+	return defaultInstallerConfigFrom("/etc/axonwall/edition", "/etc/axonwall", "/proc/cmdline")
+}
+
+func defaultInstallerConfigFrom(editionPath, markerDir, cmdlinePath string) InstallerConfig {
 	edition := "axonwall"
 	hostname := "axonwall"
 	k3sRole := "server"
-	// D-M9 (marker): the canonical edition file first — when it names a
-	// known edition it is the default and the legacy signals are not
-	// consulted. When it is absent, empty, or invalid, fall through to
-	// the markers and the cmdline as before.
-	if fileEdition := readEditionFile(); fileEdition != "" {
-		edition = fileEdition
-		switch edition {
-		case "minimal":
-			hostname = "axonwall-minimal"
-		case "k3s-storage":
-			hostname = "axonwall-storage"
-		case "vault":
-			hostname = "axonwall-vault"
+	// D-M9 / C-M12: the canonical edition file first — when it names a known
+	// edition (including "axonwall"), that explicit file wins and legacy
+	// markers or /proc/cmdline must NOT override it.
+	editionFromFile := false
+	markerFound := false
+	if data, err := os.ReadFile(editionPath); err == nil {
+		switch strings.TrimSpace(string(data)) {
+		case "axonwall", "minimal", "vault", "k3s-storage":
+			edition = strings.TrimSpace(string(data))
+			editionFromFile = true
 		}
-	} else if _, err := os.Stat("/etc/axonwall/.k3s-edition"); err == nil {
-		edition = "k3s-storage"
-		hostname = "axonwall-storage"
-	} else if _, err := os.Stat("/etc/axonwall/.vault-edition"); err == nil {
-		edition = "vault"
-		hostname = "axonwall-vault"
-	} else if _, err := os.Stat("/etc/axonwall/.minimal-edition"); err == nil {
-		edition = "minimal"
-		hostname = "axonwall-minimal"
 	}
-	if data, err := os.ReadFile("/proc/cmdline"); err == nil {
-		cmd := string(data)
-		if edition == "axonwall" {
-			if strings.Contains(cmd, "axonwall_edition=k3s-storage") || strings.Contains(cmd, "axonwall.edition=k3s-storage") {
-				edition = "k3s-storage"
-				hostname = "axonwall-storage"
-			} else if strings.Contains(cmd, "axonwall_edition=vault") || strings.Contains(cmd, "axonwall.edition=vault") {
-				edition = "vault"
-				hostname = "axonwall-vault"
-			} else if strings.Contains(cmd, "axonwall_edition=minimal") || strings.Contains(cmd, "axonwall.edition=minimal") {
-				edition = "minimal"
-				hostname = "axonwall-minimal"
+	if !editionFromFile {
+		if _, err := os.Stat(filepath.Join(markerDir, ".k3s-edition")); err == nil {
+			edition = "k3s-storage"
+			markerFound = true
+		} else if _, err := os.Stat(filepath.Join(markerDir, ".vault-edition")); err == nil {
+			edition = "vault"
+			markerFound = true
+		} else if _, err := os.Stat(filepath.Join(markerDir, ".minimal-edition")); err == nil {
+			edition = "minimal"
+			markerFound = true
+		}
+	}
+	if data, err := os.ReadFile(cmdlinePath); err == nil {
+		tokens := strings.Fields(string(data))
+		if !editionFromFile && !markerFound && edition == "axonwall" {
+			for _, tok := range tokens {
+				switch tok {
+				case "axonwall_edition=k3s-storage", "axonwall.edition=k3s-storage":
+					edition = "k3s-storage"
+				case "axonwall_edition=vault", "axonwall.edition=vault":
+					edition = "vault"
+				case "axonwall_edition=minimal", "axonwall.edition=minimal":
+					edition = "minimal"
+				case "axonwall_edition=axonwall", "axonwall.edition=axonwall":
+					edition = "axonwall"
+				}
 			}
 		}
-		if strings.Contains(cmd, "axonwall.k3s_role=agent") || strings.Contains(cmd, "axonwall_k3s_role=agent") {
-			k3sRole = "agent"
+		for _, tok := range tokens {
+			if tok == "axonwall.k3s_role=agent" || tok == "axonwall_k3s_role=agent" {
+				k3sRole = "agent"
+			}
 		}
+	}
+	switch edition {
+	case "minimal":
+		hostname = "axonwall-minimal"
+	case "k3s-storage":
+		hostname = "axonwall-storage"
+	case "vault":
+		hostname = "axonwall-vault"
 	}
 	osFamily := "debian"
 	if _, err := os.Stat("/etc/alpine-release"); err == nil {
@@ -306,7 +324,7 @@ func diskHasPrecreatedAxonwallPartitions(diskPath string) bool {
 		return false
 	}
 	for _, dir := range []string{"/dev/disk/by-label", "/dev/disk/by-partlabel"} {
-		for _, lbl := range []string{"axon_root_a", "axon_root", "AXON_EFI", "axon_data", "axon_zfs_1", "axon_zfs"} {
+		for _, lbl := range []string{"axon_root_a", "axon_root", "AXON_EFI", "axon_data", "axon_zfs_1", "axon_zfs", "axon_btrfs_1", "axon_btrfs"} {
 			if target, err := filepath.EvalSymlinks(filepath.Join(dir, lbl)); err == nil {
 				if target == diskPath || isPartitionOfDisk(target, diskPath) {
 					return true
@@ -929,7 +947,7 @@ func isAxonwallDiskLabel(lbl string) bool {
 
 func hasAxonwallRaidMemberLabel(lbl string) bool {
 	low := strings.ToLower(strings.TrimSpace(lbl))
-	for _, prefix := range []string{"axon_root_a_", "axon_root_b_", "axon_root_", "axon_data_", "axon_logs_"} {
+	for _, prefix := range []string{"axon_root_a_", "axon_root_b_", "axon_root_", "axon_btrfs_", "axon_data_", "axon_logs_"} {
 		if strings.HasPrefix(low, prefix) {
 			suffix := low[len(prefix):]
 			if _, err := strconv.Atoi(suffix); err == nil {
@@ -1025,6 +1043,7 @@ func ClassifyDiskContent(in DiskProbeInput) (DiskContentKind, string, []string) 
 	hasRootAB := false
 	hasZbmEsp := false
 	hasRollingRoot := false
+	hasBtrfsRoot := false
 	hasRaidLabel := false
 	hasAxonCrypt := false
 	hasAxonZfs := false
@@ -1038,6 +1057,8 @@ func ClassifyDiskContent(in DiskProbeInput) (DiskContentKind, string, []string) 
 			hasRootAB = true
 		case low == "zbm_esp":
 			hasZbmEsp = true
+		case low == "axon_btrfs" || hasAxonwallRaidMemberLabel(low) && strings.HasPrefix(low, "axon_btrfs_"):
+			hasBtrfsRoot = true
 		case low == "axon_root" || hasAxonwallRaidMemberLabel(low) && strings.HasPrefix(low, "axon_root_"):
 			hasRollingRoot = true
 		case strings.HasPrefix(low, "axon_crypt"):
@@ -1060,6 +1081,8 @@ func ClassifyDiskContent(in DiskProbeInput) (DiskContentKind, string, []string) 
 			arch = "Dual-Root A/B"
 		case hasZbmEsp || zfsPools["zroot"]:
 			arch = "ZFSBootMenu Root-on-ZFS"
+		case hasBtrfsRoot:
+			arch = "Btrfs + Snapper Root"
 		case hasRollingRoot:
 			arch = "Rolling Single-Root"
 		}
@@ -1522,7 +1545,7 @@ func normalizeSlotMBForMode(cfg *InstallerConfig, recommendedSlotGB int, primary
 		diskMB = primaryMB[0]
 	}
 	switch cfg.InstallMode {
-	case "zbm":
+	case "zbm", "btrfs":
 		cfg.SlotMB = 0
 	case "rolling":
 		minRollingMB := 8192
@@ -1556,7 +1579,7 @@ func RefreshHardwareEval(disks []DiskDevice, cfg *InstallerConfig) HardwareEvalu
 	tpm := hasTPM2Device()
 
 	if cfg.ZfsAllocMode == "" {
-		if len(cfg.ZfsExtraDisks) > 0 && cfg.InstallMode != "zbm" {
+		if len(cfg.ZfsExtraDisks) > 0 && cfg.InstallMode != "zbm" && cfg.InstallMode != "btrfs" {
 			cfg.ZfsAllocMode = "none"
 		} else {
 			cfg.ZfsAllocMode = "remainder"
@@ -1585,10 +1608,16 @@ func RefreshHardwareEval(disks []DiskDevice, cfg *InstallerConfig) HardwareEvalu
 
 	sysSummary := "No target disk detected"
 	if len(cfg.SystemDisks) == 1 {
-		sysSummary = fmt.Sprintf("Single Disk (%s — %.1f GB)", cfg.SystemDisks[0], float64(primaryMB)/1024.0)
+		if cfg.InstallMode == "btrfs" {
+			sysSummary = fmt.Sprintf("Single-disk Btrfs + Snapper (%s — %.1f GB)", cfg.SystemDisks[0], float64(primaryMB)/1024.0)
+		} else {
+			sysSummary = fmt.Sprintf("Single Disk (%s — %.1f GB)", cfg.SystemDisks[0], float64(primaryMB)/1024.0)
+		}
 	} else if len(cfg.SystemDisks) >= 2 {
 		if cfg.InstallMode == "zbm" {
 			sysSummary = fmt.Sprintf("ZFS Mirror across %d Disks (%s)", len(cfg.SystemDisks), strings.Join(cfg.SystemDisks, ", "))
+		} else if cfg.InstallMode == "btrfs" {
+			sysSummary = fmt.Sprintf("Btrfs RAID-1 Mirror across %d Disks (%s)", len(cfg.SystemDisks), strings.Join(cfg.SystemDisks, ", "))
 		} else {
 			sysSummary = fmt.Sprintf("RAID-1 Mirror across %d Disks (%s)", len(cfg.SystemDisks), strings.Join(cfg.SystemDisks, ", "))
 		}
@@ -1603,6 +1632,13 @@ func RefreshHardwareEval(disks []DiskDevice, cfg *InstallerConfig) HardwareEvalu
 		} else {
 			zfsSummary = fmt.Sprintf("All-in-ZFS 'zroot' Pool (%.1f GB, %s, lz4)",
 				float64(layout.ZfsMB)/1024.0, strings.ToUpper(resolvedTopo))
+		}
+	} else if cfg.InstallMode == "btrfs" {
+		if len(cfg.ZfsExtraDisks) > 0 {
+			zfsSummary = fmt.Sprintf("Dedicated 'tank' Pool (%s across %s)",
+				strings.ToUpper(resolvedTopo), strings.Join(cfg.ZfsExtraDisks, ", "))
+		} else {
+			zfsSummary = "Not used (unified Btrfs + Snapper root volume)"
 		}
 	} else {
 		if len(cfg.ZfsExtraDisks) > 0 {
@@ -1619,6 +1655,8 @@ func RefreshHardwareEval(disks []DiskDevice, cfg *InstallerConfig) HardwareEvalu
 	slotNote := fmt.Sprintf("%d GB per A/B Slot (%s)", cfg.SlotMB/1024, cfg.RootFSType)
 	if cfg.InstallMode == "zbm" {
 		slotNote = "ZFS Boot Environments (Copy-on-Write Snapshots, No GRUB)"
+	} else if cfg.InstallMode == "btrfs" {
+		slotNote = fmt.Sprintf("Btrfs + Snapper Subvolumes (@, @snapshots, @var_log — %.1f GB, zstd:1)", float64(layout.BtrfsMB)/1024.0)
 	} else if cfg.InstallMode == "rolling" {
 		slotNote = fmt.Sprintf("Single Root Partition (%s)", cfg.RootFSType)
 	}
@@ -1684,7 +1722,7 @@ func EvaluateHardwareProfile(disks []DiskDevice, cfg *InstallerConfig) ([]DiskDe
 	if cfg.Edition == "k3s-storage" && primaryMB < 102400 && recGB > 4 {
 		recGB = 4
 	}
-	if cfg.InstallMode == "zbm" {
+	if cfg.InstallMode == "zbm" || cfg.InstallMode == "btrfs" {
 		cfg.SlotMB = 0
 	} else {
 		cfg.SlotMB = recGB * 1024
@@ -1695,9 +1733,9 @@ func EvaluateHardwareProfile(disks []DiskDevice, cfg *InstallerConfig) ([]DiskDe
 	}
 
 	// Evaluate ZFS allocation and topology
-	if len(cfg.ZfsExtraDisks) > 0 && cfg.InstallMode != "zbm" {
+	if len(cfg.ZfsExtraDisks) > 0 && cfg.InstallMode != "zbm" && cfg.InstallMode != "btrfs" {
 		cfg.ZfsAllocMode = "none"
-	} else if cfg.Edition == "k3s-storage" && len(cfg.ZfsExtraDisks) == 0 && cfg.InstallMode != "zbm" {
+	} else if cfg.Edition == "k3s-storage" && len(cfg.ZfsExtraDisks) == 0 && cfg.InstallMode != "zbm" && cfg.InstallMode != "btrfs" {
 		cfg.ZfsAllocMode = "remainder"
 	} else if cfg.ZfsAllocMode == "" {
 		cfg.ZfsAllocMode = "remainder"
@@ -1754,6 +1792,66 @@ func syncDiskRolesAndConfig(disks []DiskDevice, cfg *InstallerConfig) (primaryMB
 	return primaryMB
 }
 
+// ValidatePartitionLayoutFit ensures the requested EFI + A/B slot + log
+// partitions do not overflow the target disk before leaving at least 1024 MiB
+// for persistent data.
+func ValidatePartitionLayoutFit(diskMB int, cfg InstallerConfig) error {
+	if diskMB <= 0 {
+		return fmt.Errorf("no valid primary system disk size (%d MiB)", diskMB)
+	}
+	if cfg.InstallMode == "btrfs" {
+		efiMB := 512
+		dataMB := 0
+		if cfg.LuksEnabled {
+			dataMB = 4096
+		}
+		btrfsMB := diskMB - efiMB - dataMB - 16
+		if btrfsMB < 6144 {
+			return fmt.Errorf(
+				"partition layout overflows disk capacity: EFI (%d MiB) + LUKS data (%d MiB) + 6144 MiB min Btrfs root requires >= %d MiB, disk has %d MiB",
+				efiMB, dataMB, efiMB+dataMB+16+6144, diskMB,
+			)
+		}
+		return nil
+	}
+	if cfg.InstallMode == "zbm" {
+		efiMB := 512
+		dataMB := 0
+		if cfg.LuksEnabled {
+			dataMB = 4096
+		}
+		zfsMB := diskMB - efiMB - dataMB - 16
+		if zfsMB < 4096 {
+			return fmt.Errorf(
+				"partition layout overflows disk capacity: EFI (%d MiB) + LUKS data (%d MiB) + 4096 MiB min ZFS zroot requires >= %d MiB, disk has %d MiB",
+				efiMB, dataMB, efiMB+dataMB+16+4096, diskMB,
+			)
+		}
+		return nil
+	}
+	efiMB := 260
+	slotAMB := cfg.SlotMB
+	if slotAMB < 2048 {
+		slotAMB = 4096
+	}
+	slotBMB := 0
+	if cfg.InstallMode == "ab" {
+		slotBMB = slotAMB
+	}
+	logsMB := 0
+	if cfg.LogsEnabled && cfg.LogsGB >= 1 {
+		logsMB = cfg.LogsGB * 1024
+	}
+	usedBeforeData := efiMB + slotAMB + slotBMB + logsMB + 16
+	if usedBeforeData+1024 > diskMB {
+		return fmt.Errorf(
+			"partition layout overflows disk capacity: EFI (%d MiB) + OS slots (%d MiB) + logs (%d MiB) + 1024 MiB min data requires >= %d MiB, disk has %d MiB",
+			efiMB, slotAMB+slotBMB, logsMB, usedBeforeData+1024, diskMB,
+		)
+	}
+	return nil
+}
+
 // ComputePartitionLayout calculates the exact partition sizes in MiB for the given disk capacity and config.
 func ComputePartitionLayout(diskMB int, cfg InstallerConfig) PartitionLayout {
 	if diskMB <= 0 {
@@ -1785,6 +1883,34 @@ func ComputePartitionLayout(diskMB int, cfg InstallerConfig) PartitionLayout {
 			LogsMB:  logsMB,
 			DataMB:  dataMB,
 			ZfsMB:   zfsMB,
+		}
+	}
+	if cfg.InstallMode == "btrfs" {
+		efiMB := 512
+		remMB := diskMB - efiMB - 16
+		if remMB < 1024 {
+			remMB = 1024
+		}
+		dataMB := 0
+		btrfsMB := remMB
+		if cfg.LuksEnabled {
+			dataMB = 4096
+			if remMB > 6144 {
+				btrfsMB = remMB - dataMB
+			} else {
+				dataMB = remMB / 2
+				btrfsMB = remMB - dataMB
+			}
+		}
+		return PartitionLayout{
+			TotalMB: diskMB,
+			EfiMB:   efiMB,
+			SlotAMB: 0,
+			SlotBMB: 0,
+			LogsMB:  0,
+			DataMB:  dataMB,
+			ZfsMB:   0,
+			BtrfsMB: btrfsMB,
 		}
 	}
 
@@ -1862,7 +1988,7 @@ func RenderPartitionBar(layout PartitionLayout, cfg InstallerConfig, width int) 
 	if width < 24 {
 		width = 60
 	}
-	total := layout.EfiMB + layout.SlotAMB + layout.SlotBMB + layout.LogsMB + layout.DataMB + layout.ZfsMB
+	total := layout.EfiMB + layout.SlotAMB + layout.SlotBMB + layout.LogsMB + layout.DataMB + layout.ZfsMB + layout.BtrfsMB
 	if total <= 0 {
 		total = 1
 	}
@@ -1891,7 +2017,7 @@ func RenderPartitionBar(layout PartitionLayout, cfg InstallerConfig, width int) 
 	if layout.SlotBMB > 0 {
 		segments = append(segments, seg{label: "Slot B", mb: layout.SlotBMB, color: colorCyan + colorBold, char: "█"})
 	}
-	if layout.LogsMB > 0 && cfg.InstallMode != "zbm" {
+	if layout.LogsMB > 0 && cfg.InstallMode != "zbm" && cfg.InstallMode != "btrfs" {
 		segments = append(segments, seg{label: "Logs", mb: layout.LogsMB, color: colorYellow + colorBold, char: "█"})
 	}
 	if layout.DataMB > 0 {
@@ -1900,6 +2026,9 @@ func RenderPartitionBar(layout PartitionLayout, cfg InstallerConfig, width int) 
 			dataLabel = "Data[LUKS2]"
 		}
 		segments = append(segments, seg{label: dataLabel, mb: layout.DataMB, color: colorMagenta + colorBold, char: "█"})
+	}
+	if layout.BtrfsMB > 0 {
+		segments = append(segments, seg{label: "Btrfs:@+Snapper", mb: layout.BtrfsMB, color: colorCyan + colorBold, char: "█"})
 	}
 	if layout.ZfsMB > 0 {
 		poolName := "ZFS:tank"
@@ -2047,20 +2176,42 @@ func redactDiagnosticsSecrets(s string, cfg InstallerConfig) string {
 }
 
 // readRawKey reads a single keypress or ANSI arrow escape sequence using non-canonical stty mode.
+// C-H11: restores stty on SIGINT/SIGTERM (mirroring readPassword) and returns "EOF" on io.EOF /
+// read error so TUI event loops exit cleanly instead of busy-looping on a closed PTY.
 func readRawKey() string {
 	rawCmd := exec.Command("stty", "-icanon", "-echo", "min", "1", "time", "0")
 	rawCmd.Stdin = os.Stdin
 	_ = rawCmd.Run()
-	defer func() {
+
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+	stopSig := make(chan struct{})
+	restoreStty := func() {
 		saneCmd := exec.Command("stty", "icanon", "echo")
 		saneCmd.Stdin = os.Stdin
 		_ = saneCmd.Run()
+	}
+	defer func() {
+		close(stopSig)
+		signal.Stop(sigChan)
+		restoreStty()
+	}()
+
+	go func() {
+		select {
+		case <-sigChan:
+			restoreStty()
+			fmt.Println()
+			os.Exit(130)
+		case <-stopSig:
+			return
+		}
 	}()
 
 	buf := make([]byte, 8)
 	n, err := os.Stdin.Read(buf)
 	if err != nil || n == 0 {
-		return ""
+		return "EOF"
 	}
 	s := string(buf[:n])
 	switch {
@@ -2735,7 +2886,7 @@ func runInstallerLogsScreen(cfg InstallerConfig, eval HardwareEvaluation, rawLin
 		case "R", "REDRAW":
 			suppressConsoleNoise()
 			statusBanner = fmt.Sprintf("%s[✓] Refreshed logs and console capture.%s", colorCyan+colorBold, colorReset)
-		case "B", "ESC", "Q", "BACKSPACE":
+		case "B", "ESC", "Q", "BACKSPACE", "EOF":
 			return
 		}
 	}
@@ -3023,6 +3174,11 @@ func RunNextGenInstallerTUI(reader *bufio.Reader) {
 					desc:  "Copy-on-write ZFS Boot Environments, atomic snapshots & pure ZFSBootMenu boot",
 				},
 				{
+					mode:  "btrfs",
+					title: "Btrfs + Snapper Root (CoW Subvolumes & Snapshots)",
+					desc:  "Btrfs subvolumes (@, @snapshots, @var_log), Snapper pre/post snapshots & GRUB bootable rollback",
+				},
+				{
 					mode:  "rolling",
 					title: "Rolling Standard Linux (Single-Root)",
 					desc:  "Single mutable root partition (axon_root) for compact VMs or standard APT workflow",
@@ -3097,6 +3253,13 @@ func RunNextGenInstallerTUI(reader *bufio.Reader) {
 			if wLine := renderTargetDiskWarningsLine(disks, cfg); wLine != "" {
 				fmt.Print(wLine)
 			}
+			var layoutFitErr error
+			if !cfg.KeepPartitions {
+				layoutFitErr = ValidatePartitionLayoutFit(primaryMB, cfg)
+				if layoutFitErr != nil {
+					fmt.Printf(" %s[!] %v%s\n", colorRed+colorBold, layoutFitErr, colorReset)
+				}
+			}
 			if len(allTargetDisks) > 0 {
 				if cfg.KeepPartitions {
 					fmt.Printf(" %sReady to install onto pre-partitioned [%s] (preserving existing partition table).%s\n",
@@ -3107,10 +3270,10 @@ func RunNextGenInstallerTUI(reader *bufio.Reader) {
 				}
 			}
 			if cfg.Edition == "k3s-storage" {
-				fmt.Printf(" %sControls:%s %s[Enter / I] Express Install%s  [E] Ed  [G] K3s Role  [1-3/↑/↓] Arch  [P] Pass  [L] LUKS2  [C] Custom  %s[V] Logs%s  [Q] CLI\n",
+				fmt.Printf(" %sControls:%s %s[Enter / I] Express Install%s  [E] Ed  [G] K3s Role  [1-4/↑/↓] Arch  [P] Pass  [L] LUKS2  [C] Custom  %s[V] Logs%s  [Q] CLI\n",
 					colorDim, colorReset, colorEmerald+colorBold, colorReset, colorCyan+colorBold, colorReset)
 			} else {
-				fmt.Printf(" %sControls:%s %s[Enter / I] Express Install%s  [E] Ed  [1-3/↑/↓] Arch  [P] Pass  [L] LUKS2  [X] KeepParts  [C] Custom  %s[V] Logs%s  [Q] CLI\n",
+				fmt.Printf(" %sControls:%s %s[Enter / I] Express Install%s  [E] Ed  [1-4/↑/↓] Arch  [P] Pass  [L] LUKS2  [X] KeepParts  [C] Custom  %s[V] Logs%s  [Q] CLI\n",
 					colorDim, colorReset, colorEmerald+colorBold, colorReset, colorCyan+colorBold, colorReset)
 			}
 
@@ -3128,7 +3291,7 @@ func RunNextGenInstallerTUI(reader *bufio.Reader) {
 					cfg.InstallMode = archOptions[archCursor].mode
 					normalizeSlotMBForMode(&cfg, recommendedSlotGBForDiskMB(primaryMB), primaryMB)
 				}
-			case "1", "2", "3":
+			case "1", "2", "3", "4":
 				idx, _ := strconv.Atoi(key)
 				archCursor = idx - 1
 				cfg.InstallMode = archOptions[archCursor].mode
@@ -3138,7 +3301,7 @@ func RunNextGenInstallerTUI(reader *bufio.Reader) {
 				normalizeSlotMBForMode(&cfg, recommendedSlotGBForDiskMB(primaryMB), primaryMB)
 			case "E":
 				cycleEdition(&cfg)
-				disks, eval = EvaluateHardwareProfile(disks, &cfg)
+				eval = RefreshHardwareEval(disks, &cfg)
 			case "G":
 				if cfg.Edition == "k3s-storage" {
 					if cfg.K3sRole == "agent" {
@@ -3206,7 +3369,14 @@ func RunNextGenInstallerTUI(reader *bufio.Reader) {
 			case "C":
 				step = 1
 			case "I", "ENTER":
-				syncDiskRolesAndConfig(disks, &cfg)
+				primaryMB := syncDiskRolesAndConfig(disks, &cfg)
+				if !cfg.KeepPartitions {
+					if fitErr := ValidatePartitionLayoutFit(primaryMB, cfg); fitErr != nil {
+						fmt.Printf("\n %s[!] %v%s\n", colorRed+colorBold, fitErr, colorReset)
+						pause(reader)
+						continue
+					}
+				}
 				if len(cfg.SystemDisks) > 0 {
 					clearScreen()
 					if !confirmTargetDiskOverwrite(disks, cfg, reader, os.Stdout) {
@@ -3215,7 +3385,7 @@ func RunNextGenInstallerTUI(reader *bufio.Reader) {
 					executeLiveInstallation(cfg, eval, installerPath, reader)
 					return
 				}
-			case "Q", "ESC":
+			case "Q", "ESC", "EOF":
 				return
 			}
 
@@ -3243,6 +3413,11 @@ func RunNextGenInstallerTUI(reader *bufio.Reader) {
 					desc:  "Copy-on-write ZFS Boot Environments, atomic pre-upgrade snapshots & 100% OpenZFS root pool boot",
 				},
 				{
+					mode:  "btrfs",
+					title: "Btrfs + Snapper Root (CoW Subvolumes & Snapshots)",
+					desc:  "Btrfs subvolumes (@, @snapshots, @var_log), Snapper pre/post snapshots & GRUB bootable rollback",
+				},
+				{
 					mode:  "rolling",
 					title: "Rolling Standard Linux (Single-Root)",
 					desc:  "Single root partition (axon_root) for compact virtual machines or cloud hypervisors",
@@ -3268,16 +3443,19 @@ func RunNextGenInstallerTUI(reader *bufio.Reader) {
 			if cfg.InstallMode == "zbm" {
 				fmt.Printf(" %sFilesystem Architecture:%s %s100%% OpenZFS (zroot Boot Environments + Datasets, lz4)%s\n",
 					colorBold, colorReset, colorEmerald+colorBold, colorReset)
+			} else if cfg.InstallMode == "btrfs" {
+				fmt.Printf(" %sFilesystem Architecture:%s %s100%% Btrfs + Snapper (@, @snapshots, @var_log, zstd:1 + GRUB Rollback)%s\n",
+					colorBold, colorReset, colorCyan+colorBold, colorReset)
 			} else {
 				fmt.Printf(" %s[S] Root Slot Size:%s %s%d GB%s    %s[F] Root/Data Filesystem:%s %s%s%s\n",
 					colorBold, colorReset, colorCyan+colorBold, slotGB, colorReset,
 					colorBold, colorReset, colorCyan+colorBold, strings.ToUpper(cfg.RootFSType), colorReset)
 			}
 			fmt.Println("────────────────────────────────────────────────────────────────────────────────")
-			if cfg.InstallMode == "zbm" {
-				fmt.Printf(" %sControls:%s [E] Edition  [↑/↓] Move  [Space/1-3] Arch  [V] Logs  [B] Express  [Enter] Next  [Q] Cancel\n", colorDim, colorReset)
+			if cfg.InstallMode == "zbm" || cfg.InstallMode == "btrfs" {
+				fmt.Printf(" %sControls:%s [E] Edition  [↑/↓] Move  [Space/1-4] Arch  [V] Logs  [B] Express  [Enter] Next  [Q] Cancel\n", colorDim, colorReset)
 			} else {
-				fmt.Printf(" %sControls:%s [E] Edition  [↑/↓] Move  [Space/1-3] Arch  [S] Slot Size  [F] ext4/xfs  [V] Logs  [B] Express  [Enter] Next\n", colorDim, colorReset)
+				fmt.Printf(" %sControls:%s [E] Edition  [↑/↓] Move  [Space/1-4] Arch  [S] Slot Size  [F] ext4/xfs  [V] Logs  [B] Express  [Enter] Next\n", colorDim, colorReset)
 			}
 
 			key := readRawKey()
@@ -3286,7 +3464,7 @@ func RunNextGenInstallerTUI(reader *bufio.Reader) {
 				runInstallerLogsScreen(cfg, eval, nil, reader)
 			case "E":
 				cycleEdition(&cfg)
-				disks, eval = EvaluateHardwareProfile(disks, &cfg)
+				eval = RefreshHardwareEval(disks, &cfg)
 			case "UP", "K":
 				if archCursor > 0 {
 					archCursor--
@@ -3299,7 +3477,7 @@ func RunNextGenInstallerTUI(reader *bufio.Reader) {
 					cfg.InstallMode = archOptions[archCursor].mode
 					normalizeSlotMBForMode(&cfg, recommendedSlotGBForDiskMB(primaryMB), primaryMB)
 				}
-			case "1", "2", "3":
+			case "1", "2", "3", "4":
 				idx, _ := strconv.Atoi(key)
 				archCursor = idx - 1
 				cfg.InstallMode = archOptions[archCursor].mode
@@ -3323,7 +3501,7 @@ func RunNextGenInstallerTUI(reader *bufio.Reader) {
 					} else {
 						cfg.SlotMB = 8192
 					}
-				} else if cfg.InstallMode != "zbm" {
+				} else if cfg.InstallMode != "zbm" && cfg.InstallMode != "btrfs" {
 					switch cfg.SlotMB {
 					case 2048:
 						cfg.SlotMB = 4096
@@ -3336,7 +3514,7 @@ func RunNextGenInstallerTUI(reader *bufio.Reader) {
 					}
 				}
 			case "F":
-				if cfg.InstallMode != "zbm" {
+				if cfg.InstallMode != "zbm" && cfg.InstallMode != "btrfs" {
 					if cfg.RootFSType == "ext4" {
 						cfg.RootFSType = "xfs"
 						cfg.DataFSType = "xfs"
@@ -3351,7 +3529,7 @@ func RunNextGenInstallerTUI(reader *bufio.Reader) {
 				cfg.InstallMode = archOptions[archCursor].mode
 				normalizeSlotMBForMode(&cfg, recommendedSlotGBForDiskMB(primaryMB), primaryMB)
 				step = 2
-			case "Q", "ESC":
+			case "Q", "ESC", "EOF":
 				return
 			}
 
@@ -3386,12 +3564,16 @@ func RunNextGenInstallerTUI(reader *bufio.Reader) {
 			if len(cfg.SystemDisks) == 1 {
 				if cfg.InstallMode == "zbm" {
 					raidSummary = fmt.Sprintf("%sSingle-Disk ZFS Root Pool zroot (%s)%s", colorCyan+colorBold, cfg.SystemDisks[0], colorReset)
+				} else if cfg.InstallMode == "btrfs" {
+					raidSummary = fmt.Sprintf("%sSingle-Disk Btrfs + Snapper Root (%s)%s", colorCyan+colorBold, cfg.SystemDisks[0], colorReset)
 				} else {
 					raidSummary = fmt.Sprintf("%sSingle System Disk (%s)%s", colorCyan+colorBold, cfg.SystemDisks[0], colorReset)
 				}
 			} else if len(cfg.SystemDisks) >= 2 {
 				if cfg.InstallMode == "zbm" {
 					raidSummary = fmt.Sprintf("%sMirrored ZFS Root Pool zroot across %d disks (%s)%s", colorEmerald+colorBold, len(cfg.SystemDisks), strings.Join(cfg.SystemDisks, ", "), colorReset)
+				} else if cfg.InstallMode == "btrfs" {
+					raidSummary = fmt.Sprintf("%sBtrfs RAID-1 Mirror across %d disks (%s)%s", colorEmerald+colorBold, len(cfg.SystemDisks), strings.Join(cfg.SystemDisks, ", "), colorReset)
 				} else {
 					raidSummary = fmt.Sprintf("%smdadm RAID-1 System Mirror across %d disks (%s)%s", colorEmerald+colorBold, len(cfg.SystemDisks), strings.Join(cfg.SystemDisks, ", "), colorReset)
 				}
@@ -3540,13 +3722,13 @@ func RunNextGenInstallerTUI(reader *bufio.Reader) {
 				syncDiskRolesAndConfig(disks, &cfg)
 				if len(cfg.SystemDisks) > 0 {
 					// If dedicated ZFS Data disks are assigned in A/B or Rolling mode, default System Disk to 100% OS & System Data
-					if len(cfg.ZfsExtraDisks) > 0 && cfg.InstallMode != "zbm" {
+					if len(cfg.ZfsExtraDisks) > 0 && cfg.InstallMode != "zbm" && cfg.InstallMode != "btrfs" {
 						cfg.ZfsAllocMode = "none"
 						zfsCursor = 3
 					}
 					step = 3
 				}
-			case "Q", "ESC":
+			case "Q", "ESC", "EOF":
 				return
 			}
 
@@ -3630,7 +3812,64 @@ func RunNextGenInstallerTUI(reader *bufio.Reader) {
 					step = 2
 				case "ENTER", "RIGHT":
 					step = 4
-				case "Q", "ESC":
+				case "Q", "ESC", "EOF":
+					return
+				}
+			} else if cfg.InstallMode == "btrfs" {
+				fmt.Printf(" %sBtrfs + Snapper Subvolume Architecture:%s\n\n", colorBold, colorReset)
+				fmt.Println(RenderPartitionBar(layout, cfg, 64))
+				fmt.Println()
+
+				btrfsTopo := "Single-Disk Btrfs (DUP metadata, zstd:1)"
+				if len(cfg.SystemDisks) >= 2 {
+					btrfsTopo = fmt.Sprintf("Native Btrfs RAID-1 Mirror (%d System Disks, -d raid1 -m raid1)", len(cfg.SystemDisks))
+				}
+				fmt.Printf(" %s%s[●] Btrfs Root Volume (LABEL=axon_btrfs):%s %.1f GB on [%s] (%s)\n",
+					colorCyan, colorBold, colorReset, float64(layout.BtrfsMB)/1024.0, strings.Join(cfg.SystemDisks, ", "), btrfsTopo)
+				if cfg.LuksEnabled {
+					fmt.Printf("     %sSubvolumes: @ (/), @snapshots (/.snapshots), @var_log (/var/log) | /var/lib/axonwall on LUKS2 axon_data%s\n\n", colorDim, colorReset)
+				} else {
+					fmt.Printf("     %sSubvolumes: @ (/), @snapshots (/.snapshots), @var_log (/var/log), @var_lib_axonwall (/var/lib/axonwall)%s\n\n", colorDim, colorReset)
+				}
+
+				if len(cfg.ZfsExtraDisks) > 0 {
+					fmt.Printf(" %s%s[●] Dedicated OpenZFS Pool (tank):%s %d Whole-Disk Data VDEV(s) [%s] mounted at /mnt/tank\n",
+						colorGreen, colorBold, colorReset, len(cfg.ZfsExtraDisks), strings.Join(cfg.ZfsExtraDisks, ", "))
+					fmt.Printf("     %sDatasets: tank/axonwall, tank/backups, tank/pcap, tank/logs (Topology: %s)%s\n",
+						colorDim, strings.ToUpper(cfg.ZfsTopology), colorReset)
+				} else {
+					fmt.Printf(" %s[i] Dedicated Storage Pool (tank):%s None — OS and persistent data reside on Btrfs subvolumes.\n",
+						colorCyan+colorBold, colorReset)
+					fmt.Printf("     %sTip: Press [D] to assign dedicated [ZFS DATA], [ZFS SLOG], or [ZFS L2ARC] disks in Step 2.%s\n",
+						colorDim, colorReset)
+				}
+
+				fmt.Println("────────────────────────────────────────────────────────────────────────────────")
+				fmt.Printf(" %s    Snapper Rollback Engine :%s %sActive (@ + @snapshots + GRUB2 Bootable Snapshot Submenu)%s\n",
+					colorBold, colorReset, colorEmerald+colorBold, colorReset)
+				if len(cfg.ZfsExtraDisks) > 0 {
+					fmt.Printf(" %s[T] Dedicated ZFS Topology  :%s %s%s%s\n", colorBold, colorReset, colorCyan+colorBold, strings.ToUpper(cfg.ZfsTopology), colorReset)
+				}
+				fmt.Println("────────────────────────────────────────────────────────────────────────────────")
+				fmt.Printf(" %sControls:%s [T] ZFS Topology  [D] Edit Disk Roles  [V] Logs  [B] Back  [Enter] Next\n", colorDim, colorReset)
+
+				key := readRawKey()
+				switch key {
+				case "V":
+					runInstallerLogsScreen(cfg, eval, nil, reader)
+				case "T":
+					topos := []string{"auto", "mirror", "raidz1", "raidz2", "raidz3", "stripe"}
+					for i, t := range topos {
+						if cfg.ZfsTopology == t {
+							cfg.ZfsTopology = topos[(i+1)%len(topos)]
+							break
+						}
+					}
+				case "D", "B", "BACKSPACE", "LEFT":
+					step = 2
+				case "ENTER", "RIGHT":
+					step = 4
+				case "Q", "ESC", "EOF":
 					return
 				}
 			} else {
@@ -3732,7 +3971,7 @@ func RunNextGenInstallerTUI(reader *bufio.Reader) {
 					step = 2
 				case "ENTER", "RIGHT":
 					step = 4
-				case "Q", "ESC":
+				case "Q", "ESC", "EOF":
 					return
 				}
 			}
@@ -3914,7 +4153,7 @@ func RunNextGenInstallerTUI(reader *bufio.Reader) {
 				step = 3
 			case "ENTER", "RIGHT":
 				step = 5
-			case "Q", "ESC":
+			case "Q", "ESC", "EOF":
 				return
 			}
 
@@ -3940,6 +4179,8 @@ func RunNextGenInstallerTUI(reader *bufio.Reader) {
 			archSummary := fmt.Sprintf("%s (Slot=%d GB, FS=%s)", strings.ToUpper(cfg.InstallMode), cfg.SlotMB/1024, cfg.RootFSType)
 			if cfg.InstallMode == "zbm" {
 				archSummary = "ZBM All-in-ZFS Root (zroot Boot Environments, lz4)"
+			} else if cfg.InstallMode == "btrfs" {
+				archSummary = "Btrfs + Snapper Root (@, @snapshots, @var_log, zstd:1 + GRUB Rollback)"
 			}
 
 			zfsSummary := fmt.Sprintf("SysAlloc=%s, Topology=%s, DataDisks=%v", cfg.ZfsAllocMode, strings.ToUpper(cfg.ZfsTopology), cfg.ZfsExtraDisks)
@@ -3948,6 +4189,12 @@ func RunNextGenInstallerTUI(reader *bufio.Reader) {
 					zfsSummary = fmt.Sprintf("zroot on System Disks + Dedicated 'tank' (%s) on %v", strings.ToUpper(cfg.ZfsTopology), cfg.ZfsExtraDisks)
 				} else {
 					zfsSummary = fmt.Sprintf("Unified 'zroot' Pool (100%% System Disks, Topology=%s)", strings.ToUpper(cfg.ZfsTopology))
+				}
+			} else if cfg.InstallMode == "btrfs" {
+				if len(cfg.ZfsExtraDisks) > 0 {
+					zfsSummary = fmt.Sprintf("Dedicated 'tank' (%s) on %v", strings.ToUpper(cfg.ZfsTopology), cfg.ZfsExtraDisks)
+				} else {
+					zfsSummary = "None (unified Btrfs + Snapper subvolume root)"
 				}
 			}
 
@@ -3999,6 +4246,13 @@ func RunNextGenInstallerTUI(reader *bufio.Reader) {
 			if wLine := renderTargetDiskWarningsLine(disks, cfg); wLine != "" {
 				fmt.Print(wLine)
 			}
+			var layoutFitErr error
+			if !cfg.KeepPartitions {
+				layoutFitErr = ValidatePartitionLayoutFit(primaryMB, cfg)
+				if layoutFitErr != nil {
+					fmt.Printf(" %s[!] %v%s\n", colorRed+colorBold, layoutFitErr, colorReset)
+				}
+			}
 			if cfg.KeepPartitions {
 				fmt.Printf(" %sNOTE: Existing partition table on [%s] will be PRESERVED (formatting target filesystems only).%s\n",
 					colorYellow+colorBold, strings.Join(allTargetDisks, ", "), colorReset)
@@ -4026,13 +4280,18 @@ func RunNextGenInstallerTUI(reader *bufio.Reader) {
 				pause(reader)
 				return
 			case "I", "ENTER":
+				if layoutFitErr != nil {
+					fmt.Printf("\n %s[!] Cannot start installation: %v%s\n", colorRed+colorBold, layoutFitErr, colorReset)
+					pause(reader)
+					continue
+				}
 				clearScreen()
 				if !confirmTargetDiskOverwrite(disks, cfg, reader, os.Stdout) {
 					continue
 				}
 				executeLiveInstallation(cfg, eval, installerPath, reader)
 				return
-			case "Q", "ESC":
+			case "Q", "ESC", "EOF":
 				return
 			}
 		}
@@ -4087,6 +4346,17 @@ func executeLiveInstallation(cfg InstallerConfig, eval HardwareEvaluation, insta
 			"Installing ZFSBootMenu (UEFI UKI & Legacy BIOS Syslinux — No GRUB)",
 			"Configuring OpenZFS storage datasets & factory snapshot",
 			"Finalizing installation & exporting ZFS pools",
+		}
+	} else if cfg.InstallMode == "btrfs" {
+		phases = []string{
+			"Partitioning target disk(s) (GPT + BIOS Boot + UEFI ESP + Btrfs)",
+			"Formatting UEFI ESP & creating Btrfs volume (axon_btrfs)",
+			"Creating subvolumes (@, @snapshots, @var_log) & imaging Axonwall OS",
+			"Configuring fstab, Snapper root profile, TPM 2.0, Cloud-Init & credentials",
+			"Recording Btrfs + Snapper release metadata",
+			"Installing GRUB2, taking factory snapshot #1 & syncing rollback menu",
+			"Bootstrapping optional OpenZFS storage pool (tank)",
+			"Finalizing installation & flushing Btrfs subvolume caches",
 		}
 	}
 

@@ -483,18 +483,22 @@ type NetworkConfig struct {
 }
 
 func readCurrentNetworkConfig() NetworkConfig {
+	return readCurrentNetworkConfigForEdition(detectInstalledEdition(), "/etc/axonwall/interfaces.conf")
+}
+
+func readCurrentNetworkConfigForEdition(edition, confPath string) NetworkConfig {
 	cfg := NetworkConfig{
 		WanDevice: "eth0",
 		WanMode:   "dhcp",
 		LanDevice: "eth1",
 		LanMode:   "static",
 		LanIP:     "192.168.1.1/24",
-		LanDHCP:   true,
+		LanDHCP:   edition != "minimal",
 		WanDNS1:   "1.1.1.1",
 		WanDNS2:   "8.8.8.8",
 	}
 
-	if data, err := os.ReadFile("/etc/axonwall/interfaces.conf"); err == nil {
+	if data, err := os.ReadFile(confPath); err == nil {
 		for _, line := range strings.Split(string(data), "\n") {
 			line = strings.TrimSpace(line)
 			if strings.HasPrefix(line, "#") || !strings.Contains(line, "=") {
@@ -567,7 +571,61 @@ func resolveIfaceMtu(entry map[string]interface{}) interface{} {
 	return 1500
 }
 
+func consoleDesiredStateLockPath(etcDir, varDir string) string {
+	if p := strings.TrimSpace(os.Getenv("AXONWALL_DESIRED_STATE_LOCK_PATH")); p != "" {
+		return p
+	}
+	if _, err := os.Stat(etcDir); err == nil {
+		return filepath.Join(etcDir, "state.json.lock")
+	}
+	return filepath.Join(varDir, "state.json.lock")
+}
+
+func acquireConsoleLockFile(lockPath string, timeout time.Duration) (func(), error) {
+	_ = os.MkdirAll(filepath.Dir(lockPath), 0775)
+	deadline := time.Now().Add(timeout)
+	pidPayload := []byte(fmt.Sprintf(`{"pid":%d,"createdAt":%d}`, os.Getpid(), time.Now().UnixMilli()))
+	for {
+		f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0660)
+		if err == nil {
+			_, _ = f.Write(pidPayload)
+			_ = f.Close()
+			return func() {
+				_ = os.Remove(lockPath)
+			}, nil
+		}
+		if !os.IsExist(err) {
+			return nil, err
+		}
+		if fi, statErr := os.Stat(lockPath); statErr == nil {
+			raw, _ := os.ReadFile(lockPath)
+			var meta struct {
+				PID int `json:"pid"`
+			}
+			_ = json.Unmarshal(raw, &meta)
+			deadPid := false
+			if meta.PID > 0 && meta.PID != os.Getpid() {
+				if kerr := syscall.Kill(meta.PID, 0); kerr == syscall.ESRCH {
+					deadPid = true
+				}
+			}
+			if deadPid || (meta.PID <= 0 && time.Since(fi.ModTime()) > 10*time.Second) {
+				_ = os.Remove(lockPath)
+				continue
+			}
+		}
+		if time.Now().After(deadline) {
+			return nil, fmt.Errorf("timed out waiting for lock %s", lockPath)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 func updateStateJSON(cfg NetworkConfig) []map[string]interface{} {
+	return updateStateJSONWithPaths(cfg, "/etc/axonwall", "/var/lib/axonwall", consoleDesiredStateLockPath("/etc/axonwall", "/var/lib/axonwall"))
+}
+
+func updateStateJSONWithPaths(cfg NetworkConfig, etcDir, varDir, lockPath string) []map[string]interface{} {
 	cfg.WanDevice = normalizeAssignedDevice(cfg.WanDevice)
 	cfg.LanDevice = normalizeAssignedDevice(cfg.LanDevice)
 	cfg.Opt1Device = normalizeAssignedDevice(cfg.Opt1Device)
@@ -585,15 +643,24 @@ func updateStateJSON(cfg NetworkConfig) []map[string]interface{} {
 		cfg.Opt2Mode = "dhcp"
 	}
 
-	statePath := "/etc/axonwall/state.json"
-	_ = os.MkdirAll("/etc/axonwall", 0775)
-	_ = os.MkdirAll("/var/lib/axonwall", 0775)
+	canonicalStatePath := filepath.Join(varDir, "state.json")
+	etcStatePath := filepath.Join(etcDir, "state.json")
+	_ = os.MkdirAll(etcDir, 0775)
+	_ = os.MkdirAll(varDir, 0775)
+
+	var releaseLock func()
+	if rel, err := acquireConsoleLockFile(lockPath, 10*time.Second); err == nil {
+		releaseLock = rel
+	}
+	if releaseLock != nil {
+		defer releaseLock()
+	}
 
 	var state map[string]interface{}
-	if data, err := os.ReadFile(statePath); err == nil {
-		_ = json.Unmarshal(data, &state)
-	} else if dataVar, errVar := os.ReadFile("/var/lib/axonwall/state.json"); errVar == nil {
+	if dataVar, errVar := os.ReadFile(canonicalStatePath); errVar == nil {
 		_ = json.Unmarshal(dataVar, &state)
+	} else if data, err := os.ReadFile(etcStatePath); err == nil {
+		_ = json.Unmarshal(data, &state)
 	}
 	if state == nil {
 		state = make(map[string]interface{})
@@ -700,7 +767,7 @@ func updateStateJSON(cfg NetworkConfig) []map[string]interface{} {
 	dhcpMap, _ := state["dhcp"].(map[string]interface{})
 	if dhcpMap == nil {
 		dhcpMap = map[string]interface{}{
-			"enabled": true,
+			"enabled": cfg.LanDHCP || cfg.Opt1DHCP || cfg.Opt2DHCP,
 			"subnets": []interface{}{},
 		}
 	}
@@ -808,13 +875,18 @@ func updateStateJSON(cfg NetworkConfig) []map[string]interface{} {
 	state["system"] = sysMap
 
 	if out, err := json.MarshalIndent(state, "", "  "); err == nil {
-		writeSharedConfigFile("/etc/axonwall/state.json", out, 0660)
-		writeSharedConfigFile("/var/lib/axonwall/state.json", out, 0660)
-		writeSharedConfigFile("/var/lib/axonwall/etc-axonwall/state.json", out, 0660)
+		writeSharedConfigFile(canonicalStatePath, out, 0660)
+		writeSharedConfigFile(etcStatePath, out, 0660)
+		writeSharedConfigFile(filepath.Join(varDir, "etc-axonwall", "state.json"), out, 0660)
 	}
 
-	writeSystemYamlAntiLockout(allowedIfaces)
+	if etcDir == "/etc/axonwall" && varDir == "/var/lib/axonwall" {
+		writeSystemYamlAntiLockout(allowedIfaces)
+	}
 
+	if etcDir != "/etc/axonwall" || varDir != "/var/lib/axonwall" {
+		return extraIfaces
+	}
 	// Also write /etc/axonwall/interfaces.yaml and /var/lib/axonwall/etc-axonwall/interfaces.yaml
 	var yamlBuilder strings.Builder
 	yamlBuilder.WriteString("# ============================================================================\n")
@@ -1620,6 +1692,17 @@ func detectInstalledEdition() string {
 	return "axonwall"
 }
 
+func isNastyMapMenuAvailable() bool {
+	if !isAxonwallFirewallMenuAvailable() {
+		return false
+	}
+	if detectInstalledEdition() != "minimal" {
+		return true
+	}
+	_, err := exec.LookPath("nmap")
+	return err == nil
+}
+
 func isAxonwallFirewallMenuAvailable() bool {
 	ed := detectInstalledEdition()
 	return ed == "axonwall" || ed == "minimal" || isLiveMode()
@@ -1752,7 +1835,7 @@ func authenticateConsole(reader *bufio.Reader) (string, bool) {
 }
 
 func detectLiveMode(cmdline string, statExists func(string) bool) bool {
-	if strings.Contains(cmdline, "slot=A") || strings.Contains(cmdline, "slot=B") || strings.Contains(cmdline, "root=LABEL=axon_root") || strings.Contains(cmdline, "root=ZFS=") {
+	if strings.Contains(cmdline, "slot=A") || strings.Contains(cmdline, "slot=B") || strings.Contains(cmdline, "root=LABEL=axon_root") || strings.Contains(cmdline, "root=LABEL=axon_btrfs") || strings.Contains(cmdline, "rootfstype=btrfs") || strings.Contains(cmdline, "root=ZFS=") {
 		return false
 	}
 	if strings.Contains(cmdline, "boot=live") || strings.Contains(cmdline, "axonwall_install=1") || strings.Contains(cmdline, "axonwall.install=1") || strings.Contains(cmdline, "axonwall.unattended=1") {
@@ -1797,6 +1880,8 @@ func readInstalledMode() string {
 			return "ab"
 		case strings.Contains(cmd, "root=ZFS="):
 			return "zbm"
+		case strings.Contains(cmd, "axon_btrfs") || strings.Contains(cmd, "rootfstype=btrfs"):
+			return "btrfs"
 		case strings.Contains(cmd, "root=LABEL=axon_root"):
 			return "rolling"
 		}
@@ -1950,8 +2035,7 @@ func printHeader() {
 	case "vault":
 		fmt.Printf("  %sS) Vault S3 Object-Lock & Storage Status (axonwall-vault-status)%s\n", colorGreen+colorBold, colorReset)
 	}
-	_, nmapErr := exec.LookPath("nmap")
-	showNastyMap := edition != "minimal" || nmapErr == nil
+	showNastyMap := isNastyMapMenuAvailable()
 	if isAxonwallFirewallMenuAvailable() {
 		fmt.Printf("  %sT) Launch Interactive Ink Web-Console & NastyMap TUI (axonwall-tui)%s\n", colorGreen+colorBold, colorReset)
 		if showNastyMap {
@@ -1963,7 +2047,11 @@ func printHeader() {
 	fmt.Println("  0) Logout / Lock Console")
 	fmt.Println("================================================================================")
 	if isLiveMode() {
-		fmt.Print(" Enter option [0-12, T, N, A, E, or I]: ")
+		if showNastyMap {
+			fmt.Print(" Enter option [0-12, T, N, A, E, or I]: ")
+		} else {
+			fmt.Print(" Enter option [0-12, T, A, E, or I]: ")
+		}
 	} else if edition == "k3s-storage" || edition == "vault" {
 		fmt.Print(" Enter option [0-12, S, or E]: ")
 	} else if showNastyMap {
@@ -3143,7 +3231,7 @@ func actionManageAntiLockout(reader *bufio.Reader) {
 
 	// Recompile and apply ruleset via axonwallctl or axonwalld
 	fmt.Printf("\n%sApplying new Anti-Lockout ruleset...%s\n", colorCyan, colorReset)
-	if err := exec.Command("axonwallctl", "apply", "--no-confirm").Run(); err != nil {
+	if err := exec.Command("axonwallctl", "apply").Run(); err != nil {
 		// Fallback: trigger axonwalld or direct nft reload
 		_ = exec.Command("pkill", "-HUP", "axonwalld").Run()
 	}
@@ -3593,7 +3681,7 @@ func main() {
 					_, _ = reader.ReadString('\n')
 				}
 			case "N", "NASTYMAP":
-				if isAxonwallFirewallMenuAvailable() {
+				if isNastyMapMenuAvailable() {
 					clearScreen()
 					cmd := exec.Command("/usr/local/bin/axonwall-tui", "--tab", "nastymap")
 					cmd.Stdin = os.Stdin

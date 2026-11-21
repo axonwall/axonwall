@@ -51,9 +51,41 @@ import net from 'node:net';
 import { execSync, execFileSync, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { getSession } from './auth';
-import { assertActionPermitted } from './auth-guard';
+import { assertActionPermitted, isPasswordChangeEnforced } from './auth-guard';
+import { ssrfSafeFetch } from './ssrf-guard';
 import type { UserSession } from '@axonwall/lib/rbac';
 import { headers } from 'next/headers';
+import {
+  normalizeEbpfOverviewResponse,
+  createEmptyKernelBpfInventory,
+  createEmptyKernelRca,
+  FORBIDDEN_RING0_PROG_TYPES,
+  type BpfTokenProfileStatus,
+  type BpfTokenCapabilityReport,
+  type XdpVerdictStats,
+  type XdpPerCpuStat,
+  type XdpFlowEntry,
+  type XdpProtocolSummary,
+  type XdpPortSummary,
+  type XdpVlanSummary,
+  type XdpSynMeterEntry,
+  type XdpBlockedEntry,
+  type BpfLsmAllowlistEntry,
+  type BpfLsmEventEntry,
+  type BpfProgramInventoryItem,
+  type BpfMapInventoryItem,
+  type BpfTypeAggregate,
+  type KernelBpfInventory,
+  type KernelRcaTelemetry,
+  type NetdevTrafficStat,
+  type VirtWorkloadSummary,
+  type NasPoolIoStat,
+  type ThreatHarvesterOverviewSummary,
+  type ZfsDeepTelemetry,
+  type VirtDutyTelemetry,
+  type K3sDutyTelemetry,
+  type EbpfOverviewTelemetry,
+} from '@/lib/ebpf-telemetry';
 
 const execFileAsync = promisify(execFile);
 
@@ -91,14 +123,17 @@ import {
   isVirtualOrLoopbackInterface,
   readHostOSRelease,
 } from './dev-paths';
+import {
+  clearMockPendingConfirm,
+  getLastPendingJobId,
+  getMockApplyState,
+  isDevModeRuntimeInternal,
+  runDesiredStateApplyPipeline,
+  setLastPendingJobId,
+} from './apply-state-internal';
 
 function isDevModeRuntime(): boolean {
-  return (
-    isDevRuntime() ||
-    process.env.AXONWALL_DEV_MODE === '1' ||
-    process.env.AXONWALL_DEV_MODE === 'true' ||
-    process.env.NODE_ENV === 'development'
-  );
+  return isDevModeRuntimeInternal();
 }
 
 export interface AgentStatus {
@@ -125,11 +160,6 @@ export interface AgentStatus {
     ipAddresses: string[];
   }>;
 }
-
-let mockPendingConfirm = false;
-let mockDeadline = 0;
-let mockActiveRuleset = '';
-let lastPendingJobId = '';
 
 const actionRateLimit = new Map<string, { count: number, resetAt: number }>();
 
@@ -275,13 +305,14 @@ export async function getAgentStatus(): Promise<AgentStatus> {
     });
   }
 
+  const mockState = getMockApplyState();
   return {
     nodeId: `axonwall-${os.hostname()}`,
     version: '0.12.4',
     uptimeSeconds: Math.floor(os.uptime()),
-    activeBundleHash: mockActiveRuleset ? 'hash-active-ruleset' : 'hash-initial-default',
-    pendingConfirm: mockPendingConfirm,
-    confirmDeadlineUnix: mockDeadline,
+    activeBundleHash: mockState.activeBundleHash,
+    pendingConfirm: mockState.pendingConfirm,
+    confirmDeadlineUnix: mockState.confirmDeadlineUnix,
     osName: hostOs.prettyName,
     osId: hostOs.id,
     osFamily: hostOs.family,
@@ -295,7 +326,7 @@ export async function getAgentStatus(): Promise<AgentStatus> {
 }
 
 function redactDesiredStateForSession(state: DesiredState, session: UserSession): DesiredState {
-  if (!session.passwordChangeRequired && (session.roles?.includes('admin') || session.privileges?.includes('*'))) {
+  if (!isPasswordChangeEnforced(session) && (session.roles?.includes('admin') || session.privileges?.includes('*'))) {
     return state;
   }
   const redacted: any = structuredClone(state);
@@ -510,6 +541,41 @@ function redactDesiredStateForSession(state: DesiredState, session: UserSession)
       for (const app of redacted.zeroTrust.apps) {
         if (app?.oidcClientSecret) app.oidcClientSecret = MASK;
       }
+    }
+  }
+  if (redacted.ddns && Array.isArray(redacted.ddns.entries)) {
+    for (const entry of redacted.ddns.entries) {
+      if (entry?.apiToken) entry.apiToken = MASK;
+    }
+  }
+  if (redacted.captivePortal) {
+    if (redacted.captivePortal.radiusSecret) redacted.captivePortal.radiusSecret = MASK;
+    if (Array.isArray(redacted.captivePortal.zones)) {
+      for (const zone of redacted.captivePortal.zones) {
+        if (zone?.radiusSecret) zone.radiusSecret = MASK;
+      }
+    }
+  }
+  if (redacted.crowdsec?.apiKey) {
+    redacted.crowdsec.apiKey = MASK;
+  }
+  if (redacted.ha?.mtlsKey) {
+    redacted.ha.mtlsKey = MASK;
+  }
+  if (redacted.observability?.alerting?.webhookUrl) {
+    redacted.observability.alerting.webhookUrl = MASK;
+  }
+  if (redacted.fleet && Array.isArray(redacted.fleet.nodes)) {
+    for (const node of redacted.fleet.nodes) {
+      if (node?.ztpToken) node.ztpToken = MASK;
+    }
+  }
+  if (redacted.threatHarvester) {
+    if (redacted.threatHarvester.teacherLlm?.apiKey) {
+      redacted.threatHarvester.teacherLlm.apiKey = MASK;
+    }
+    if (redacted.threatHarvester.fleetShipper?.secretKey) {
+      redacted.threatHarvester.fleetShipper.secretKey = MASK;
     }
   }
 
@@ -876,213 +942,25 @@ export async function exportCloudInitConfigAction(
   };
 }
 
-export async function invalidateDesiredStateCache(): Promise<void> {
-  invalidateDesiredStateCacheInternal();
-}
-
 export async function applyDesiredState(
   state: DesiredState,
   confirmTimeoutSeconds = 120,
   options?: { expectedFingerprint?: string }
-): Promise<{ success: boolean; message: string; nftScript: string; warnings: string[] }> {
+): Promise<{ success: boolean; message: string; nftScript: string; warnings: string[]; jobId?: string }> {
   const session = await getSession();
   await enforceRateLimit(10, 60000); // Max 10 applies per minute per IP
   assertActionPermitted(session, 'admin');
 
   const normalizedState = DesiredStateSchema.parse(state);
-
-  // C2: state-version precondition. When the caller passes the fingerprint
-  // the page loaded with, refuse to apply over newer on-disk state instead
-  // of silently reverting another operator's (or tab's) change.
-  if (options?.expectedFingerprint) {
-    const { fingerprint: currentFingerprint } = readAllYamlConfigFiles();
-    if (currentFingerprint !== options.expectedFingerprint) {
-      throw new Error(
-        'Configuration changed since it was loaded; reload the latest configuration and retry instead of overwriting it.'
-      );
+  const { devMode: _devMode, ...result } = await runDesiredStateApplyPipeline(
+    normalizedState,
+    confirmTimeoutSeconds,
+    {
+      expectedFingerprint: options?.expectedFingerprint,
+      actorUsername: session?.username || 'admin',
     }
-  }
-
-  // C9: snapshot on-disk config before persisting, so a daemon rejection
-  // below can roll it back rather than leaving disk ahead of the daemon.
-  const diskSnapshot = snapshotDesiredStateOnDisk();
-
-  // 1. Run linter
-  const lintIssues = lintRuleset(normalizedState);
-
-  // 2. Compile to nftables & daemon config files
-  const { nftScript, files, reloadServices, warnings: compileWarnings } = compileNftables(normalizedState);
-  const warnings = [...lintIssues.map((i) => i.message), ...(compileWarnings || [])];
-  const bundleHash = crypto.createHash('sha256').update(nftScript).digest('hex');
-
-  // 3. Persist /etc/axonwall/*.yaml to disk and include them in the daemon bundle
-  const yamlDaemonFiles = persistDesiredStateToDisk(normalizedState);
-  const { confContent, ifacesContent } = syncNetworkInterfacesFiles(normalizedState);
-
-  const allFiles = [
-    ...files.map((f: any) => ({
-      ...f,
-      fileMode: f.fileMode ?? f.file_mode ?? 0o600,
-      file_mode: f.file_mode ?? f.fileMode ?? 0o600,
-    })),
-    ...Object.entries(yamlDaemonFiles).map(([filePath, content]) => ({
-      path: filePath,
-      content,
-      fileMode: 0o660,
-      file_mode: 0o660,
-    })),
-    {
-      path: '/etc/axonwall/interfaces.conf',
-      content: confContent,
-      fileMode: 0o664,
-      file_mode: 0o664,
-    },
-    ...(isApplianceRuntime() && readHostOSRelease().family === 'debian'
-      ? [
-          {
-            path: '/etc/network/interfaces',
-            content: ifacesContent,
-            fileMode: 0o644,
-            file_mode: 0o644,
-          },
-        ]
-      : []),
-    {
-      path: '/etc/axonwall/state.json',
-      content: JSON.stringify(normalizedState, null, 2),
-      fileMode: 0o660,
-      file_mode: 0o660,
-    },
-  ];
-
-  // 4. Delegate to root axonwalld daemon if active
-  const jobId = `ui-${Date.now()}`;
-  lastPendingJobId = jobId;
-  const applyRes = await callAgentApiDetailed<any>(
-    '/v1/apply',
-    'POST',
-    {
-      job_id: jobId,
-      bundle_hash: bundleHash,
-      nft_script: nftScript,
-      files: allFiles,
-      reload_services: reloadServices,
-      confirm_timeout_seconds: confirmTimeoutSeconds,
-    },
-    120_000
   );
-
-  if (applyRes.kind === 'ok') {
-    const daemonResp = applyRes.data;
-    if (!daemonResp.success) {
-      const restored = restoreDesiredStateSnapshot(diskSnapshot);
-      invalidateDesiredStateCacheInternal();
-      lastPendingJobId = '';
-      throw new Error(
-        (daemonResp.message || 'Ruleset validation failed on daemon') +
-          (restored
-            ? ''
-            : ' WARNING: on-disk configuration could not be fully restored to its pre-apply state; disk and daemon state may diverge.')
-      );
-    }
-    try {
-      const { recordGitOpsChange } = await import('./gitops');
-      await recordGitOpsChange(
-        normalizedState,
-        session?.username || 'admin',
-        `Configuration applied to /etc/axonwall/*.yaml (SHA256: ${bundleHash.slice(0, 12)})`
-      );
-    } catch {}
-    return {
-      success: true,
-      message: daemonResp.message,
-      nftScript,
-      warnings,
-    };
-  }
-
-  if (applyRes.kind === 'http_error') {
-    const restored = restoreDesiredStateSnapshot(diskSnapshot);
-    invalidateDesiredStateCacheInternal();
-    lastPendingJobId = '';
-    throw new Error(
-      (applyRes.message || 'Ruleset validation failed on daemon') +
-        (restored
-          ? ''
-          : ' WARNING: on-disk configuration could not be fully restored to its pre-apply state; disk and daemon state may diverge.')
-    );
-  }
-
-  if (applyRes.kind === 'timeout') {
-    // Prevent split-brain on slow applies: do NOT revert disk files and do NOT
-    // clear lastPendingJobId; sync pending job id from /v1/status if armed.
-    try {
-      const status = await callAgentApi<any>('/v1/status', 'GET', undefined, 5000);
-      const livePending = status?.pending_job_id || status?.pendingJobId;
-      if (livePending) {
-        lastPendingJobId = livePending;
-      }
-    } catch {}
-    throw new Error(
-      'axonwalld apply request timed out after 120s — the configuration may still be committing or awaiting confirm/rollback on axonwalld. Check pending commit-confirm status before retrying.'
-    );
-  }
-
-  // Daemon unreachable: in production, fail closed and restore pre-apply disk state
-  // BEFORE recording any GitOps commit so failed applies never leave false history.
-  const devMode = isDevModeRuntime();
-  if (!devMode) {
-    const restored = restoreDesiredStateSnapshot(diskSnapshot);
-    invalidateDesiredStateCacheInternal();
-    lastPendingJobId = '';
-    throw new Error(
-      'axonwalld is unreachable — the configuration was NOT applied and no commit-confirm is active' +
-        (restored
-          ? '. On-disk configuration was restored to its pre-apply state.'
-          : ' WARNING: on-disk configuration could not be fully restored to its pre-apply state; disk and daemon state may diverge.')
-    );
-  }
-
-  try {
-    const { recordGitOpsChange } = await import('./gitops');
-    await recordGitOpsChange(
-      normalizedState,
-      session?.username || 'admin',
-      `Configuration applied to /etc/axonwall/*.yaml (SHA256: ${bundleHash.slice(0, 12)})`
-    );
-  } catch {}
-
-  // Fallback for dev mode / local execution only (see C-B2 above).
-  try {
-    const routes = normalizedState.routes || [];
-    for (const r of routes) {
-      if (!r.network || !r.gateway) continue;
-      const isV6 = r.network.includes(':') || r.gateway.includes(':');
-      const family = isV6 ? '-6' : '-4';
-      if (r.enabled ?? true) {
-        const args = [family, 'route', 'replace', r.network, 'via', r.gateway, 'proto', 'static'];
-        try {
-          execFileSync('ip', args, { stdio: 'ignore', timeout: 2000 });
-        } catch {}
-      } else {
-        const args = [family, 'route', 'del', r.network, 'proto', 'static'];
-        try {
-          execFileSync('ip', args, { stdio: 'ignore', timeout: 2000 });
-        } catch {}
-      }
-    }
-  } catch {}
-
-  mockPendingConfirm = true;
-  mockDeadline = Math.floor(Date.now() / 1000) + confirmTimeoutSeconds;
-  mockActiveRuleset = nftScript;
-
-  return {
-    success: true,
-    message: `Configuration saved to /etc/axonwall/*.yaml and applied (DEV MODE — no daemon running). Commit-confirm active for ${confirmTimeoutSeconds}s.`,
-    nftScript,
-    warnings,
-  };
+  return result;
 }
 
 export async function applyDesiredStateAction(
@@ -1104,11 +982,11 @@ export async function applyDesiredStateAction(
   }
 }
 
-export async function confirmActiveRuleset(): Promise<{ success: boolean; message: string }> {
+export async function confirmActiveRuleset(explicitJobId?: string): Promise<{ success: boolean; message: string }> {
   const session = await getSession();
   assertActionPermitted(session, 'admin');
 
-  let targetJobId: string | null = lastPendingJobId || null;
+  let targetJobId: string | null = explicitJobId?.trim() || getLastPendingJobId() || null;
   try {
     const daemonStatus = await callAgentApi<any>('/v1/status', 'GET', undefined, 5000);
     if (daemonStatus?.pending_job_id || daemonStatus?.pendingJobId) {
@@ -1134,9 +1012,8 @@ export async function confirmActiveRuleset(): Promise<{ success: boolean; messag
   if (confirmRes.kind === 'ok') {
     const daemonResp = confirmRes.data;
     if (daemonResp.success) {
-      mockPendingConfirm = false;
-      mockDeadline = 0;
-      lastPendingJobId = '';
+      clearMockPendingConfirm();
+      setLastPendingJobId('');
     }
     return {
       success: daemonResp.success,
@@ -1175,8 +1052,8 @@ export async function rollbackActiveRuleset(): Promise<{ success: boolean; messa
   if (rollbackRes.kind === 'ok') {
     const daemonResp = rollbackRes.data;
     if (daemonResp.success) {
-      mockPendingConfirm = false;
-      mockDeadline = 0;
+      clearMockPendingConfirm();
+      setLastPendingJobId('');
       invalidateDesiredStateCacheInternal();
     }
     return {
@@ -1792,38 +1669,21 @@ export async function testOidcDiscoveryAction(
   if (!issuer) {
     return { ok: false, message: 'Enter an OIDC issuer URL first.' };
   }
-  let parsed: URL;
-  try {
-    parsed = new URL(issuer);
-  } catch {
-    return { ok: false, message: `Issuer URL '${issuerUrl}' is not a valid URL.` };
-  }
-  if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
-    return { ok: false, message: 'Issuer URL must use http(s).' };
-  }
-  const host = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, '');
-  if (
-    host === 'localhost' ||
-    host === '::1' ||
-    host === '0.0.0.0' ||
-    host.startsWith('127.') ||
-    host.startsWith('169.254.') ||
-    host.startsWith('fe80:') ||
-    host === 'metadata.google.internal'
-  ) {
-    return { ok: false, message: 'OIDC issuer URL cannot target loopback or link-local/metadata addresses.' };
-  }
 
   try {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 10000);
-    let res: Response;
+    let res: Awaited<ReturnType<typeof ssrfSafeFetch>>;
     try {
-      res = await fetch(`${issuer}/.well-known/openid-configuration`, {
-        headers: { accept: 'application/json' },
-        signal: controller.signal,
-        redirect: 'error',
-      });
+      res = await ssrfSafeFetch(
+        `${issuer}/.well-known/openid-configuration`,
+        {
+          headers: { accept: 'application/json' },
+          signal: controller.signal,
+          timeoutMs: 10000,
+        },
+        { allowHttp: true, allowPrivate: false }
+      );
     } finally {
       clearTimeout(timeoutId);
     }
@@ -2519,7 +2379,7 @@ export async function saveInterfaceAssignment(data: {
     ];
 
     const ifaceJobId = `iface-${Date.now()}`;
-    lastPendingJobId = ifaceJobId;
+    setLastPendingJobId(ifaceJobId);
     const applyRes = await callAgentApiDetailed<any>(
       '/v1/apply',
       'POST',
@@ -2542,7 +2402,7 @@ export async function saveInterfaceAssignment(data: {
       );
       if (confirmRes.kind === 'ok' && confirmRes.data?.success) {
         daemonApplied = true;
-        lastPendingJobId = '';
+        setLastPendingJobId('');
       } else if (confirmRes.kind === 'http_error' || (confirmRes.kind === 'ok' && !confirmRes.data?.success)) {
         daemonError =
           confirmRes.kind === 'http_error'
@@ -2557,7 +2417,7 @@ export async function saveInterfaceAssignment(data: {
       try {
         const st = await callAgentApi<any>('/v1/status', 'GET', undefined, 5000);
         const livePending = st?.pending_job_id || st?.pendingJobId;
-        if (livePending) lastPendingJobId = livePending;
+        if (livePending) setLastPendingJobId(livePending);
       } catch {}
       daemonTimedOut = 'apply request timed out after 120s — configuration may still be committing on axonwalld.';
     } else if (applyRes.kind === 'http_error' || applyRes.kind === 'ok') {
@@ -2575,7 +2435,7 @@ export async function saveInterfaceAssignment(data: {
   if (daemonError) {
     restoreDesiredStateSnapshot(diskSnapshot);
     invalidateDesiredStateCacheInternal();
-    lastPendingJobId = '';
+    setLastPendingJobId('');
     return {
       success: false,
       message: `Interface ${cleanName.toUpperCase()} was not applied: ${daemonError}`,
@@ -2593,7 +2453,7 @@ export async function saveInterfaceAssignment(data: {
   if (daemonUnreachable && !devMode) {
     const restored = restoreDesiredStateSnapshot(diskSnapshot);
     invalidateDesiredStateCacheInternal();
-    lastPendingJobId = '';
+    setLastPendingJobId('');
     return {
       success: false,
       message: `Interface ${cleanName.toUpperCase()} was NOT applied: axonwalld is unreachable (${daemonUnreachable})${restored ? '. On-disk configuration was restored.' : '.'}`,
@@ -2823,7 +2683,7 @@ export async function deleteInterfaceAssignment(name: string): Promise<{ success
     ];
 
     const ifaceDelJobId = `iface-del-${Date.now()}`;
-    lastPendingJobId = ifaceDelJobId;
+    setLastPendingJobId(ifaceDelJobId);
     const applyRes = await callAgentApiDetailed<any>(
       '/v1/apply',
       'POST',
@@ -2845,7 +2705,7 @@ export async function deleteInterfaceAssignment(name: string): Promise<{ success
         60_000
       );
       if (confirmRes.kind === 'ok' && confirmRes.data?.success) {
-        lastPendingJobId = '';
+        setLastPendingJobId('');
       } else if (confirmRes.kind === 'http_error' || (confirmRes.kind === 'ok' && !confirmRes.data?.success)) {
         daemonError =
           confirmRes.kind === 'http_error'
@@ -2860,7 +2720,7 @@ export async function deleteInterfaceAssignment(name: string): Promise<{ success
       try {
         const st = await callAgentApi<any>('/v1/status', 'GET', undefined, 5000);
         const livePending = st?.pending_job_id || st?.pendingJobId;
-        if (livePending) lastPendingJobId = livePending;
+        if (livePending) setLastPendingJobId(livePending);
       } catch {}
       daemonTimedOut = 'apply request timed out after 120s — removal may still be committing on axonwalld.';
     } else if (applyRes.kind === 'http_error' || applyRes.kind === 'ok') {
@@ -2878,7 +2738,7 @@ export async function deleteInterfaceAssignment(name: string): Promise<{ success
   if (daemonError) {
     restoreDesiredStateSnapshot(diskSnapshot);
     invalidateDesiredStateCacheInternal();
-    lastPendingJobId = '';
+    setLastPendingJobId('');
     return {
       success: false,
       message: `Interface ${cleanName.toUpperCase()} was not removed: ${daemonError}`,
@@ -2895,7 +2755,7 @@ export async function deleteInterfaceAssignment(name: string): Promise<{ success
   if (daemonUnreachable && !isDevModeRuntime()) {
     const restored = restoreDesiredStateSnapshot(diskSnapshot);
     invalidateDesiredStateCacheInternal();
-    lastPendingJobId = '';
+    setLastPendingJobId('');
     return {
       success: false,
       message: `Interface ${cleanName.toUpperCase()} was NOT removed: axonwalld is unreachable (${daemonUnreachable})${restored ? '. On-disk configuration was restored.' : '.'}`,
@@ -3150,7 +3010,7 @@ function compareSemver(v1: string, v2: string): number {
 export async function getReleaseInfo(forceRefresh = false): Promise<ReleaseInfo> {
   const session = await getSession();
   if (!session) throw new Error('Unauthorized');
-  if (session.passwordChangeRequired) throw new Error('Forbidden: Password change required');
+  if (isPasswordChangeEnforced(session)) throw new Error('Forbidden: Password change required');
   const currentVersion = getCurrentInstalledVersion();
   const now = Date.now();
 
@@ -3325,8 +3185,20 @@ export interface ZfsBootEnvironmentTelemetry {
   snapshotDetails?: ZfsSnapshotDetailTelemetry[];
 }
 
+export interface BtrfsSnapperSnapshotTelemetry {
+  id: number;
+  type: string;
+  preNum?: number;
+  date: string;
+  description: string;
+  cleanup?: string;
+  important?: boolean;
+  bootable: boolean;
+  subvolume: string;
+}
+
 export interface SystemPartitionsTelemetry {
-  installMode?: 'ab' | 'rolling' | 'zbm';
+  installMode?: 'ab' | 'rolling' | 'zbm' | 'btrfs';
   slots: PartitionSlotInfo[];
   bootCount: number;
   bootLimit: number;
@@ -3342,9 +3214,12 @@ export interface SystemPartitionsTelemetry {
   zbmPoolTopology?: string;
   zbmPoolHealth?: string;
   bootEnvironments?: ZfsBootEnvironmentTelemetry[];
+  btrfsLabel?: string;
+  btrfsTopology?: string;
+  btrfsSnapshots?: BtrfsSnapperSnapshotTelemetry[];
 }
 
-export async function getSystemInstallMode(): Promise<'ab' | 'rolling' | 'zbm'> {
+export async function getSystemInstallMode(): Promise<'ab' | 'rolling' | 'zbm' | 'btrfs'> {
   const session = await getSession();
   assertActionPermitted(session);
 
@@ -3355,6 +3230,9 @@ export async function getSystemInstallMode(): Promise<'ab' | 'rolling' | 'zbm'> 
         const content = fs.readFileSync(p, 'utf8').toLowerCase();
         if (content.includes('zbm') || content.includes('zfsbootmenu')) {
           return 'zbm';
+        }
+        if (content.includes('btrfs') || content.includes('snapper')) {
+          return 'btrfs';
         }
         if (content.includes('rolling')) {
           return 'rolling';
@@ -3373,16 +3251,30 @@ export async function getSystemInstallMode(): Promise<'ab' | 'rolling' | 'zbm'> 
       if (cmdline.includes('root=zfs:') || cmdline.includes('zfsbootmenu') || cmdline.includes('spl.spl_hostid')) {
         return 'zbm';
       }
+      if (cmdline.includes('axon_btrfs') || cmdline.includes('rootfstype=btrfs') || cmdline.includes('subvol=@')) {
+        return 'btrfs';
+      }
       if (cmdline.includes('axon_rolling') || cmdline.includes('rolling')) {
         return 'rolling';
       }
     }
   } catch {}
 
+  try {
+    if (fs.existsSync('/proc/mounts') && fs.readFileSync('/proc/mounts', 'utf8').includes(' / btrfs ')) {
+      return 'btrfs';
+    }
+  } catch {}
+
   // 3. Fallback to daemon if available
   try {
     const daemonData = await callAgentApi<any>('/v1/system/partitions');
-    if (daemonData?.installMode === 'zbm' || daemonData?.installMode === 'rolling' || daemonData?.installMode === 'ab') {
+    if (
+      daemonData?.installMode === 'zbm' ||
+      daemonData?.installMode === 'btrfs' ||
+      daemonData?.installMode === 'rolling' ||
+      daemonData?.installMode === 'ab'
+    ) {
       return daemonData.installMode;
     }
   } catch {}
@@ -3390,13 +3282,16 @@ export async function getSystemInstallMode(): Promise<'ab' | 'rolling' | 'zbm'> 
   return 'ab';
 }
 
-function detectLocalInstallMode(): 'ab' | 'rolling' | 'zbm' {
+function detectLocalInstallMode(): 'ab' | 'rolling' | 'zbm' | 'btrfs' {
   for (const p of ['/etc/axonwall/install-mode', '/var/lib/axonwall/install-mode']) {
     try {
       if (fs.existsSync(p)) {
         const content = fs.readFileSync(p, 'utf8').toLowerCase();
         if (content.includes('zbm') || content.includes('zfsbootmenu')) {
           return 'zbm';
+        }
+        if (content.includes('btrfs') || content.includes('snapper')) {
+          return 'btrfs';
         }
         if (content.includes('rolling')) {
           return 'rolling';
@@ -3413,6 +3308,14 @@ function detectLocalInstallMode(): 'ab' | 'rolling' | 'zbm' {
       if (cmdline.includes('root=zfs:') || cmdline.includes('zfsbootmenu') || cmdline.includes('spl.spl_hostid')) {
         return 'zbm';
       }
+      if (cmdline.includes('axon_btrfs') || cmdline.includes('rootfstype=btrfs') || cmdline.includes('subvol=@')) {
+        return 'btrfs';
+      }
+    }
+  } catch {}
+  try {
+    if (fs.existsSync('/proc/mounts') && fs.readFileSync('/proc/mounts', 'utf8').includes(' / btrfs ')) {
+      return 'btrfs';
     }
   } catch {}
   return 'ab';
@@ -3421,7 +3324,7 @@ function detectLocalInstallMode(): 'ab' | 'rolling' | 'zbm' {
 export async function getSystemPartitionsTelemetry(): Promise<SystemPartitionsTelemetry> {
   const session = await getSession();
   if (!session) throw new Error('Unauthorized');
-  if (session.passwordChangeRequired) throw new Error('Forbidden: Password change required');
+  if (isPasswordChangeEnforced(session)) throw new Error('Forbidden: Password change required');
   const currentVersion = getCurrentInstalledVersion();
   const kernel = os.release() || '6.12.0';
   const localInstallMode = detectLocalInstallMode();
@@ -3429,12 +3332,14 @@ export async function getSystemPartitionsTelemetry(): Promise<SystemPartitionsTe
   // 1. Check daemon API if available
   const daemonData = await callAgentApi<any>('/v1/system/partitions');
   if (daemonData && daemonData.activeSlot) {
-    const installMode: 'ab' | 'rolling' | 'zbm' =
+    const installMode: 'ab' | 'rolling' | 'zbm' | 'btrfs' =
       daemonData.installMode === 'zbm' || localInstallMode === 'zbm'
         ? 'zbm'
-        : daemonData.installMode === 'rolling' || localInstallMode === 'rolling'
-          ? 'rolling'
-          : 'ab';
+        : daemonData.installMode === 'btrfs' || localInstallMode === 'btrfs'
+          ? 'btrfs'
+          : daemonData.installMode === 'rolling' || localInstallMode === 'rolling'
+            ? 'rolling'
+            : 'ab';
     const activeSlot = daemonData.activeSlot.toUpperCase();
     const defaultInactive = 'Standby';
     const slotAVer = daemonData.slotAVersion || (activeSlot === 'A' ? currentVersion : defaultInactive);
@@ -3468,6 +3373,9 @@ export async function getSystemPartitionsTelemetry(): Promise<SystemPartitionsTe
       // the page shows no BE rows instead of an invented BE that
       // claims activeNow and activeNext with a made-up size.
       bootEnvironments: daemonData.bootEnvironments || [],
+      btrfsLabel: daemonData.btrfsLabel,
+      btrfsTopology: daemonData.btrfsTopology,
+      btrfsSnapshots: daemonData.btrfsSnapshots || [],
       slots:
         installMode === 'rolling'
           ? [
@@ -3485,7 +3393,23 @@ export async function getSystemPartitionsTelemetry(): Promise<SystemPartitionsTe
                 lastUpdated: 'In-Place Rolling Root + Full APT',
               },
             ]
-          : installMode === 'zbm'
+          : installMode === 'btrfs'
+            ? [
+                {
+                  slot: 'A',
+                  name: 'Btrfs + Snapper Root (@)',
+                  isActive: true,
+                  isHealthy: runningHealthy,
+                  healthKnown: runningHealthKnown,
+                  version: slotAVer,
+                  kernel: daemonData.kernelVersion || kernel,
+                  device: daemonData.activeRootDevice || '/dev/disk/by-label/axon_btrfs',
+                  label: daemonData.btrfsLabel || 'axon_btrfs',
+                  size: 'Btrfs CoW Subvolumes (@ + Snapper)',
+                  lastUpdated: slotBVer || 'Btrfs + Snapper Snapshots',
+                },
+              ]
+            : installMode === 'zbm'
             ? [
                 {
                   slot: 'A',
@@ -3600,6 +3524,7 @@ export async function getSystemPartitionsTelemetry(): Promise<SystemPartitionsTe
   return {
     installMode: localInstallMode,
     daemonUnreachable: true,
+    btrfsLabel: localInstallMode === 'btrfs' ? 'axon_btrfs' : undefined,
     slots:
       localInstallMode === 'rolling'
         ? [
@@ -3617,7 +3542,23 @@ export async function getSystemPartitionsTelemetry(): Promise<SystemPartitionsTe
               lastUpdated: 'In-Place Rolling Root + Full APT',
             },
           ]
-        : [
+        : localInstallMode === 'btrfs'
+          ? [
+              {
+                slot: 'A',
+                name: 'Btrfs + Snapper Root (@)',
+                isActive: true,
+                isHealthy: false,
+                healthKnown: false,
+                version: slotAVersion,
+                kernel,
+                device: '/dev/disk/by-label/axon_btrfs',
+                label: 'axon_btrfs',
+                size: 'Btrfs CoW Subvolumes (@ + Snapper)',
+                lastUpdated: slotBVersion || 'Btrfs + Snapper Snapshots',
+              },
+            ]
+          : [
             {
               slot: 'A',
               name: 'Slot A (Primary Rootfs)',
@@ -3663,11 +3604,60 @@ export async function getSystemPartitionsTelemetry(): Promise<SystemPartitionsTe
 
 function isAdminSession(session: Awaited<ReturnType<typeof getSession>>): boolean {
   if (!session) return false;
-  if (session.passwordChangeRequired) return false;
+  if (isPasswordChangeEnforced(session)) return false;
   if (session.source === 'local_admin') return true;
   if (Array.isArray(session.roles) && session.roles.includes('admin')) return true;
   if (Array.isArray(session.privileges) && session.privileges.includes('*')) return true;
   return false;
+}
+
+function writeAndMirrorAbGrubEnv(
+  args: string[],
+  actionLabel: string
+): string | null {
+  try {
+    execFileSync('grub-editenv', ['/boot/grub/grubenv', 'set', ...args], {
+      stdio: 'ignore',
+      timeout: 1500,
+    });
+  } catch (err: any) {
+    return `${actionLabel}: ${err?.message || 'grub-editenv write failed'}`;
+  }
+
+  // E2-4: when running on slot B, GRUB reads slot A's grubenv, so mirror onto slot A.
+  try {
+    const cmdline = fs.existsSync('/proc/cmdline') ? fs.readFileSync('/proc/cmdline', 'utf8') : '';
+    if (cmdline.includes('axon_root_b') || cmdline.includes('slot=B')) {
+      const slotADev = '/dev/disk/by-label/axon_root_a';
+      if (!fs.existsSync(slotADev)) {
+        return `${actionLabel}, but the Slot A mirror could not be made (device ${slotADev} not found)`;
+      }
+      const mntDir = '/tmp/axonwall-grubenv-slot-a';
+      fs.mkdirSync(mntDir, { recursive: true });
+      try {
+        execFileSync('mount', [slotADev, mntDir], { stdio: 'ignore', timeout: 5000 });
+      } catch (mountErr: any) {
+        return `${actionLabel}, but Slot A could not be mounted to mirror it (${mountErr?.message || 'mount failed'})`;
+      }
+      try {
+        execFileSync('grub-editenv', [`${mntDir}/boot/grub/grubenv`, 'set', ...args], {
+          stdio: 'ignore',
+          timeout: 1500,
+        });
+      } catch (mirrorErr: any) {
+        try {
+          execFileSync('umount', [mntDir], { stdio: 'ignore', timeout: 5000 });
+        } catch {}
+        return `${actionLabel}, but the Slot A grubenv mirror failed (${mirrorErr?.message || 'grub-editenv failed'})`;
+      }
+      try {
+        execFileSync('umount', [mntDir], { stdio: 'ignore', timeout: 5000 });
+      } catch {}
+    }
+  } catch (err: any) {
+    return `Failed to mirror the GRUB environment to Slot A: ${err?.message || 'mirror failed'}`;
+  }
+  return null;
 }
 
 export async function activatePartitionSlot(slot: 'A' | 'B'): Promise<{ success: boolean; message: string }> {
@@ -3710,72 +3700,19 @@ export async function activatePartitionSlot(slot: 'A' | 'B'): Promise<{ success:
         message:
           localInstallMode === 'zbm'
             ? `Cannot arm Slot ${cleanSlot} via the GRUB environment: this is a ZFSBootMenu install, where the boot target is the pool's bootfs property, not grubenv. The daemon is unreachable, so the slot was NOT armed; do not reboot on the basis of this result.`
-            : `Cannot arm Slot ${cleanSlot}: this is a Rolling Single-Root install with no A/B slots. The slot was NOT armed.`,
+            : localInstallMode === 'btrfs'
+              ? `Cannot arm Slot ${cleanSlot}: this is a Btrfs + Snapper install with no A/B slots; select a Snapper snapshot to roll back.`
+              : `Cannot arm Slot ${cleanSlot}: this is a Rolling Single-Root install with no A/B slots. The slot was NOT armed.`,
       };
     }
-    try {
-      execFileSync('grub-editenv', ['/boot/grub/grubenv', 'set', `active_slot=${cleanSlot}`, 'bootcount=0'], {
-        stdio: 'ignore',
-        timeout: 1500,
-      });
-    } catch (err: any) {
-      // C7: a failed privileged grub-editenv write is a failure, not an
-      // "emulated environment" success. The active slot was not changed.
+    const grubErr = writeAndMirrorAbGrubEnv(
+      [`active_slot=${cleanSlot}`, 'bootcount=0'],
+      `Failed to arm Slot ${cleanSlot}`
+    );
+    if (grubErr) {
       return {
         success: false,
-        message: `Failed to arm Slot ${cleanSlot}: ${err?.message || 'grub-editenv write failed'}. The active slot was not changed; do not reboot on the basis of this result.`,
-      };
-    }
-
-    // E2-4: when running on slot B, GRUB reads slot A's grubenv, so
-    // the write above went to a grubenv GRUB never reads. Mirror it
-    // onto slot A the way the daemon and axonwall-update do; a mirror
-    // failure means the slot was NOT armed, and must be reported as
-    // such rather than as success.
-    try {
-      const cmdline = fs.existsSync('/proc/cmdline') ? fs.readFileSync('/proc/cmdline', 'utf8') : '';
-      if (cmdline.includes('axon_root_b') || cmdline.includes('slot=B')) {
-        const slotADev = '/dev/disk/by-label/axon_root_a';
-        if (!fs.existsSync(slotADev)) {
-          return {
-            success: false,
-            message: `Slot ${cleanSlot} was written to the local GRUB environment, but the Slot A mirror could not be made (device ${slotADev} not found); GRUB reads Slot A's grubenv, so the slot was NOT armed. Do not reboot on the basis of this result.`,
-          };
-        }
-        const mntDir = '/tmp/axonwall-grubenv-slot-a';
-        fs.mkdirSync(mntDir, { recursive: true });
-        try {
-          execFileSync('mount', [slotADev, mntDir], { stdio: 'ignore', timeout: 5000 });
-        } catch (mountErr: any) {
-          return {
-            success: false,
-            message: `Slot ${cleanSlot} was written to the local GRUB environment, but Slot A could not be mounted to mirror it (${mountErr?.message || 'mount failed'}); GRUB reads Slot A's grubenv, so the slot was NOT armed. Do not reboot on the basis of this result.`,
-          };
-        }
-        try {
-          execFileSync('grub-editenv', [`${mntDir}/boot/grub/grubenv`, 'set', `active_slot=${cleanSlot}`, 'bootcount=0'], {
-            stdio: 'ignore',
-            timeout: 1500,
-          });
-        } catch (mirrorErr: any) {
-          try {
-            execFileSync('umount', [mntDir], { stdio: 'ignore', timeout: 5000 });
-          } catch {}
-          return {
-            success: false,
-            message: `Slot ${cleanSlot} was written to the local GRUB environment, but the Slot A grubenv mirror failed (${mirrorErr?.message || 'grub-editenv failed'}); GRUB reads Slot A's grubenv, so the slot was NOT armed. Do not reboot on the basis of this result.`,
-          };
-        }
-        // A stuck unmount after a successful mirror write does not
-        // change what GRUB will boot; ignore it.
-        try {
-          execFileSync('umount', [mntDir], { stdio: 'ignore', timeout: 5000 });
-        } catch {}
-      }
-    } catch (err: any) {
-      return {
-        success: false,
-        message: `Failed to mirror the GRUB environment to Slot A: ${err?.message || 'mirror failed'}. The slot was NOT armed; do not reboot on the basis of this result.`,
+        message: `${grubErr}. The active slot was not changed; do not reboot on the basis of this result.`,
       };
     }
 
@@ -3907,9 +3844,11 @@ export async function applySystemFirmwareUpdate(targetSlot: 'A' | 'B'): Promise<
           const cliArgs =
             localInstallMode === 'zbm'
               ? ['--zbm', '--version', targetVersion]
-              : localInstallMode === 'rolling'
-                ? ['--rolling', '--version', targetVersion]
-                : ['--slot', cleanSlot, '--version', targetVersion];
+              : localInstallMode === 'btrfs'
+                ? ['--btrfs', '--version', targetVersion]
+                : localInstallMode === 'rolling'
+                  ? ['--rolling', '--version', targetVersion]
+                  : ['--slot', cleanSlot, '--version', targetVersion];
           execFileSync(up, cliArgs, {
             stdio: 'pipe',
             timeout: 300000,
@@ -3939,24 +3878,16 @@ export async function applySystemFirmwareUpdate(targetSlot: 'A' | 'B'): Promise<
       };
     }
 
-    // Update GRUB environment for standby slot (skip on Rolling Single-Root systems)
-    if (localInstallMode !== 'rolling') {
-      try {
-        execFileSync(
-          'grub-editenv',
-          ['/boot/grub/grubenv', 'set', `active_slot=${cleanSlot}`, 'bootcount=0', 'bootlimit=3'],
-          { stdio: 'ignore', timeout: 1500 }
-        );
-      } catch (err: any) {
-        // C-B11: a failed grubenv write used to be swallowed while the
-        // success message below claimed "Watchdog bootcount armed
-        // (bootlimit=3)". Like activatePartitionSlot (C7), a failed
-        // privileged write is a failure: the firmware WAS flashed, but
-        // the watchdog was NOT armed, so a bad boot will not count
-        // toward the rollback limit. Say so loudly instead.
+    // Update GRUB environment only for A/B partitioned installs (skip on Rolling & ZBM)
+    if (localInstallMode === 'ab') {
+      const grubErr = writeAndMirrorAbGrubEnv(
+        [`active_slot=${cleanSlot}`, 'bootcount=0', 'bootlimit=3'],
+        `Firmware v${targetVersion} was flashed to Slot ${cleanSlot}, but the watchdog bootcount could NOT be armed`
+      );
+      if (grubErr) {
         return {
           success: false,
-          message: `Firmware v${targetVersion} was flashed to Slot ${cleanSlot}, but the watchdog bootcount could NOT be armed: ${err?.message || 'grub-editenv write failed'}. A failed boot will not count toward the rollback limit; fix /boot/grub/grubenv and re-arm before relying on watchdog rollback.`,
+          message: `${grubErr}. A failed boot will not count toward the rollback limit; fix /boot/grub/grubenv and re-arm before relying on watchdog rollback.`,
           targetSlot: cleanSlot,
           newVersion: targetVersion,
         };
@@ -4146,6 +4077,50 @@ export async function deleteZbmBootEnvironment(beName: string): Promise<{ succes
     return { success: true, message: daemonResp.message };
   }
   return { success: false, message: daemonResp?.message || 'Failed to delete Boot Environment' };
+}
+
+async function callBtrfsAction(
+  body: Record<string, unknown>,
+  fallbackError: string
+): Promise<{ success: boolean; message: string; snapshotId?: number }> {
+  const session = await getSession();
+  if (!isAdminSession(session)) {
+    return { success: false, message: 'Unauthorized: Administrator credentials required' };
+  }
+  const daemonResp = await callAgentApiResponse<any>('/v1/system/btrfs', 'POST', body, 120_000);
+  if (daemonResp && daemonResp.success) {
+    return {
+      success: true,
+      message: daemonResp.message,
+      snapshotId: typeof daemonResp.snapshotId === 'number' ? daemonResp.snapshotId : undefined,
+    };
+  }
+  return { success: false, message: daemonResp?.message || fallbackError };
+}
+
+export async function createBtrfsSnapshot(
+  description: string,
+  important = false
+): Promise<{ success: boolean; message: string; snapshotId?: number }> {
+  return callBtrfsAction({ action: 'snapshot', description, important }, 'Failed to create Btrfs Snapper snapshot');
+}
+
+export async function deleteBtrfsSnapshot(snapshotId: number): Promise<{ success: boolean; message: string }> {
+  if (!Number.isInteger(snapshotId) || snapshotId < 1) {
+    return { success: false, message: 'Invalid snapshot ID' };
+  }
+  return callBtrfsAction({ action: 'delete-snapshot', snapshotId }, 'Failed to delete Btrfs Snapper snapshot');
+}
+
+export async function rollbackBtrfsSnapshot(snapshotId: number): Promise<{ success: boolean; message: string }> {
+  if (!Number.isInteger(snapshotId) || snapshotId < 1) {
+    return { success: false, message: 'Invalid snapshot ID' };
+  }
+  return callBtrfsAction({ action: 'rollback-snapshot', snapshotId }, 'Failed to roll back Btrfs Snapper snapshot');
+}
+
+export async function syncBtrfsGrubSnapshots(): Promise<{ success: boolean; message: string }> {
+  return callBtrfsAction({ action: 'sync-grub' }, 'Failed to synchronize GRUB Btrfs snapshot menu');
 }
 
 export interface PowerActionResult {
@@ -4456,6 +4431,7 @@ export interface K3sNodeUpdatePayload {
   customLabels?: Record<string, string>;
   removeLabels?: string[];
   taints: K3sNodeTaintItem[];
+  removeTaints?: K3sNodeTaintItem[];
   unschedulable?: boolean;
 }
 
@@ -4897,6 +4873,9 @@ export async function getK3sEtcdSnapshotsAction(): Promise<K3sEtcdSnapshotItem[]
   const session = await getSession();
   assertActionPermitted(session);
   const daemonResp = await callAgentApi<{ snapshots?: K3sEtcdSnapshotItem[] }>('/v1/k3s/etcd-snapshots');
+  if (!daemonResp && !isDevModeRuntime()) {
+    throw new Error('Daemon unavailable: could not load K3s etcd snapshots from axonwalld.');
+  }
   return Array.isArray(daemonResp?.snapshots) ? daemonResp!.snapshots! : [];
 }
 
@@ -6067,6 +6046,7 @@ export interface RosenpassLiveStatus {
   publicKeyUpdatedAt?: string;
   peerKeys: RosenpassLivePeerKey[];
   wireguardPeers: RosenpassLiveWgPeerTelemetry[];
+  daemonDown?: boolean;
 }
 
 export async function getRosenpassStatusAction(wgDevice = 'wg0'): Promise<RosenpassLiveStatus> {
@@ -6092,6 +6072,7 @@ export async function getRosenpassStatusAction(wgDevice = 'wg0'): Promise<Rosenp
       publicKeyUpdatedAt: res.publicKeyUpdatedAt,
       peerKeys: Array.isArray(res.peerKeys) ? res.peerKeys : [],
       wireguardPeers: Array.isArray(res.wireguardPeers) ? res.wireguardPeers : [],
+      daemonDown: false,
     };
   }
 
@@ -6105,6 +6086,7 @@ export async function getRosenpassStatusAction(wgDevice = 'wg0'): Promise<Rosenp
     publicKeySha256: '',
     peerKeys: [],
     wireguardPeers: [],
+    daemonDown: true,
   };
 }
 
@@ -6329,172 +6311,58 @@ export async function runHostRootkitScan(): Promise<HostRootkitAuditApiResponse 
 // Ring-0 eBPF Dataplane, Linux 6.9+ BPF_TOKEN_CREATE & Cross-Duty Telemetry
 // ============================================================================
 
-export interface BpfTokenProfileStatus {
-  name: string;
-  mountPath: string;
-  preset: 'networking-safe' | 'cgroup-observability' | 'firewall-xdp-tc' | 'custom';
-  delegateCmds: string;
-  delegateProgs: string;
-  delegateMaps: string;
-  delegateAttachs: string;
-  mounted: boolean;
-  mountOptions?: string;
-  ring0IsolationVerified: boolean;
-  workloadTarget?: string;
-}
+export type {
+  BpfTokenProfileStatus,
+  BpfTokenCapabilityReport,
+  XdpVerdictStats,
+  XdpPerCpuStat,
+  XdpFlowEntry,
+  XdpProtocolSummary,
+  XdpPortSummary,
+  XdpVlanSummary,
+  XdpSynMeterEntry,
+  XdpBlockedEntry,
+  BpfLsmAllowlistEntry,
+  BpfLsmEventEntry,
+  BpfProgramInventoryItem,
+  BpfMapInventoryItem,
+  BpfTypeAggregate,
+  KernelBpfInventory,
+  KernelRcaTelemetry,
+  NetdevTrafficStat,
+  VirtWorkloadSummary,
+  NasPoolIoStat,
+  ThreatHarvesterOverviewSummary,
+  ZfsDeepTelemetry,
+  VirtDutyTelemetry,
+  K3sDutyTelemetry,
+  EbpfOverviewTelemetry,
+};
 
-export interface BpfTokenCapabilityReport {
-  kernelRelease: string;
-  major: number;
-  minor: number;
-  patch: number;
-  supportsBpfToken: boolean;
-  supportsUserNsBpf: boolean;
-  bpffsRootMounted: boolean;
-  unprivilegedBpfSysctl: string;
-  bpfLsmActive: boolean;
-  forbiddenRing0ProgTypes: string[];
-  activeProfiles: BpfTokenProfileStatus[];
-  presets: Record<
-    string,
-    {
-      delegateCmds: string;
-      delegateProgs: string;
-      delegateMaps: string;
-      delegateAttachs: string;
-    }
-  >;
-}
+type CanonicalBpfTokenPreset =
+  | 'socket-observability'
+  | 'network-dataplane'
+  | 'cgroup-microsegmentation';
 
-export interface XdpVerdictStats {
-  rxPackets: number;
-  rxBytes: number;
-  ipv4Packets: number;
-  ipv6Packets: number;
-  vlanTaggedPackets: number;
-  xdpDropPackets: number;
-  xdpDropBytes: number;
-  xdpPassPackets: number;
-  tcpSynPackets: number;
-}
+type BpfTokenPresetInput =
+  | CanonicalBpfTokenPreset
+  | 'networking-safe'
+  | 'cgroup-observability'
+  | 'firewall-xdp-tc';
 
-export interface XdpBlockedEntry {
-  ip: string;
-  family: 'ipv4' | 'ipv6';
-  isCidr?: boolean;
-  expiresInSeconds: number;
-  droppedPackets: number;
-  droppedBytes: number;
-}
-
-export interface ZfsDeepTelemetry {
-  timestamp: string;
-  zfsModuleLoaded: boolean;
-  arc: {
-    sizeBytes: number;
-    maxSizeBytes: number;
-    minSizeBytes: number;
-    hits: number;
-    misses: number;
-    hitRatioPct: number;
-    demandDataHits: number;
-    demandDataMisses: number;
-    l2Hits: number;
-    l2Misses: number;
-    l2SizeBytes: number;
-    memoryThrottleCount: number;
-  };
-  zil: {
-    zilCommitCount: number;
-    zilCommitWriterCount: number;
-    itxCount: number;
-    itxIndirectBytes: number;
-    itxCopiedBytes: number;
-    itxNeedcopyBytes: number;
-  };
-  pools: Array<{
-    pool: string;
-    state: string;
-    nreadBytes: number;
-    nwrittenBytes: number;
-    reads: number;
-    writes: number;
-    wtimeNs: number;
-    rtimeNs: number;
-    syncqReadActive: number;
-    syncqWriteActive: number;
-    asyncqReadActive: number;
-    asyncqWriteActive: number;
-    scrubqReadActive: number;
-  }>;
-}
-
-export interface VirtDutyTelemetry {
-  timestamp: string;
-  kvmAvailable: boolean;
-  iommuGroupsCount: number;
-  lxcInstalled: boolean;
-  qemuInstalled: boolean;
-  vnetInterfaces: Array<{
-    name: string;
-    kind: string;
-    operState: string;
-    mtu: number;
-    rxBytes: number;
-    txBytes: number;
-    rxPackets: number;
-    txPackets: number;
-    rxDropped: number;
-    txDropped: number;
-    xdpAttached: boolean;
-  }>;
-  runningQemuCount: number;
-  runningLxcCount: number;
-  unprivilegedLxcTokenMounts: string[];
-}
-
-export interface K3sDutyTelemetry {
-  timestamp: string;
-  serviceActive: boolean;
-  binaryPresent: boolean;
-  userNamespacesSupported: boolean;
-  cniInterfaces: Array<{
-    name: string;
-    kind: string;
-    operState: string;
-    mtu: number;
-    rxBytes: number;
-    txBytes: number;
-    rxPackets: number;
-    txPackets: number;
-    rxDropped: number;
-    txDropped: number;
-    xdpAttached: boolean;
-  }>;
-  kubepodsCgroupV2: boolean;
-  bpfTokenReady: boolean;
-  openEbsDatasets: string[];
-}
-
-export interface EbpfOverviewTelemetry {
-  daemonDown?: boolean;
-  dataplane: {
-    attachedInterfaces: string[];
-    dualStackEnabled: boolean;
-    vlanPeelingEnabled: boolean;
-    xdpStats: XdpVerdictStats;
-    blockedIps: XdpBlockedEntry[];
-    topFlowsCount: number;
-  };
-  bpfLsm: {
-    attached: boolean;
-    attachedHooks: string[];
-    denialEventsCount: number;
-  };
-  bpfTokens: BpfTokenCapabilityReport;
-  virt: VirtDutyTelemetry;
-  k3s: K3sDutyTelemetry;
-  nas: ZfsDeepTelemetry;
+function mapBpfTokenPreset(preset?: string): CanonicalBpfTokenPreset {
+  switch (preset) {
+    case 'socket-observability':
+      return 'socket-observability';
+    case 'cgroup-observability':
+    case 'cgroup-microsegmentation':
+      return 'cgroup-microsegmentation';
+    case 'networking-safe':
+    case 'firewall-xdp-tc':
+    case 'network-dataplane':
+    default:
+      return 'network-dataplane';
+  }
 }
 
 export async function getEbpfOverviewTelemetry(): Promise<EbpfOverviewTelemetry> {
@@ -6502,9 +6370,9 @@ export async function getEbpfOverviewTelemetry(): Promise<EbpfOverviewTelemetry>
   assertActionPermitted(session);
   await enforceRateLimit(60, 60000, 'ebpf-overview');
 
-  const res = await callAgentApi<EbpfOverviewTelemetry>('/v1/ebpf/overview?limit=50', 'GET', undefined, 8000);
-  if (res && res.bpfTokens) {
-    return res;
+  const res = await callAgentApi<any>('/v1/ebpf/overview?limit=100', 'GET', undefined, 8000);
+  if (res && (res.bpfTokens || res.dataplane)) {
+    return normalizeEbpfOverviewResponse(res);
   }
 
   const rel = os.release() || '6.12.0';
@@ -6519,6 +6387,7 @@ export async function getEbpfOverviewTelemetry(): Promise<EbpfOverviewTelemetry>
   return {
     daemonDown: true,
     dataplane: {
+      running: false,
       attachedInterfaces: [],
       dualStackEnabled: false,
       vlanPeelingEnabled: false,
@@ -6532,7 +6401,18 @@ export async function getEbpfOverviewTelemetry(): Promise<EbpfOverviewTelemetry>
         xdpDropBytes: 0,
         xdpPassPackets: 0,
         tcpSynPackets: 0,
+        lpmCidrDrops: 0,
+        synFloodDrops: 0,
       },
+      perCpuStats: [],
+      totalFlowCount: 0,
+      totalFlowCountV4: 0,
+      totalFlowCountV6: 0,
+      protocolBreakdown: [],
+      topPorts: [],
+      vlanBreakdown: [],
+      synRateMeters: [],
+      topFlows: [],
       blockedIps: [],
       topFlowsCount: 0,
     },
@@ -6540,6 +6420,8 @@ export async function getEbpfOverviewTelemetry(): Promise<EbpfOverviewTelemetry>
       attached: false,
       attachedHooks: [],
       denialEventsCount: 0,
+      allowlist: [],
+      recentEvents: [],
     },
     bpfTokens: {
       kernelRelease: rel,
@@ -6551,40 +6433,31 @@ export async function getEbpfOverviewTelemetry(): Promise<EbpfOverviewTelemetry>
       bpffsRootMounted: fs.existsSync('/sys/fs/bpf'),
       unprivilegedBpfSysctl: '',
       bpfLsmActive: false,
-      forbiddenRing0ProgTypes: [
-        'kprobe',
-        'tracepoint',
-        'perf_event',
-        'raw_tracepoint',
-        'raw_tracepoint_writable',
-        'tracing',
-        'lsm',
-        'struct_ops',
-        'ext',
-        'syscall',
-      ],
+      forbiddenRing0ProgTypes: FORBIDDEN_RING0_PROG_TYPES,
       activeProfiles: [],
       presets: {
-        'networking-safe': {
-          delegateCmds: 'prog_load:map_create:map_lookup_elem:map_update_elem:map_delete_elem:link_create',
-          delegateProgs: 'socket_filter:sched_cls:sched_act:xdp:cgroup_skb:sk_skb:sk_msg:sock_ops',
-          delegateMaps: 'hash:array:percpu_hash:percpu_array:lru_hash:lru_percpu_hash:ringbuf:lpm_trie',
-          delegateAttachs: 'xdp:cgroup_inet_ingress:cgroup_inet_egress:sk_skb_stream_parser:sk_skb_stream_verdict',
+        'network-dataplane': {
+          delegateCmds: 'prog_load:map_create:btf_load:link_create:link_update:link_detach:obj_pin:obj_get:map_lookup_elem:map_update_elem:map_delete_elem:map_get_next_key',
+          delegateProgs: 'xdp:sched_cls:sched_act:socket_filter:cgroup_skb:cgroup_sock_addr:sk_skb:sk_msg',
+          delegateMaps: 'array:percpu_array:hash:percpu_hash:lru_hash:lru_percpu_hash:lpm_trie:ringbuf:devmap:sockmap:sockhash',
+          delegateAttachs: 'xdp:tcx_ingress:tcx_egress:cgroup_inet_ingress:cgroup_inet_egress:cgroup_inet4_connect:cgroup_inet6_connect:sk_skb_stream_verdict:sk_msg_verdict',
         },
-        'cgroup-observability': {
-          delegateCmds: 'prog_load:map_create:map_lookup_elem:link_create',
-          delegateProgs: 'cgroup_skb:cgroup_sock:cgroup_device:sock_ops',
-          delegateMaps: 'hash:array:percpu_array:ringbuf',
-          delegateAttachs: 'cgroup_inet_ingress:cgroup_inet_egress:cgroup_inet_sock_create:cgroup_sock_ops',
+        'socket-observability': {
+          delegateCmds: 'prog_load:map_create:btf_load:map_lookup_elem:map_update_elem:map_delete_elem:map_get_next_key',
+          delegateProgs: 'socket_filter:cgroup_skb',
+          delegateMaps: 'array:hash:lru_hash:percpu_array:ringbuf',
+          delegateAttachs: 'cgroup_inet_ingress:cgroup_inet_egress',
         },
-        'firewall-xdp-tc': {
-          delegateCmds: 'prog_load:map_create:map_lookup_elem:map_update_elem:map_delete_elem:link_create',
-          delegateProgs: 'xdp:sched_cls:sched_act',
-          delegateMaps: 'hash:array:lru_hash:lpm_trie:ringbuf:devmap',
-          delegateAttachs: 'xdp:tcx_ingress:tcx_egress',
+        'cgroup-microsegmentation': {
+          delegateCmds: 'prog_load:map_create:btf_load:link_create:map_lookup_elem:map_update_elem:map_delete_elem',
+          delegateProgs: 'cgroup_skb:cgroup_sock:cgroup_sock_addr',
+          delegateMaps: 'array:hash:lru_hash:lpm_trie:ringbuf',
+          delegateAttachs: 'cgroup_inet_ingress:cgroup_inet_egress:cgroup_inet4_bind:cgroup_inet6_bind:cgroup_inet4_connect:cgroup_inet6_connect',
         },
       },
     },
+    bpfInventory: createEmptyKernelBpfInventory(),
+    kernelRca: createEmptyKernelRca(),
     virt: {
       timestamp: new Date().toISOString(),
       kvmAvailable: fs.existsSync('/dev/kvm'),
@@ -6592,6 +6465,8 @@ export async function getEbpfOverviewTelemetry(): Promise<EbpfOverviewTelemetry>
       lxcInstalled: false,
       qemuInstalled: false,
       vnetInterfaces: [],
+      workloads: [],
+      bridgeStats: [],
       runningQemuCount: 0,
       runningLxcCount: 0,
       unprivilegedLxcTokenMounts: [],
@@ -6632,6 +6507,7 @@ export async function getEbpfOverviewTelemetry(): Promise<EbpfOverviewTelemetry>
         itxNeedcopyBytes: 0,
       },
       pools: [],
+      poolIoStats: [],
     },
   };
 }
@@ -6639,20 +6515,20 @@ export async function getEbpfOverviewTelemetry(): Promise<EbpfOverviewTelemetry>
 export async function manageBpfTokenProfileAction(input: {
   action: 'create' | 'delete';
   name: string;
-  preset?: 'networking-safe' | 'cgroup-observability' | 'firewall-xdp-tc';
+  preset?: BpfTokenPresetInput;
   workloadTarget?: string;
 }): Promise<{ success: boolean; profile?: BpfTokenProfileStatus; error?: string }> {
   const session = await getSession();
   assertActionPermitted(session, 'admin');
   await enforceRateLimit(20, 60000, 'ebpf-token-manage');
 
-  const cleanName = (input.name || '').trim();
-  if (!/^[a-zA-Z0-9_-]{2,48}$/.test(cleanName)) {
-    return { success: false, error: 'Profile name must be 2–48 alphanumeric, dash, or underscore characters.' };
+  const cleanName = (input.name || '').trim().toLowerCase();
+  if (!/^[a-z0-9][a-z0-9._-]{1,62}$/.test(cleanName)) {
+    return { success: false, error: 'Profile ID must match ^[a-z0-9][a-z0-9._-]{1,62}$.' };
   }
 
   if (input.action === 'delete') {
-    const res = await callAgentApiResponse<any>(`/v1/ebpf/tokens?name=${encodeURIComponent(cleanName)}`, 'DELETE', undefined, 10000);
+    const res = await callAgentApiResponse<any>(`/v1/ebpf/tokens?id=${encodeURIComponent(cleanName)}`, 'DELETE', undefined, 10000);
     if (!res) {
       return { success: false, error: 'Daemon unavailable — cannot unmount bpffs delegation profile.' };
     }
@@ -6662,13 +6538,23 @@ export async function manageBpfTokenProfileAction(input: {
     return { success: true };
   }
 
+  const targetRef = (input.workloadTarget || 'k3s-userns').trim();
+  const targetKind = targetRef.startsWith('ct-') || targetRef.startsWith('lxc:')
+    ? 'lxc'
+    : targetRef.includes('k3s') || targetRef.includes('/')
+      ? 'k3s-pod'
+      : 'standalone';
+
   const res = await callAgentApiResponse<any>(
     '/v1/ebpf/tokens',
     'POST',
     {
-      name: cleanName,
-      preset: input.preset || 'networking-safe',
-      workloadTarget: input.workloadTarget || 'k3s-userns',
+      id: cleanName,
+      targetKind,
+      targetRef,
+      preset: mapBpfTokenPreset(input.preset),
+      enabled: true,
+      auditViaBpfLsm: true,
     },
     10000
   );
@@ -6717,11 +6603,14 @@ export async function manageXdpFastDropAction(input: {
   return { success: true };
 }
 
-export async function getXdpSynLimitAction(): Promise<{ maxSynPps: number }> {
+export async function getXdpSynLimitAction(): Promise<{ maxSynPps: number; daemonDown: boolean }> {
   const session = await getSession();
   assertActionPermitted(session);
   const res = await callAgentApi<{ maxSynPps?: number }>('/v1/ebpf/xdp/syn-limit', 'GET', undefined, 5000);
-  return { maxSynPps: Number(res?.maxSynPps ?? 0) };
+  if (!res) {
+    return { maxSynPps: 0, daemonDown: true };
+  }
+  return { maxSynPps: Number(res.maxSynPps ?? 0), daemonDown: false };
 }
 
 export async function setXdpSynLimitAction(
@@ -6754,7 +6643,7 @@ export async function renderK3sBpfTokenManifestAction(input: {
   namespace?: string;
   image?: string;
   profileName?: string;
-  preset?: 'networking-safe' | 'cgroup-observability' | 'firewall-xdp-tc';
+  preset?: BpfTokenPresetInput;
   kind?: 'Pod' | 'DaemonSet';
 }): Promise<{ success: boolean; manifestYaml: string; error?: string }> {
   const session = await getSession();
@@ -6764,20 +6653,27 @@ export async function renderK3sBpfTokenManifestAction(input: {
   const cleanName = /^[a-z0-9-]{2,48}$/.test((input.name || '').trim()) ? input.name.trim() : 'ebpf-packet-sensor';
   const cleanNs = /^[a-z0-9-]{1,48}$/.test((input.namespace || '').trim()) ? input.namespace!.trim() : 'default';
   const cleanImg = (input.image || 'ghcr.io/cilium/ebpf-sensor:latest').trim();
-  const profileName = /^[a-zA-Z0-9_-]{2,48}$/.test((input.profileName || '').trim())
-    ? input.profileName!.trim()
+  const profileName = /^[a-z0-9][a-z0-9._-]{1,62}$/.test((input.profileName || '').trim().toLowerCase())
+    ? input.profileName!.trim().toLowerCase()
     : 'k3s-net-safe';
   const kind = input.kind === 'DaemonSet' ? 'DaemonSet' : 'Pod';
+  const mappedPreset = mapBpfTokenPreset(input.preset);
 
   const res = await callAgentApi<any>(
     '/v1/ebpf/tokens/render-k3s',
     'POST',
     {
-      name: cleanName,
+      profileId: profileName,
+      profile: {
+        id: profileName,
+        preset: mappedPreset,
+        targetKind: 'k3s-pod',
+        targetRef: cleanName,
+        enabled: true,
+      },
+      workloadName: cleanName,
       namespace: cleanNs,
       image: cleanImg,
-      profileName,
-      preset: input.preset || 'networking-safe',
       kind,
     },
     5000
@@ -6881,6 +6777,16 @@ export async function getThreatHarvesterStatus(): Promise<ThreatHarvesterStatusS
     8000
   );
   if (res && res.config && res.stats) {
+    if (!isAdminSession(session)) {
+      const cloned: ThreatHarvesterStatusSnapshot = structuredClone(res);
+      if (cloned.config?.teacherLlm?.apiKey) {
+        cloned.config.teacherLlm.apiKey = '********';
+      }
+      if (cloned.config?.fleetShipper?.secretKey) {
+        cloned.config.fleetShipper.secretKey = '********';
+      }
+      return cloned;
+    }
     return res;
   }
 
@@ -6932,7 +6838,7 @@ export async function listThreatHarvesterEpisodes(params?: {
   tier?: string;
   reviewStatus?: string;
   limit?: number;
-}): Promise<{ episodes: ThreatEpisode[]; total: number }> {
+}): Promise<{ episodes: ThreatEpisode[]; total: number; daemonDown?: boolean }> {
   const session = await getSession();
   assertActionPermitted(session);
   await enforceRateLimit(60, 60000, 'threat-harvester-episodes');
@@ -6949,11 +6855,12 @@ export async function listThreatHarvesterEpisodes(params?: {
     8000
   );
   if (!res || !Array.isArray(res.episodes)) {
-    return { episodes: [], total: 0 };
+    return { episodes: [], total: 0, daemonDown: !res };
   }
   return {
     episodes: res.episodes,
     total: typeof res.total === 'number' ? res.total : res.episodes.length,
+    daemonDown: false,
   };
 }
 

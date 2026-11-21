@@ -6,6 +6,9 @@ services:
     container_name: axonwalld
     network_mode: host
     restart: unless-stopped
+    environment:
+      - AXONWALL_SOCKET_GROUP=1001
+      - AXONWALL_AGENT_TOKEN=${AXONWALL_AGENT_TOKEN:?AXONWALL_AGENT_TOKEN must be set}
     cap_add:
       - NET_ADMIN
       - NET_RAW
@@ -29,14 +32,14 @@ services:
       # secret (there is no fallback). Generate one per deployment:
       #   JWT_SECRET=$(openssl rand -hex 32)
       - JWT_SECRET=${JWT_SECRET:?JWT_SECRET must be set (see comment above)}
-      - SUPABASE_URL=http://supabase-db:54321
-      - SUPABASE_ANON_KEY=local-dev-anon-key
+      - AXONWALL_AGENT_TOKEN=${AXONWALL_AGENT_TOKEN:?AXONWALL_AGENT_TOKEN must be set}
+      - AGENT_API_SOCKET=/run/axonwalld/agent-api.sock
       - LDAP_URL=ldap://openldap:389
+      - LDAP_BASE_DN=dc=axonwall,dc=internal
       - LDAP_BIND_DN=cn=admin,dc=axonwall,dc=internal
-      - LDAP_BIND_PASSWORD=adminpassword
-      - AXONWALLD_SOCKET=/run/axonwalld/axonwalld.sock
+      - LDAP_BIND_PASSWORD=${LDAP_ADMIN_PASSWORD:?LDAP_ADMIN_PASSWORD must be set}
     volumes:
-      - /run/axonwalld:/run/axonwalld:ro
+      - /run/axonwalld:/run/axonwalld
     depends_on:
       - openldap
       - supabase-db
@@ -50,7 +53,7 @@ services:
     environment:
       - LDAP_ORGANISATION=Axonwall
       - LDAP_DOMAIN=axonwall.internal
-      - LDAP_ADMIN_PASSWORD=adminpassword
+      - LDAP_ADMIN_PASSWORD=${LDAP_ADMIN_PASSWORD:?LDAP_ADMIN_PASSWORD must be set}
     volumes:
       - openldap_data:/var/lib/ldap
       - openldap_config:/etc/ldap/slapd.d
@@ -62,7 +65,7 @@ services:
     ports:
       - "127.0.0.1:5432:5432"
     environment:
-      - POSTGRES_PASSWORD=postgrespassword
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
       - POSTGRES_DB=postgres
     volumes:
       - supabase_data:/var/lib/postgresql/data

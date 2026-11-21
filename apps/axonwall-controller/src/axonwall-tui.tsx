@@ -47,12 +47,13 @@ export type TopTab =
   | 'updates'
   | 'cli_ops';
 
-function detectLocalInstallMode(): 'zbm' | 'rolling' | 'ab' {
+function detectLocalInstallMode(): 'zbm' | 'btrfs' | 'rolling' | 'ab' {
   for (const p of [path.join(ETC_CONFIG_DIR, 'install-mode'), path.join(CONTROLLER_DIRS.varDir, 'install-mode')]) {
     try {
       if (fs.existsSync(p)) {
         const raw = fs.readFileSync(p, 'utf-8').trim().toLowerCase();
         if (raw.includes('zbm') || raw.includes('zfs')) return 'zbm';
+        if (raw.includes('btrfs') || raw.includes('snapper')) return 'btrfs';
         if (raw.includes('rolling')) return 'rolling';
         if (raw.includes('ab')) return 'ab';
       }
@@ -66,6 +67,9 @@ function detectLocalInstallMode(): 'zbm' | 'rolling' | 'ab' {
         if (parts[1] === '/' && parts[2] === 'zfs') {
           return 'zbm';
         }
+        if (parts[1] === '/' && parts[2] === 'btrfs') {
+          return 'btrfs';
+        }
       }
     }
   } catch {}
@@ -76,9 +80,11 @@ function getTopTabs(installMode: string): Array<{ id: TopTab; key: string; label
   const updatesLabel =
     installMode === 'zbm'
       ? 'ZFS Boot Env'
-      : installMode === 'rolling'
-        ? 'Rolling Updates'
-        : 'A/B Updates';
+      : installMode === 'btrfs'
+        ? 'Btrfs Snapper'
+        : installMode === 'rolling'
+          ? 'Rolling Updates'
+          : 'A/B Updates';
   return [
     { id: 'dashboard', key: '1', label: 'Dashboard' },
     { id: 'interfaces', key: '2', label: 'Interfaces' },
@@ -1150,6 +1156,7 @@ export function AxonwallTuiApp({
       }
     }
   }
+  const allBtrfsSnapshots: any[] = Array.isArray(partitionStatus?.btrfsSnapshots) ? partitionStatus.btrfsSnapshots : [];
 
   useInput((input, key) => {
     // Handle inline text prompt mode first
@@ -1705,6 +1712,63 @@ export function AxonwallTuiApp({
           }
           return;
         }
+      } else if (installMode === 'btrfs') {
+        if (input === 's') {
+          setPromptState({
+            title: 'Create Btrfs Snapper Snapshot (Enter description)',
+            placeholder: `manual-${new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)}`,
+            value: '',
+            onSubmit: (description) => {
+              setBusyAction('Creating Snapper snapshot...');
+              callDaemon('/v1/system/btrfs', 'POST', { action: 'snapshot', description }, 30000).then((res) => {
+                setBusyAction(null);
+                setStatusMessage(
+                  res?.success ? `✔ ${res.message}` : `✖ Snapshot failed: ${res?.message || 'Btrfs/Snapper error'}`
+                );
+                refreshAll();
+              });
+            },
+          });
+          return;
+        }
+        if (input === 'r' && allBtrfsSnapshots.length > 0) {
+          const targetSnap = allBtrfsSnapshots[cursorIdx % allBtrfsSnapshots.length]!;
+          setStatusMessage(`Promoting Snapper snapshot #${targetSnap.id} to @...`);
+          callDaemon(
+            '/v1/system/btrfs',
+            'POST',
+            { action: 'rollback-snapshot', snapshotId: targetSnap.id },
+            30000
+          ).then((res) => {
+            setStatusMessage(
+              res?.success ? `✔ ${res.message}` : `✖ Rollback failed: ${res?.message || 'Btrfs error'}`
+            );
+            refreshAll();
+          });
+          return;
+        }
+        if (input === 'x' && allBtrfsSnapshots.length > 0) {
+          const targetSnap = allBtrfsSnapshots[cursorIdx % allBtrfsSnapshots.length]!;
+          setStatusMessage(`Deleting Snapper snapshot #${targetSnap.id}...`);
+          callDaemon(
+            '/v1/system/btrfs',
+            'POST',
+            { action: 'delete-snapshot', snapshotId: targetSnap.id },
+            20000
+          ).then((res) => {
+            setStatusMessage(res?.success ? `✔ ${res.message}` : `✖ Delete failed: ${res?.message}`);
+            refreshAll();
+          });
+          return;
+        }
+        if (input === 'g') {
+          setStatusMessage('Regenerating /boot/grub/btrfs-snapshots.cfg...');
+          callDaemon('/v1/system/btrfs', 'POST', { action: 'sync-grub' }, 20000).then((res) => {
+            setStatusMessage(res?.success ? `✔ ${res.message}` : `✖ GRUB sync failed: ${res?.message}`);
+            refreshAll();
+          });
+          return;
+        }
       } else {
         // A/B or Rolling mode
         if (input === 'b') {
@@ -2036,6 +2100,7 @@ export function AxonwallTuiApp({
   const pluginsViewport = getViewportSlice(BUILTIN_PLUGINS, cursorIdx, 13);
   const zbmBeViewport = getViewportSlice(partitionStatus?.bootEnvironments || [], cursorIdx, 11);
   const zbmSnapViewport = getViewportSlice(allZbmSnapshots, cursorIdx, 11);
+  const btrfsSnapViewport = getViewportSlice(allBtrfsSnapshots, cursorIdx, 11);
 
   return (
     <Box flexDirection="column" paddingX={1}>
@@ -2161,9 +2226,11 @@ export function AxonwallTuiApp({
                 <Text color="magenta" bold>
                   {installMode === 'zbm'
                     ? `ZFSBootMenu (${partitionStatus?.bootEnvironments?.length || 1} BEs, ${allZbmSnapshots.length} snaps)`
-                    : installMode === 'rolling'
-                      ? 'Rolling Standard Linux'
-                      : `A/B Dual-Root (Slot ${partitionStatus?.activeSlot || 'A'})`}
+                    : installMode === 'btrfs'
+                      ? `Btrfs + Snapper (${allBtrfsSnapshots.length} snaps)`
+                      : installMode === 'rolling'
+                        ? 'Rolling Standard Linux'
+                        : `A/B Dual-Root (Slot ${partitionStatus?.activeSlot || 'A'})`}
                 </Text>
               </Text>
               <Text wrap="truncate-end">  • Firewall & NAT    : <Text color="green" bold>{state.rules.length}</Text> rules, <Text color="cyan" bold>{state.nat?.length || 0}</Text> NAT, <Text color="yellow" bold>{state.aliases?.length || 0}</Text> aliases</Text>
@@ -2838,6 +2905,66 @@ export function AxonwallTuiApp({
                 </Box>
               )}
             </>
+          ) : installMode === 'btrfs' ? (
+            <>
+              <Text bold color="cyan" wrap="truncate-end">
+                Btrfs + Snapper Root System Updates &amp; Snapshots [{updSubView === 'checks' ? 'HEALTH' : 'SNAPSHOTS'}]{' '}
+                <Text color="gray" bold={false}>
+                  — [n] View (Snapshots / Health) · [s] New Snapshot · [r] Rollback · [x] Delete · [g] Sync GRUB · [h] Verify
+                </Text>
+              </Text>
+              <Text wrap="truncate-end">
+                Volume: <Text bold color="cyan">{partitionStatus?.btrfsLabel || 'axon_btrfs'}</Text>{' '}
+                ({partitionStatus?.btrfsTopology || 'unknown'}) · Subvolume: <Text bold color="yellow">@</Text> · Health:{' '}
+                <Text bold color={partitionStatus?.healthVerified ? 'green' : 'yellow'}>
+                  {partitionStatus?.healthVerified ? 'VERIFIED' : 'PENDING'}
+                </Text>
+              </Text>
+              {partitionStatus?.stale && (
+                <Text color="yellow" wrap="truncate-end">
+                  Partition status STALE — last successful check {partitionStatus?.staleSince || 'unknown'}; {partitionStatus?.error || 'daemon unreachable'}.
+                </Text>
+              )}
+              {updSubView === 'checks' ? (
+                <Box flexDirection="column" marginTop={1}>
+                  <Text bold color="white">Boot Watchdog Health Quorum Checks ({(partitionStatus?.checks || []).length}):</Text>
+                  {(partitionStatus?.checks || []).map((chk: any, idx: number) => (
+                    <Text key={chk.name || idx} wrap="truncate-end">
+                      {'  '}
+                      <Text color={chk.status === 'PASS' ? 'green' : chk.status === 'WARN' ? 'yellow' : 'red'} bold>
+                        [{chk.status}]
+                      </Text>{' '}
+                      <Text bold color="white">{(chk.name || '').padEnd(28, ' ')}</Text>{' '}
+                      <Text color="gray">{chk.detail} ({chk.durationMs || 0}ms)</Text>
+                    </Text>
+                  ))}
+                </Box>
+              ) : (
+                <Box flexDirection="column" marginTop={1}>
+                  <Text bold color="white">
+                    Snapper Snapshots ({allBtrfsSnapshots.length}) — [s] Create · [r] Rollback Selected · [x] Delete · [g] Sync GRUB:
+                  </Text>
+                  {btrfsSnapViewport.slice.length === 0 ? (
+                    <Text color="gray">  No Snapper snapshots reported yet. Press [s] to create a snapshot.</Text>
+                  ) : (
+                    btrfsSnapViewport.slice.map((sn: any, i: number) => {
+                      const absIdx = btrfsSnapViewport.startIndex + i;
+                      const sel = absIdx === btrfsSnapViewport.activeIndex;
+                      return (
+                        <Text key={sn.id || absIdx} wrap="truncate-end">
+                          <Text color={sel ? 'cyan' : 'gray'} bold>{sel ? '▶ ' : '  '}</Text>
+                          <Text bold color="cyan">{`#${sn.id}`.padEnd(6, ' ')}</Text>
+                          <Text color="yellow">{`[${sn.type || 'single'}]`.padEnd(10, ' ')}</Text>
+                          <Text color={sn.bootable ? 'green' : 'gray'}>{sn.bootable ? '[GRUB] ' : '       '}</Text>
+                          <Text bold color="white">{(sn.description || '').slice(0, 36).padEnd(37, ' ')}</Text>
+                          <Text color="gray">{sn.date || ''}</Text>
+                        </Text>
+                      );
+                    })
+                  )}
+                </Box>
+              )}
+            </>
           ) : (
             <>
               <Text bold color="cyan" wrap="truncate-end">
@@ -2972,7 +3099,7 @@ export function resolveTabFromArg(val: string): TopTab {
   if (v === 'storage' || v === 'zfs' || v === 'nas') return 'storage';
   if (v === 'compute' || v === 'k3s' || v === 'virt' || v === 'vigilante') return 'compute';
   if (v === 'plugins' || v === 'shell') return 'plugins';
-  if (v === 'updates' || v === 'update' || v === 'zbm' || v === 'be' || v === 'bootenv') return 'updates';
+  if (v === 'updates' || v === 'update' || v === 'zbm' || v === 'btrfs' || v === 'snapper' || v === 'be' || v === 'bootenv') return 'updates';
   if (
     v === 'cli' ||
     v === 'ops' ||
@@ -3010,7 +3137,7 @@ Usage:
 Tabs:
   dashboard, interfaces, firewall (nat), routing, services (vpn, mcp),
   storage (zfs), compute (k3s, virt, vigilante), plugins (shell),
-  nastymap, cli_ops (users, gitops, logs), updates (zbm, be)`);
+  nastymap, cli_ops (users, gitops, logs), updates (zbm, btrfs, be)`);
       process.exit(0);
     } else if (arg === '--readonly' || arg === '-r') {
       readOnlyMode = true;

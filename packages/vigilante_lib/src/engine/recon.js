@@ -7,12 +7,79 @@ import net from 'node:net';
 import {
   getVigilanteReconDir,
   ensureVigilanteConfig,
-  getHostEvidenceDir
+  getHostEvidenceDir,
+  assertCliTarget,
+  isValidHostname
 } from './config.js';
 import { autoSignIfConfigured } from './gpg.js';
 import { saveEvidenceFile } from './evidence.js';
 import { detectNetworkSubnets } from './nmap.js';
 import { logger } from '../utils/logger.js';
+
+function assertBoundedInt(value, label, min, max) {
+  const num = Number(value);
+  if (!Number.isInteger(num) || num < min || num > max) {
+    throw new Error(`Invalid ${label} '${value}': expected integer between ${min} and ${max}`);
+  }
+  return String(num);
+}
+
+function assertPortsSpec(ports) {
+  const spec = String(ports).trim();
+  if (!/^[0-9,-]+$/.test(spec) || spec.startsWith('-')) {
+    throw new Error(`Invalid ports specification '${ports}'`);
+  }
+  return spec;
+}
+
+function isLinkLocalOrMetadataHost(hostname) {
+  const host = String(hostname || '').replace(/^\[|\]$/g, '').toLowerCase();
+  if (!host) return true;
+  if (host === 'metadata.google.internal' || host.startsWith('169.254.')) return true;
+  if (host.startsWith('::ffff:169.254.') || host.startsWith('fe80:') || host.startsWith('fe80%')) return true;
+  return false;
+}
+
+function assertSafeProbeHttpUrl(targetUrl) {
+  const normUrl = String(targetUrl || '').trim();
+  if (!normUrl) throw new Error('Empty probe URL');
+  const isBareIp = Boolean(net.isIP(normUrl.replace(/^\[|\]$/g, '')));
+  const hasHostPortPrefix = /^[^/:?#]+:\d+(?:[/?#]|$)/.test(normUrl);
+  const hasExplicitScheme = !isBareIp && !hasHostPortPrefix && /^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(normUrl);
+  const withScheme = hasExplicitScheme
+    ? normUrl
+    : (isBareIp && net.isIP(normUrl) === 6 ? `http://[${normUrl}]` : `http://${normUrl}`);
+  const parsed = new URL(withScheme);
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new Error(`Disallowed URL scheme '${parsed.protocol}'`);
+  }
+  if (isLinkLocalOrMetadataHost(parsed.hostname)) {
+    throw new Error(`Access to link-local/metadata host '${parsed.hostname}' is blocked`);
+  }
+  return parsed.toString();
+}
+
+function validateReconTargetAndOptions(target, opts = {}) {
+  const cleanTarget = assertCliTarget(target, 'recon target');
+  const validated = {
+    topPorts: opts.topPorts !== undefined && opts.topPorts !== null && opts.topPorts !== ''
+      ? assertBoundedInt(opts.topPorts, 'topPorts', 1, 65535)
+      : '100',
+    rate: opts.rate !== undefined && opts.rate !== null && opts.rate !== ''
+      ? assertBoundedInt(opts.rate, 'rate', 1, 1000000)
+      : null,
+    timeout: opts.timeout !== undefined && opts.timeout !== null && opts.timeout !== ''
+      ? assertBoundedInt(opts.timeout, 'timeout', 1, 300000)
+      : null,
+    ports: opts.ports !== undefined && opts.ports !== null && opts.ports !== ''
+      ? assertPortsSpec(opts.ports)
+      : null,
+    threads: opts.threads !== undefined && opts.threads !== null && opts.threads !== ''
+      ? assertBoundedInt(opts.threads, 'threads', 1, 1024)
+      : null
+  };
+  return { cleanTarget, validated };
+}
 
 export const RECON_PROFILES = [
   {
@@ -22,9 +89,10 @@ export const RECON_PROFILES = [
     tool: 'naabu',
     args: ['-top-ports', '100', '-json'],
     buildArgs: (target, opts = {}) => {
-      const a = ['-host', target, '-top-ports', opts.topPorts ? String(opts.topPorts) : '100', '-json'];
-      if (opts.rate) a.push('-rate', String(opts.rate));
-      if (opts.timeout) a.push('-timeout', String(opts.timeout));
+      const { cleanTarget, validated } = validateReconTargetAndOptions(target, opts);
+      const a = ['-host', cleanTarget, '-top-ports', validated.topPorts, '-json'];
+      if (validated.rate) a.push('-rate', validated.rate);
+      if (validated.timeout) a.push('-timeout', validated.timeout);
       return a;
     }
   },
@@ -35,8 +103,9 @@ export const RECON_PROFILES = [
     tool: 'naabu',
     args: ['-p', '-', '-json'],
     buildArgs: (target, opts = {}) => {
-      const a = ['-host', target, '-p', '-', '-json'];
-      if (opts.rate) a.push('-rate', String(opts.rate));
+      const { cleanTarget, validated } = validateReconTargetAndOptions(target, opts);
+      const a = ['-host', cleanTarget, '-p', '-', '-json'];
+      if (validated.rate) a.push('-rate', validated.rate);
       return a;
     }
   },
@@ -47,9 +116,10 @@ export const RECON_PROFILES = [
     tool: 'httpx',
     args: ['-title', '-tech-detect', '-status-code', '-json'],
     buildArgs: (target, opts = {}) => {
-      const a = ['-u', target, '-title', '-tech-detect', '-status-code', '-tls-grab', '-json'];
-      if (opts.ports) a.push('-ports', String(opts.ports));
-      if (opts.threads) a.push('-threads', String(opts.threads));
+      const { cleanTarget, validated } = validateReconTargetAndOptions(target, opts);
+      const a = ['-u', cleanTarget, '-title', '-tech-detect', '-status-code', '-tls-grab', '-json'];
+      if (validated.ports) a.push('-ports', validated.ports);
+      if (validated.threads) a.push('-threads', validated.threads);
       return a;
     }
   },
@@ -118,6 +188,10 @@ export async function checkReconToolsInstalled() {
  * @returns {Promise<Array<{ host: string, ip: string, port: number }>>}
  */
 export async function probePortsNative(host, ports = [80, 443, 22, 53, 8080, 8443, 3000], timeoutMs = 800) {
+  const cleanHost = String(host || '').trim();
+  if (!isValidHostname(cleanHost) && !net.isIP(cleanHost)) {
+    throw new Error(`Invalid probe host '${host}': must be a valid hostname or IP`);
+  }
   const open = [];
   const promises = ports.map((port) => {
     return new Promise((resolve) => {
@@ -125,7 +199,7 @@ export async function probePortsNative(host, ports = [80, 443, 22, 53, 8080, 844
       socket.setTimeout(timeoutMs);
 
       socket.on('connect', () => {
-        open.push({ host, ip: socket.remoteAddress || host, port });
+        open.push({ host: cleanHost, ip: socket.remoteAddress || cleanHost, port });
         socket.destroy();
         resolve(true);
       });
@@ -140,7 +214,7 @@ export async function probePortsNative(host, ports = [80, 443, 22, 53, 8080, 844
         resolve(false);
       });
 
-      socket.connect(port, host);
+      socket.connect(port, cleanHost);
     });
   });
 
@@ -154,15 +228,14 @@ export async function probePortsNative(host, ports = [80, 443, 22, 53, 8080, 844
  * @returns {Promise<object>}
  */
 export async function probeHttpNative(targetUrl) {
-  const normUrl = targetUrl.startsWith('http://') || targetUrl.startsWith('https://')
-    ? targetUrl
-    : `http://${targetUrl}`;
+  const safeUrl = assertSafeProbeHttpUrl(targetUrl);
 
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 3500);
-    const res = await fetch(normUrl, {
+    const res = await fetch(safeUrl, {
       method: 'GET',
+      redirect: 'error',
       signal: controller.signal,
       headers: { 'User-Agent': 'Vigilante-Recon/1.0' }
     });
@@ -172,11 +245,12 @@ export async function probeHttpNative(targetUrl) {
     const titleMatch = bodyText.match(/<title[^>]*>([^<]+)<\/title>/i);
     const title = titleMatch ? titleMatch[1].trim() : '';
     const server = res.headers.get('server') || 'unknown';
+    const parsedUrl = new URL(safeUrl);
 
     return {
-      url: normUrl,
-      host: new URL(normUrl).hostname,
-      port: Number(new URL(normUrl).port || (normUrl.startsWith('https') ? 443 : 80)),
+      url: safeUrl,
+      host: parsedUrl.hostname,
+      port: Number(parsedUrl.port || (parsedUrl.protocol === 'https:' ? 443 : 80)),
       title,
       webserver: server,
       status_code: res.status,
@@ -185,7 +259,7 @@ export async function probeHttpNative(targetUrl) {
     };
   } catch (err) {
     return {
-      url: normUrl,
+      url: safeUrl,
       host: targetUrl,
       status_code: 0,
       failed: true,
@@ -298,46 +372,48 @@ async function runScannerCli(bin, args) {
 }
 
 export async function runReconScan(target, profileId = 'fast-ports', opts = {}) {
+  const { cleanTarget } = validateReconTargetAndOptions(target, opts);
   await ensureVigilanteConfig();
   const reconDir = getVigilanteReconDir();
   const profile = RECON_PROFILES.find((p) => p.id === profileId) || RECON_PROFILES[0];
   const tools = await checkReconToolsInstalled();
 
   const timestamp = new Date().toISOString();
-  const scanId = `recon_${target.replace(/[^a-zA-Z0-9_.-]/g, '_')}_${Date.now()}`;
+  const scanId = `recon_${cleanTarget.replace(/[^a-zA-Z0-9_.-]/g, '_')}_${Date.now()}`;
   let rawOutput = '';
   let openPorts = [];
   let webServices = [];
 
   if (profile.tool === 'naabu') {
     if (tools.naabu.runner === 'host') {
-      const args = profile.buildArgs(target, opts);
+      const args = profile.buildArgs(cleanTarget, opts);
       rawOutput = await runScannerCli('naabu', args);
       openPorts = parseNaabuOutput(rawOutput);
     } else {
       // Native socket probe fallback
       const ports = opts.topPorts ? [80, 443, 22, 21, 53, 161, 389, 8080, 8443, 9000] : [80, 443, 22, 8080];
-      openPorts = await probePortsNative(target, ports);
+      openPorts = await probePortsNative(cleanTarget, ports);
       rawOutput = JSON.stringify(openPorts, null, 2);
     }
   } else if (profile.tool === 'httpx') {
     if (tools.httpx.runner === 'host') {
-      const args = profile.buildArgs(target, opts);
+      const args = profile.buildArgs(cleanTarget, opts);
       rawOutput = await runScannerCli('httpx', args);
       webServices = parseHttpxOutput(rawOutput);
     } else {
       // Native fetch fallback
-      const webResult = await probeHttpNative(target);
+      const webResult = await probeHttpNative(cleanTarget);
       if (!webResult.failed) webServices.push(webResult);
       rawOutput = JSON.stringify(webServices, null, 2);
     }
   } else if (profile.tool === 'combined') {
     // Pipeline ports into web services
     const ports = [80, 443, 8080, 8443, 3000];
-    openPorts = await probePortsNative(target, ports);
+    openPorts = await probePortsNative(cleanTarget, ports);
     for (const p of openPorts) {
       const scheme = p.port === 443 || p.port === 8443 ? 'https' : 'http';
-      const webResult = await probeHttpNative(`${scheme}://${target}:${p.port}`);
+      const authority = net.isIP(cleanTarget) === 6 ? `[${cleanTarget}]` : cleanTarget;
+      const webResult = await probeHttpNative(`${scheme}://${authority}:${p.port}`);
       if (!webResult.failed) webServices.push(webResult);
     }
     rawOutput = JSON.stringify({ openPorts, webServices }, null, 2);
@@ -345,7 +421,7 @@ export async function runReconScan(target, profileId = 'fast-ports', opts = {}) 
 
   const record = {
     id: scanId,
-    target,
+    target: cleanTarget,
     profile: profile.id,
     timestamp,
     openPorts,

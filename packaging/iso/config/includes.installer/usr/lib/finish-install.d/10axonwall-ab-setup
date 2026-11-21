@@ -442,8 +442,30 @@ if [ ! -s /target/etc/axonwall/certs/hub.crt ] || [ ! -s /target/etc/axonwall/ce
   in-target chmod 0644 /etc/axonwall/certs/hub.crt 2>/dev/null || true
 fi
 
+purge_debian_packages() {
+  _p_root="$1"
+  shift
+  [ -x "${_p_root}/usr/bin/dpkg" ] || return 0
+  _to_purge=""
+  for _p_name in "$@"; do
+    _p_st="$(chroot "$_p_root" /usr/bin/dpkg-query -W -f='${Status}' "$_p_name" 2>/dev/null || true)"
+    case "$_p_st" in
+      *"install ok installed"*) _to_purge="${_to_purge} ${_p_name}" ;;
+    esac
+  done
+  [ -n "$_to_purge" ] || return 0
+  if [ -x "${_p_root}/usr/bin/apt-get" ]; then
+    # shellcheck disable=SC2086
+    DEBIAN_FRONTEND=noninteractive chroot "$_p_root" /usr/bin/apt-get purge -y --auto-remove $_to_purge </dev/null >/dev/null 2>&1 || \
+      chroot "$_p_root" /usr/bin/dpkg --purge $_to_purge </dev/null >/dev/null 2>&1 || true
+  else
+    # shellcheck disable=SC2086
+    chroot "$_p_root" /usr/bin/dpkg --purge $_to_purge </dev/null >/dev/null 2>&1 || true
+  fi
+}
+
 # 2a. Apply Vault Edition target staging & package isolation before Slot B sync
-if [ "${INSTALL_EDITION:-axonwall}" = "vault" ] || [ -f /target/etc/axonwall/.vault-edition ]; then
+if [ "${INSTALL_EDITION:-axonwall}" = "vault" ]; then
   echo "[+] Configuring /target as Axonwall Vault Edition S3 Appliance..."
   mkdir -p /target/etc/axonwall \
            /target/etc/axonwall/certs \
@@ -458,7 +480,10 @@ if [ "${INSTALL_EDITION:-axonwall}" = "vault" ] || [ -f /target/etc/axonwall/.va
   touch /target/etc/axonwall/.vault-edition /target/etc/axonwall/.vault-firstboot
   rm -f /target/etc/axonwall/.firstboot \
         /target/etc/axonwall/.k3s-firstboot \
-        /target/etc/axonwall/.k3s-edition
+        /target/etc/axonwall/.k3s-edition \
+        /target/etc/axonwall/.minimal-edition \
+        /target/etc/axonwall/workstation.disabled \
+        /target/var/lib/axonwall/etc-axonwall/workstation.disabled
 
   if ! in-target getent group axonwall-vault >/dev/null 2>&1; then
     in-target groupadd --system axonwall-vault 2>/dev/null || true
@@ -523,14 +548,37 @@ if [ "${INSTALL_EDITION:-axonwall}" = "vault" ] || [ -f /target/etc/axonwall/.va
     rm -f "/target/etc/systemd/system/${fw_unit}" "/target/etc/systemd/system/multi-user.target.wants/${fw_unit}"
   done
 
+  if [ -x /target/usr/bin/dpkg ]; then
+    echo "[+] Purging firewall packages from Vault /target..."
+    purge_debian_packages /target \
+      suricata kea-dhcp4-server kea-common unbound frr strongswan strongswan-charon strongswan-starter charon-systemd strongswan-swanctl \
+      openvpn conntrackd keepalived wireguard-tools samba samba-common-bin nfs-kernel-server open-iscsi \
+      slapd ldap-utils sssd-ldap sssd-common sssd-tools libnss-sss libpam-sss nodejs node-acorn node-corepack \
+      qemu-system-x86 qemu-utils ovmf xorriso bridge-utils
+  fi
+  rm -rf /target/opt/axonwall \
+         /target/usr/sbin/axonwalld \
+         /target/usr/sbin/headscale \
+         /target/usr/sbin/litestream \
+         /target/usr/sbin/axonwall-satellite \
+         /target/usr/share/axonwall/satellites \
+         /target/usr/share/axonwall/lockdown.nft \
+         /target/usr/lib/axonwall/edge \
+         /target/usr/local/bin/axonwall-firstboot \
+         /target/usr/local/bin/axonwallctl \
+         /target/usr/local/bin/axonwall-tui \
+         /target/usr/local/bin/axonwall-ha-notify \
+         /target/usr/local/bin/axonwall-cloud-init \
+         /target/usr/local/bin/axonwall-import \
+         /target/etc/headscale \
+         /target/etc/systemd/system/suricata.service.d
+
   _cur_hn="$(cat /target/etc/hostname 2>/dev/null | tr -d '\r\n ' || true)"
   if [ -z "$_cur_hn" ] || [ "$_cur_hn" = "axonwall" ]; then
     echo "axonwall-vault" > /target/etc/hostname
   fi
-fi
-
 # 2b. Apply K3s + ZFS Storage Host target staging & package purge before Slot B sync
-if [ "${INSTALL_EDITION:-axonwall}" = "k3s-storage" ] || [ -f /target/etc/axonwall/.k3s-edition ]; then
+elif [ "${INSTALL_EDITION:-axonwall}" = "k3s-storage" ]; then
   echo "[+] Configuring /target as Axonwall K3s + ZFS Storage Host (role=${K3S_ROLE:-server})..."
   mkdir -p /target/etc/axonwall \
            /target/etc/modprobe.d \
@@ -543,7 +591,10 @@ if [ "${INSTALL_EDITION:-axonwall}" = "k3s-storage" ] || [ -f /target/etc/axonwa
   touch /target/etc/axonwall/.k3s-edition /target/etc/axonwall/.k3s-firstboot
   rm -f /target/etc/axonwall/.firstboot \
         /target/etc/axonwall/.vault-firstboot \
-        /target/etc/axonwall/.vault-edition
+        /target/etc/axonwall/.vault-edition \
+        /target/etc/axonwall/.minimal-edition \
+        /target/etc/axonwall/workstation.disabled \
+        /target/var/lib/axonwall/etc-axonwall/workstation.disabled
 
   # Compute dynamic zfs_arc_max bytes and write /target/etc/modprobe.d/zfs.conf
   _arc_override_mb="${ZFS_ARC_MAX_MB:-0}"
@@ -643,6 +694,14 @@ if [ "${INSTALL_EDITION:-axonwall}" = "k3s-storage" ] || [ -f /target/etc/axonwa
   for fw_unit in axonwall-firstboot.service axonwalld.service axonwall-controller.service axonwall-ui.service headscale.service axonwall-satellite.service; do
     rm -f "/target/etc/systemd/system/${fw_unit}" "/target/etc/systemd/system/multi-user.target.wants/${fw_unit}"
   done
+  if [ -x /target/usr/bin/dpkg ]; then
+    echo "[+] Purging NGFW/router/UI packages from K3s Storage Host /target..."
+    purge_debian_packages /target \
+      suricata kea-dhcp4-server kea-common unbound frr strongswan strongswan-charon strongswan-starter charon-systemd strongswan-swanctl \
+      openvpn conntrackd keepalived samba samba-common-bin nfs-kernel-server open-iscsi \
+      slapd ldap-utils sssd-ldap sssd-common sssd-tools libnss-sss libpam-sss nodejs node-acorn node-corepack \
+      qemu-system-x86 qemu-utils ovmf xorriso
+  fi
   rm -rf /target/opt/axonwall \
          /target/usr/sbin/axonwalld \
          /target/usr/sbin/headscale \
@@ -659,15 +718,6 @@ if [ "${INSTALL_EDITION:-axonwall}" = "k3s-storage" ] || [ -f /target/etc/axonwa
          /target/etc/headscale \
          /target/etc/systemd/system/suricata.service.d
 
-  if [ -x /target/usr/bin/dpkg ]; then
-    echo "[+] Purging NGFW/router/UI packages from K3s Storage Host /target..."
-    chroot /target /usr/bin/dpkg --purge --force-all \
-      suricata kea-dhcp4-server kea-common unbound frr strongswan strongswan-charon strongswan-starter \
-      openvpn conntrackd keepalived samba samba-common-bin nfs-kernel-server open-iscsi \
-      slapd ldap-utils sssd-ldap sssd-common sssd-tools libnss-sss libpam-sss nodejs \
-      qemu-system-x86 qemu-utils ovmf xorriso >/dev/null 2>&1 || true
-  fi
-
   _cur_hn="$(cat /target/etc/hostname 2>/dev/null | tr -d '\r\n ' || true)"
   if [ -z "$_cur_hn" ] || [ "$_cur_hn" = "axonwall" ]; then
     echo "axonwall-storage" > /target/etc/hostname
@@ -677,7 +727,7 @@ if [ "${INSTALL_EDITION:-axonwall}" = "k3s-storage" ] || [ -f /target/etc/axonwa
   # the replicated Slot B / ZBM BE with a stale initramfs. It now aborts
   # the install instead of replicating a stale initramfs.
   in-target update-initramfs -u -k all >/dev/null 2>&1 || { echo "[-] ERROR: update-initramfs failed during K3s Storage staging; aborting the install rather than replicating a stale initramfs."; exit 1; }
-elif [ "${INSTALL_EDITION:-axonwall}" = "minimal" ] || [ -f /target/etc/axonwall/.minimal-edition ]; then
+elif [ "${INSTALL_EDITION:-axonwall}" = "minimal" ]; then
   echo "[+] Configuring /target as Axonwall Minimal Edition (reduced attack surface host)..."
   mkdir -p /target/etc/axonwall /target/var/lib/axonwall /target/var/lib/axonwall/etc-axonwall
   printf 'minimal\n' > /target/etc/axonwall/edition
@@ -702,6 +752,19 @@ elif [ "${INSTALL_EDITION:-axonwall}" = "minimal" ] || [ -f /target/etc/axonwall
           "/target/lib/systemd/system/${min_unit}" \
           "/target/usr/lib/systemd/system/${min_unit}"
   done
+
+  if [ -x /target/usr/bin/dpkg ]; then
+    echo "[+] Purging optional workstation, NGFW, virtualization, NAS, diagnostics, and security scanner packages from Minimal /target..."
+    purge_debian_packages /target \
+      suricata kea-dhcp4-server kea-common unbound dns-root-data frr strongswan strongswan-charon strongswan-starter charon-systemd strongswan-swanctl \
+      openvpn conntrackd keepalived wireguard-tools \
+      samba samba-common-bin nfs-kernel-server open-iscsi tgt \
+      qemu-system-x86 qemu-utils ovmf xorriso bridge-utils libvirt-clients lxc \
+      zsh zsh-autosuggestions zsh-syntax-highlighting vim neovim tmux fzf ripgrep fd-find bat git etckeeper \
+      nmap bind9-dnsutils bind9-host net-tools btop htop sysstat iotop iftop slurm mtr-tiny tcpdump \
+      kubectl mkcert starship zoxide \
+      rkhunter chkrootkit yara unhide lynis debsums bpftool python3-drgn linux-perf
+  fi
 
   rm -rf /target/usr/sbin/headscale \
          /target/usr/sbin/litestream \
@@ -747,18 +810,6 @@ elif [ "${INSTALL_EDITION:-axonwall}" = "minimal" ] || [ -f /target/etc/axonwall
          /target/var/lib/axonwall/cli-workstation \
          /target/var/lib/axonwall/headscale
 
-  if [ -x /target/usr/bin/dpkg ]; then
-    echo "[+] Purging optional workstation, NGFW, virtualization, NAS, diagnostics, and security scanner packages from Minimal /target..."
-    chroot /target /usr/bin/dpkg --purge --force-all \
-      suricata kea-dhcp4-server kea-common unbound dns-root-data frr strongswan strongswan-charon strongswan-starter \
-      openvpn conntrackd keepalived wireguard-tools \
-      samba samba-common-bin nfs-kernel-server open-iscsi tgt \
-      qemu-system-x86 qemu-utils ovmf xorriso bridge-utils libvirt-clients lxc \
-      zsh zsh-autosuggestions zsh-syntax-highlighting vim neovim tmux fzf ripgrep fd-find bat git etckeeper \
-      nmap dnsutils bind9-host net-tools btop htop sysstat iotop iftop slurm mtr-tiny tcpdump \
-      rkhunter chkrootkit yara unhide lynis debsums bpftool python3-drgn linux-perf >/dev/null 2>&1 || true
-  fi
-
   if [ -f /target/etc/passwd ]; then
     sed -i 's|:/usr/bin/zsh$|:/bin/bash|g; s|:/bin/zsh$|:/bin/bash|g' /target/etc/passwd 2>/dev/null || true
   fi
@@ -779,11 +830,23 @@ elif [ "${INSTALL_EDITION:-axonwall}" = "minimal" ] || [ -f /target/etc/axonwall
   if [ -f /target/etc/shells ]; then
     sed -i '\|^/usr/bin/zsh$|d; \|^/bin/zsh$|d' /target/etc/shells 2>/dev/null || true
   fi
+  if [ -f /target/etc/cloud/cloud.cfg.d/90_axonwall.cfg ]; then
+    sed -i 's|shell:[[:space:]]*/usr/bin/zsh|shell: /bin/bash|g' /target/etc/cloud/cloud.cfg.d/90_axonwall.cfg 2>/dev/null || true
+  fi
 
   _cur_hn="$(cat /target/etc/hostname 2>/dev/null | tr -d '\r\n ' || true)"
   if [ -z "$_cur_hn" ] || [ "$_cur_hn" = "axonwall" ]; then
     echo "axonwall-minimal" > /target/etc/hostname
   fi
+else
+  rm -f /target/etc/axonwall/.vault-edition \
+        /target/etc/axonwall/.vault-firstboot \
+        /target/etc/axonwall/.k3s-edition \
+        /target/etc/axonwall/.k3s-firstboot \
+        /target/etc/axonwall/.minimal-edition \
+        /target/etc/axonwall/workstation.disabled \
+        /target/var/lib/axonwall/etc-axonwall/workstation.disabled
+  touch /target/etc/axonwall/.firstboot
 fi
 rm -rf /target/usr/share/axonwall/vault /target/usr/share/axonwall/k3s-storage
 if [ "${INSTALL_EDITION:-axonwall}" = "vault" ]; then
@@ -1336,7 +1399,15 @@ if [ "$INSTALL_MODE" = "zbm" ]; then
   # Install UKI onto EFI partition (with .splash, embedded initramfs hooks, and BIOS Syslinux extraction)
   if [ -f /target/usr/lib/zfsbootmenu/vmlinuz.efi ]; then
     THEMED_DONE=0
-    if command -v python3 >/dev/null 2>&1 && [ -x /usr/lib/axonwall/theme-zbm-uki.py ] && [ -f /target/etc/zfsbootmenu/splash.bmp ]; then
+    if [ -f /target/usr/lib/axonwall/theme-zbm-uki.py ] && [ -f /target/etc/zfsbootmenu/splash.bmp ] && in-target sh -c 'command -v python3 >/dev/null 2>&1'; then
+      if in-target python3 /usr/lib/axonwall/theme-zbm-uki.py /usr/lib/zfsbootmenu/vmlinuz.efi \
+        -o /boot/efi/EFI/ZBM/VMLINUZ.EFI \
+        -s /etc/zfsbootmenu/splash.bmp \
+        --extract-linux /boot/efi/EFI/ZBM/vmlinuz-bootmenu \
+        --extract-initrd /boot/efi/EFI/ZBM/initramfs-bootmenu.img 2>/dev/null; then
+        THEMED_DONE=1
+      fi
+    elif command -v python3 >/dev/null 2>&1 && [ -x /usr/lib/axonwall/theme-zbm-uki.py ] && [ -f /target/etc/zfsbootmenu/splash.bmp ]; then
       if python3 /usr/lib/axonwall/theme-zbm-uki.py /target/usr/lib/zfsbootmenu/vmlinuz.efi \
         -o /target/boot/efi/EFI/ZBM/VMLINUZ.EFI \
         -s /target/etc/zfsbootmenu/splash.bmp \
@@ -1367,13 +1438,57 @@ LABEL zbm_backup
   APPEND zfsbootmenu zbm.force_import=1 loglevel=3 net.ifnames=0 zbm.timeout=5 zbm.autosize=1 zbm.hookroot=LABEL=AXON_EFI//EFI/ZBM/hooks console=ttyS0,9600 console=tty1
 ZBM_SYSLINUX_EOF
     cp -f /target/boot/efi/EFI/ZBM/syslinux.cfg /target/boot/efi/syslinux.cfg 2>/dev/null || true
+
+    # Install Legacy BIOS extlinux + gptmbr and UEFI NVRAM entry via target tools
+    EFI_DEV="$(awk '$2 == "/target/boot/efi" {print $1; exit}' /proc/mounts 2>/dev/null || true)"
+    [ -z "$EFI_DEV" ] && EFI_DEV="/dev/disk/by-label/AXON_EFI"
+    [ -e "$EFI_DEV" ] && EFI_DEV="$(readlink -f "$EFI_DEV" 2>/dev/null || echo "$EFI_DEV")"
+    EFI_DISK=""
+    EFI_PART_NUM="1"
+    case "$EFI_DEV" in
+      /dev/nvme*n*p[0-9]*|/dev/mmcblk*p[0-9]*|/dev/loop*p[0-9]*|/dev/nbd*p[0-9]*|/dev/md*p[0-9]*)
+        EFI_DISK="$(printf '%s' "$EFI_DEV" | sed -E 's/p([0-9]+)$//')"
+        EFI_PART_NUM="$(printf '%s' "$EFI_DEV" | sed -E 's/^.*p([0-9]+)$/\1/')"
+        ;;
+      /dev/*[0-9])
+        EFI_DISK="$(printf '%s' "$EFI_DEV" | sed -E 's/[0-9]+$//')"
+        EFI_PART_NUM="$(printf '%s' "$EFI_DEV" | sed -E 's/^.*[^0-9]([0-9]+)$/\1/')"
+        ;;
+    esac
+    if in-target sh -c 'command -v extlinux >/dev/null 2>&1'; then
+      in-target extlinux --install /boot/efi/EFI/ZBM 2>/dev/null || in-target extlinux --install /boot/efi 2>/dev/null || true
+    fi
+    GPTMBR_BIN=""
+    for mbr_cand in \
+      /target/usr/lib/SYSLINUX/gptmbr.bin \
+      /target/usr/lib/syslinux/mbr/gptmbr.bin \
+      /target/usr/share/syslinux/gptmbr.bin \
+      /usr/lib/SYSLINUX/gptmbr.bin \
+      /usr/lib/syslinux/mbr/gptmbr.bin \
+      /usr/share/syslinux/gptmbr.bin; do
+      if [ -f "$mbr_cand" ]; then
+        GPTMBR_BIN="$mbr_cand"
+        break
+      fi
+    done
+    if [ -n "$EFI_DISK" ] && [ -b "$EFI_DISK" ]; then
+      if [ -n "$GPTMBR_BIN" ]; then
+        dd if="$GPTMBR_BIN" of="$EFI_DISK" bs=440 count=1 conv=notrunc 2>/dev/null || true
+      fi
+      in-target sgdisk --attributes="${EFI_PART_NUM}:set:2" "$EFI_DISK" >/dev/null 2>&1 || true
+      if [ -d /sys/firmware/efi/efivars ] && in-target sh -c 'command -v efibootmgr >/dev/null 2>&1'; then
+        in-target efibootmgr -c -d "$EFI_DISK" -p "$EFI_PART_NUM" -L "Axonwall ZFSBootMenu" -l '\EFI\ZBM\VMLINUZ.EFI' 2>/dev/null || true
+      fi
+    fi
   fi
 
-  # Install CLI tools
+  # Install CLI tools & ensure ZBM convenience symlinks exist in /target
   mkdir -p /target/usr/local/bin /target/usr/lib/axonwall
   if [ -f /usr/local/bin/axonwall-zbm-theme ]; then
     cp -f /usr/local/bin/axonwall-zbm-theme /target/usr/local/bin/
     chmod +x /target/usr/local/bin/axonwall-zbm-theme
+  fi
+  if [ -x /target/usr/local/bin/axonwall-zbm-theme ]; then
     ln -sf axonwall-zbm-theme /target/usr/local/bin/generate-zbm
     ln -sf axonwall-zbm-theme /target/usr/local/bin/zbm-kcl
   fi
@@ -1550,6 +1665,21 @@ CFG_EOF
   # loudly (hook runs under `set -e`) instead of swallowing the failure
   # and printing success with no A/B slot logic.
   in-target update-grub
+
+  if [ "$INSTALL_MODE" = "ab" ] && [ -b "${ROOT_B_DEV:-}" ] && [ "${SYNC_OK:-0}" = "1" ]; then
+    STAGE_B_GRUB="/tmp/stage_slot_b_grub"
+    mkdir -p "$STAGE_B_GRUB"
+    if mount "$ROOT_B_DEV" "$STAGE_B_GRUB" 2>/dev/null; then
+      mkdir -p "$STAGE_B_GRUB/etc/grub.d" "$STAGE_B_GRUB/etc/default/grub.d" "$STAGE_B_GRUB/boot/grub"
+      [ -f /target/etc/grub.d/40_axonwall_ab ] && cp -af /target/etc/grub.d/40_axonwall_ab "$STAGE_B_GRUB/etc/grub.d/40_axonwall_ab" 2>/dev/null || true
+      [ -d /target/etc/default/grub.d ] && cp -af /target/etc/default/grub.d/. "$STAGE_B_GRUB/etc/default/grub.d/" 2>/dev/null || true
+      [ -f /target/etc/kernel-img.conf ] && cp -af /target/etc/kernel-img.conf "$STAGE_B_GRUB/etc/kernel-img.conf" 2>/dev/null || true
+      [ -d /target/boot/grub ] && cp -af /target/boot/grub/. "$STAGE_B_GRUB/boot/grub/" 2>/dev/null || true
+      sync
+      umount "$STAGE_B_GRUB" 2>/dev/null || true
+    fi
+    rmdir "$STAGE_B_GRUB" 2>/dev/null || true
+  fi
 fi
 
 # 10. Clean up sensitive installer state files & persist installation log into target

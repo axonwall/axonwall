@@ -1,9 +1,18 @@
 import { NextResponse } from 'next/server';
 import { confirmActiveRuleset } from '../../../../server/agent';
 
-export async function POST() {
+export async function POST(req: Request) {
   try {
-    const result = await confirmActiveRuleset();
+    let jobId: string | undefined;
+    try {
+      const body = await req.json();
+      if (typeof body?.jobId === 'string' && body.jobId.trim()) {
+        jobId = body.jobId.trim();
+      }
+    } catch {
+      // Optional empty POST body stays supported
+    }
+    const result = await confirmActiveRuleset(jobId);
     if (!result.success) {
       const msg = result.message || 'Failed to confirm ruleset';
       const status = msg.toLowerCase().includes('unavailable') || msg.toLowerCase().includes('unreachable') ? 502 : 409;

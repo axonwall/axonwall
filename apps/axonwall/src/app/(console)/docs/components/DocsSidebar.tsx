@@ -48,6 +48,8 @@ export const DOCS_NAVIGATION: DocCategory[] = [
       { title: 'Overview & Introduction', href: '/docs' },
       { title: 'Installation Guide (ISO, UKI, Cloud)', href: '/docs#installation' },
       { title: 'Multi-Disk RAID & ZFSBootMenu', href: '/docs/installer-raid-zfs', badge: 'ZBM' },
+      { title: 'Btrfs + Snapper Root', href: '/docs/installer-raid-zfs#btrfs-snapper', badge: 'Btrfs' },
+      { title: 'Minimal Edition (Low Surface)', href: '/docs/installer-raid-zfs#minimal-edition', badge: 'Min' },
       { title: 'Barebones K3s + Storage Edition', href: '/docs/installer-raid-zfs#k3s-storage-edition', badge: 'K3s' },
       { title: 'Quickstart & First Boot', href: '/docs#quickstart' },
       { title: 'Hardware Compatibility List', href: '/docs#hardware' },
@@ -132,6 +134,7 @@ export const DOCS_NAVIGATION: DocCategory[] = [
     icon: Layers,
     items: [
       { title: 'K3s & OpenEBS Overview', href: '/docs/k3s-kubernetes' },
+      { title: 'Browser K9s & Node Taints', href: '/docs/k3s-kubernetes#browser-k9s', badge: 'K9s' },
       { title: 'Cilium eBPF CNI & Etcd Snapshots', href: '/docs/k3s-kubernetes#cilium-etcd', badge: 'eBPF' },
       { title: 'Vigilant Octo Waffle GitOps PaaS', href: '/docs/vigilant-octo-waffle', badge: 'GitOps' },
       { title: 'WireGuard Flannel Mesh', href: '/docs/k3s-kubernetes#wireguard' },
@@ -215,6 +218,7 @@ export const DOCS_NAVIGATION: DocCategory[] = [
       { title: 'Container Network & FS I/O', href: '/docs/observability#container-tracking' },
       { title: 'K3s Cluster Troubleshooting', href: '/docs/observability#kubernetes-troubleshooting' },
       { title: 'Coroot eBPF APM & RCA', href: '/docs/observability#coroot-apm', badge: 'APM' },
+      { title: 'Live eBPF Visuals & Inventory', href: '/docs/observability#ebpf-visualizations', badge: 'New' },
       { title: 'Linux 6.9+ BPF_TOKEN & Dual XDP', href: '/docs/observability#bpf-token-delegation', badge: '6.9+' },
       { title: 'eBPF & NFLOG Kernel Tap', href: '/docs/observability#kernel-tap' },
       { title: 'Real-Time Protocol Dissectors', href: '/docs/observability#dissectors' },
@@ -359,7 +363,7 @@ export function DocsSidebar({ onClose }: DocsSidebarProps) {
 
       {/* Footer Status */}
       <div className="p-3 border-t border-slate-800/80 text-[11px] text-slate-500 flex items-center justify-between">
-        <span className="font-mono">Axonwall v0.11.71</span>
+        <span className="font-mono">Axonwall v0.13.0</span>
         <span className="text-emerald-400 font-medium">26 Guides</span>
       </div>
     </aside>

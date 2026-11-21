@@ -62,9 +62,9 @@ func TestBatch10NftRejectsMissingFlowtable(t *testing.T) {
 	}
 }
 
-// A-L35: "limit rate over 100/second" must compile to the same limit
-// expression as "limit rate 100/second" — not to the old silent
-// 10/second default — and an explicit burst must be honoured.
+// A-L35 / C-C2: "limit rate over 100/second" must set NFTA_LIMIT_FLAGS=NFT_LIMIT_F_INV
+// (so it differs from non-inverted "limit rate 100/second"), honor the 100/s rate
+// (not the old 10/second default), and honor an explicit burst.
 func TestBatch10NftLimitRateOver(t *testing.T) {
 	compileLimit := func(rateLine string) [][]byte {
 		script := "table inet axonwall {\n  chain input {\n    type filter hook input priority filter; policy drop;\n    " + rateLine + " drop\n  }\n}"
@@ -87,19 +87,25 @@ func TestBatch10NftLimitRateOver(t *testing.T) {
 
 	over100 := concat(compileLimit("limit rate over 100/second"))
 	plain100 := concat(compileLimit("limit rate 100/second"))
-	if !bytes.Equal(over100, plain100) {
-		t.Fatalf("\"limit rate over 100/second\" compiled differently from \"limit rate 100/second\"")
+	invFlagAttr := nlAttrU32BE(nftaLimitFlags, nftLimitFInv)
+	if !bytes.Contains(over100, invFlagAttr) {
+		t.Fatalf("\"limit rate over 100/second\" must emit NFTA_LIMIT_FLAGS=NFT_LIMIT_F_INV")
 	}
-	plain10 := concat(compileLimit("limit rate 10/second"))
-	if bytes.Equal(over100, plain10) {
-		t.Fatalf("\"limit rate over 100/second\" compiled to the same limit as \"limit rate 10/second\" (the old silent default)")
+	if bytes.Contains(plain100, invFlagAttr) {
+		t.Fatalf("\"limit rate 100/second\" must not emit NFT_LIMIT_F_INV")
+	}
+	if bytes.Equal(over100, plain100) {
+		t.Fatalf("\"limit rate over 100/second\" must differ from \"limit rate 100/second\" by NFT_LIMIT_F_INV")
+	}
+	over10 := concat(compileLimit("limit rate over 10/second"))
+	if bytes.Equal(over100, over10) {
+		t.Fatalf("\"limit rate over 100/second\" compiled to the same limit as \"limit rate over 10/second\" (the old silent default)")
 	}
 	over100Burst20 := concat(compileLimit("limit rate over 100/second burst 20"))
-	plain100Burst20 := concat(compileLimit("limit rate 100/second burst 20"))
-	if !bytes.Equal(over100Burst20, plain100Burst20) {
-		t.Fatalf("\"limit rate over 100/second burst 20\" compiled differently from \"limit rate 100/second burst 20\"")
+	if !bytes.Contains(over100Burst20, invFlagAttr) {
+		t.Fatalf("\"limit rate over 100/second burst 20\" must emit NFTA_LIMIT_FLAGS=NFT_LIMIT_F_INV")
 	}
-	if bytes.Equal(over100Burst20, plain100) {
+	if bytes.Equal(over100Burst20, over100) {
 		t.Fatalf("an explicit \"burst 20\" compiled identically to the default burst")
 	}
 	if _, err := CompileNftScriptToNetlinkBatch("table inet axonwall {\n  chain input {\n    type filter hook input priority filter; policy drop;\n    limit rate over banana/second drop\n  }\n}"); err == nil {

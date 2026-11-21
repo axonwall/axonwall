@@ -125,11 +125,8 @@ ALPINE_KERNEL_FLAVOR="${ALPINE_FLAVOR}"
 if [[ "$ALPINE_FLAVOR" == "standard" ]]; then
   ALPINE_KERNEL_FLAVOR="lts"
 fi
-RELEASE_YAML="$(curl -fsSL "${ALPINE_MIRROR}/releases/x86_64/latest-releases.yaml")"
-ISO_FILE="$(echo "$RELEASE_YAML" | awk -v flv="alpine-${ALPINE_FLAVOR}-" '$1 == "file:" && $2 ~ flv && $2 ~ "-x86_64.iso" {print $2; exit}')"
-if [[ -z "$ISO_FILE" ]]; then
-  ISO_FILE="alpine-${ALPINE_FLAVOR}-3.21.8-x86_64.iso"
-fi
+ALPINE_ISO_VERSION="${ALPINE_ISO_VERSION:-3.21.8}"
+ISO_FILE="alpine-${ALPINE_FLAVOR}-${ALPINE_ISO_VERSION}-x86_64.iso"
 
 # Pinned SHA-256 for the stock Alpine base ISOs this build redistributes:
 # the kernel, initramfs and modloop are taken from the base ISO verbatim,
@@ -192,6 +189,7 @@ if [[ "${EDITION}" == "k3s-storage" ]]; then
     mdadm
     sgdisk
     e2fsprogs
+    btrfs-progs
     dosfstools
     cryptsetup
     rsync
@@ -235,6 +233,7 @@ elif [[ "${EDITION}" == "minimal" ]]; then
     mdadm
     sgdisk
     e2fsprogs
+    btrfs-progs
     dosfstools
     cryptsetup
     rsync
@@ -290,6 +289,7 @@ CORE_PKGS=(
   mdadm
   sgdisk
   e2fsprogs
+  btrfs-progs
   dosfstools
   cryptsetup
   rsync
@@ -551,7 +551,14 @@ if [[ "${EDITION}" == "k3s-storage" ]]; then
     cp "${REPO_ROOT}/packaging/k3s-storage/${_kbin}" "${OVL}/usr/local/bin/${_kbin}"
     chmod 0755 "${OVL}/usr/local/bin/${_kbin}"
   done
-  ln -sf /bin/ash "${OVL}/usr/bin/zsh"
+  cat << 'ZSH_SHIM_EOF' > "${OVL}/usr/bin/zsh"
+#!/bin/sh
+if [ -x /bin/bash ]; then
+  exec /bin/bash "$@"
+fi
+exec /bin/ash "$@"
+ZSH_SHIM_EOF
+  chmod 0755 "${OVL}/usr/bin/zsh"
 elif [[ "${EDITION}" == "minimal" ]]; then
   # Reduced attack surface: strip headscale and k3s-storage payload; keep core control plane + Web UI + OpenLDAP
   rm -f "${OVL}/etc/init.d/headscale" "${OVL}/etc/init.d/k3s" "${OVL}/etc/init.d/k3s-agent" \
@@ -605,9 +612,17 @@ else
       cp -a "${REPO_ROOT}/packaging/iso/config/includes.chroot/etc/axonwall/nvim/." "${OVL}/etc/axonwall/nvim/"
     fi
   else
-    # On minimal Alpine (no zsh installed), symlink /usr/bin/zsh -> /bin/ash so SSO users
-    # replicated with loginShell=/usr/bin/zsh can SSH into minimal Alpine seamlessly.
-    ln -sf /bin/ash "${OVL}/usr/bin/zsh"
+    # On minimal-package Alpine (no zsh installed), provide a real wrapper script
+    # (never a symlink to /bin/ash -> busybox, which rejects argv[0]=zsh with
+    # "zsh: applet not found") so SSO users with loginShell=/usr/bin/zsh work.
+    cat << 'ZSH_SHIM_EOF' > "${OVL}/usr/bin/zsh"
+#!/bin/sh
+if [ -x /bin/bash ]; then
+  exec /bin/bash "$@"
+fi
+exec /bin/ash "$@"
+ZSH_SHIM_EOF
+    chmod 0755 "${OVL}/usr/bin/zsh"
   fi
 
   cp "${REPO_ROOT}/packaging/iso/config/includes.chroot/usr/local/bin/axonwall-ha-notify" "${OVL}/usr/local/bin/"
@@ -619,6 +634,10 @@ else
 fi
 
 cp "${REPO_ROOT}/packaging/iso/config/includes.chroot/usr/local/bin/axonwall-update" "${OVL}/usr/local/bin/"
+if [[ -f "${REPO_ROOT}/packaging/iso/config/includes.chroot/usr/local/bin/axonwall-btrfs-grub" ]]; then
+  cp "${REPO_ROOT}/packaging/iso/config/includes.chroot/usr/local/bin/axonwall-btrfs-grub" "${OVL}/usr/local/bin/"
+  chmod 0755 "${OVL}/usr/local/bin/axonwall-btrfs-grub"
+fi
 # E-M3 (round-3): ship the release-signing trust anchor so an Alpine
 # box's first .deb update verifies the detached signature instead of
 # falling back to SHA-256 + TLS only. Debian installs get the anchor
@@ -713,13 +732,21 @@ fi
 # just bin/k9s and the daemon downloads k3s on first core-k3s
 # install/reconfigure.
 write_core_k3s_bundled_json() {
-  local _dir="$1" _k3s_sum="" _k9s_sum="" _n=0
+  local _dir="$1"
+  local _k3s_src_sum="${2:-${K3S_SHA256:-}}"
+  local _k9s_src_sum="${3:-${K9S_SHA256:-}}"
+  local _k3s_sum="" _k9s_sum="" _n=0
   if [[ -x "${_dir}/bin/k3s" ]]; then
     _k3s_sum="$(sha256sum "${_dir}/bin/k3s" | awk '{print $1}')"
+    _k3s_src_sum="${_k3s_src_sum:-${_k3s_sum}}"
     _n=$((_n + 1))
   fi
   if [[ -x "${_dir}/bin/k9s" ]]; then
     _k9s_sum="$(sha256sum "${_dir}/bin/k9s" | awk '{print $1}')"
+    if [[ -z "${_k9s_src_sum}" ]]; then
+      echo "[!] ERROR: core-k3s plugin dir ${_dir} stages bin/k9s without pinned archive checksum K9S_SHA256." >&2
+      return 1
+    fi
     _n=$((_n + 1))
   fi
   if [[ "${_n}" -eq 0 ]]; then
@@ -727,7 +754,15 @@ write_core_k3s_bundled_json() {
     return 1
   fi
   {
-    printf '{\n  "pluginId": "core-k3s",\n  "files": [\n'
+    printf '{\n  "pluginId": "core-k3s",\n  "sources": {\n'
+    if [[ -n "${_k3s_sum}" ]]; then
+      printf '    "k3s": "%s"' "${_k3s_src_sum}"
+      if [[ -n "${_k9s_sum}" ]]; then printf ',\n'; fi
+    fi
+    if [[ -n "${_k9s_sum}" ]]; then
+      printf '    "k9s": "%s"' "${_k9s_src_sum}"
+    fi
+    printf '\n  },\n  "files": [\n'
     if [[ -n "${_k3s_sum}" ]]; then
       printf '    {\n      "path": "bin/k3s",\n      "sha256": "%s",\n      "entry": "k3s",\n      "kind": "binary"\n    }' "${_k3s_sum}"
       if [[ -n "${_k9s_sum}" ]]; then printf ',\n'; fi
@@ -810,7 +845,7 @@ if [[ "${EDITION}" == "axonwall" || "${EDITION}" == "k3s-storage" ]]; then
   # on the axonwall edition this lists bin/k9s only — k3s is not
   # staged there and the daemon downloads it on first core-k3s
   # install/reconfigure).
-  write_core_k3s_bundled_json "${OVL}/var/lib/axonwall/core-k3s"
+  write_core_k3s_bundled_json "${OVL}/var/lib/axonwall/core-k3s" "${K3S_SHA256:-}" "${K9S_SHA256:-}"
 fi
 
 # Fetch ZFSBootMenu v3.1.0 Unified Kernel Image (UKI) for Root-on-ZFS installations
@@ -1078,27 +1113,35 @@ LABEL install
 SYSLINUX_EOF
 
 if [[ "${EDITION}" == "axonwall" ]]; then
-cat << 'SYSLINUX_EDITIONS_EOF' >> "${WORK_DIR}/iso/boot/syslinux/syslinux.cfg"
+  cat << 'SYSLINUX_MINIMAL_EOF' >> "${WORK_DIR}/iso/boot/syslinux/syslinux.cfg"
 
 LABEL install-minimal
   MENU LABEL Install Axonwall ^Minimal Edition (Reduced Attack Surface)
   KERNEL /boot/vmlinuz-virt
   INITRD /boot/initramfs-virt
   APPEND modules=loop,squashfs,sd-mod,usb-storage,sr_mod,cdrom,isofs,virtio_blk,virtio_scsi,virtio_pci,nvme,ata_piix,ahci axonwall_edition=minimal axonwall_install=1 quiet console=tty0 console=ttyS0,9600
+SYSLINUX_MINIMAL_EOF
+  if [[ -x "${OVL}/usr/share/axonwall/vault/weed" || -x "${OVL}/usr/sbin/weed" ]]; then
+    cat << 'SYSLINUX_VAULT_EOF' >> "${WORK_DIR}/iso/boot/syslinux/syslinux.cfg"
 
 LABEL install-vault
   MENU LABEL Install Axonwall ^Vault Edition (Immutable S3 Storage)
   KERNEL /boot/vmlinuz-virt
   INITRD /boot/initramfs-virt
   APPEND modules=loop,squashfs,sd-mod,usb-storage,sr_mod,cdrom,isofs,virtio_blk,virtio_scsi,virtio_pci,nvme,ata_piix,ahci axonwall_edition=vault axonwall_install=1 quiet console=tty0 console=ttyS0,9600
+SYSLINUX_VAULT_EOF
+  fi
+  if [[ -x "${OVL}/var/lib/axonwall/core-k3s/bin/k3s" ]]; then
+    cat << 'SYSLINUX_K3S_EOF' >> "${WORK_DIR}/iso/boot/syslinux/syslinux.cfg"
 
 LABEL install-k3s-storage
   MENU LABEL Install Axonwall ^K3s + ZFS Storage Host (Minimal)
   KERNEL /boot/vmlinuz-virt
   INITRD /boot/initramfs-virt
   APPEND modules=loop,squashfs,sd-mod,usb-storage,sr_mod,cdrom,isofs,virtio_blk,virtio_scsi,virtio_pci,nvme,ata_piix,ahci axonwall_edition=k3s-storage axonwall_install=1 quiet console=tty0 console=ttyS0,9600
-SYSLINUX_EDITIONS_EOF
-sed -i "s|/boot/vmlinuz-virt|/boot/vmlinuz-${ALPINE_KERNEL_FLAVOR}|g; s|/boot/initramfs-virt|/boot/initramfs-${ALPINE_KERNEL_FLAVOR}|g; s|modules=loop,[^ ]*|modules=${STORAGE_MODULES}|g" "${WORK_DIR}/iso/boot/syslinux/syslinux.cfg"
+SYSLINUX_K3S_EOF
+  fi
+  sed -i "s|/boot/vmlinuz-virt|/boot/vmlinuz-${ALPINE_KERNEL_FLAVOR}|g; s|/boot/initramfs-virt|/boot/initramfs-${ALPINE_KERNEL_FLAVOR}|g; s|modules=loop,[^ ]*|modules=${STORAGE_MODULES}|g" "${WORK_DIR}/iso/boot/syslinux/syslinux.cfg"
 fi
 
 cat << SYSLINUX_REST_EOF >> "${WORK_DIR}/iso/boot/syslinux/syslinux.cfg"
@@ -1150,23 +1193,31 @@ menuentry "${BOOT_GRUB_INSTALL_LABEL}" {
 GRUB_EOF
 
 if [[ "${EDITION}" == "axonwall" ]]; then
-cat << GRUB_EDITIONS_EOF >> "${WORK_DIR}/iso/boot/grub/grub.cfg"
+  cat << GRUB_MINIMAL_EOF >> "${WORK_DIR}/iso/boot/grub/grub.cfg"
 
 menuentry "Install Axonwall Minimal Edition (Reduced Attack Surface)" {
   linux /boot/vmlinuz-${ALPINE_KERNEL_FLAVOR} modules=${STORAGE_MODULES} axonwall_edition=minimal axonwall_install=1 quiet console=tty0 console=ttyS0,9600
   initrd /boot/initramfs-${ALPINE_KERNEL_FLAVOR}
 }
+GRUB_MINIMAL_EOF
+  if [[ -x "${OVL}/usr/share/axonwall/vault/weed" || -x "${OVL}/usr/sbin/weed" ]]; then
+    cat << GRUB_VAULT_EOF >> "${WORK_DIR}/iso/boot/grub/grub.cfg"
 
 menuentry "Install Axonwall Vault Edition (Immutable S3 Storage)" {
   linux /boot/vmlinuz-${ALPINE_KERNEL_FLAVOR} modules=${STORAGE_MODULES} axonwall_edition=vault axonwall_install=1 quiet console=tty0 console=ttyS0,9600
   initrd /boot/initramfs-${ALPINE_KERNEL_FLAVOR}
 }
+GRUB_VAULT_EOF
+  fi
+  if [[ -x "${OVL}/var/lib/axonwall/core-k3s/bin/k3s" ]]; then
+    cat << GRUB_K3S_EOF >> "${WORK_DIR}/iso/boot/grub/grub.cfg"
 
 menuentry "Install Axonwall K3s + ZFS Storage Host (Minimal)" {
   linux /boot/vmlinuz-${ALPINE_KERNEL_FLAVOR} modules=${STORAGE_MODULES} axonwall_edition=k3s-storage axonwall_install=1 quiet console=tty0 console=ttyS0,9600
   initrd /boot/initramfs-${ALPINE_KERNEL_FLAVOR}
 }
-GRUB_EDITIONS_EOF
+GRUB_K3S_EOF
+  fi
 fi
 
 cat << GRUB_REST_EOF >> "${WORK_DIR}/iso/boot/grub/grub.cfg"

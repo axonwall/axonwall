@@ -14,6 +14,7 @@ import {
   Search,
   Maximize2,
 } from 'lucide-react';
+import { FlowsLiveVisualStrip, type FlowsRatePoint } from '@/components/ebpf/FlowsLiveVisualStrip';
 
 interface StreamPacket {
   index: number;
@@ -35,18 +36,29 @@ export default function FlowsDashboardPage() {
   const [packets, setPackets] = useState<StreamPacket[]>([]);
   const [selectedPacket, setSelectedPacket] = useState<StreamPacket | null>(null);
   const [packetsPerSec, setPacketsPerSec] = useState(0);
+  const [rateSeries, setRateSeries] = useState<FlowsRatePoint[]>([]);
   const [feedError, setFeedError] = useState<string | null>(null);
 
   const eventSourceRef = useRef<EventSource | null>(null);
   const ppsCounterRef = useRef(0);
+  const bytesCounterRef = useRef(0);
 
   useEffect(() => {
     const timer = setInterval(() => {
-      setPacketsPerSec(ppsCounterRef.current);
+      const curPps = ppsCounterRef.current;
+      const curKbps = Math.round((bytesCounterRef.current / 1024) * 10) / 10;
+      setPacketsPerSec(curPps);
       ppsCounterRef.current = 0;
+      bytesCounterRef.current = 0;
+      if (isStreaming || curPps > 0) {
+        setRateSeries((prev) => [
+          ...prev.slice(-29),
+          { time: new Date().toLocaleTimeString(), pps: curPps, kbps: curKbps },
+        ]);
+      }
     }, 1000);
     return () => clearInterval(timer);
-  }, []);
+  }, [isStreaming]);
 
   useEffect(() => {
     if (!isStreaming) {
@@ -69,6 +81,7 @@ export default function FlowsDashboardPage() {
       try {
         const pkt = JSON.parse(event.data) as StreamPacket;
         ppsCounterRef.current++;
+        bytesCounterRef.current += Number(pkt.length) || 0;
         setPackets((prev) => [pkt, ...prev.slice(0, 199)]);
       } catch {}
     });
@@ -305,6 +318,14 @@ export default function FlowsDashboardPage() {
           />
         </div>
       </div>
+
+      {/* Live eBPF SSE Rate & Protocol/Talker Visualizations */}
+      <FlowsLiveVisualStrip
+        packets={packets}
+        rateSeries={rateSeries}
+        isStreaming={isStreaming}
+        feedError={feedError}
+      />
 
       {/* Packet Stream Grid */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">

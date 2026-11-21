@@ -7,7 +7,7 @@ import { CodeBlock } from '../components/CodeBlock';
 export const metadata = {
   title: 'REST API, Fleet/MCP, Agent Sockets & Terraform Reference | Axonwall Documentation',
   description:
-    'Complete REST/OpenAPI endpoints, Server-Sent Events (SSE) packet streams, Fleet & MCP security APIs, Go agent Unix socket IPC, and official Terraform / OpenTofu provider for Axonwall v0.11.68.',
+    'Complete REST/OpenAPI endpoints, Server-Sent Events (SSE) packet streams, Fleet & MCP security APIs, Go agent Unix socket IPC, and official Terraform / OpenTofu provider for Axonwall v0.13.0.',
 };
 
 export default function ApiReferenceDocPage() {
@@ -17,7 +17,7 @@ export default function ApiReferenceDocPage() {
       <div className="space-y-4 border-b border-slate-800/80 pb-8">
         <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-950/60 border border-emerald-500/30 text-emerald-400 text-xs font-semibold">
           <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-          Developer, IaC &amp; Automation • v0.11.68
+          Developer, IaC &amp; Automation • v0.13.0
         </div>
         <h1 className="text-3xl sm:text-5xl font-extrabold text-white tracking-tight">
           REST, Fleet/MCP, Agent Socket &amp; Terraform Reference
@@ -71,7 +71,7 @@ export default function ApiReferenceDocPage() {
               <tr>
                 <td className="p-3 font-mono text-sky-400 font-bold">GET</td>
                 <td className="p-3 font-mono text-emerald-400">/api/v1/status</td>
-                <td className="p-3">Appliance health, version (<code className="font-mono">0.11.68</code>), active boot slot/BE, and Commit-Confirm timer state.</td>
+                <td className="p-3">Appliance health, version (<code className="font-mono">0.13.0</code>), active boot slot/BE/snapshot, and Commit-Confirm timer state.</td>
               </tr>
               <tr>
                 <td className="p-3 font-mono text-sky-400 font-bold">GET / PUT</td>
@@ -106,7 +106,7 @@ export default function ApiReferenceDocPage() {
               <tr>
                 <td className="p-3 font-mono text-sky-400 font-bold">GET</td>
                 <td className="p-3 font-mono text-emerald-400">/api/v1/ebpf/overview</td>
-                <td className="p-3">Unified Ring-0 eBPF status: Dual-Stack IPv4/IPv6 + VLAN XDP flow/drop counters, 5-hook CO-RE BPF-LSM state, and Linux 6.9+ <code className="font-mono">BPF_TOKEN</code> mounts.</td>
+                <td className="p-3">Unified Ring-0 eBPF status: Dual-Stack IPv4/IPv6 + VLAN XDP flow/drop counters, 5-hook CO-RE BPF-LSM state, Linux 6.9+ <code className="font-mono">BPF_TOKEN</code> mounts, cross-duty ARC/ZIL &amp; KVM telemetry, and live kernel BPF program/map inventory (<code className="font-mono">bpfInventory</code>).</td>
               </tr>
               <tr>
                 <td className="p-3 font-mono text-emerald-400 font-bold">GET / POST / DELETE</td>
@@ -126,7 +126,17 @@ export default function ApiReferenceDocPage() {
               <tr>
                 <td className="p-3 font-mono text-sky-400 font-bold">GET / POST</td>
                 <td className="p-3 font-mono text-emerald-400">/api/system/kernel</td>
-                <td className="p-3">Custom Kernel Studio: detect host hardware &amp; active modules, audit kernel posture (25 checks including <code className="font-mono">/proc/config.gz</code> fallback), synthesize hardened Kconfig fragments, launch async builds, and safely stage/install built <code className="font-mono">.deb</code> kernels via ZBM or GRUB.</td>
+                <td className="p-3">Custom Kernel Studio: detect host hardware &amp; active modules, audit kernel posture (25 checks including <code className="font-mono">/proc/config.gz</code> fallback), synthesize hardened Kconfig fragments, launch async builds, and safely stage/install built <code className="font-mono">.deb</code> kernels via ZBM, Btrfs + Snapper, or GRUB.</td>
+              </tr>
+              <tr>
+                <td className="p-3 font-mono text-sky-400 font-bold">GET / POST</td>
+                <td className="p-3 font-mono text-emerald-400">/api/system/update</td>
+                <td className="p-3">Release check, OTA updates (<code className="font-mono">update</code> / <code className="font-mono">activate</code> / <code className="font-mono">verify</code>), ZFSBootMenu (<code className="font-mono">zbm-*</code>), and Btrfs + Snapper (<code className="font-mono">btrfs-snapshot</code>, <code className="font-mono">btrfs-delete-snapshot</code>, <code className="font-mono">btrfs-rollback-snapshot</code>, <code className="font-mono">btrfs-sync-grub</code>).</td>
+              </tr>
+              <tr>
+                <td className="p-3 font-mono text-sky-400 font-bold">GET / POST</td>
+                <td className="p-3 font-mono text-emerald-400">/api/k3s &amp; /api/k3s/logs/stream</td>
+                <td className="p-3">Query K3s runtime &amp; etcd snapshots, trigger cluster HA join or etcd save/restore, and stream live pod/container SSE logs for Browser K9s Live Explorer.</td>
               </tr>
               <tr>
                 <td className="p-3 font-mono text-sky-400 font-bold">GET / POST</td>
@@ -239,19 +249,23 @@ sudo curl -s --unix-socket /run/axonwall/agent-api.sock \\
 //    POST /v1/apply                      -> Compile & apply nftables + daemon configs with Commit-Confirm
 //    POST /v1/confirm                    -> Confirm pending jobId and disarm rollback timer
 //    POST /v1/rollback                   -> Immediately revert to last-known-good bundle
-//    GET  /v1/ebpf/overview              -> Dual-Stack VLAN XDP stats, 5-hook BPF-LSM & BPF_TOKEN mounts
+//    GET  /v1/ebpf/overview              -> Dual-Stack VLAN XDP stats, 5-hook BPF-LSM, BPF_TOKEN mounts & kernel BPF inventory (bpfInventory)
 //    POST /v1/ebpf/xdp/block             -> Monotonic TTL XDP_DROP IPv4/IPv6 blocklist (GET/POST/DELETE)
 //    POST /v1/ebpf/tokens                -> Mount/unmount Linux 6.9+ bpffs delegate_* token superblocks
 //    GET  /v1/ebpf/tokens/render-k3s     -> Render K3s hostUsers:false Pod/DaemonSet BPF_TOKEN manifest
 //    GET  /v1/nas/telemetry              -> OpenZFS /proc/spl/kstat/zfs ARC/L2ARC, ZIL/SLOG & pool ZIO queues
 //    GET  /v1/virt/telemetry             -> KVM vnet/tap interface RX/TX/drop stats, IOMMU & LXC BPF_TOKEN state
 //    GET  /v1/k3s/telemetry              -> K3s UserNamespacesSupport, CNI/WireGuard interfaces & pod BPF_TOKENs
+//    POST /v1/k3s/nodes/scheduling       -> Merge-patch K3s node roles, labels & edge taints (NoSchedule/NoExecute)
+//    GET  /v1/k3s/{pulse,api-resources,namespaces,resources,resource/inspect,logs/stream} & POST /v1/k3s/action -> Browser K9s Explorer
 //    POST /v1/terminal/exec              -> RBAC-gated Console Command Runner execution
 //    GET  /v1/virt/console/ws            -> WebSocket proxy for KVM guest HTML5 noVNC consoles
+//    GET  /v1/system/btrfs               -> Btrfs + Snapper list & status; POST list/snapshot/delete-snapshot/rollback-snapshot/sync-grub
+//    GET  /v1/system/plugins & POST /v1/system/plugins/action -> On-demand role/plugin install & SHA-256 bundled binary lifecycle
 //    GET  /v1/system/etckeeper/*         -> Host /etc Git status, init, config, commit, history & diff
 //    GET  /v1/system/kernel/studio       -> Live hardware inventory, lsmod, running kernel config & build jobs
 //    POST /v1/system/kernel/build        -> Start async Universal or localmodconfig stripped kernel build
-//    POST /v1/system/kernel/install      -> Safe stage/install via ZFS Boot Environment clone or dpkg + update-grub
+//    POST /v1/system/kernel/install      -> Safe stage/install via ZBM clone, Btrfs pre-snapshot + GRUB sync, or dpkg + update-grub
 //    GET  /v1/security/threat-harvester/status   -> Blackbox TCX/tracepoint/uprobe status, redactions & ZFS spool quota
 //    POST /v1/security/threat-harvester/config   -> Apply live ThreatHarvesterConfig updates to Ring-0 collector
 //    GET  /v1/security/threat-harvester/episodes -> Filter captured Causal Threat Episodes by tier & reviewStatus
@@ -282,7 +296,7 @@ sudo curl -s --unix-socket /run/axonwall/agent-api.sock \\
   required_providers {
     axonwall = {
       source  = "axonwall/axonwall"
-      version = "~> 0.11.68"
+      version = "~> 0.13.0"
     }
   }
 }

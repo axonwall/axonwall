@@ -417,7 +417,10 @@ func jsonUnmarshalForTest(data []byte, v any) error {
 // bughunt3FakeQga serves canned QGA replies on the VM's agent socket.
 func bughunt3FakeQga(t *testing.T, vmid int, reply func(cmd string) string) {
 	t.Helper()
-	sockPath := fmt.Sprintf("/run/axonwall/qga/vm-%d.sock", vmid)
+	oldQgaDir := virtQgaSocketDir
+	virtQgaSocketDir = t.TempDir()
+	t.Cleanup(func() { virtQgaSocketDir = oldQgaDir })
+	sockPath := filepath.Join(virtQgaSocketDir, fmt.Sprintf("vm-%d.sock", vmid))
 	_ = os.Remove(sockPath)
 	ln, err := net.Listen("unix", sockPath)
 	if err != nil {
@@ -599,7 +602,10 @@ func TestBughunt3_SnapshotPartialFailureCleansUp(t *testing.T) {
 // It returns an accessor for the number of query-migrate calls seen.
 func bughunt3FakeQmp(t *testing.T, vmid int, statuses []string) func() int {
 	t.Helper()
-	sockPath := fmt.Sprintf("/run/axonwall/qmp/vm-%d.sock", vmid)
+	oldQmpDir := virtQmpSocketDir
+	virtQmpSocketDir = t.TempDir()
+	t.Cleanup(func() { virtQmpSocketDir = oldQmpDir })
+	sockPath := filepath.Join(virtQmpSocketDir, fmt.Sprintf("vm-%d.sock", vmid))
 	_ = os.Remove(sockPath)
 	ln, err := net.Listen("unix", sockPath)
 	if err != nil {
@@ -743,7 +749,10 @@ func TestBughunt3_LiveMigrateTargetNotListening(t *testing.T) {
 	}
 	defer func() { liveMigrateDialTarget = oldDial }()
 
-	sockPath := "/run/axonwall/qmp/vm-102.sock"
+	oldQmpDir := virtQmpSocketDir
+	virtQmpSocketDir = t.TempDir()
+	t.Cleanup(func() { virtQmpSocketDir = oldQmpDir })
+	sockPath := filepath.Join(virtQmpSocketDir, "vm-102.sock")
 	_ = os.Remove(sockPath)
 	if err := os.WriteFile(sockPath, []byte{}, 0600); err != nil {
 		t.Fatalf("create qmp socket file: %v", err)

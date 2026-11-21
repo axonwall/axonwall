@@ -153,7 +153,11 @@ export function acquireMcpLockFile(lockPath: string, timeoutMs = 10000): () => v
             }
           }
         }
-        stale = mtimeStale && (holderPid === null || holderPidAlive === false);
+        // Break immediately when a non-self holder PID is confirmed dead (ESRCH);
+        // keep mtimeStale for unparseable/empty lockfiles without a holder PID.
+        stale =
+          (holderPid !== null && holderPidAlive === false) ||
+          (mtimeStale && holderPid === null);
         if (mtimeStale && holderPid !== null && holderPidAlive === true && !warnedLiveHolder) {
           warnedLiveHolder = true;
           console.warn(

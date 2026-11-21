@@ -288,6 +288,14 @@ jobs:
             echo "::error::axonwall-install differs between Debian ISO and Alpine ISO overlays"
             fail=1
           fi
+          if ! diff -u packaging/iso/config/includes.chroot/usr/lib/axonwall/theme-zbm-uki.py packaging/iso/branding/theme-zbm-uki.py; then
+            echo "::error::theme-zbm-uki.py differs between includes.chroot and branding"
+            fail=1
+          fi
+          if ! diff -u packaging/iso/config/includes.chroot/usr/local/bin/axonwall-zbm-theme packaging/alpine/overlay/usr/local/bin/axonwall-zbm-theme; then
+            echo "::error::axonwall-zbm-theme differs between Debian ISO and Alpine ISO overlays"
+            fail=1
+          fi
           for s in \
             packaging/iso/config/includes.chroot/usr/local/bin/axonwall-install \
             packaging/iso/config/includes.chroot/usr/local/bin/axonwall-update \

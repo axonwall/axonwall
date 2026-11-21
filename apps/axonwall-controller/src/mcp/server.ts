@@ -39,7 +39,7 @@ import { hasMcpScope } from './authz.js';
 import { acquireMcpLockFile, desiredStateLockPath } from './lockfile.js';
 export { desiredStateLockPath } from './lockfile.js';
 import { recordMcpAuditEntry, queryMcpAuditEntries } from './audit.js';
-import { readCanonicalConfig } from '../atomic-config.js';
+import { readCanonicalConfig, writeCanonicalConfig, writeFileAtomicSync } from '../atomic-config.js';
 
 function readAgentToken(): string {
   if (process.env.AXONWALL_AGENT_TOKEN) {
@@ -233,38 +233,37 @@ function loadLocalDesiredState(): DesiredState | null {
 function persistDesiredStateToDisk(targetState: DesiredState): boolean {
   const dirs = resolveControllerDirs();
   const customState = process.env.AXONWALL_STATE_JSON_PATH || process.env.AXONWALL_STATE_FILE;
+  const serializedJson = JSON.stringify(targetState, null, 2);
   if (customState) {
     try {
-      fs.mkdirSync(path.dirname(customState), { recursive: true, mode: 0o770 });
-      fs.writeFileSync(customState, JSON.stringify(targetState, null, 2), { mode: 0o600 });
+      writeFileAtomicSync(customState, serializedJson, 0o660);
       const yamlFiles = serializeDesiredStateToYamlFiles(targetState);
       const customDir = path.dirname(customState);
       for (const [fn, content] of Object.entries(yamlFiles)) {
-        fs.writeFileSync(path.join(customDir, fn), content, { mode: 0o660 });
+        writeFileAtomicSync(path.join(customDir, fn), content, 0o660);
       }
       return true;
     } catch {
-      // A failed custom-state write must not report staged success.
       return false;
     }
   }
-  let stateJsonLanded = false;
-  for (const statePath of Array.from(new Set([path.join(dirs.etcDir, 'state.json'), dirs.stateFile]))) {
-    try {
-      fs.mkdirSync(path.dirname(statePath), { recursive: true, mode: 0o770 });
-      fs.writeFileSync(statePath, JSON.stringify(targetState, null, 2), { mode: 0o600 });
-      stateJsonLanded = true;
-    } catch {
-      // Fallback if target directory not writable
-    }
+  try {
+    writeCanonicalConfig({
+      canonicalPath: dirs.stateFile,
+      mirrorPaths: [path.join(dirs.persistYamlDir, 'state.json'), path.join(dirs.etcDir, 'state.json')],
+      serialized: serializedJson,
+      mode: 0o660,
+      label: 'state.json',
+    });
+  } catch {
+    return false;
   }
-  if (!stateJsonLanded) return false;
   try {
     const yamlFiles = serializeDesiredStateToYamlFiles(targetState);
     for (const dir of Array.from(new Set([dirs.etcDir, dirs.persistYamlDir]))) {
       if (fs.existsSync(dir)) {
         for (const [fn, content] of Object.entries(yamlFiles)) {
-          fs.writeFileSync(path.join(dir, fn), content, { mode: 0o660 });
+          writeFileAtomicSync(path.join(dir, fn), content, 0o660);
         }
       }
     }
@@ -324,7 +323,7 @@ function renderOfflineK3sBpfTokenYaml(params: {
     `    type: RuntimeDefault`,
     `containers:`,
     `  - name: ebpf-agent`,
-    `    image: ${params.image}`,
+    `    image: ${JSON.stringify(params.image)}`,
     `    env:`,
     `      - name: LIBBPF_BPF_TOKEN_PATH`,
     `        value: "/sys/fs/bpf"`,
@@ -339,7 +338,7 @@ function renderOfflineK3sBpfTokenYaml(params: {
     `volumes:`,
     `  - name: delegated-bpffs`,
     `    hostPath:`,
-    `      path: ${hostPinPath}`,
+    `      path: ${JSON.stringify(hostPinPath)}`,
     `      type: Directory`,
   ];
   const header = [
@@ -355,20 +354,20 @@ function renderOfflineK3sBpfTokenYaml(params: {
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
-  name: ${params.workloadName}
-  namespace: ${params.namespace}
+  name: ${JSON.stringify(params.workloadName)}
+  namespace: ${JSON.stringify(params.namespace)}
   labels:
-    app.kubernetes.io/name: ${params.workloadName}
-    axonwall.io/bpf-token-profile: ${params.profileId}
+    app.kubernetes.io/name: ${JSON.stringify(params.workloadName)}
+    axonwall.io/bpf-token-profile: ${JSON.stringify(params.profileId)}
 spec:
   selector:
     matchLabels:
-      app.kubernetes.io/name: ${params.workloadName}
+      app.kubernetes.io/name: ${JSON.stringify(params.workloadName)}
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: ${params.workloadName}
-        axonwall.io/bpf-token-profile: ${params.profileId}
+        app.kubernetes.io/name: ${JSON.stringify(params.workloadName)}
+        axonwall.io/bpf-token-profile: ${JSON.stringify(params.profileId)}
     spec:
 ${indented}
 `;
@@ -378,11 +377,11 @@ ${indented}
 apiVersion: v1
 kind: Pod
 metadata:
-  name: ${params.workloadName}
-  namespace: ${params.namespace}
+  name: ${JSON.stringify(params.workloadName)}
+  namespace: ${JSON.stringify(params.namespace)}
   labels:
-    app.kubernetes.io/name: ${params.workloadName}
-    axonwall.io/bpf-token-profile: ${params.profileId}
+    app.kubernetes.io/name: ${JSON.stringify(params.workloadName)}
+    axonwall.io/bpf-token-profile: ${JSON.stringify(params.profileId)}
 spec:
 ${indented}
 `;
@@ -1516,6 +1515,26 @@ export async function handleMcpReadResource(
   };
 }
 
+const SENSITIVE_AUDIT_KEY_RE = /^(keymaterial|password|passphrase|token|secret|privatekey|authkey|apikey|mtlskey|radiussecret|ztptoken)$/i;
+
+function redactSensitiveArgs(value: unknown, depth = 0): unknown {
+  if (depth > 8 || value === null || typeof value !== 'object') {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => redactSensitiveArgs(item, depth + 1));
+  }
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+    if (SENSITIVE_AUDIT_KEY_RE.test(k)) {
+      out[k] = '[REDACTED]';
+    } else {
+      out[k] = redactSensitiveArgs(v, depth + 1);
+    }
+  }
+  return out;
+}
+
 export async function handleMcpCallTool(
   toolName: string,
   rawArgs: Record<string, unknown> | undefined,
@@ -1533,7 +1552,7 @@ export async function handleMcpCallTool(
       requiredScope,
       decision: 'denied',
       denialReason: reason,
-      paramsSummary: args,
+      paramsSummary: redactSensitiveArgs(args) as Record<string, unknown>,
       auditMetadata: auditMeta,
     });
     return {
@@ -2120,8 +2139,14 @@ export async function handleMcpCallTool(
       const targetLease = leasesRes.ok && Array.isArray(leasesRes.data?.leases)
         ? leasesRes.data.leases.find((l) => l.id === leaseId)
         : undefined;
-      if (targetLease) {
-        if (targetLease?.kind && !hasMcpScope(env.key, 'mcp:firewall:write')) {
+      if (!hasMcpScope(env.key, 'mcp:firewall:write')) {
+        if (!leasesRes.ok) {
+          return deny('mcp:traffic:*', 'Cannot verify authorization scope while daemon leases endpoint is unavailable');
+        }
+        if (!targetLease) {
+          return deny('mcp:traffic:*', 'Cannot verify authorization scope (requested lease not found)');
+        }
+        if (targetLease.kind) {
           const requiredForKind =
             targetLease.kind === 'blackhole'
               ? 'mcp:traffic:blackhole'
@@ -2342,12 +2367,17 @@ export async function handleMcpCallTool(
         if (dstErr) return deny('mcp:firewall:write', dstErr, req.audit);
         const ruleIface = (req.rule.interface || 'any').toLowerCase();
         const isWanOrAny = ruleIface === 'wan' || ruleIface === 'any';
-        const rawPassDport = (req.rule.destinationPort || '').trim();
+        const rawSrc = (req.rule.source || '').trim().toLowerCase();
+        const rawDst = (req.rule.destination || '').trim().toLowerCase();
+        const rawPassDport = (req.rule.destinationPort || '').trim().toLowerCase().replace(/:/g, '-');
+        const isWildcardAddr = (v: string) => v === '' || v === 'any' || v === '0.0.0.0/0' || v === '::/0';
+        const isWildcardPort = (v: string) =>
+          v === '' || v === 'any' || v === '0-65535' || v === '1-65535' || v === '*';
         if (
           isWanOrAny &&
-          (!req.rule.source || req.rule.source === 'any') &&
-          (!req.rule.destination || req.rule.destination === 'any' || req.rule.destination === 'self' || req.rule.destination === 'wan_ip') &&
-          (!rawPassDport || rawPassDport === 'any')
+          isWildcardAddr(rawSrc) &&
+          (isWildcardAddr(rawDst) || rawDst === 'self' || rawDst === 'wan_ip') &&
+          isWildcardPort(rawPassDport)
         ) {
           return deny(
             'mcp:firewall:write',
@@ -2501,7 +2531,7 @@ export async function handleMcpCallTool(
           reloadServices: compiled.reloadServices,
           commitConfirmTimeoutSec: req.confirmTimeoutSeconds,
         }, Number(process.env.AXONWALL_APPLY_TIMEOUT_MS) || 120_000);
-        if (!applyRes.ok) {
+        if (!applyRes.ok || applyRes.data?.success === false) {
           if (applyRes.status === 504) {
             return deny(
               'mcp:firewall:apply',
@@ -2542,7 +2572,7 @@ export async function handleMcpCallTool(
           }
           return deny(
             'mcp:firewall:apply',
-            applyRes.data?.error || 'Daemon rejected ruleset apply; rolled back staged rule',
+            applyRes.data?.message || applyRes.data?.error || 'Daemon rejected ruleset apply; rolled back staged rule',
             req.audit,
           );
         }

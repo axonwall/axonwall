@@ -5,7 +5,15 @@ import os from 'node:os';
 import path from 'node:path';
 import { logger } from '../utils/logger.js';
 import { runInteractiveTerminal } from '../utils/terminal-runner.js';
-import { sanitizePathComponent } from './config.js';
+import { sanitizePathComponent, assertDnsLabel, assertCliTarget } from './config.js';
+
+function assertContainerName(container) {
+  const clean = assertCliTarget(container, 'container');
+  if (/[./\\]/.test(clean)) {
+    throw new Error(`Invalid container '${container}': must not contain path separators or dots`);
+  }
+  return clean;
+}
 
 /**
  * Format age from ISO timestamp into concise human string (e.g. 12s, 4m, 2h, 5d)
@@ -99,13 +107,13 @@ export function computePodStatus(pod) {
 export async function getPodsWide({ clusterName = 'vigilante-dev', namespace = null } = {}) {
   const args = ['get', 'pods'];
   if (namespace && namespace !== 'all') {
-    args.push('-n', namespace);
+    args.push('-n', assertDnsLabel(namespace, 'namespace'));
   } else {
     args.push('-A');
   }
 
   if (clusterName) {
-    args.push('--context', `k3d-${clusterName}`);
+    args.push('--context', `k3d-${assertDnsLabel(clusterName, 'clusterName')}`);
   }
 
   args.push('--request-timeout=4s', '-o', 'json');
@@ -285,18 +293,24 @@ export function openInSystemPager(content, filenameHint = 'output.txt') {
  */
 export async function getPodLogs({ clusterName = 'vigilante-dev', namespace = 'default', podName, container = null, tailLines = 100 } = {}) {
   if (!podName) return 'No pod specified';
-  const args = ['logs', podName, '-n', namespace, `--tail=${tailLines}`];
+  const cleanPod = assertDnsLabel(podName, 'podName');
+  const cleanNs = assertDnsLabel(namespace, 'namespace');
+  const lines = Number(tailLines);
+  if (!Number.isInteger(lines) || lines < 1 || lines > 10000) {
+    throw new Error(`Invalid tailLines '${tailLines}': expected integer between 1 and 10000`);
+  }
+  const args = ['logs', cleanPod, '-n', cleanNs, `--tail=${lines}`];
   if (container) {
-    args.push('-c', container);
+    args.push('-c', assertContainerName(container));
   }
   if (clusterName) {
-    args.push('--context', `k3d-${clusterName}`);
+    args.push('--context', `k3d-${assertDnsLabel(clusterName, 'clusterName')}`);
   }
   try {
     const { stdout } = await execa('kubectl', args);
     return stdout || '(No logs returned)';
   } catch (err) {
-    return `Error retrieving logs for ${namespace}/${podName}: ${err.message}`;
+    return `Error retrieving logs for ${cleanNs}/${cleanPod}: ${err.message}`;
   }
 }
 
@@ -310,15 +324,17 @@ export async function getPodLogs({ clusterName = 'vigilante-dev', namespace = 'd
  */
 export async function describePod({ clusterName = 'vigilante-dev', namespace = 'default', podName } = {}) {
   if (!podName) return 'No pod specified';
-  const args = ['describe', 'pod', podName, '-n', namespace];
+  const cleanPod = assertDnsLabel(podName, 'podName');
+  const cleanNs = assertDnsLabel(namespace, 'namespace');
+  const args = ['describe', 'pod', cleanPod, '-n', cleanNs];
   if (clusterName) {
-    args.push('--context', `k3d-${clusterName}`);
+    args.push('--context', `k3d-${assertDnsLabel(clusterName, 'clusterName')}`);
   }
   try {
     const { stdout } = await execa('kubectl', args);
     return stdout || '(No describe output returned)';
   } catch (err) {
-    return `Error describing ${namespace}/${podName}: ${err.message}`;
+    return `Error describing ${cleanNs}/${cleanPod}: ${err.message}`;
   }
 }
 
@@ -331,23 +347,20 @@ export async function describePod({ clusterName = 'vigilante-dev', namespace = '
  */
 export function describePodInteractive({ clusterName = 'vigilante-dev', namespace, podName }) {
   if (!podName || !namespace) return;
-  logger.info('PODS:DESCRIBE', `Running kubectl describe pod ${podName} -n ${namespace}`);
+  const cleanPod = assertDnsLabel(podName, 'podName');
+  const cleanNs = assertDnsLabel(namespace, 'namespace');
+  const cleanCluster = clusterName ? assertDnsLabel(clusterName, 'clusterName') : '';
+  logger.info('PODS:DESCRIBE', `Running kubectl describe pod ${cleanPod} -n ${cleanNs}`);
   let output = '';
   try {
-    const res = spawnSync('kubectl', [
-      'describe',
-      'pod',
-      podName,
-      '-n',
-      namespace,
-      '--context',
-      `k3d-${clusterName}`
-    ], { encoding: 'utf8' });
+    const args = ['describe', 'pod', cleanPod, '-n', cleanNs];
+    if (cleanCluster) args.push('--context', `k3d-${cleanCluster}`);
+    const res = spawnSync('kubectl', args, { encoding: 'utf8' });
     output = res.stdout || res.stderr || 'No describe output available.';
   } catch (err) {
     output = `Failed to execute kubectl describe: ${err.message}`;
   }
-  openInSystemPager(output, `describe-${namespace}-${podName}.txt`);
+  openInSystemPager(output, `describe-${cleanNs}-${cleanPod}.txt`);
 }
 
 /**
@@ -359,24 +372,21 @@ export function describePodInteractive({ clusterName = 'vigilante-dev', namespac
  */
 export function viewPodLogsInteractive({ clusterName = 'vigilante-dev', namespace, podName }) {
   if (!podName || !namespace) return;
-  logger.info('PODS:LOGS', `Viewing kubectl logs for ${podName} -n ${namespace}`);
+  const cleanPod = assertDnsLabel(podName, 'podName');
+  const cleanNs = assertDnsLabel(namespace, 'namespace');
+  const cleanCluster = clusterName ? assertDnsLabel(clusterName, 'clusterName') : '';
+  logger.info('PODS:LOGS', `Viewing kubectl logs for ${cleanPod} -n ${cleanNs}`);
   let output = '';
   try {
-    const res = spawnSync('kubectl', [
-      'logs',
-      '--tail=5000',
-      podName,
-      '-n',
-      namespace,
-      '--context',
-      `k3d-${clusterName}`,
-      '--all-containers=true'
-    ], { encoding: 'utf8' });
+    const args = ['logs', '--tail=5000', cleanPod, '-n', cleanNs];
+    if (cleanCluster) args.push('--context', `k3d-${cleanCluster}`);
+    args.push('--all-containers=true');
+    const res = spawnSync('kubectl', args, { encoding: 'utf8' });
     output = res.stdout || res.stderr || 'No logs available for this pod.';
   } catch (err) {
     output = `Failed to retrieve logs: ${err.message}`;
   }
-  openInSystemPager(output, `logs-${namespace}-${podName}.log`);
+  openInSystemPager(output, `logs-${cleanNs}-${cleanPod}.log`);
 }
 
 /**
@@ -393,21 +403,15 @@ export const streamPodLogsInteractive = viewPodLogsInteractive;
  */
 export function openPodShellInteractive({ clusterName = 'vigilante-dev', namespace, podName }) {
   if (!podName || !namespace) return;
-  logger.info('PODS:SHELL', `Opening shell into pod ${podName} -n ${namespace}`);
+  const cleanPod = assertDnsLabel(podName, 'podName');
+  const cleanNs = assertDnsLabel(namespace, 'namespace');
+  const cleanCluster = clusterName ? assertDnsLabel(clusterName, 'clusterName') : '';
+  logger.info('PODS:SHELL', `Opening shell into pod ${cleanPod} -n ${cleanNs}`);
   runInteractiveTerminal(() => {
-    console.log(`\x1b[1;32m=== Connecting interactive shell to pod: ${namespace}/${podName} (Type 'exit' to return to Vigilante) ===\x1b[0m\n`);
-    spawnSync('kubectl', [
-      'exec',
-      '-it',
-      podName,
-      '-n',
-      namespace,
-      '--context',
-      `k3d-${clusterName}`,
-      '--',
-      '/bin/sh',
-      '-c',
-      'command -v bash >/dev/null 2>&1 && exec bash || exec sh'
-    ], { stdio: 'inherit' });
+    console.log(`\x1b[1;32m=== Connecting interactive shell to pod: ${cleanNs}/${cleanPod} (Type 'exit' to return to Vigilante) ===\x1b[0m\n`);
+    const args = ['exec', '-it', cleanPod, '-n', cleanNs];
+    if (cleanCluster) args.push('--context', `k3d-${cleanCluster}`);
+    args.push('--', '/bin/sh', '-c', 'command -v bash >/dev/null 2>&1 && exec bash || exec sh');
+    spawnSync('kubectl', args, { stdio: 'inherit' });
   });
 }

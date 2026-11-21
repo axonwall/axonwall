@@ -43,9 +43,24 @@ export const SIGMA_FIELD_MAPPINGS = {
  * @param {string|Object} input
  * @returns {Object} Structured SIGMA rule definition
  */
+const FORBIDDEN_OBJECT_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+
+function stripForbiddenKeys(val, seen = new WeakSet()) {
+  if (val === null || typeof val !== 'object') return val;
+  if (seen.has(val)) return val;
+  seen.add(val);
+  if (Array.isArray(val)) return val.map((item) => stripForbiddenKeys(item, seen));
+  const clean = Object.create(null);
+  for (const [k, v] of Object.entries(val)) {
+    if (FORBIDDEN_OBJECT_KEYS.has(k)) continue;
+    clean[k] = stripForbiddenKeys(v, seen);
+  }
+  return clean;
+}
+
 export function parseSigmaRule(input) {
   if (typeof input === 'object' && input !== null) {
-    return input;
+    return stripForbiddenKeys(input);
   }
 
   if (typeof input !== 'string') {
@@ -54,10 +69,10 @@ export function parseSigmaRule(input) {
 
   // Attempt standard JSON parse first
   try {
-    return JSON.parse(input);
+    return stripForbiddenKeys(JSON.parse(input));
   } catch {
     // Basic lightweight YAML line parser for key-value and detection mappings
-    const rule = { detection: {}, logsource: {}, tags: [] };
+    const rule = { detection: Object.create(null), logsource: Object.create(null), tags: [] };
     const lines = input.split(/\r?\n/);
     let currentSection = null;
     let currentSubSection = null;
@@ -70,6 +85,7 @@ export function parseSigmaRule(input) {
       if (!rawLine.startsWith(' ') && !rawLine.startsWith('\t') && line.includes(':')) {
         const [k, ...v] = line.split(':');
         const key = k.trim();
+        if (FORBIDDEN_OBJECT_KEYS.has(key)) continue;
         const val = v.join(':').trim();
         if (['detection', 'logsource', 'tags'].includes(key)) {
           currentSection = key;
@@ -84,6 +100,7 @@ export function parseSigmaRule(input) {
         if ((rawLine.startsWith('  ') || rawLine.startsWith('\t')) && !rawLine.startsWith('    ') && line.includes(':')) {
           const [k, ...v] = line.split(':');
           const subKey = k.trim();
+          if (FORBIDDEN_OBJECT_KEYS.has(subKey)) continue;
           const subVal = v.join(':').trim();
           listField = null;
           if (subKey === 'condition') {
@@ -91,7 +108,7 @@ export function parseSigmaRule(input) {
             currentSubSection = null;
           } else {
             currentSubSection = subKey;
-            rule.detection[currentSubSection] = subVal ? { _val: subVal.replace(/^['"]|['"]$/g, '') } : {};
+            rule.detection[currentSubSection] = subVal ? { _val: subVal.replace(/^['"]|['"]$/g, '') } : Object.create(null);
           }
         } else if (currentSubSection && listField && line.startsWith('-')) {
           // YAML list item under the current field: collect it instead of
@@ -104,6 +121,7 @@ export function parseSigmaRule(input) {
         } else if (currentSubSection && line.includes(':')) {
           const [k, ...v] = line.split(':');
           const field = k.trim().replace(/^-\s*/, '');
+          if (FORBIDDEN_OBJECT_KEYS.has(field)) continue;
           const val = v.join(':').trim().replace(/^['"]|['"]$/g, '');
           rule.detection[currentSubSection][field] = val;
           listField = val === '' ? field : null;
@@ -233,47 +251,70 @@ export function transpileSigmaToSql(ruleInput, options = {}) {
   const detection = rule.detection || {};
   const condition = (detection.condition || 'selection').trim();
 
-  // Transpile named selections
-  const selectionClauses = {};
+  // Transpile named selections into a prototype-free map
+  const selectionClauses = Object.create(null);
   for (const [name, def] of Object.entries(detection)) {
-    if (name === 'condition') continue;
+    if (name === 'condition' || FORBIDDEN_OBJECT_KEYS.has(name)) continue;
     selectionClauses[name] = transpileSelection(def);
   }
 
-  // Normalize boolean operators FIRST, on the bare condition (selection
-  // names and operators only). Doing this after substitution rewrote the
-  // words and/or/not inside quoted literal values in the generated
-  // clauses, silently corrupting them ('this or that' became
-  // 'this OR that' and matched nothing).
-  let sqlCondition = condition
-    .replace(/\band\b/gi, 'AND')
-    .replace(/\bor\b/gi, 'OR')
-    .replace(/\bnot\b/gi, 'NOT');
-
-  // Handle "1 of <pattern>" / "all of <pattern>": the captured pattern
-  // decides which named selections participate (prefix match; a trailing
-  // '*' is optional). Previously the pattern was discarded and EVERY
-  // selection_* clause was combined, matching far more broadly than the
-  // rule specifies.
-  const expandOfPattern = (quantifier, joiner) => {
-    const re = new RegExp(`${quantifier} of (selection\\*|[a-zA-Z0-9_]+)`, 'i');
-    const m = sqlCondition.match(re);
-    if (!m) return;
-    const prefix = m[1].endsWith('*') ? m[1].slice(0, -1) : m[1];
-    const matching = Object.keys(selectionClauses).filter(k => k.startsWith(prefix));
-    const block = matching.length > 0
-      ? matching.map(k => `(${selectionClauses[k]})`).join(` ${joiner} `)
-      : '1=1';
-    sqlCondition = sqlCondition.replace(new RegExp(`${quantifier} of (selection\\*|[a-zA-Z0-9_]+)`, 'gi'), `(${block})`);
-  };
-  expandOfPattern('1', 'OR');
-  expandOfPattern('all', 'AND');
-
-  // Replace discrete named selections
-  for (const [name, clause] of Object.entries(selectionClauses)) {
-    const regex = new RegExp(`\\b${name}\\b`, 'g');
-    sqlCondition = sqlCondition.replace(regex, `(${clause})`);
+  // Strictly tokenize & compile boolean condition AST in a single pass so no
+  // SQL keywords, string literals, subqueries, or condition-overwriting
+  // selection values can be injected.
+  const tokens = [];
+  const tokenRe = /\s+|(\(|\)|\b1\s+of\s+(?:selection\*|[a-zA-Z0-9_]+)\b|\ball\s+of\s+(?:selection\*|[a-zA-Z0-9_]+)\b|[a-zA-Z_][a-zA-Z0-9_]*)/gi;
+  let lastIdx = 0;
+  let match;
+  while ((match = tokenRe.exec(condition)) !== null) {
+    if (match.index !== lastIdx) {
+      throw new Error(`Invalid SIGMA condition token near '${condition.slice(lastIdx, match.index)}'`);
+    }
+    lastIdx = tokenRe.lastIndex;
+    if (match[1]) {
+      tokens.push(match[1]);
+    }
   }
+  if (lastIdx !== condition.length || tokens.length === 0) {
+    throw new Error(`Invalid SIGMA condition '${condition}': unexpected character sequence`);
+  }
+
+  let parens = 0;
+  const compiledTokens = tokens.map((tok) => {
+    const lower = tok.toLowerCase();
+    if (tok === '(') {
+      parens++;
+      return '(';
+    }
+    if (tok === ')') {
+      parens--;
+      if (parens < 0) throw new Error('Invalid SIGMA condition: unbalanced parentheses');
+      return ')';
+    }
+    if (lower === 'and') return 'AND';
+    if (lower === 'or') return 'OR';
+    if (lower === 'not') return 'NOT';
+
+    const ofMatch = /^(1|all)\s+of\s+(selection\*|[a-zA-Z0-9_]+)$/i.exec(tok);
+    if (ofMatch) {
+      const joiner = ofMatch[1].toLowerCase() === '1' ? 'OR' : 'AND';
+      const prefix = ofMatch[2].endsWith('*') ? ofMatch[2].slice(0, -1) : ofMatch[2];
+      const matching = Object.keys(selectionClauses).filter((k) => k.startsWith(prefix));
+      const block = matching.length > 0
+        ? matching.map((k) => `(${selectionClauses[k]})`).join(` ${joiner} `)
+        : '1=1';
+      return `(${block})`;
+    }
+
+    if (Object.prototype.hasOwnProperty.call(selectionClauses, tok)) {
+      return `(${selectionClauses[tok]})`;
+    }
+    throw new Error(`Unknown identifier '${tok}' in SIGMA condition`);
+  });
+  if (parens !== 0) {
+    throw new Error('Invalid SIGMA condition: unclosed parenthesis');
+  }
+
+  const sqlCondition = compiledTokens.join(' ');
 
   const technique = (rule.tags || []).find(t => /^attack\.t\d{4}/i.test(t))?.replace(/^attack\./i, '').toUpperCase() || null;
 

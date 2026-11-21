@@ -13,6 +13,7 @@ import {
 } from '@axonwall/lib/schemas';
 import { compileVmProcess, compileLxcContainer } from '@axonwall/lib';
 import { getCurrentDesiredState, applyDesiredState, getDesiredStateFingerprint } from './agent';
+import { getDesiredStateInternal } from './desired-state-internal';
 import { callAgentApi, callAgentApiResponse } from './agent-client';
 import { getSession } from './auth';
 import { assertActionPermitted } from './auth-guard';
@@ -189,7 +190,7 @@ export async function vmPowerAction(
 
   // Register spec with daemon on start if configured
   if (action === 'start') {
-    const state = await getCurrentDesiredState();
+    const state = await getDesiredStateInternal();
     const vm = state.virt?.vms?.find((v) => v.vmid === vmid);
     // D1: never start a VM with no configured spec — the daemon would boot
     // a generic diskless VM (2 vCPU / 2048 MB, no disks, no NICs) that is

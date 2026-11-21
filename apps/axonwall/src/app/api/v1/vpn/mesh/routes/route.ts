@@ -1,14 +1,16 @@
 import { NextResponse } from 'next/server';
 import { getMachineRoutes, enableMachineRoutes } from '../../../../../../server/headscale';
 import { getSession } from '../../../../../../server/auth';
+import { isPasswordChangeEnforced } from '../../../../../../server/auth-guard';
 
 export async function GET(req: Request) {
   try {
     const session = await getSession();
-    if (!session || session.passwordChangeRequired || !session.roles.includes('admin')) {
+    const pwdEnforced = isPasswordChangeEnforced(session);
+    if (!session || pwdEnforced || !session.roles.includes('admin')) {
       return NextResponse.json(
-        { error: session?.passwordChangeRequired ? 'Password change required' : 'Unauthorized' },
-        { status: session?.passwordChangeRequired ? 403 : 401 }
+        { error: pwdEnforced ? 'Password change required' : 'Unauthorized' },
+        { status: pwdEnforced ? 403 : 401 }
       );
     }
     const { searchParams } = new URL(req.url);
@@ -25,10 +27,11 @@ export async function GET(req: Request) {
 export async function POST(req: Request) {
   try {
     const session = await getSession();
-    if (!session || session.passwordChangeRequired || !session.roles.includes('admin')) {
+    const pwdEnforced = isPasswordChangeEnforced(session);
+    if (!session || pwdEnforced || !session.roles.includes('admin')) {
       return NextResponse.json(
-        { error: session?.passwordChangeRequired ? 'Password change required' : 'Unauthorized' },
-        { status: session?.passwordChangeRequired ? 403 : 401 }
+        { error: pwdEnforced ? 'Password change required' : 'Unauthorized' },
+        { status: pwdEnforced ? 403 : 401 }
       );
     }
     const body = await req.json();

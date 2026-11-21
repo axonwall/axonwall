@@ -1,36 +1,41 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSession } from '@/server/auth';
+import { isPasswordChangeEnforced } from '@/server/auth-guard';
 import { getCurrentDesiredState } from '@/server/agent';
 
 export async function GET(req: NextRequest) {
   try {
     const session = await getSession();
+    const pwdEnforced = isPasswordChangeEnforced(session);
 
-    if (!session || session.passwordChangeRequired) {
+    if (!session || pwdEnforced) {
       return NextResponse.json(
-        { error: session?.passwordChangeRequired ? 'Password change required' : 'Unauthorized' },
-        { status: session?.passwordChangeRequired ? 403 : 401 }
+        { error: pwdEnforced ? 'Password change required' : 'Unauthorized' },
+        { status: pwdEnforced ? 403 : 401 }
       );
     }
 
     const searchParams =
       req.nextUrl?.searchParams ?? new URL(req.url, 'http://localhost').searchParams;
     const rolesParam = searchParams.get('roles');
-    const hasExplicitRolesParam = Boolean(rolesParam && rolesParam.trim().length > 0);
+    const requiredRoles = rolesParam
+      ? rolesParam
+          .split(',')
+          .map((r) => r.trim())
+          .filter(Boolean)
+      : [];
+    if (rolesParam !== null && requiredRoles.length === 0) {
+      return NextResponse.json({ error: 'Invalid roles parameter' }, { status: 400 });
+    }
+    const hasExplicitRolesParam = requiredRoles.length > 0;
 
-    if (hasExplicitRolesParam && rolesParam) {
-      const requiredRoles = rolesParam
-        .split(',')
-        .map((r) => r.trim())
-        .filter(Boolean);
-      if (requiredRoles.length > 0) {
-        const userRoles = Array.isArray(session.roles) ? session.roles : [];
-        const hasRequiredRole =
-          userRoles.includes('admin') ||
-          requiredRoles.some((reqRole) => userRoles.includes(reqRole as any));
-        if (!hasRequiredRole) {
-          return NextResponse.json({ error: 'Forbidden: Insufficient privileges' }, { status: 403 });
-        }
+    if (hasExplicitRolesParam) {
+      const userRoles = Array.isArray(session.roles) ? session.roles : [];
+      const hasRequiredRole =
+        userRoles.includes('admin') ||
+        requiredRoles.some((reqRole) => userRoles.includes(reqRole as any));
+      if (!hasRequiredRole) {
+        return NextResponse.json({ error: 'Forbidden: Insufficient privileges' }, { status: 403 });
       }
     }
 

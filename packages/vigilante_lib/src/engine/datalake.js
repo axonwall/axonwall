@@ -235,7 +235,8 @@ export function ingestSecurityEvents(eventType, events = []) {
   return inserted;
 }
 
-const FORBIDDEN_DATALAKE_SQL = /\b(ATTACH|DETACH|PRAGMA|COPY|EXPORT|IMPORT|INSTALL|LOAD|INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|REPLACE|VACUUM|read_text|read_blob|read_csv|read_csv_auto|read_json|read_parquet|parquet_scan|sqlite_master|sqlite_temp_master)\b/i;
+const FORBIDDEN_DATALAKE_SQL = /\b(ATTACH|DETACH|PRAGMA|COPY|EXPORT|IMPORT|INSTALL|LOAD|INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|REPLACE|VACUUM|read_text|read_blob|read_csv|read_csv_auto|read_json|read_parquet|read_xlsx|sniff_csv|parquet_scan|sqlite_master|sqlite_temp_master|sqlite_schema|sqlite_temp_schema|pragma_[a-z_]+|duckdb_[a-z_]+|glob|httpfs)\b/i;
+const FORBIDDEN_FILE_TABLE_SQL = /\b(?:FROM|JOIN)\s+['"]/i;
 
 /**
  * Validate that a Data Lake SQL query is a single read-only SELECT/WITH statement
@@ -259,7 +260,7 @@ export function assertReadOnlyDataLakeSql(sql) {
   if (!/^(SELECT|WITH)\b/i.test(stripped)) {
     throw new Error('Only read-only SELECT or WITH queries are permitted against the Security Data Lake');
   }
-  if (FORBIDDEN_DATALAKE_SQL.test(stripped)) {
+  if (FORBIDDEN_DATALAKE_SQL.test(stripped) || FORBIDDEN_FILE_TABLE_SQL.test(stripped)) {
     throw new Error('Query contains forbidden DDL, DML, or filesystem access keywords');
   }
   return stripped;

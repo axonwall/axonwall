@@ -28,11 +28,15 @@ export const InterfaceSchema = z.object({
   ipv4Address: z.string().refine((val) => val === '' || isValidCIDR(val) || isValidIPv4(val), {
     message: 'Invalid IPv4 address or CIDR',
   }).optional(),
-  ipv4Gateway: z.string().optional(),
+  ipv4Gateway: z.string().refine((val) => val === '' || isValidIPv4(val), {
+    message: 'Invalid IPv4 gateway',
+  }).optional(),
   ipv6Address: z.string().refine((val) => val === '' || isValidCIDR(val) || isValidIPv6(val), {
     message: 'Invalid IPv6 address or CIDR',
   }).optional(),
-  ipv6Gateway: z.string().optional(),
+  ipv6Gateway: z.string().refine((val) => val === '' || isValidIPv6(val), {
+    message: 'Invalid IPv6 gateway',
+  }).optional(),
   mtu: z.number().int().min(576).max(65535).default(1500),
   macAddress: z.string().refine((val) => val === '' || isValidMAC(val), {
     message: 'Invalid MAC address',
@@ -66,7 +70,7 @@ export function isInterfaceAuthoritativeDhcp(
 export const AliasTypeSchema = z.enum(['host', 'network', 'port', 'mac', 'urltable', 'geoip', 'asn', 'fqdn']);
 
 export function isValidFirewallEndpoint(val: string): boolean {
-  if (!val || /[;#\r\n"'{}]/.test(val)) return false;
+  if (!val || /[;#\r\n"'{}]|[\s]/.test(val)) return false;
   if (val === 'any' || val === 'wan_ip' || val === 'lan_net' || val === 'self') return true;
   if (isValidIPv4(val) || isValidIPv6(val) || isValidCIDR(val)) return true;
   if (/^\$[a-zA-Z0-9_-]+$/.test(val)) return true;
@@ -74,8 +78,10 @@ export function isValidFirewallEndpoint(val: string): boolean {
 }
 
 export function isValidPortSpec(val: string): boolean {
-  if (!val || /[;#\r\n"'{}]/.test(val)) return false;
-  return isValidPortRange(val) || /^\$[a-zA-Z0-9_-]+$/.test(val);
+  if (!val || /[;#\r\n\t"'{}]/.test(val)) return false;
+  if (/^\$[a-zA-Z0-9_-]+$/.test(val)) return true;
+  if (/\s/.test(val.replace(/, */g, ','))) return false;
+  return isValidPortRange(val);
 }
 
 export const AliasSchema = z.object({
@@ -256,7 +262,13 @@ export function normalizeAntiLockoutInterfaces(a?: { interface?: string; interfa
 export const SystemSettingsSchema = z.object({
   hostname: z.string().default('axonwall'),
   domain: z.string().default('local'),
-  dnsServers: z.array(z.string()).default(['1.1.1.1', '8.8.8.8']),
+  dnsServers: z
+    .array(
+      z.string().refine((val) => isValidIPv4(val) || isValidIPv6(val), {
+        message: 'Invalid DNS server IP',
+      }),
+    )
+    .default(['1.1.1.1', '8.8.8.8']),
   timezone: z.string().default('UTC'),
   flowtableOffload: z.boolean().default(true),
   sshEnabled: z.boolean().optional(),
@@ -1084,14 +1096,41 @@ export const PluginBundledBinarySha256Schema = z
     'sha256 must be a 64-char hex digest, or a temporary SHA256_TODO_<name> marker to be replaced before install',
   );
 
+const isValidHttpUrl = (val: string): boolean => {
+  if (!val || /\s/.test(val)) return false;
+  try {
+    const parsed = new URL(val);
+    return (parsed.protocol === 'http:' || parsed.protocol === 'https:') && parsed.hostname.length > 0;
+  } catch {
+    return false;
+  }
+};
+
+const PluginBundledBinaryNameSchema = z
+  .string()
+  .min(1)
+  .regex(/^[a-zA-Z0-9._-]+$/, 'binary name must be a plain file name')
+  .refine((v) => v !== '.' && v !== '..', 'binary name must not be "." or ".."');
+
+const PluginBundledOSListSchema = z
+  .array(z.enum(['debian', 'alpine', 'arch']))
+  .refine((arr) => new Set(arr).size === arr.length, 'oses entries must be unique')
+  .optional();
+
+const isValidRelativeArchivePath = (val: string): boolean => {
+  if (!val || val.startsWith('/') || val.includes('\\') || /\s/.test(val)) return false;
+  const segments = val.split('/');
+  return !segments.some((seg) => seg === '' || seg === '..' || seg === '.');
+};
+
 export const PluginBundledArchiveBinarySchema = z
   .object({
     kind: z.literal('archive'),
-    name: z.string().min(1),
+    name: PluginBundledBinaryNameSchema,
     url: z
       .string()
       .min(1)
-      .regex(/^https?:\/\//, 'archive url must be an http(s) URL'),
+      .refine(isValidHttpUrl, 'archive url must be an http(s) URL'),
     sha256: PluginBundledBinarySha256Schema,
     // Archive container: 'tar' (uncompressed tar, e.g. the rosenpass
     // v0.2.3 release tarball), 'tar.gz'/'tgz', or 'zip'. Defaults to
@@ -1100,7 +1139,11 @@ export const PluginBundledArchiveBinarySchema = z
     // Path of the binary inside the archive, relative, no '..'. Defaults
     // to `name` when omitted. Must be omitted with extract 'tree'
     // (the strip selects the tree root there).
-    pathInArchive: z.string().min(1).optional(),
+    pathInArchive: z
+      .string()
+      .min(1)
+      .refine(isValidRelativeArchivePath, 'pathInArchive must be a clean relative path with no ".."')
+      .optional(),
     // Extraction mode: 'binary' (default — exactly one member,
     // pathInArchive, into bin/) or 'tree' (the whole archive into
     // the plugin dir, preserving member paths after stripping
@@ -1118,7 +1161,7 @@ export const PluginBundledArchiveBinarySchema = z
     // this host is skipped at install and ignored by verification
     // (e.g. the glibc-linked neovim tarball is debian-only; on
     // Alpine/Arch vim/neovim keep coming from the system packages).
-    oses: z.array(z.enum(['debian', 'alpine', 'arch'])).optional(),
+    oses: PluginBundledOSListSchema,
   })
   .refine((v) => v.extract !== 'tree' || v.pathInArchive === undefined, {
     message: 'pathInArchive must be omitted with extract "tree" (the strip selects the tree root)',
@@ -1141,26 +1184,27 @@ export type PluginBundledArchiveBinary = z.infer<typeof PluginBundledArchiveBina
 export const PluginBundledRawBinarySchema = z
   .object({
     kind: z.literal('binary'),
-    name: z.string().min(1),
+    name: PluginBundledBinaryNameSchema,
     url: z
       .string()
       .min(1)
-      .regex(/^https?:\/\//, 'binary url must be an http(s) URL'),
+      .refine(isValidHttpUrl, 'binary url must be an http(s) URL'),
     sha256: PluginBundledBinarySha256Schema,
+    oses: PluginBundledOSListSchema,
   })
   .strict();
 export type PluginBundledRawBinary = z.infer<typeof PluginBundledRawBinarySchema>;
 
 export const PluginBundledDistroPackageBinarySchema = z.object({
   kind: z.literal('distroPackage'),
-  name: z.string().min(1),
+  name: PluginBundledBinaryNameSchema,
   sha256: PluginBundledBinarySha256Schema,
-  distro: z.enum(['debian', 'alpine', 'arch']),
+  distro: z.literal('debian'),
   // Distro package name, e.g. 'emacs-nox'. The .deb/.apk filename is
   // derived from package + version + arch by the daemon (Debian
   // filenames drop the epoch, e.g. version '1:30.1+1-6' becomes
   // 'emacs-nox_30.1+1-6_amd64.deb' under pool/main/e/emacs/).
-  package: z.string().min(1),
+  package: z.string().regex(/^[a-z0-9][a-z0-9+.-]*$/, 'Invalid Debian package name'),
   // Debian *source* package name, e.g. 'gcc-14' for the binary
   // package libgccjit0, or 'emacs' for emacs-nox /
   // emacs-bin-common / emacs-common. The pool path is derived from
@@ -1171,13 +1215,14 @@ export const PluginBundledDistroPackageBinarySchema = z.object({
   // libasound2t64 / libasound2-data ← alsa-lib, liblcms2-2 ←
   // lcms2) — without it the daemon builds the wrong pool URL and
   // the download 404s.
-  source: z.string().min(1).optional(),
+  source: z.string().regex(/^[a-z0-9][a-z0-9+.-]*$/, 'Invalid Debian source package name').optional(),
   // Full version including epoch where the distro uses one, e.g.
   // '1:30.1+1-6' for Debian trixie emacs-nox.
-  version: z.string().min(1),
+  version: z.string().regex(/^(?:\d+:)?[0-9][a-zA-Z0-9.+~:-]*$/, 'Invalid Debian version'),
   // Target architecture, e.g. 'amd64' — or 'all' for
   // architecture-independent packages such as emacs-common.
-  arch: z.string().min(1),
+  arch: z.string().regex(/^[a-z0-9][a-z0-9-]*$/, 'Invalid Debian architecture'),
+  oses: PluginBundledOSListSchema,
 });
 export type PluginBundledDistroPackageBinary = z.infer<typeof PluginBundledDistroPackageBinarySchema>;
 
@@ -1222,7 +1267,7 @@ export const PluginEnvSchema = z
 export type PluginEnv = z.infer<typeof PluginEnvSchema>;
 
 export const PluginManifestSchema = z.object({
-  id: z.string().min(1),
+  id: z.string().regex(/^[a-z0-9-]+$/, 'plugin id must match ^[a-z0-9-]+$'),
   name: z.string().min(1),
   version: z.string().min(1),
   category: PluginCategorySchema.default('extension').optional(),
@@ -1253,7 +1298,13 @@ export const PluginManifestSchema = z.object({
   // extracted into the plugin's own directory, never installed into
   // the system). Additive alongside cliBinaries/RequiredBinaries,
   // which keep working as-is.
-  binaries: z.array(PluginBundledBinarySchema).optional(),
+  binaries: z
+    .array(PluginBundledBinarySchema)
+    .refine(
+      (arr) => new Set(arr.map((b) => b.name)).size === arr.length,
+      'binaries entries must have unique names',
+    )
+    .optional(),
   // Plugin-owned directories (relative to the per-plugin directory)
   // added to PATH for daemon invocations and interactive shells.
   binDirs: z.array(PluginBinDirSchema).optional(),

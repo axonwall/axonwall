@@ -1,0 +1,402 @@
+#!/bin/sh
+# ==============================================================================
+# Axonwall Btrfs + Snapper Boot Menu & Atomic Rollback Helper
+#
+# Manages:
+#   1) Generating /boot/grub/btrfs-snapshots.cfg from Snapper snapshots under
+#      /.snapshots/<N>/snapshot so operators can boot directly into any
+#      point-in-time read-only snapshot from GRUB2 (analogous to ZFSBootMenu).
+#   2) Atomic flat-subvolume rollback (`rollback <N>`), swapping the top-level
+#      Btrfs subvolume `@` safely after preserving `@_pre_rollback_<TS>`.
+#   3) Creating read-only Snapper-compatible snapshots (`create-snapshot`) when
+#      the snapper CLI/D-Bus daemon is not running or unavailable (e.g. Alpine).
+# ==============================================================================
+set -eu
+
+BTRFS_LABEL="${AXONWALL_BTRFS_LABEL:-axon_btrfs}"
+ROOT_DIR="/"
+
+usage() {
+  cat << 'EOF'
+Usage: axonwall-btrfs-grub <subcommand> [options]
+
+Subcommands:
+  sync [--root <dir>] [--snapshots-dir <dir>]
+      Scan <snapshots-dir>/*/info.xml (default <dir>/.snapshots) and write <dir>/boot/grub/btrfs-snapshots.cfg.
+  rollback <snapshot-id>
+      Atomically swap subvolume `@` on LABEL=axon_btrfs with a writable clone
+      of `@snapshots/<snapshot-id>/snapshot` (backing up current `@` first).
+  create-snapshot --description <text> [--type single|pre|post] [--pre-number <N>] [--important] [--root <dir>]
+      Create a read-only Btrfs snapshot under <dir>/.snapshots/<next>/snapshot
+      with valid Snapper info.xml metadata, refresh GRUB entries, and print ID.
+EOF
+}
+
+sanitize_text() {
+  # Strip control chars, quotes, backticks, dollar signs, and newlines so GRUB titles remain safe.
+  printf '%s' "$1" | tr '\r\n\t' '   ' | sed 's/["'\''`$\\<>]//g' | sed 's/  */ /g;s/^ //;s/ $//' | cut -c1-120
+}
+
+xml_escape() {
+  printf '%s' "$1" | sed 's/&/\&amp;/g;s/</\&lt;/g;s/>/\&gt;/g;s/"/\&quot;/g;s/'"'"'/\&apos;/g'
+}
+
+xml_field() {
+  _file="$1"
+  _tag="$2"
+  sed -n "s/.*<${_tag}>\([^<]*\)<\/${_tag}>.*/\1/p" "$_file" 2>/dev/null | head -n1 || true
+}
+
+detect_kargs() {
+  _root="$1"
+  _grub_cfg="${_root%/}/boot/grub/grub.cfg"
+  _extracted=""
+  if [ -f "$_grub_cfg" ]; then
+    _line="$(grep -E '^[[:space:]]*linux[[:space:]]+/@/boot/vmlinuz' "$_grub_cfg" 2>/dev/null | head -n1 || true)"
+    if [ -n "$_line" ]; then
+      for _tok in $_line; do
+        case "$_tok" in
+          linux|/@/boot/vmlinuz|ro|root=*|rootflags=*|rootfstype=*|slot=*) continue ;;
+          *) _extracted="${_extracted} ${_tok}" ;;
+        esac
+      done
+    fi
+  fi
+  _extracted="$(printf '%s' "$_extracted" | sed 's/^ //;s/ $//')"
+  if [ -n "$_extracted" ]; then
+    printf '%s' "$_extracted"
+    return 0
+  fi
+  if [ -f "${_root%/}/etc/alpine-release" ]; then
+    printf '%s' "modules=sd-mod,usb-storage,ext4,xfs,btrfs,virtio_blk,nvme,raid1,md-mod quiet console=tty0 console=ttyS0,9600"
+  else
+    printf '%s' "quiet splash plymouth.ignore-serial-consoles lsm=landlock,lockdown,yama,integrity,apparmor,bpf console=ttyS0,9600 console=tty0"
+  fi
+}
+
+resolve_kernel_initrd() {
+  _snap_boot="$1"
+  _vmlinuz=""
+  _initrd=""
+  if [ -e "${_snap_boot}/vmlinuz" ]; then
+    _vmlinuz="vmlinuz"
+  else
+    for _cand in "${_snap_boot}"/vmlinuz-*; do
+      case "$_cand" in
+        *.old|*"*"*) continue ;;
+      esac
+      if [ -e "$_cand" ]; then
+        _vmlinuz="$(basename "$_cand")"
+        break
+      fi
+    done
+  fi
+
+  if [ -e "${_snap_boot}/initrd.img" ]; then
+    _initrd="initrd.img"
+  else
+    for _cand in "${_snap_boot}"/initramfs-* "${_snap_boot}"/initrd.img-*; do
+      case "$_cand" in
+        *.old|*"*"*) continue ;;
+      esac
+      if [ -e "$_cand" ]; then
+        _initrd="$(basename "$_cand")"
+        break
+      fi
+    done
+  fi
+
+  [ -n "$_vmlinuz" ] && [ -n "$_initrd" ] || return 1
+  printf '%s %s\n' "$_vmlinuz" "$_initrd"
+}
+
+cmd_sync() {
+  _root="$ROOT_DIR"
+  _snap_dir_override=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --root)
+        [ $# -ge 2 ] || { echo "[!] --root requires an argument" >&2; exit 1; }
+        _root="$2"
+        shift 2
+        ;;
+      --snapshots-dir)
+        [ $# -ge 2 ] || { echo "[!] --snapshots-dir requires an argument" >&2; exit 1; }
+        _snap_dir_override="$2"
+        shift 2
+        ;;
+      *)
+        echo "[!] Unknown option for sync: $1" >&2
+        exit 1
+        ;;
+    esac
+  done
+
+  _root="${_root%/}"
+  [ -n "$_root" ] || _root="/"
+  if [ -n "$_snap_dir_override" ]; then
+    _snap_root="${_snap_dir_override%/}"
+    if [ "$_root" = "/" ]; then
+      _grub_dir="/boot/grub"
+    else
+      _grub_dir="${_root}/boot/grub"
+    fi
+  elif [ "$_root" = "/" ]; then
+    _snap_root="/.snapshots"
+    _grub_dir="/boot/grub"
+  else
+    _snap_root="${_root}/.snapshots"
+    _grub_dir="${_root}/boot/grub"
+  fi
+  _out_cfg="${_grub_dir}/btrfs-snapshots.cfg"
+  _tmp_cfg="${_out_cfg}.tmp.$$"
+
+  mkdir -p "$_grub_dir"
+  _kargs="$(detect_kargs "$_root")"
+
+  {
+    printf '# Auto-generated by axonwall-btrfs-grub — do not edit manually\n'
+  } > "$_tmp_cfg"
+
+  _count=0
+  if [ -d "$_snap_root" ]; then
+    _ids=""
+    for _d in "$_snap_root"/*; do
+      [ -d "$_d" ] || continue
+      _id="$(basename "$_d")"
+      case "$_id" in
+        ''|0|*[!0-9]*) continue ;;
+      esac
+      _ids="${_ids}${_id}
+"
+    done
+
+    for _id in $(printf '%s' "$_ids" | sort -rn); do
+      [ -n "$_id" ] || continue
+      _dir="${_snap_root}/${_id}"
+      _subvol_dir="${_dir}/snapshot"
+      [ -d "${_subvol_dir}/boot" ] || continue
+      _pair="$(resolve_kernel_initrd "${_subvol_dir}/boot" || true)"
+      [ -n "$_pair" ] || continue
+      _kern="${_pair%% *}"
+      _initrd="${_pair#* }"
+
+      _date="unknown"
+      _desc="Snapshot ${_id}"
+      _type="single"
+      if [ -f "${_dir}/info.xml" ]; then
+        _raw_date="$(xml_field "${_dir}/info.xml" "date")"
+        _raw_desc="$(xml_field "${_dir}/info.xml" "description")"
+        _raw_type="$(xml_field "${_dir}/info.xml" "type")"
+        [ -n "$_raw_date" ] && _date="$(sanitize_text "$_raw_date")"
+        [ -n "$_raw_desc" ] && _desc="$(sanitize_text "$_raw_desc")"
+        [ -n "$_raw_type" ] && _type="$(sanitize_text "$_raw_type")"
+      fi
+
+      cat << ENTRY_EOF >> "$_tmp_cfg"
+menuentry "Snapshot #${_id} (${_type}, ${_date}) — ${_desc} [Read-Only]" {
+  insmod btrfs
+  search --no-floppy --label --set=root ${BTRFS_LABEL}
+  linux /@snapshots/${_id}/snapshot/boot/${_kern} root=LABEL=${BTRFS_LABEL} rootflags=subvol=@snapshots/${_id}/snapshot ro rootfstype=btrfs ${_kargs}
+  initrd /@snapshots/${_id}/snapshot/boot/${_initrd}
+}
+ENTRY_EOF
+      _count=$((_count + 1))
+    done
+  fi
+
+  if [ "$_count" -eq 0 ]; then
+    printf '# No bootable Btrfs Snapper snapshots discovered yet.\n' >> "$_tmp_cfg"
+  fi
+
+  chmod 0644 "$_tmp_cfg"
+  mv -f "$_tmp_cfg" "$_out_cfg"
+  return 0
+}
+
+cmd_create_snapshot() {
+  _root="$ROOT_DIR"
+  _type="single"
+  _pre_num=""
+  _desc="Manual snapshot"
+  _important=0
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --root)
+        [ $# -ge 2 ] || { echo "[!] --root requires an argument" >&2; exit 1; }
+        _root="$2"
+        shift 2
+        ;;
+      --type)
+        [ $# -ge 2 ] || { echo "[!] --type requires an argument" >&2; exit 1; }
+        _type="$2"
+        shift 2
+        ;;
+      --pre-number)
+        [ $# -ge 2 ] || { echo "[!] --pre-number requires an argument" >&2; exit 1; }
+        _pre_num="$2"
+        shift 2
+        ;;
+      --description)
+        [ $# -ge 2 ] || { echo "[!] --description requires an argument" >&2; exit 1; }
+        _desc="$2"
+        shift 2
+        ;;
+      --important)
+        _important=1
+        shift
+        ;;
+      *)
+        echo "[!] Unknown option for create-snapshot: $1" >&2
+        exit 1
+        ;;
+    esac
+  done
+
+  command -v btrfs >/dev/null 2>&1 || { echo "[!] btrfs CLI not found" >&2; exit 1; }
+  case "$_type" in
+    single|pre|post) ;;
+    *) echo "[!] Invalid snapshot type: $_type" >&2; exit 1 ;;
+  esac
+
+  _root="${_root%/}"
+  [ -n "$_root" ] || _root="/"
+  if [ "$_root" = "/" ]; then
+    _snap_root="/.snapshots"
+  else
+    _snap_root="${_root}/.snapshots"
+  fi
+  mkdir -p "$_snap_root"
+  chmod 0750 "$_snap_root" 2>/dev/null || true
+
+  _max=0
+  for _d in "$_snap_root"/*; do
+    [ -d "$_d" ] || continue
+    _id="$(basename "$_d")"
+    case "$_id" in
+      ''|*[!0-9]*) continue ;;
+    esac
+    if [ "$_id" -gt "$_max" ]; then
+      _max="$_id"
+    fi
+  done
+  _next=$((_max + 1))
+
+  _target_dir="${_snap_root}/${_next}"
+  mkdir -p "$_target_dir"
+  btrfs subvolume snapshot -r "$_root" "${_target_dir}/snapshot" >/dev/null
+
+  _now_date="$(date -u '+%Y-%m-%d %H:%M:%S' 2>/dev/null || echo '1970-01-01 00:00:00')"
+  _clean_desc="$(xml_escape "$(sanitize_text "$_desc")")"
+  {
+    printf '<?xml version="1.0"?>\n<snapshot>\n'
+    printf '  <type>%s</type>\n' "$_type"
+    printf '  <num>%s</num>\n' "$_next"
+    if [ "$_type" = "post" ] && [ -n "$_pre_num" ]; then
+      printf '  <pre_num>%s</pre_num>\n' "$(sanitize_text "$_pre_num")"
+    fi
+    printf '  <date>%s</date>\n' "$_now_date"
+    printf '  <cleanup>number</cleanup>\n'
+    printf '  <description>%s</description>\n' "$_clean_desc"
+    if [ "$_important" -eq 1 ]; then
+      printf '  <userdata><key>important</key><value>yes</value></userdata>\n'
+    fi
+    printf '</snapshot>\n'
+  } > "${_target_dir}/info.xml"
+  chmod 0644 "${_target_dir}/info.xml"
+
+  cmd_sync --root "$_root" >/dev/null 2>&1 || true
+  printf '%s\n' "$_next"
+}
+
+resolve_btrfs_device() {
+  _src=""
+  if command -v findmnt >/dev/null 2>&1; then
+    _src="$(findmnt -n -o SOURCE / 2>/dev/null | head -n1 | sed 's/\[.*\]$//' || true)"
+  fi
+  if [ -n "$_src" ] && [ -b "$_src" ]; then
+    printf '%s' "$_src"
+    return 0
+  fi
+  if [ -b "/dev/disk/by-label/${BTRFS_LABEL}" ]; then
+    printf '%s' "/dev/disk/by-label/${BTRFS_LABEL}"
+    return 0
+  fi
+  return 1
+}
+
+cmd_rollback() {
+  [ $# -ge 1 ] || { echo "[!] rollback requires a snapshot ID" >&2; exit 1; }
+  _snap_id="$1"
+  case "$_snap_id" in
+    ''|0|*[!0-9]*)
+      echo "[!] Invalid snapshot ID: ${_snap_id}" >&2
+      exit 1
+      ;;
+  esac
+
+  command -v btrfs >/dev/null 2>&1 || { echo "[!] btrfs CLI not found" >&2; exit 1; }
+  _dev="$(resolve_btrfs_device)" || { echo "[!] Could not locate Btrfs root device (LABEL=${BTRFS_LABEL})" >&2; exit 1; }
+
+  _top="/run/axonwall-btrfs-top.$$"
+  cleanup_rollback() {
+    if [ -d "$_top" ]; then
+      umount "$_top" 2>/dev/null || true
+      rmdir "$_top" 2>/dev/null || true
+    fi
+  }
+  trap cleanup_rollback EXIT INT TERM
+
+  mkdir -p "$_top"
+  mount -t btrfs -o subvolid=5 "$_dev" "$_top"
+
+  _src_snap="${_top}/@snapshots/${_snap_id}/snapshot"
+  btrfs subvolume show "$_src_snap" >/dev/null 2>&1 || {
+    echo "[!] Snapshot #${_snap_id} subvolume (@snapshots/${_snap_id}/snapshot) not found." >&2
+    exit 1
+  }
+
+  _backup_ts="$(date -u '+%Y%m%d-%H%M%S' 2>/dev/null || echo 'backup')"
+  if btrfs subvolume show "${_top}/@" >/dev/null 2>&1; then
+    mv "${_top}/@" "${_top}/@_pre_rollback_${_backup_ts}"
+  fi
+
+  btrfs subvolume snapshot "$_src_snap" "${_top}/@" >/dev/null
+  mkdir -p "${_top}/@/.snapshots" "${_top}/@/var/log" "${_top}/@/var/lib/axonwall" "${_top}/@/boot/efi"
+  cmd_sync --root "${_top}/@" --snapshots-dir "${_top}/@snapshots" >/dev/null 2>&1 || true
+
+  umount "$_top"
+  rmdir "$_top" 2>/dev/null || true
+  trap - EXIT INT TERM
+
+  printf 'Atomically promoted Snapshot #%s to @ (previous root preserved as @_pre_rollback_%s). Reboot to activate.\n' "$_snap_id" "$_backup_ts"
+}
+
+SUBCMD="${1:-sync}"
+case "$SUBCMD" in
+  -h|--help|help)
+    usage
+    exit 0
+    ;;
+  sync)
+    if [ $# -gt 0 ]; then shift; fi
+    cmd_sync "$@"
+    ;;
+  rollback)
+    shift
+    cmd_rollback "$@"
+    ;;
+  create-snapshot)
+    shift
+    cmd_create_snapshot "$@"
+    ;;
+  --root)
+    cmd_sync "$@"
+    ;;
+  *)
+    echo "[!] Unknown subcommand: ${SUBCMD}" >&2
+    usage >&2
+    exit 1
+    ;;
+esac

@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { cookies } from 'next/headers';
-import { performAuthentication } from '../../../../server/auth';
+import { performAuthentication } from '../../../../server/auth-internal';
 import { getJwtSecret, SESSION_COOKIE } from '../../../../server/auth-constants';
 import { mintSupabaseToken } from '@axonwall/lib/ldap';
 

@@ -34,6 +34,16 @@ export function passwordChangeRequiredNow(): boolean {
   return true;
 }
 
+export function isPasswordChangeEnforced(session: UserSession | null): boolean {
+  if (!session) {
+    return false;
+  }
+  return (
+    Boolean(session.passwordChangeRequired) ||
+    (session.source === 'local_admin' && passwordChangeRequiredNow())
+  );
+}
+
 /**
  * Asserts that a valid authenticated session exists and that any
  * required roles or password changes are satisfied.
@@ -45,9 +55,7 @@ export function assertActionPermitted(
   if (!session) {
     throw new Error('Unauthorized');
   }
-  const mustChangePassword =
-    Boolean(session.passwordChangeRequired) ||
-    (session.source === 'local_admin' && passwordChangeRequiredNow());
+  const mustChangePassword = isPasswordChangeEnforced(session);
   if (mustChangePassword && requiredRole && requiredRole !== 'readonly') {
     throw new Error('Forbidden: Password change required before performing this action');
   }

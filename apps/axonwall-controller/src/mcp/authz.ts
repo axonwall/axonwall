@@ -419,21 +419,60 @@ function extractClientCertificateFingerprint(req?: http.IncomingMessage): string
 }
 
 function checkSlidingWindowRateLimit(keyId: string, limitPerMinute: number): boolean {
-  // R4-B-L2: the budget is shared across processes through the
-  // on-disk state file. Pull in any other process's usage before
-  // deciding, so a fresh stdio process does not get a fresh budget.
-  refreshRateLimitBucketsFromDisk();
-  const now = Date.now();
-  const windowStart = now - 60_000;
-  const timestamps = (rateLimitBuckets.get(keyId) ?? []).filter((ts) => ts > windowStart);
-  if (timestamps.length >= limitPerMinute) {
-    rateLimitBuckets.set(keyId, timestamps);
-    return false;
+  // C-M9: hold the rate-limit file lock across the full read-check-append-write cycle
+  // and keep arrays rather than deduplicating identical millisecond timestamps.
+  const statePath = resolveMcpRateLimitPath();
+  let release: (() => void) | null = null;
+  try {
+    release = acquireMcpLockFile(`${statePath}.lock`, 2000);
+  } catch (err: any) {
+    console.warn(`[MCP RateLimit] Could not lock ${statePath} (${err?.message || err}); falling back to process budget.`);
+    release = null;
   }
-  timestamps.push(now);
-  rateLimitBuckets.set(keyId, timestamps);
-  persistRateLimitState();
-  return true;
+  try {
+    const now = Date.now();
+    const windowStart = now - 60_000;
+    if (release) {
+      const disk = loadRateLimitStateFromDisk();
+      const pruned: Record<string, number[]> = {};
+      for (const [k, stamps] of Object.entries(disk)) {
+        const kept = stamps.filter((ts) => typeof ts === 'number' && ts > windowStart);
+        if (kept.length > 0) pruned[k] = kept;
+      }
+      const existing = pruned[keyId] ?? [];
+      if (existing.length >= limitPerMinute) {
+        rateLimitBuckets.set(keyId, existing);
+        return false;
+      }
+      existing.push(now);
+      pruned[keyId] = existing;
+      rateLimitBuckets.set(keyId, existing);
+      try {
+        writeFileAtomicSync(statePath, JSON.stringify(pruned, null, 2), 0o660);
+        try {
+          rateLimitDiskMtimeMs = fs.statSync(statePath).mtimeMs;
+        } catch {}
+        rateLimitDiskLoaded = true;
+      } catch (err: any) {
+        console.warn(`[MCP RateLimit] Failed to persist rate-limit state to ${statePath} (${err?.message || err}).`);
+      }
+      return true;
+    }
+
+    refreshRateLimitBucketsFromDisk();
+    const timestamps = (rateLimitBuckets.get(keyId) ?? []).filter((ts) => ts > windowStart);
+    if (timestamps.length >= limitPerMinute) {
+      rateLimitBuckets.set(keyId, timestamps);
+      return false;
+    }
+    timestamps.push(now);
+    rateLimitBuckets.set(keyId, timestamps);
+    return true;
+  } finally {
+    try {
+      release?.();
+    } catch {}
+  }
 }
 
 /**

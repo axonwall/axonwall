@@ -27,7 +27,7 @@ import { getMcpServerStatus, saveMcpSettings, validateVirtWorkloadSafety, type S
 import { importFirewallConfig, mergeFirewallConfigs, type FirewallVendor } from '@axonwall/lib/import';
 import { isValidDevice } from '@axonwall/lib/util';
 import { acquireMcpLockFile, desiredStateLockPath } from './mcp/lockfile.js';
-import { writeCanonicalConfig } from './atomic-config.js';
+import { writeCanonicalConfig, writeFileAtomicSync } from './atomic-config.js';
 import {
   parseCloudInitYaml,
   parseCloudInitNetworkConfig,
@@ -945,16 +945,19 @@ async function cmdApply(autoConfirm = true) {
       console.log(
         `${cYellow}[!] Apply status unknown — the daemon did not answer in time (${msg}). The new config is on disk; the bundle may still be pending on the daemon. Check the daemon's pending job before retrying; not recorded in GitOps.${cReset}`
       );
+      return;
     } else if (/Socket not found/i.test(msg)) {
       console.log(
         `${cYellow}[!] Synchronized /etc/axonwall/*.yaml and state.json on disk only (daemon socket offline: ${msg}). Not recorded in GitOps: nothing was applied.${cReset}`
       );
+      return;
     } else {
+      const restored = restoreCliConfigSnapshotLocked(diskSnapshot);
       console.error(
-        `${cRed}[✗] Apply failed: ${msg}. The new config is on disk; nothing was recorded in GitOps.${cReset}`
+        `${cRed}[✗] Apply failed: ${msg}. ${restored ? 'Previous on-disk configuration restored.' : 'Failed to restore previous on-disk configuration (check DesiredState lock).'} Nothing was recorded in GitOps.${cReset}`
       );
+      process.exit(1);
     }
-    return;
   }
 
   if (autoConfirm) {
@@ -1136,28 +1139,44 @@ function cmdSaveJson(fileArg?: string) {
   const state = validation.data;
   const serialized = serializeDesiredStateToYamlFiles(state);
   const serializedJson = JSON.stringify(state, null, 2);
-  for (const dir of [ETC_DIR, PERSIST_YAML_DIR]) {
-    try {
+  const explicitEtcOnly =
+    Boolean(process.env.AXONWALL_ETC_DIR || process.env.AXONWALL_CONFIG_DIR) &&
+    !process.env.AXONWALL_STATE_DIR &&
+    !process.env.AXONWALL_STATE_FILE &&
+    !process.env.AXONWALL_STATE_JSON_PATH;
+  const canonicalJsonTarget = explicitEtcOnly ? path.join(ETC_DIR, 'state.json') : STATE_JSON_PATH;
+  const mirrorJsonTargets = explicitEtcOnly
+    ? []
+    : [path.join(PERSIST_YAML_DIR, 'state.json'), path.join(ETC_DIR, 'state.json')];
+  const yamlDirs = explicitEtcOnly ? [ETC_DIR] : Array.from(new Set([ETC_DIR, PERSIST_YAML_DIR]));
+  let releaseLock: (() => void) | null = null;
+  try {
+    releaseLock = acquireMcpLockFile(desiredStateLockPath());
+    writeCanonicalConfig({
+      canonicalPath: canonicalJsonTarget,
+      mirrorPaths: mirrorJsonTargets,
+      serialized: serializedJson,
+      mode: 0o660,
+      label: 'state.json',
+    });
+    for (const dir of yamlDirs) {
       fs.mkdirSync(path.join(dir, 'conf.d'), { recursive: true, mode: 0o775 });
       for (const [fn, content] of Object.entries(serialized)) {
         const fp = path.join(dir, fn);
-        fs.writeFileSync(fp, content, { encoding: 'utf-8', mode: 0o660 });
-        try { fs.chmodSync(fp, 0o660); } catch {}
+        writeFileAtomicSync(fp, content, 0o660);
       }
       const ciOverride = path.join(dir, 'conf.d', '99-cloudinit.yaml');
       if (fs.existsSync(ciOverride)) {
         fs.rmSync(ciOverride, { force: true });
       }
-    } catch {}
+    }
+    fixSharedConfigOwnership();
+  } catch (err: any) {
+    process.stdout.write(JSON.stringify({ ok: false, error: err?.message || String(err) }) + '\n');
+    process.exit(1);
+  } finally {
+    try { releaseLock?.(); } catch {}
   }
-  for (const jsonTarget of [STATE_JSON_PATH, path.join(PERSIST_YAML_DIR, 'state.json'), path.join(ETC_DIR, 'state.json')]) {
-    try {
-      fs.mkdirSync(path.dirname(jsonTarget), { recursive: true, mode: 0o775 });
-      fs.writeFileSync(jsonTarget, serializedJson, { encoding: 'utf-8', mode: 0o660 });
-      try { fs.chmodSync(jsonTarget, 0o660); } catch {}
-    } catch {}
-  }
-  fixSharedConfigOwnership();
 
   process.stdout.write(
     JSON.stringify({
@@ -1320,9 +1339,9 @@ async function cmdCloudInitExport(userArgs: string[]) {
           ).trim();
           for (const line of zfsOut.split('\n')) {
             const [dsName, mp, comp] = line.split('\t').map((s) => s.trim());
-            if (dsName && dsName !== poolName) {
+            if (dsName && dsName !== poolName && dsName.startsWith(`${poolName}/`)) {
               datasets.push({
-                name: dsName.replace(new RegExp(`^${poolName}/`), ''),
+                name: dsName.slice(poolName.length + 1),
                 mountpoint: mp && mp !== 'none' && mp !== '-' ? mp : undefined,
                 compression: comp || 'lz4',
               });
@@ -1792,21 +1811,20 @@ async function cmdCloudInit(userArgs: string[]) {
     try {
       const res = spawnSync('which', ['growpart'], { stdio: 'pipe' });
       if (res.status === 0) {
-        const findmnt = spawnSync('findmnt', ['-n', '-o', 'SOURCE', '/var/lib/axonwall'], { encoding: 'utf-8' });
-        const dev = findmnt.stdout?.trim();
-        if (dev && dev.startsWith('/dev/')) {
+        const findmnt = spawnSync('findmnt', ['-n', '-o', 'SOURCE,FSTYPE', '/var/lib/axonwall'], { encoding: 'utf-8' });
+        const [dev, mntFstype] = (findmnt.stdout?.trim() || '').split(/\s+/);
+        if (dev && dev.startsWith('/dev/') && mntFstype !== 'zfs') {
           const diskRes = spawnSync('lsblk', ['-no', 'PKNAME', dev], { encoding: 'utf-8' });
           const disk = diskRes.stdout?.trim();
-          const partMatch = dev.match(/\d+$/);
+          const partMatch = dev.match(/(?:p)?(\d+)$/);
           if (disk && partMatch) {
-            const partNum = partMatch[0];
+            const partNum = partMatch[1]!;
             console.log(`[+] Attempting dynamic partition resize of /dev/${disk} partition ${partNum}...`);
             spawnSync('growpart', [`/dev/${disk}`, partNum], { stdio: 'inherit' });
-            const fstypeRes = spawnSync('lsblk', ['-no', 'FSTYPE', dev], { encoding: 'utf-8' });
-            const fstype = fstypeRes.stdout?.trim();
+            const fstype = mntFstype || spawnSync('lsblk', ['-no', 'FSTYPE', dev], { encoding: 'utf-8' }).stdout?.trim() || '';
             if (fstype === 'xfs') {
               spawnSync('xfs_growfs', ['/var/lib/axonwall'], { stdio: 'inherit' });
-            } else {
+            } else if (fstype.startsWith('ext')) {
               spawnSync('resize2fs', [dev], { stdio: 'inherit' });
             }
           }
@@ -1940,67 +1958,73 @@ async function setExtensionPlugin(pluginId: string, enable: boolean) {
     process.exit(1);
   }
 
-  const state = cmdValidate(true);
+  let releaseLock: (() => void) | null = null;
+  let state: DesiredState;
+  try {
+    releaseLock = acquireMcpLockFile(desiredStateLockPath());
+    state = cmdValidate(true);
 
-  const nextPlugins = (state.plugins || []).filter((p: any) => p.id !== pluginId);
-  nextPlugins.push({ id: pluginId, enabled: enable, config: {} });
-  state.plugins = nextPlugins;
+    const existingEntry = (state.plugins || []).find((p: any) => p.id === pluginId);
+    const nextPlugins = (state.plugins || []).filter((p: any) => p.id !== pluginId);
+    nextPlugins.push({ id: pluginId, enabled: enable, config: existingEntry?.config ?? {} });
+    state.plugins = nextPlugins;
 
-  if (pluginId === 'rosenpass') {
-    state.rosenpass = {
-      ...(state.rosenpass || {
-        listenPort: 9999,
-        listenAddresses: ['0.0.0.0:9999', '[::]:9999'],
-        wgDevice: 'wg0',
-        verbosity: 'Quiet',
-        rekeyIntervalSeconds: 120,
-        failClosedBootGuard: true,
-        memfdSecret: true,
-        publicKeyPath: '/etc/rosenpass/pq.pk',
-        secretKeyPath: '/etc/rosenpass/pq.sk',
-        peers: [],
-      }),
-      enabled: enable,
-    };
-  } else if (pluginId === 'haproxy') {
-    state.haproxy = {
-      ...(state.haproxy || { mode: 'http', frontends: [], backends: [] }),
-      enabled: enable,
-    };
-  } else if (pluginId === 'freeradius') {
-    state.freeradius = {
-      ...(state.freeradius || { authPort: 1812, acctPort: 1813, clients: [], ldapSync: true }),
-      enabled: enable,
-    };
-  } else if (pluginId === 'snmp') {
-    state.snmp = {
-      ...(state.snmp || {
-        community: 'public',
-        sysLocation: 'Server Room',
-        sysContact: 'admin@axonwall.local',
-        listenPort: 161,
-      }),
-      enabled: enable,
-    };
-  } else if (pluginId === 'nut-ups') {
-    state.ups = {
-      ...(state.ups || {
-        name: 'ups',
-        driver: 'usbhid-ups',
-        port: 'auto',
-        shutdownBatteryPct: 20,
-        lowBatteryRuntimeSec: 300,
-      }),
-      enabled: enable,
-    };
-  } else if (pluginId === 'headscale') {
-    state.headscale = {
-      ...(state.headscale || {
-        magicDnsDomain: 'mesh.axonwall.local',
-      }),
-      enabled: enable,
-    };
-  } else if (pluginId === 'vigilant-octo-waffle' || pluginId === 'host-malware-rootkit' || pluginId === 'eluvix') {
+    if (pluginId === 'rosenpass') {
+      state.rosenpass = {
+        ...(state.rosenpass || {
+          listenPort: 9999,
+          listenAddresses: ['0.0.0.0:9999', '[::]:9999'],
+          wgDevice: 'wg0',
+          verbosity: 'Quiet',
+          rekeyIntervalSeconds: 120,
+          failClosedBootGuard: true,
+          memfdSecret: true,
+          publicKeyPath: '/etc/rosenpass/pq.pk',
+          secretKeyPath: '/etc/rosenpass/pq.sk',
+          peers: [],
+        }),
+        enabled: enable,
+      };
+    } else if (pluginId === 'haproxy') {
+      state.haproxy = {
+        ...(state.haproxy || { mode: 'http', frontends: [], backends: [] }),
+        enabled: enable,
+      };
+    } else if (pluginId === 'freeradius') {
+      state.freeradius = {
+        ...(state.freeradius || { authPort: 1812, acctPort: 1813, clients: [], ldapSync: true }),
+        enabled: enable,
+      };
+    } else if (pluginId === 'snmp') {
+      state.snmp = {
+        ...(state.snmp || {
+          community: 'public',
+          sysLocation: 'Server Room',
+          sysContact: 'admin@axonwall.local',
+          listenPort: 161,
+        }),
+        enabled: enable,
+      };
+    } else if (pluginId === 'nut-ups') {
+      state.ups = {
+        ...(state.ups || {
+          name: 'ups',
+          driver: 'usbhid-ups',
+          port: 'auto',
+          shutdownBatteryPct: 20,
+          lowBatteryRuntimeSec: 300,
+        }),
+        enabled: enable,
+      };
+    } else if (pluginId === 'headscale') {
+      state.headscale = {
+        ...(state.headscale || {
+          magicDnsDomain: 'mesh.axonwall.local',
+        }),
+        enabled: enable,
+      };
+    }
+
     if (enable) {
       const depRes = enablePluginWithDependencies(pluginId, state);
       Object.assign(state, depRes.state);
@@ -2013,16 +2037,29 @@ async function setExtensionPlugin(pluginId: string, enable: boolean) {
       const depRes = disablePluginWithDependents(pluginId, state);
       Object.assign(state, depRes.state);
     }
-  }
 
-  const yamlFiles = serializeDesiredStateToYamlFiles(state);
-  for (const dir of [ETC_DIR, PERSIST_YAML_DIR]) {
-    try {
-      fs.mkdirSync(path.join(dir, 'conf.d'), { recursive: true });
-      for (const [filename, content] of Object.entries(yamlFiles)) {
-        fs.writeFileSync(path.join(dir, filename), content, { mode: 0o660 });
-      }
-    } catch {}
+    const yamlFiles = serializeDesiredStateToYamlFiles(state);
+    for (const dir of [ETC_DIR, PERSIST_YAML_DIR]) {
+      try {
+        fs.mkdirSync(path.join(dir, 'conf.d'), { recursive: true, mode: 0o775 });
+        for (const [filename, content] of Object.entries(yamlFiles)) {
+          writeFileAtomicSync(path.join(dir, filename), content, 0o660);
+        }
+        const ciOverride = path.join(dir, 'conf.d', '99-cloudinit.yaml');
+        if (fs.existsSync(ciOverride)) {
+          fs.rmSync(ciOverride, { force: true });
+        }
+      } catch {}
+    }
+    writeCanonicalConfig({
+      canonicalPath: STATE_JSON_PATH,
+      mirrorPaths: [path.join(PERSIST_YAML_DIR, 'state.json'), path.join(ETC_DIR, 'state.json')],
+      serialized: JSON.stringify(state, null, 2),
+      mode: 0o660,
+      label: 'state.json',
+    });
+  } finally {
+    try { releaseLock?.(); } catch {}
   }
 
   console.log(`[+] ${enable ? 'Enabling' : 'Disabling'} extension plugin '${pluginId}' (${manifest.name})...`);
@@ -2138,6 +2175,24 @@ async function cmdPlugin(args: string[]) {
         process.exit(1);
       }
       if (CORE_ROLE_PLUGIN_IDS.has(pluginId)) {
+        console.log(`[+] Installing core role plugin '${pluginId}' via daemon...`);
+        try {
+          const res = await sendAgentSocketRequest<{ success: boolean; message: string; output?: string }>(
+            '/v1/system/plugins/action',
+            'POST',
+            { pluginId, action: 'install' },
+            300000
+          );
+          if (!res.success) {
+            console.error(`${cRed}[!] ${res.message}${cReset}`);
+            if (res.output) console.error(res.output);
+            process.exit(1);
+          }
+          console.log(`${cGreen}[✓] ${res.message}${cReset}`);
+        } catch (err: any) {
+          console.error(`${cRed}Failed to install core role plugin:${cReset}`, err?.message || err);
+          process.exit(1);
+        }
         await setCoreRolePlugin(pluginId, true);
         break;
       }
@@ -2241,9 +2296,11 @@ async function cmdZbm(args: string[]) {
         const modeLabel =
           mode === 'zbm'
             ? 'ZFSBootMenu Root-on-ZFS'
-            : mode === 'rolling'
-              ? 'Rolling Standard Linux'
-              : 'Dual-Root A/B Partition';
+            : mode === 'btrfs'
+              ? 'Btrfs + Snapper Root'
+              : mode === 'rolling'
+                ? 'Rolling Standard Linux'
+                : 'Dual-Root A/B Partition';
         console.log(`\n${cCyan}${cBold}=== Axonwall Boot Environment & Partition Status (${modeLabel}) ===${cReset}\n`);
         console.log(
           `  ${cBold}Install Mode:${cReset}   ${mode.toUpperCase()}   ${cBold}Active Root:${cReset} ${res?.activeRootDevice || res?.activeDataset || res?.activeSlot || 'root'}`
@@ -2563,13 +2620,17 @@ async function cmdUpdate(args: string[]) {
     }
   }
 
-  let installMode: 'zbm' | 'ab' | 'rolling' = 'ab';
+  let installMode: 'zbm' | 'btrfs' | 'ab' | 'rolling' = 'ab';
   for (const modePath of [path.join(ETC_DIR, 'install-mode'), path.join(CONTROLLER_DIRS.varDir, 'install-mode')]) {
     try {
       if (fs.existsSync(modePath)) {
         const raw = fs.readFileSync(modePath, 'utf8').toLowerCase();
         if (raw.includes('zbm') || raw.includes('zfs')) {
           installMode = 'zbm';
+          break;
+        }
+        if (raw.includes('btrfs') || raw.includes('snapper')) {
+          installMode = 'btrfs';
           break;
         }
         if (raw.includes('rolling')) {
@@ -2581,14 +2642,21 @@ async function cmdUpdate(args: string[]) {
   }
   if (installMode === 'ab') {
     try {
-      if (fs.existsSync('/proc/mounts') && fs.readFileSync('/proc/mounts', 'utf8').includes(' / zfs ')) {
-        installMode = 'zbm';
+      if (fs.existsSync('/proc/mounts')) {
+        const mounts = fs.readFileSync('/proc/mounts', 'utf8');
+        if (mounts.includes(' / zfs ')) {
+          installMode = 'zbm';
+        } else if (mounts.includes(' / btrfs ')) {
+          installMode = 'btrfs';
+        }
       }
     } catch {}
   }
 
   if (installMode === 'zbm') {
     console.log(`${cCyan}${cBold}=== Axonwall ZFSBootMenu Root-on-ZFS System Updater ===${cReset}`);
+  } else if (installMode === 'btrfs') {
+    console.log(`${cCyan}${cBold}=== Axonwall Btrfs + Snapper System Updater ===${cReset}`);
   } else if (installMode === 'rolling') {
     console.log(`${cCyan}${cBold}=== Axonwall Rolling Standard Linux Updater ===${cReset}`);
   } else {
@@ -2659,6 +2727,8 @@ async function cmdUpdate(args: string[]) {
       const cliArgs: string[] = [];
       if (installMode === 'zbm') {
         cliArgs.push('--zbm');
+      } else if (installMode === 'btrfs') {
+        cliArgs.push('--btrfs');
       } else if (installMode === 'rolling') {
         cliArgs.push('--rolling');
       } else if (targetSlot) {
@@ -2816,6 +2886,13 @@ async function cmdMcp(args: string[]) {
   }
 }
 
+function parseBoolFlag(val: string | boolean | undefined): boolean {
+  if (typeof val === 'boolean') return val;
+  if (typeof val !== 'string') return false;
+  const norm = val.trim().toLowerCase();
+  return norm !== '' && norm !== 'false' && norm !== '0' && norm !== 'no' && norm !== 'off';
+}
+
 function parseCliArgs(args: string[], valueFlags: string[] = []): { positionals: string[]; flags: Record<string, string | boolean> } {
   const valueSet = new Set(valueFlags);
   const positionals: string[] = [];
@@ -2825,7 +2902,13 @@ function parseCliArgs(args: string[], valueFlags: string[] = []): { positionals:
     if (a.startsWith('--')) {
       const eqIdx = a.indexOf('=');
       if (eqIdx !== -1) {
-        flags[a.slice(2, eqIdx)] = a.slice(eqIdx + 1);
+        const key = a.slice(2, eqIdx);
+        const val = a.slice(eqIdx + 1);
+        if (!valueSet.has(key) && /^(true|false|0|1)$/i.test(val.trim())) {
+          flags[key] = parseBoolFlag(val);
+        } else {
+          flags[key] = val;
+        }
       } else {
         const key = a.slice(2);
         if (valueSet.has(key) && i + 1 < args.length) {
@@ -3256,8 +3339,17 @@ async function cmdVirt(args: string[]) {
       // that had one). Resolve the VM name from the daemon list and
       // the hosted-edge flag from local DesiredState, and refuse a
       // guarded stop/pause unless --force is given explicitly.
-      if (sub === 'stop' || sub === 'pause') {
-        const force = args.includes('--force');
+      const guardedVirtMap: Record<string, 'stop' | 'pause' | 'reboot' | 'rollback' | 'restore' | 'live_migrate'> = {
+        stop: 'stop',
+        pause: 'pause',
+        reset: 'reboot',
+        rollback: 'rollback',
+        restore: 'restore',
+        migrate: 'live_migrate',
+      };
+      const safetyAction = guardedVirtMap[sub];
+      const force = parseBoolFlag(flags.force);
+      if (safetyAction) {
         let workloadName: string | undefined;
         try {
           const vmsRes = await sendAgentSocketRequest<any>('/v1/virt/vms', 'GET');
@@ -3281,7 +3373,7 @@ async function cmdVirt(args: string[]) {
         } catch {
           // Best effort: the name-pattern half of the guard still applies.
         }
-        const safetyCheck = validateVirtWorkloadSafety(workloadName, sub, hostedEdgeEnabled, vmid);
+        const safetyCheck = validateVirtWorkloadSafety(workloadName, safetyAction, hostedEdgeEnabled, vmid);
         if (!safetyCheck.valid && !force) {
           console.error(`${cRed}[✗] ${safetyCheck.reason || 'Virtualization action blocked by anti-lockout guard'}${cReset}`);
           console.error(`${cYellow}Re-run with --force if you really mean to ${sub} VM #${vmid}.${cReset}`);
@@ -3296,7 +3388,7 @@ async function cmdVirt(args: string[]) {
           await sendAgentSocketRequest<any>('/v1/virt/vms', 'POST', {
             action: sub,
             vmid,
-            force: Boolean(flags.force),
+            force,
           }),
           null,
           2,

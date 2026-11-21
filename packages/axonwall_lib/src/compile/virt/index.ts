@@ -112,9 +112,23 @@ function sanitizeIdentifier(v: string): string {
   return v.replace(/[^a-zA-Z0-9_.-]/g, '_');
 }
 
+function escapeXmlAttr(v: unknown): string {
+  return String(v ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
+}
+
 function sanitizeCloudInitScalar(val: string): string {
   const singleLine = String(val).replace(/[\r\n\0]+/g, ' ').trim();
-  if (/[:#{}[\]&*?|>'"%@`]/.test(singleLine) || /\s/.test(singleLine)) {
+  const safeBareword = /^[a-zA-Z0-9_./+-]+$/.test(singleLine) &&
+    !/^(?:true|false|null|yes|no|on|off|~)$/i.test(singleLine) &&
+    !singleLine.startsWith('-') &&
+    !singleLine.startsWith('+') &&
+    !singleLine.includes('---');
+  if (!safeBareword) {
     return JSON.stringify(singleLine);
   }
   return singleLine;
@@ -506,15 +520,16 @@ export function compileVmProcess(vm: VirtualMachine, opts?: VirtCompileOptions):
 }
 
 export function compileLibvirtDomainXml(vm: VirtualMachine, opts?: VirtCompileOptions): string {
-  const safeName = sanitizeIdentifier(vm.name);
+  const safeName = escapeXmlAttr(sanitizeIdentifier(vm.name));
   const vcpus = (vm.cores || 1) * (vm.sockets || 1);
   const memKib = (vm.memoryMb || 2048) * 1024;
   const secBoot = vm.bios === 'ovmf' && Boolean(vm.secureBoot);
+  const vmidNum = Math.max(0, Math.trunc(vm.vmid));
   const xml: string[] = [
     `<domain type='kvm'>`,
     `  <name>${safeName}</name>`,
     `  <metadata>`,
-    `    <axonwall:vm xmlns:axonwall='https://axonwall.com/xmlns/libvirt/1.0' vmid='${vm.vmid}' ha='${Boolean(vm.haManaged)}'/>`,
+    `    <axonwall:vm xmlns:axonwall='https://axonwall.com/xmlns/libvirt/1.0' vmid='${vmidNum}' ha='${Boolean(vm.haManaged)}'/>`,
     `  </metadata>`,
     `  <memory unit='KiB'>${memKib}</memory>`,
     `  <vcpu placement='static'>${vcpus}</vcpu>`,
@@ -522,7 +537,7 @@ export function compileLibvirtDomainXml(vm: VirtualMachine, opts?: VirtCompileOp
 
   if (vm.cpuPinning) {
     xml.push(`  <cputune>`);
-    xml.push(`    <vcpupin vcpu='0' cpuset='${vm.cpuPinning.replace(/[^0-9,-]/g, '')}'/>`);
+    xml.push(`    <vcpupin vcpu='0' cpuset='${escapeXmlAttr(vm.cpuPinning.replace(/[^0-9,-]/g, ''))}'/>`);
     xml.push(`  </cputune>`);
   }
 
@@ -544,27 +559,29 @@ export function compileLibvirtDomainXml(vm: VirtualMachine, opts?: VirtCompileOp
       osFamily: opts?.osFamily,
       existsFn: opts?.existsFn,
     }).code;
-    xml.push(`    <loader readonly='yes' secure='${secBoot ? 'yes' : 'no'}' type='pflash'>${loaderPath}</loader>`);
-    xml.push(`    <nvram>/var/lib/axonwall/nvram/vm-${vm.vmid}.fd</nvram>`);
+    xml.push(`    <loader readonly='yes' secure='${secBoot ? 'yes' : 'no'}' type='pflash'>${escapeXmlAttr(loaderPath)}</loader>`);
+    xml.push(`    <nvram>/var/lib/axonwall/nvram/vm-${vmidNum}.fd</nvram>`);
   }
   xml.push(`  </os>`);
   xml.push(`  <features><acpi/><apic/>${secBoot ? "<smm state='on'/>" : ''}</features>`);
   xml.push(`  <cpu mode='${vm.cpuType === 'host' ? 'host-passthrough' : 'custom'}'>`);
-  xml.push(`    <topology sockets='${vm.sockets || 1}' dies='1' cores='${vm.cores || 1}' threads='1'/>`);
+  xml.push(`    <topology sockets='${Math.max(1, Math.trunc(vm.sockets || 1))}' dies='1' cores='${Math.max(1, Math.trunc(vm.cores || 1))}' threads='1'/>`);
   xml.push(`  </cpu>`);
   xml.push(`  <devices>`);
   xml.push(`    <emulator>/usr/bin/qemu-system-x86_64</emulator>`);
 
   if (!vm.diskless) {
     vm.disks.forEach((disk, idx) => {
-      const zvolPath = disk.zvol || `/dev/zvol/${disk.pool || 'tank'}/vms/vm-${vm.vmid}-disk-${idx}`;
+      const pool = disk.pool || 'tank';
+      const safePool = SAFE_POOL_REGEX.test(pool) && !pool.includes('..') ? pool : 'tank';
+      const zvolPath = disk.zvol || `/dev/zvol/${safePool}/vms/vm-${vmidNum}-disk-${idx}`;
       const devPrefix = disk.bus === 'scsi' ? 'sd' : disk.bus === 'nvme' ? 'nvme0n' : 'vd';
       const targetDev = disk.bus === 'nvme' ? `${devPrefix}${idx + 1}` : `${devPrefix}${String.fromCharCode(97 + idx)}`;
       const targetBus = disk.bus === 'nvme' ? 'virtio' : disk.bus || 'virtio';
       xml.push(`    <disk type='block' device='disk'>`);
-      xml.push(`      <driver name='qemu' type='raw' cache='${disk.cache || 'none'}' discard='${disk.discard ? 'unmap' : 'ignore'}'/>`);
-      xml.push(`      <source dev='${zvolPath}'/>`);
-      xml.push(`      <target dev='${targetDev}' bus='${targetBus}'/>`);
+      xml.push(`      <driver name='qemu' type='raw' cache='${escapeXmlAttr(disk.cache || 'none')}' discard='${disk.discard ? 'unmap' : 'ignore'}'/>`);
+      xml.push(`      <source dev='${escapeXmlAttr(zvolPath)}'/>`);
+      xml.push(`      <target dev='${escapeXmlAttr(targetDev)}' bus='${escapeXmlAttr(targetBus)}'/>`);
       if (disk.readOnly) xml.push(`      <readonly/>`);
       xml.push(`    </disk>`);
     });
@@ -573,22 +590,22 @@ export function compileLibvirtDomainXml(vm: VirtualMachine, opts?: VirtCompileOp
   for (const share of vm.virtioFsShares ?? []) {
     xml.push(`    <filesystem type='mount' accessmode='passthrough'>`);
     xml.push(`      <driver type='virtiofs' queue='1024'/>`);
-    xml.push(`      <source dir='${share.hostPath}'/>`);
-    xml.push(`      <target dir='${share.tag}'/>`);
+    xml.push(`      <source dir='${escapeXmlAttr(share.hostPath)}'/>`);
+    xml.push(`      <target dir='${escapeXmlAttr(share.tag)}'/>`);
     if (share.readOnly) xml.push(`      <readonly/>`);
     xml.push(`    </filesystem>`);
   }
 
   vm.nics.forEach((nic, idx) => {
-    const mac = nic.mac || generateDeterministicMac(vm.vmid, idx);
-    const tapName = nic.vnet && SAFE_IFACE_REGEX.test(nic.vnet) ? nic.vnet : `tap${vm.vmid}i${idx}`;
+    const mac = nic.mac || generateDeterministicMac(vmidNum, idx);
+    const tapName = nic.vnet && SAFE_IFACE_REGEX.test(nic.vnet) ? nic.vnet : `tap${vmidNum}i${idx}`;
     xml.push(`    <interface type='bridge'>`);
-    xml.push(`      <mac address='${mac}'/>`);
-    xml.push(`      <source bridge='${nic.bridge || 'br0'}'/>`);
-    xml.push(`      <target dev='${tapName}'/>`);
-    xml.push(`      <model type='${nic.model || 'virtio'}'/>`);
+    xml.push(`      <mac address='${escapeXmlAttr(mac)}'/>`);
+    xml.push(`      <source bridge='${escapeXmlAttr(nic.bridge || 'br0')}'/>`);
+    xml.push(`      <target dev='${escapeXmlAttr(tapName)}'/>`);
+    xml.push(`      <model type='${escapeXmlAttr(nic.model || 'virtio')}'/>`);
     if (nic.vlanTag && nic.vlanTag > 0) {
-      xml.push(`      <vlan><tag id='${nic.vlanTag}'/></vlan>`);
+      xml.push(`      <vlan><tag id='${Math.trunc(nic.vlanTag)}'/></vlan>`);
     }
     xml.push(`    </interface>`);
   });
@@ -598,11 +615,11 @@ export function compileLibvirtDomainXml(vm: VirtualMachine, opts?: VirtCompileOp
   }
   if (vm.agent) {
     xml.push(`    <channel type='unix'>`);
-    xml.push(`      <source mode='bind' path='/run/axonwall/qga/vm-${vm.vmid}.sock'/>`);
+    xml.push(`      <source mode='bind' path='/run/axonwall/qga/vm-${vmidNum}.sock'/>`);
     xml.push(`      <target type='virtio' name='org.qemu.guest_agent.0'/>`);
     xml.push(`    </channel>`);
   }
-  xml.push(`    <graphics type='vnc' socket='/run/axonwall/vnc/vm-${vm.vmid}.sock'/>`);
+  xml.push(`    <graphics type='vnc' socket='/run/axonwall/vnc/vm-${vmidNum}.sock'/>`);
   xml.push(`  </devices>`);
   xml.push(`</domain>`);
   return xml.join('\n') + '\n';
@@ -617,13 +634,13 @@ export function compileCloudInit(vm: VirtualMachine): CompiledCloudInit | null {
   const metaDataYaml = [
     '# Axonwall Cloud-Init Meta-Data',
     `instance-id: vm-${vm.vmid}`,
-    `local-hostname: ${hostname}`,
+    `local-hostname: ${sanitizeCloudInitScalar(hostname)}`,
     '',
   ].join('\n');
 
   const userDataLines = [
     '#cloud-config',
-    `hostname: ${hostname}`,
+    `hostname: ${sanitizeCloudInitScalar(hostname)}`,
     'manage_etc_hosts: true',
     'users:',
     `  - name: ${user}`,
@@ -634,8 +651,7 @@ export function compileCloudInit(vm: VirtualMachine): CompiledCloudInit | null {
   if (vm.cloudInit.sshAuthorizedKeys && vm.cloudInit.sshAuthorizedKeys.length > 0) {
     userDataLines.push('    ssh_authorized_keys:');
     for (const key of vm.cloudInit.sshAuthorizedKeys) {
-      const safeKey = String(key).replace(/[\r\n\0]+/g, ' ').trim();
-      userDataLines.push(`      - ${safeKey}`);
+      userDataLines.push(`      - ${sanitizeCloudInitScalar(key)}`);
     }
   }
 
@@ -648,7 +664,7 @@ export function compileCloudInit(vm: VirtualMachine): CompiledCloudInit | null {
   if (vm.cloudInit.customUserData) {
     userDataLines.push('');
     userDataLines.push('# Custom User Data Hook:');
-    userDataLines.push(vm.cloudInit.customUserData);
+    userDataLines.push(String(vm.cloudInit.customUserData).replace(/\0/g, '').replace(/\r/g, ''));
   }
   userDataLines.push('');
 
@@ -692,11 +708,12 @@ export function compileLxcContainer(ct: LxcContainer, opts?: VirtCompileOptions)
   const cores = Math.max(1, ct.cores || 1);
   const memoryMb = Math.max(256, ct.memoryMb || 1024);
   const swapMb = ct.swapMb ?? 512;
+  const safeCtHostComment = String(ct.hostname).replace(/[\r\n\0]+/g, ' ').trim();
 
   const lines: string[] = [
     `# =============================================================================`,
     `# Axonwall Auto-Generated LXC Container Configuration`,
-    `# Container ID: ${ct.ctid} (${ct.hostname})`,
+    `# Container ID: ${ct.ctid} (${safeCtHostComment})`,
     `# =============================================================================`,
     `lxc.uts.name = ${sanitizeIdentifier(ct.hostname)}`,
     `lxc.arch = x86_64`,
@@ -936,8 +953,10 @@ export function compileHostedEdge(
   const edgeId = `edge-${hostHostname}`;
   const ztpToken = opts?.ztpToken || 'ztp_hosted_edge_bootstrap';
   const hubIpOnly = (edgeCfg.lan.hostAddress || '10.0.0.2/24').split('/')[0] || '10.0.0.2';
+  const safeHubHost = hubIpOnly.replace(/[^a-zA-Z0-9.:_-]/g, '') || '10.0.0.2';
   const hubPort = state.fleet?.listenPort || 2966;
-  const hubUrl = `wss://${hubIpOnly}:${hubPort}/ws/satellite`;
+  const safeHubPort = Number.isInteger(hubPort) && hubPort >= 1 && hubPort <= 65535 ? hubPort : 2966;
+  const hubUrl = `wss://${safeHubHost}:${safeHubPort}/ws/satellite`;
 
   const wanBridgeName = edgeCfg.wan.bridgeName || 'br-wan';
   const lanBridgeName = edgeCfg.lan.bridgeName || 'br-lan';
@@ -1035,18 +1054,18 @@ export function compileHostedEdge(
 
   const userDataLines: string[] = [
     '#cloud-config',
-    `hostname: ${edgeId}`,
+    `hostname: ${sanitizeCloudInitScalar(edgeId)}`,
     'axonwall:',
     `  hub: ${hubUrl}`,
-    `  id: ${edgeId}`,
+    `  id: ${sanitizeCloudInitScalar(edgeId)}`,
     `  token: ${sanitizeCloudInitScalar(ztpToken)}`,
-    `  sku: ${sku}`,
-    `  slot: ${slot}`,
+    `  sku: ${sanitizeCloudInitScalar(sku)}`,
+    `  slot: ${sanitizeCloudInitScalar(slot)}`,
   ];
 
   if (opts?.caCertPem && opts.caCertPem.trim()) {
     userDataLines.push('  ca_cert: |');
-    for (const line of opts.caCertPem.trim().split(/\r?\n/)) {
+    for (const line of opts.caCertPem.replace(/\0/g, '').trim().split(/\r?\n/)) {
       userDataLines.push(`    ${line}`);
     }
   }
@@ -1055,17 +1074,17 @@ export function compileHostedEdge(
     '  interfaces:',
     '    - name: wan',
     '      device: eth0',
-    `      address: ${wanAddrSpec}`,
+    `      address: ${sanitizeCloudInitScalar(wanAddrSpec)}`,
   );
   if (edgeCfg.wan.ipv4Mode === 'static' && edgeCfg.wan.ipv4Gateway) {
-    userDataLines.push(`      gateway: ${edgeCfg.wan.ipv4Gateway}`);
+    userDataLines.push(`      gateway: ${sanitizeCloudInitScalar(edgeCfg.wan.ipv4Gateway)}`);
   }
   userDataLines.push(
-    `      ipv6_mode: ${edgeCfg.wan.ipv6Mode}`,
+    `      ipv6_mode: ${sanitizeCloudInitScalar(edgeCfg.wan.ipv6Mode)}`,
     '    - name: lan',
     '      device: eth1',
-    `      address: ${edgeCfg.lan.edgeAddress}`,
-    `      ipv6_mode: ${edgeCfg.lan.ipv6Mode}`,
+    `      address: ${sanitizeCloudInitScalar(edgeCfg.lan.edgeAddress)}`,
+    `      ipv6_mode: ${sanitizeCloudInitScalar(edgeCfg.lan.ipv6Mode)}`,
     'write_files:',
     '  - path: /etc/nftables.conf',
     '    permissions: "0600"',
@@ -1076,8 +1095,8 @@ export function compileHostedEdge(
 
   const metaData = [
     '# Axonwall Hosted Edge NGFW Cloud-Init Meta-Data',
-    `instance-id: ${edgeId}`,
-    `local-hostname: ${edgeId}`,
+    `instance-id: ${sanitizeCloudInitScalar(edgeId)}`,
+    `local-hostname: ${sanitizeCloudInitScalar(edgeId)}`,
     '',
   ].join('\n');
 

@@ -32,7 +32,7 @@ export default function ObservabilityDocPage() {
       <div className="space-y-4 border-b border-slate-800/80 pb-8">
         <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-950/60 border border-emerald-500/30 text-emerald-400 text-xs font-semibold">
           <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-          Zero-Instrumentation Kernel Telemetry • eBPF &amp; K3s • v0.11.68
+          Zero-Instrumentation Kernel Telemetry • eBPF &amp; K3s • v0.13.0
         </div>
         <h1 className="text-3xl sm:text-5xl font-extrabold text-white tracking-tight">
           eBPF Infrastructure &amp; Kubernetes Observability
@@ -471,10 +471,63 @@ axonwallctl ebpf render-k3s ebpf-sensor k3s-net-safe networking-safe`}
         />
       </section>
 
+      {/* Live eBPF Visualizations & Kernel BPF Inventory */}
+      <section id="ebpf-visualizations" className="space-y-6 pt-6 border-t border-slate-800/80">
+        <h2 className="text-2xl font-bold text-white flex items-center gap-2">
+          <Activity className="w-6 h-6 text-emerald-400" /> 5. Live eBPF Visualizations &amp; Kernel BPF Inventory
+        </h2>
+        <p className="text-sm text-slate-300 leading-relaxed">
+          <code className="text-emerald-400 font-mono">GET /v1/ebpf/overview</code> (and its Web Console proxy{' '}
+          <code className="text-slate-200 font-mono">GET /api/v1/ebpf/overview</code>) exposes{' '}
+          <code className="text-emerald-300 font-mono">CollectKernelBpfInventory()</code> (<code className="font-mono text-slate-200">bpfInventory</code>) alongside live Ring-0 XDP counters, BPF-LSM blocks, cross-duty storage/hypervisor telemetry, and Blackbox threat sketches—powering six live visualizers across{' '}
+          <code className="text-emerald-400 font-mono">/reporting/ebpf</code>, <code className="text-emerald-400 font-mono">/reporting/flows</code>, and{' '}
+          <code className="text-emerald-400 font-mono">/security/threat-harvester</code>:
+        </p>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 text-xs">
+          <div className="p-4 rounded-xl bg-slate-900 border border-slate-800 space-y-1.5">
+            <span className="font-bold text-emerald-400">EbpfDataplaneCharts</span>
+            <p className="text-slate-400 leading-relaxed">
+              Six live charts: <em>Real-Time XDP Ring-0 Verdict Rate</em>, <em>Per-CPU XDP Core Load</em>, <em>Protocol, Dual-Stack &amp; VLAN Mix</em>, <em>Top Destination Services by XDP Bytes</em>, <em>XDP Blocklist Impact by Source / CIDR</em>, and <em>Per-Source TCP SYN Rate Meter</em>.
+            </p>
+          </div>
+          <div className="p-4 rounded-xl bg-slate-900 border border-slate-800 space-y-1.5">
+            <span className="font-bold text-sky-400">EbpfFlowTopologyMap</span>
+            <p className="text-slate-400 leading-relaxed">
+              Interactive live XDP flow topology graph linking ingress NICs/VLANs, active IPv4/IPv6 tuples, blocked peers, and downstream destinations.
+            </p>
+          </div>
+          <div className="p-4 rounded-xl bg-slate-900 border border-slate-800 space-y-1.5">
+            <span className="font-bold text-purple-400">EbpfKernelInventoryPanel</span>
+            <p className="text-slate-400 leading-relaxed">
+              Live kernel enumeration of loaded BPF programs (ID, type, JIT &amp; translated bytes, verified instructions, BTF status, cumulative <code className="font-mono text-slate-200">runCount</code>/<code className="font-mono text-slate-200">runTimeNs</code>) and BPF maps (key/value/max entries, memlock bytes, frozen flag).
+            </p>
+          </div>
+          <div className="p-4 rounded-xl bg-slate-900 border border-slate-800 space-y-1.5">
+            <span className="font-bold text-amber-400">EbpfCrossDutyVisualizer</span>
+            <p className="text-slate-400 leading-relaxed">
+              Correlates OpenZFS SPL kstat ARC/L2ARC/ZIL throughput, KVM <code className="font-mono text-slate-200">vnet</code>/<code className="font-mono text-slate-200">tap</code> NIC queues, and K3s pod eBPF token metrics in a unified view.
+            </p>
+          </div>
+          <div className="p-4 rounded-xl bg-slate-900 border border-slate-800 space-y-1.5">
+            <span className="font-bold text-cyan-400">EbpfSecurityVisualizer &amp; ThreatSketchWaveform</span>
+            <p className="text-slate-400 leading-relaxed">
+              Visualizes 5-hook CO-RE BPF-LSM enforcement events, Linux 6.9+ <code className="font-mono text-slate-200">BPF_TOKEN</code> mounts, and signed packet-size / microsecond inter-arrival-time waveforms for Blackbox Threat-LLM episodes.
+            </p>
+          </div>
+          <div className="p-4 rounded-xl bg-slate-900 border border-slate-800 space-y-1.5">
+            <span className="font-bold text-emerald-300">FlowsLiveVisualStrip</span>
+            <p className="text-slate-400 leading-relaxed">
+              Heads-up protocol, direction, verdict, and burst Sparkline strip embedded above the live packet &amp; flow table at <code className="font-mono text-slate-200">/reporting/flows</code>.
+            </p>
+          </div>
+        </div>
+      </section>
+
       {/* Kernel Packet Tap */}
       <section id="kernel-tap" className="space-y-6 pt-6 border-t border-slate-800/80">
         <h2 className="text-2xl font-bold text-white flex items-center gap-2">
-          <Cpu className="w-6 h-6 text-emerald-400" /> 5. Kernel Packet Stream Architecture (NFLOG &amp; XDP)
+          <Cpu className="w-6 h-6 text-emerald-400" /> 6. Kernel Packet Stream Architecture (NFLOG &amp; XDP)
         </h2>
         <p className="text-sm text-slate-300 leading-relaxed">
           Traditional BSD firewalls require administrators to start a packet capture, wait for an incident to occur,
@@ -514,7 +567,7 @@ axonwallctl ebpf render-k3s ebpf-sensor k3s-net-safe networking-safe`}
       {/* Protocol Dissectors */}
       <section id="dissectors" className="space-y-6 pt-6 border-t border-slate-800/80">
         <h2 className="text-2xl font-bold text-white flex items-center gap-2">
-          <Binary className="w-6 h-6 text-emerald-400" /> 6. Deep Protocol Dissector
+          <Binary className="w-6 h-6 text-emerald-400" /> 7. Deep Protocol Dissector
         </h2>
         <p className="text-sm text-slate-300 leading-relaxed">
           The embedded Go daemon dissector analyzes raw Ethernet frames at wire-speed and parses packet headers without
@@ -546,7 +599,7 @@ axonwallctl ebpf render-k3s ebpf-sensor k3s-net-safe networking-safe`}
       {/* SSE Streaming Endpoint */}
       <section id="sse-streaming" className="space-y-6 pt-6 border-t border-slate-800/80">
         <h2 className="text-2xl font-bold text-white flex items-center gap-2">
-          <Radio className="w-6 h-6 text-emerald-400" /> 7. Server-Sent Events (SSE) API
+          <Radio className="w-6 h-6 text-emerald-400" /> 8. Server-Sent Events (SSE) API
         </h2>
         <p className="text-sm text-slate-300 leading-relaxed">
           Clients stream live packet telemetry over HTTP/2 using Server-Sent Events. The stream supports server-side
@@ -597,7 +650,7 @@ curl -N "https://192.168.1.1:2966/api/v1/events/packets?iface=eth0&proto=tcp"`}
       {/* VictoriaMetrics */}
       <section id="victoriametrics" className="space-y-6 pt-6 border-t border-slate-800/80">
         <h2 className="text-2xl font-bold text-white flex items-center gap-2">
-          <Activity className="w-6 h-6 text-emerald-400" /> 8. VictoriaMetrics, ClickHouse &amp; Insight Flow Analytics
+          <Activity className="w-6 h-6 text-emerald-400" /> 9. VictoriaMetrics, ClickHouse &amp; Insight Flow Analytics
         </h2>
         <p className="text-sm text-slate-300 leading-relaxed">
           In addition to real-time eBPF and NFLOG streaming, historical time-series metrics are stored in an embedded,

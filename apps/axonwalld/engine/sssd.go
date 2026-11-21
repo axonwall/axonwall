@@ -90,6 +90,11 @@ ldap_tls_reqcert = never`
 		bindBlock = fmt.Sprintf("ldap_default_bind_dn = %s\nldap_default_authtok_type = password\nldap_default_authtok = %s\n", bindDN, bindPassword)
 	}
 
+	defaultShell := "/bin/bash"
+	if _, err := os.Stat("/usr/bin/zsh"); err == nil {
+		defaultShell = "/usr/bin/zsh"
+	}
+
 	return fmt.Sprintf(`[sssd]
 services = nss, pam, ssh
 config_file_version = 2
@@ -98,7 +103,8 @@ domains = axonwall
 [nss]
 filter_users = root,axonwall,axonwall-controller,openldap,ldap,sshd,nobody
 filter_groups = root,axonwall,axonwall-api,axonwall-controller,openldap,ldap,sshd,nobody,nogroup
-default_shell = /usr/bin/zsh
+default_shell = %s
+allowed_shells = /usr/bin/zsh, /bin/zsh
 shell_fallback = /bin/bash
 entry_negative_timeout = 5
 
@@ -121,7 +127,7 @@ ldap_user_ssh_public_key = sshPublicKey
 cache_credentials = True
 enumerate = False
 entry_cache_timeout = 30
-`, ldapURI, baseDN, baseDN, baseDN, bindBlock, tlsBlock), nil
+`, defaultShell, ldapURI, baseDN, baseDN, baseDN, bindBlock, tlsBlock), nil
 }
 
 // hasSSSD returns true if the SSSD daemon binary is installed on the host OS (Debian/glibc).
@@ -149,7 +155,17 @@ fi
 if command -v ldapsearch >/dev/null 2>&1; then
   ldapsearch -LLL -o ldif-wrap=no -x -H ldap://127.0.0.1:389 \
     -b "ou=users,${BASE_DN}" "(uid=${USER_ARG})" sshPublicKey 2>/dev/null \
-    | sed -n 's/^sshPublicKey: //p'
+    | while IFS= read -r line; do
+        case "$line" in
+          "sshPublicKey:: "*)
+            printf '%s' "${line#sshPublicKey:: }" | base64 -d 2>/dev/null
+            printf '\n'
+            ;;
+          "sshPublicKey: "*)
+            printf '%s\n' "${line#sshPublicKey: }"
+            ;;
+        esac
+      done
 fi
 if [ -r "/home/${USER_ARG}/.ssh/authorized_keys" ]; then
   cat "/home/${USER_ARG}/.ssh/authorized_keys" 2>/dev/null || true
@@ -186,10 +202,11 @@ func isMinimalEditionRoot(root string) bool {
 
 // SyncZshInEtcShells adds or removes /usr/bin/zsh and /bin/zsh from /etc/shells
 // based on whether zsh actually exists on disk (or when removing cli-workstation).
-func SyncZshInEtcShells(present bool) {
+// Returns true when /etc/shells was modified.
+func SyncZshInEtcShells(present bool) bool {
 	data, err := os.ReadFile("/etc/shells")
 	if err != nil {
-		return
+		return false
 	}
 	lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
 	if present {
@@ -205,7 +222,7 @@ func SyncZshInEtcShells(present bool) {
 		if changed {
 			_ = os.WriteFile("/etc/shells", []byte(strings.Join(lines, "\n")+"\n"), 0644)
 		}
-		return
+		return changed
 	}
 	filtered := make([]string, 0, len(lines))
 	changed := false
@@ -220,6 +237,7 @@ func SyncZshInEtcShells(present bool) {
 	if changed {
 		_ = os.WriteFile("/etc/shells", []byte(strings.Join(filtered, "\n")+"\n"), 0644)
 	}
+	return changed
 }
 
 // EnsureSSSDConfiguredWithPeer configures SSSD with optional HA peer LDAPS failover.
@@ -242,22 +260,18 @@ func EnsureSSSDConfiguredWithPeer(baseDN string, peerLDAPURI string) error {
 
 	EnsureAuthorizedKeysHelperInstalled()
 
-	// 1. Register /usr/local/bin/axonwall-opshell and existing zsh binaries in /etc/shells
+	// 1. Register /usr/local/bin/axonwall-opshell and sync zsh binaries in /etc/shells.
+	// SSSD reads /etc/shells once at responder startup, so any /etc/shells change
+	// triggers an SSSD restart below.
+	_, zshUsrErr := os.Stat("/usr/bin/zsh")
+	_, zshBinErr := os.Stat("/bin/zsh")
+	shellsChanged := SyncZshInEtcShells(zshUsrErr == nil || zshBinErr == nil)
 	if shellsData, err := os.ReadFile("/etc/shells"); err == nil {
 		updated := strings.TrimRight(string(shellsData), "\n")
-		changed := false
-		for _, sh := range []string{"/usr/bin/zsh", "/bin/zsh"} {
-			if _, serr := os.Stat(sh); serr == nil && !strings.Contains(updated+"\n", sh+"\n") {
-				updated += "\n" + sh
-				changed = true
-			}
-		}
 		if _, serr := os.Stat("/usr/local/bin/axonwall-opshell"); serr == nil && !strings.Contains(updated+"\n", "/usr/local/bin/axonwall-opshell\n") {
 			updated += "\n/usr/local/bin/axonwall-opshell"
-			changed = true
-		}
-		if changed {
 			_ = os.WriteFile("/etc/shells", []byte(updated+"\n"), 0644)
+			shellsChanged = true
 		}
 	}
 
@@ -317,7 +331,7 @@ Cmnd_Alias AXONWALL_OP_CMDS = /usr/local/bin/axonwall-tui --readonly, /usr/local
 			return err
 		}
 		InvalidateSSSDCache("")
-	} else if !sssdRunning() {
+	} else if shellsChanged || !sssdRunning() {
 		if err := restartSSSD(); err != nil {
 			return err
 		}

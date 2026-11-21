@@ -10,6 +10,12 @@ service:
   type: ClusterIP
   port: 3000
 
+auth:
+  # Secret containing mandatory JWT_SECRET and AXONWALL_AGENT_TOKEN keys.
+  existingSecret: "axonwall-auth-secret"
+  jwtSecretKey: "jwt-secret"
+  agentTokenKey: "agent-token"
+
 nodeFirewall:
   enabled: true
   image:
@@ -24,6 +30,7 @@ database:
 ldap:
   embedded: true
   host: "axonwall-ldap"
+  baseDn: "dc=axonwall,dc=internal"
   port: 389
 
 observability:

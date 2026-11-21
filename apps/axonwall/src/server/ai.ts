@@ -11,6 +11,7 @@ import type { AiProviderType, AiConfig } from '@axonwall/lib/schemas';
 import { getSession } from './auth';
 import { assertActionPermitted } from './auth-guard';
 import { getDesiredStateInternal } from './desired-state-internal';
+import { assertSafeOutboundUrl, ssrfSafeFetch, type SsrfSafeResponse } from './ssrf-guard';
 
 export interface AiProbeResult {
   ok: boolean;
@@ -20,49 +21,24 @@ export interface AiProbeResult {
   error?: string;
 }
 
-function validateAiEndpoint(endpoint: string, isLocalExpected: boolean): string {
+async function validateAiEndpoint(endpoint: string, isLocalExpected: boolean): Promise<string> {
   const clean = endpoint.trim().replace(/\/+$/, '');
-  let url: URL;
-  try {
-    url = new URL(clean);
-  } catch {
-    throw new Error('Invalid endpoint URL');
-  }
-
-  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
-    throw new Error('Endpoint must use http: or https:');
-  }
-
-  const hostname = url.hostname.toLowerCase().replace(/^\[|\]$/g, '');
-  if (
-    hostname === '169.254.169.254' ||
-    hostname.startsWith('169.254.') ||
-    hostname.startsWith('fe80:') ||
-    hostname === 'metadata.google.internal' ||
-    hostname === '0.0.0.0'
-  ) {
-    throw new Error('Access to cloud metadata or link-local endpoints is prohibited');
-  }
-
-  if (!isLocalExpected) {
-    if (
-      hostname === 'localhost' ||
-      hostname === '::1' ||
-      hostname.startsWith('127.') ||
-      hostname.startsWith('10.') ||
-      hostname.startsWith('192.168.') ||
-      /^172\.(1[6-9]|2\d|3[0-1])\./.test(hostname) ||
-      hostname.startsWith('fc00:') ||
-      hostname.startsWith('fd00:')
-    ) {
-      throw new Error('Remote AI provider endpoints cannot target loopback or private RFC1918 networks');
-    }
-    if (url.protocol === 'http:') {
-      throw new Error('Remote AI provider endpoints must use HTTPS');
-    }
-  }
-
+  await assertSafeOutboundUrl(clean, {
+    allowHttp: isLocalExpected,
+    allowPrivate: isLocalExpected,
+  });
   return clean;
+}
+
+function aiFetch(
+  url: string,
+  isLocalExpected: boolean,
+  init: { method?: string; headers?: Record<string, string>; body?: string; signal?: AbortSignal }
+): Promise<SsrfSafeResponse> {
+  return ssrfSafeFetch(url, init, {
+    allowHttp: isLocalExpected,
+    allowPrivate: isLocalExpected,
+  });
 }
 
 function resolveAiApiKey(
@@ -80,7 +56,7 @@ function resolveAiApiKey(
   return (cleanConfigured || envKey || '').trim();
 }
 
-function formatUpstreamHttpError(providerLabel: string, res: Response): string {
+function formatUpstreamHttpError(providerLabel: string, res: Pick<SsrfSafeResponse, 'status' | 'statusText'>): string {
   const safeStatusText = (res.statusText || 'Request Failed')
     .replace(/[^\w\s.-]/g, '')
     .trim()
@@ -145,7 +121,7 @@ export async function testAiProviderProbe(
       case 'antigravity': {
         const p = aiCfg?.providers?.antigravity;
         const rawEndpoint = p?.endpoint || AI_PROVIDERS_META.antigravity.defaultEndpoint;
-        const endpoint = validateAiEndpoint(rawEndpoint, AI_PROVIDERS_META.antigravity.isLocal);
+        const endpoint = await validateAiEndpoint(rawEndpoint, AI_PROVIDERS_META.antigravity.isLocal);
         const apiKey = resolveAiApiKey(
           p?.apiKey,
           process.env.GEMINI_API_KEY,
@@ -160,10 +136,14 @@ export async function testAiProviderProbe(
             error: 'No Gemini / Antigravity API key configured.',
           };
         }
-        const res = await fetch(`${endpoint}/models?key=${encodeURIComponent(apiKey)}`, {
-          method: 'GET',
-          signal: AbortSignal.timeout(5000),
-        });
+        const res = await aiFetch(
+          `${endpoint}/models?key=${encodeURIComponent(apiKey)}`,
+          AI_PROVIDERS_META.antigravity.isLocal,
+          {
+            method: 'GET',
+            signal: AbortSignal.timeout(5000),
+          }
+        );
         const latencyMs = Date.now() - start;
         if (!res.ok) {
           return {
@@ -191,8 +171,8 @@ export async function testAiProviderProbe(
       case 'ollama': {
         const p = aiCfg?.providers?.ollama;
         const rawEndpoint = p?.endpoint || AI_PROVIDERS_META.ollama.defaultEndpoint;
-        const endpoint = validateAiEndpoint(rawEndpoint, AI_PROVIDERS_META.ollama.isLocal);
-        const res = await fetch(`${endpoint}/api/tags`, {
+        const endpoint = await validateAiEndpoint(rawEndpoint, AI_PROVIDERS_META.ollama.isLocal);
+        const res = await aiFetch(`${endpoint}/api/tags`, AI_PROVIDERS_META.ollama.isLocal, {
           method: 'GET',
           signal: AbortSignal.timeout(4000),
         });
@@ -223,7 +203,7 @@ export async function testAiProviderProbe(
       case 'claude-code': {
         const p = aiCfg?.providers?.claudeCode;
         const rawEndpoint = p?.endpoint || AI_PROVIDERS_META['claude-code'].defaultEndpoint;
-        const endpoint = validateAiEndpoint(rawEndpoint, AI_PROVIDERS_META['claude-code'].isLocal);
+        const endpoint = await validateAiEndpoint(rawEndpoint, AI_PROVIDERS_META['claude-code'].isLocal);
         const apiKey = resolveAiApiKey(
           p?.apiKey,
           process.env.ANTHROPIC_API_KEY,
@@ -238,7 +218,7 @@ export async function testAiProviderProbe(
             error: 'No Anthropic API key configured.',
           };
         }
-        const res = await fetch(`${endpoint}/models`, {
+        const res = await aiFetch(`${endpoint}/models`, AI_PROVIDERS_META['claude-code'].isLocal, {
           method: 'GET',
           headers: {
             'x-api-key': apiKey,
@@ -273,7 +253,7 @@ export async function testAiProviderProbe(
       case 'codex': {
         const p = aiCfg?.providers?.codex;
         const rawEndpoint = p?.endpoint || AI_PROVIDERS_META.codex.defaultEndpoint;
-        const endpoint = validateAiEndpoint(rawEndpoint, AI_PROVIDERS_META.codex.isLocal);
+        const endpoint = await validateAiEndpoint(rawEndpoint, AI_PROVIDERS_META.codex.isLocal);
         const apiKey = resolveAiApiKey(
           p?.apiKey,
           process.env.OPENAI_API_KEY,
@@ -288,7 +268,7 @@ export async function testAiProviderProbe(
             error: 'No OpenAI API key configured.',
           };
         }
-        const res = await fetch(`${endpoint}/models`, {
+        const res = await aiFetch(`${endpoint}/models`, AI_PROVIDERS_META.codex.isLocal, {
           method: 'GET',
           headers: {
             Authorization: `Bearer ${apiKey}`,
@@ -322,7 +302,7 @@ export async function testAiProviderProbe(
       case 'vllm': {
         const p = aiCfg?.providers?.vllm;
         const rawEndpoint = p?.endpoint || AI_PROVIDERS_META.vllm.defaultEndpoint;
-        const endpoint = validateAiEndpoint(rawEndpoint, AI_PROVIDERS_META.vllm.isLocal);
+        const endpoint = await validateAiEndpoint(rawEndpoint, AI_PROVIDERS_META.vllm.isLocal);
         const apiKey = resolveAiApiKey(
           p?.apiKey,
           undefined,
@@ -334,7 +314,7 @@ export async function testAiProviderProbe(
         if (apiKey) {
           headers.Authorization = `Bearer ${apiKey}`;
         }
-        const res = await fetch(`${endpoint}/models`, {
+        const res = await aiFetch(`${endpoint}/models`, AI_PROVIDERS_META.vllm.isLocal, {
           method: 'GET',
           headers,
           signal: AbortSignal.timeout(4000),
@@ -411,7 +391,7 @@ export async function generateAiCompletion(
     case 'antigravity': {
       const p = aiCfg?.providers?.antigravity;
       const rawEndpoint = p?.endpoint || AI_PROVIDERS_META.antigravity.defaultEndpoint;
-      const endpoint = validateAiEndpoint(rawEndpoint, AI_PROVIDERS_META.antigravity.isLocal);
+      const endpoint = await validateAiEndpoint(rawEndpoint, AI_PROVIDERS_META.antigravity.isLocal);
       const model = p?.model || AI_PROVIDERS_META.antigravity.defaultModel;
       const apiKey = resolveAiApiKey(
         p?.apiKey,
@@ -424,8 +404,9 @@ export async function generateAiCompletion(
         throw new Error('Missing API Key for Google Antigravity / Gemini. Enter your API key in the Provider Settings tab.');
       }
 
-      const res = await fetch(
+      const res = await aiFetch(
         `${endpoint}/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`,
+        AI_PROVIDERS_META.antigravity.isLocal,
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -459,11 +440,11 @@ export async function generateAiCompletion(
     case 'ollama': {
       const p = aiCfg?.providers?.ollama;
       const rawEndpoint = p?.endpoint || AI_PROVIDERS_META.ollama.defaultEndpoint;
-      const endpoint = validateAiEndpoint(rawEndpoint, AI_PROVIDERS_META.ollama.isLocal);
+      const endpoint = await validateAiEndpoint(rawEndpoint, AI_PROVIDERS_META.ollama.isLocal);
       const model = p?.model || AI_PROVIDERS_META.ollama.defaultModel;
       const temperature = p?.temperature ?? 0.2;
 
-      const res = await fetch(`${endpoint}/api/chat`, {
+      const res = await aiFetch(`${endpoint}/api/chat`, AI_PROVIDERS_META.ollama.isLocal, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -493,7 +474,7 @@ export async function generateAiCompletion(
     case 'claude-code': {
       const p = aiCfg?.providers?.claudeCode;
       const rawEndpoint = p?.endpoint || AI_PROVIDERS_META['claude-code'].defaultEndpoint;
-      const endpoint = validateAiEndpoint(rawEndpoint, AI_PROVIDERS_META['claude-code'].isLocal);
+      const endpoint = await validateAiEndpoint(rawEndpoint, AI_PROVIDERS_META['claude-code'].isLocal);
       const model = p?.model || AI_PROVIDERS_META['claude-code'].defaultModel;
       const apiKey = resolveAiApiKey(
         p?.apiKey,
@@ -506,7 +487,7 @@ export async function generateAiCompletion(
         throw new Error('Missing API Key for Claude Code (Anthropic). Enter your API key in the Provider Settings tab.');
       }
 
-      const res = await fetch(`${endpoint}/messages`, {
+      const res = await aiFetch(`${endpoint}/messages`, AI_PROVIDERS_META['claude-code'].isLocal, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -539,7 +520,7 @@ export async function generateAiCompletion(
     case 'codex': {
       const p = aiCfg?.providers?.codex;
       const rawEndpoint = p?.endpoint || AI_PROVIDERS_META.codex.defaultEndpoint;
-      const endpoint = validateAiEndpoint(rawEndpoint, AI_PROVIDERS_META.codex.isLocal);
+      const endpoint = await validateAiEndpoint(rawEndpoint, AI_PROVIDERS_META.codex.isLocal);
       const model = p?.model || AI_PROVIDERS_META.codex.defaultModel;
       const apiKey = resolveAiApiKey(
         p?.apiKey,
@@ -552,7 +533,7 @@ export async function generateAiCompletion(
         throw new Error('Missing API Key for OpenAI Codex. Enter your API key in the Provider Settings tab.');
       }
 
-      const res = await fetch(`${endpoint}/chat/completions`, {
+      const res = await aiFetch(`${endpoint}/chat/completions`, AI_PROVIDERS_META.codex.isLocal, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -584,7 +565,7 @@ export async function generateAiCompletion(
     case 'vllm': {
       const p = aiCfg?.providers?.vllm;
       const rawEndpoint = p?.endpoint || AI_PROVIDERS_META.vllm.defaultEndpoint;
-      const endpoint = validateAiEndpoint(rawEndpoint, AI_PROVIDERS_META.vllm.isLocal);
+      const endpoint = await validateAiEndpoint(rawEndpoint, AI_PROVIDERS_META.vllm.isLocal);
       const model = p?.model || AI_PROVIDERS_META.vllm.defaultModel;
       const apiKey = resolveAiApiKey(
         p?.apiKey,
@@ -598,7 +579,7 @@ export async function generateAiCompletion(
         headers.Authorization = `Bearer ${apiKey}`;
       }
 
-      const res = await fetch(`${endpoint}/chat/completions`, {
+      const res = await aiFetch(`${endpoint}/chat/completions`, AI_PROVIDERS_META.vllm.isLocal, {
         method: 'POST',
         headers,
         body: JSON.stringify({

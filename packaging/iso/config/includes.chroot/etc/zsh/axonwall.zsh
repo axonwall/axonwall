@@ -20,7 +20,7 @@ export PAGER="less -FRX"
 # from another shell), which zlogin never heals — only login shells
 # were restored. This loop is idempotent and preserves order.
 for _d in /bin /sbin /usr/bin /usr/sbin /usr/local/bin /usr/local/sbin; do
-  case ":$PATH:" in *":$_d:"*) ;; *) PATH="$_d:$PATH";; esac
+  case ":$PATH:" in *":$_d:"*) ;; *) PATH="$PATH:$_d";; esac
 done
 export PATH
 unset _d

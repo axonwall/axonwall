@@ -157,6 +157,49 @@ func DefaultShellForRole(role string) string {
 	}
 }
 
+func defaultInteractiveAdminShell() string {
+	if _, err := os.Stat("/usr/bin/zsh"); err == nil {
+		return "/usr/bin/zsh"
+	}
+	return "/bin/bash"
+}
+
+func resolveLocalNSSShell(requestedShell, role string) string {
+	sh := cleanNSSField(requestedShell)
+	if sh == "" {
+		sh = DefaultShellForRole(role)
+	}
+	switch sh {
+	case "/usr/sbin/nologin", "/sbin/nologin", "/bin/false", "/usr/bin/false", "/sbin/false":
+		for _, cand := range []string{sh, "/usr/sbin/nologin", "/sbin/nologin", "/bin/false"} {
+			if _, err := os.Stat(cand); err == nil {
+				return cand
+			}
+		}
+		return "/sbin/nologin"
+	case "/usr/local/bin/axonwall-opshell":
+		if _, err := os.Stat(sh); err == nil {
+			return sh
+		}
+		for _, cand := range []string{"/usr/sbin/nologin", "/sbin/nologin", "/bin/false"} {
+			if _, err := os.Stat(cand); err == nil {
+				return cand
+			}
+		}
+		return "/sbin/nologin"
+	default:
+		if _, err := os.Stat(sh); err == nil {
+			return sh
+		}
+		for _, fb := range []string{"/bin/bash", "/bin/ash", "/bin/sh"} {
+			if _, err := os.Stat(fb); err == nil {
+				return fb
+			}
+		}
+		return "/bin/sh"
+	}
+}
+
 // seedUserZshrc ensures a user's home directory has a .zshrc that loads /etc/zsh/axonwall.zsh
 // so ZSH's first-run wizard (zsh-newuser-install) never blocks interactive logins.
 func seedUserZshrc(homeDir string, uid, gid int) {
@@ -286,10 +329,10 @@ func (d *DirectoryManager) ensureBreakGlassAdmin() error {
 		if u.ApplianceRole == "admin" && !u.PasswordLocked {
 			hasAdmin = true
 		}
-		// Upgrade existing shell users (admin / os_only) from legacy /bin/bash to /usr/bin/zsh
-		if (u.ApplianceRole == "admin" || u.ApplianceRole == "os_only") && (u.Shell == "/bin/bash" || u.Shell == "") {
-			zshShell := "/usr/bin/zsh"
-			_ = d.UpdateUser(u.Username, UpdateUserRequest{Shell: &zshShell})
+		// Upgrade existing shell users (admin / os_only) from legacy /bin/bash to /usr/bin/zsh only when zsh is installed
+		adminShell := defaultInteractiveAdminShell()
+		if (u.ApplianceRole == "admin" || u.ApplianceRole == "os_only") && ((u.Shell == "/bin/bash" && adminShell == "/usr/bin/zsh") || u.Shell == "") {
+			_ = d.UpdateUser(u.Username, UpdateUserRequest{Shell: &adminShell})
 		}
 		if u.HomeDir != "" && u.UID >= 1000 {
 			seedUserZshrc(u.HomeDir, u.UID, u.GID)
@@ -311,13 +354,14 @@ func (d *DirectoryManager) ensureBreakGlassAdmin() error {
 			}
 		}
 	}
+	adminShell := defaultInteractiveAdminShell()
 	for attempt := 0; attempt < 3; attempt++ {
 		err = d.CreateUser(CreateUserRequest{
 			Username:      "admin",
 			Comment:       "Axonwall Break-Glass Administrator",
 			Password:      adminPass,
 			ApplianceRole: "admin",
-			Shell:         "/usr/bin/zsh",
+			Shell:         adminShell,
 		})
 		if err == nil {
 			break
@@ -1065,10 +1109,18 @@ loginShell: %s
 			groupErrs = append(groupErrs, fmt.Sprintf("group %s: attach failed: %v", g, err))
 			continue
 		}
-		// Also mirror membership in /etc/group for local admin groups (sudo/adm on Debian, wheel on Arch) when that local group exists.
-		if (g == "sudo" || g == "adm" || g == "wheel") && localEtcGroupExists("/etc/group", g) {
-			if err := exec.Command("usermod", "-a", "-G", g, username).Run(); err != nil {
-				groupErrs = append(groupErrs, fmt.Sprintf("group %s: local mirror failed: %v", g, err))
+		// Mirror membership in /etc/group for local admin groups (sudo/adm on Debian, wheel on Arch) on SSSD hosts.
+		// Non-SSSD/Alpine hosts mirror LDAP groups via syncLocalNSSMirrorIfNoSSSD below.
+		// Use gpasswd -a because shadow-utils usermod requires the user to already exist in /etc/passwd.
+		if hasSSSD() && (g == "sudo" || g == "adm" || g == "wheel") && localEtcGroupExists("/etc/group", g) {
+			var cmd *exec.Cmd
+			if gpasswdBin, gErr := exec.LookPath("gpasswd"); gErr == nil {
+				cmd = exec.Command(gpasswdBin, "-a", username, g)
+			} else {
+				cmd = exec.Command("usermod", "-a", "-G", g, username)
+			}
+			if err := cmd.Run(); err != nil {
+				log.Printf("[Directory] Warning: local group mirror (%s += %s) failed: %v", g, username, err)
 			}
 		}
 	}
@@ -1803,18 +1855,7 @@ func (d *DirectoryManager) applyLocalNSSMirror(deletedUser string, ldapUsers []L
 				if home == "" {
 					home = "/home/" + cleanNSSField(lu.Username)
 				}
-				sh := cleanNSSField(lu.Shell)
-				if sh == "" {
-					sh = DefaultShellForRole(lu.ApplianceRole)
-				}
-				if _, serr := os.Stat(sh); serr != nil {
-					for _, fb := range []string{"/bin/bash", "/bin/ash", "/bin/sh"} {
-						if _, ferr := os.Stat(fb); ferr == nil {
-							sh = fb
-							break
-						}
-					}
-				}
+				sh := resolveLocalNSSShell(lu.Shell, lu.ApplianceRole)
 				newPasswdLines = append(newPasswdLines, fmt.Sprintf("%s:x:%d:%d:%s:%s:%s", cleanNSSField(lu.Username), lu.UID, lu.GID, gecos, home, sh))
 			} else if uUID >= 10000 && uUID < 60000 && isTrackedMirror {
 				// Stale LDAP-mirrored user removed from directory (local UIDs in 10000-59999 are preserved)
@@ -1835,18 +1876,7 @@ func (d *DirectoryManager) applyLocalNSSMirror(deletedUser string, ldapUsers []L
 			if home == "" {
 				home = "/home/" + cleanU
 			}
-			sh := cleanNSSField(lu.Shell)
-			if sh == "" {
-				sh = DefaultShellForRole(lu.ApplianceRole)
-			}
-			if _, serr := os.Stat(sh); serr != nil {
-				for _, fb := range []string{"/bin/bash", "/bin/ash", "/bin/sh"} {
-					if _, ferr := os.Stat(fb); ferr == nil {
-						sh = fb
-						break
-					}
-				}
-			}
+			sh := resolveLocalNSSShell(lu.Shell, lu.ApplianceRole)
 			newPasswdLines = append(newPasswdLines, fmt.Sprintf("%s:x:%d:%d:%s:%s:%s", cleanU, lu.UID, lu.GID, gecos, home, sh))
 		}
 		newPasswdContent := strings.Join(newPasswdLines, "\n") + "\n"
@@ -2023,8 +2053,9 @@ func (d *DirectoryManager) MigrateLocalHumanUsers() ([]string, error) {
 			comment = u.Username
 		}
 		shell := strings.TrimSpace(u.Shell)
-		if shell == "" || shell == "/bin/bash" || !allowedLoginShells[shell] {
-			shell = "/usr/bin/zsh"
+		adminShell := defaultInteractiveAdminShell()
+		if shell == "" || (shell == "/bin/bash" && adminShell == "/usr/bin/zsh") || !allowedLoginShells[shell] {
+			shell = adminShell
 		}
 
 		var sshLines strings.Builder

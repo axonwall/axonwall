@@ -278,6 +278,8 @@ export interface InstallerChoices {
   ZFS_EXTRA_DISKS: string;
   ZFS_RAID_TOPOLOGY: string;
   CUSTOM_MOUNTS_JSON: string;
+  INSTALL_MODE?: 'ab' | 'rolling' | 'zbm';
+  PARTITION_MODE?: 'ab' | 'rolling' | 'zbm' | 'wizard';
   INSTALL_EDITION?: 'axonwall' | 'minimal' | 'vault' | 'k3s-storage';
   K3S_ROLE?: 'server' | 'agent';
   K3S_SERVER_URL?: string;
@@ -343,6 +345,9 @@ export function cloudInitStorageToInstallerChoices(
   const k3sServerUrl = k3sBootstrap?.server_url ?? k3sState?.serverUrl ?? '';
   const k3sJoinToken = (k3sBootstrap?.join_token ?? '').replace(/[\r\n\0]/g, '');
   const zfsArcMaxMb = k3sBootstrap?.zfs_arc_max_mb ?? k3sState?.zfsArcMaxMb ?? 0;
+  const installMode: 'ab' | 'rolling' | 'zbm' =
+    storage.layout_mode === 'single_root' ? 'rolling' : 'ab';
+  const partitionMode = installMode;
 
   return {
     TARGET_DISK: targetDisk,
@@ -373,6 +378,8 @@ export function cloudInitStorageToInstallerChoices(
     ZFS_EXTRA_DISKS: zfsExtraDisks,
     ZFS_RAID_TOPOLOGY: zfsTopology,
     CUSTOM_MOUNTS_JSON: customMountsJson,
+    INSTALL_MODE: installMode,
+    PARTITION_MODE: partitionMode,
     INSTALL_EDITION: installEdition,
     K3S_ROLE: k3sRole,
     K3S_SERVER_URL: k3sServerUrl,
@@ -389,14 +396,30 @@ function escapeShellSingleQuotes(val: string | number | boolean): string {
 }
 
 /**
+ * Formats sensitive secrets intended for separate mode-0600 files
+ * (/var/lib/partman/axonwall-luks.pass and /var/lib/partman/axonwall-k3s.token)
+ * so they are never placed in the world/shell-sourced axonwall-choices env file.
+ */
+export function formatInstallerSecretFiles(choices: InstallerChoices): {
+  luksPassphrase?: string;
+  k3sJoinToken?: string;
+} {
+  return {
+    ...(choices.LUKS_PASSPHRASE ? { luksPassphrase: choices.LUKS_PASSPHRASE } : {}),
+    ...(choices.K3S_JOIN_TOKEN ? { k3sJoinToken: choices.K3S_JOIN_TOKEN } : {}),
+  };
+}
+
+/**
  * Formats InstallerChoices as shell variables suitable for sourcing in sh scripts.
  */
 export function formatInstallerChoicesEnv(choices: InstallerChoices): string {
   const installEdition = choices.INSTALL_EDITION ?? 'axonwall';
   const k3sRole = choices.K3S_ROLE ?? 'server';
   const k3sServerUrl = choices.K3S_SERVER_URL ?? '';
-  const k3sJoinToken = choices.K3S_JOIN_TOKEN ?? '';
   const zfsArcMaxMb = choices.ZFS_ARC_MAX_MB ?? 0;
+  const installMode = choices.INSTALL_MODE ?? (choices.STANDBY_ENABLED ? 'ab' : 'rolling');
+  const partitionMode = choices.PARTITION_MODE ?? installMode;
 
   return [
     `# ==============================================================================`,
@@ -409,21 +432,22 @@ export function formatInstallerChoicesEnv(choices: InstallerChoices): string {
     `ROOT_GB=${choices.ROOT_GB}`,
     `ROOT_MB=${choices.ROOT_MB}`,
     `ROOT_FSTYPE=${escapeShellSingleQuotes(choices.ROOT_FSTYPE)}`,
-    `STANDBY_ENABLED=${choices.STANDBY_ENABLED}`,
+    `INSTALL_MODE=${escapeShellSingleQuotes(installMode)}`,
+    `PARTITION_MODE=${escapeShellSingleQuotes(partitionMode)}`,
+    `STANDBY_ENABLED=${choices.STANDBY_ENABLED ? 1 : 0}`,
     `SWAP_GB=${choices.SWAP_GB}`,
     `SWAP_MB=${choices.SWAP_MB}`,
-    `ZRAM_ENABLED=${choices.ZRAM_ENABLED}`,
+    `ZRAM_ENABLED=${choices.ZRAM_ENABLED ? 1 : 0}`,
     `DATA_GB=${choices.DATA_GB}`,
     `DATA_MB=${choices.DATA_MB}`,
     `DATA_FSTYPE=${escapeShellSingleQuotes(choices.DATA_FSTYPE)}`,
     `DATA_ALLOC_MODE=${escapeShellSingleQuotes(choices.DATA_ALLOC_MODE)}`,
-    `LOGS_ENABLED=${choices.LOGS_ENABLED}`,
+    `LOGS_ENABLED=${choices.LOGS_ENABLED ? 1 : 0}`,
     `LOGS_GB=${choices.LOGS_GB}`,
     `LOGS_MB=${choices.LOGS_MB}`,
     `LOGS_FSTYPE=${escapeShellSingleQuotes(choices.LOGS_FSTYPE)}`,
-    `LUKS_ENABLED=${choices.LUKS_ENABLED}`,
-    `LUKS_TPM2=${choices.LUKS_TPM2}`,
-    `LUKS_PASSPHRASE=${escapeShellSingleQuotes(choices.LUKS_PASSPHRASE)}`,
+    `LUKS_ENABLED=${choices.LUKS_ENABLED ? 1 : 0}`,
+    `LUKS_TPM2=${choices.LUKS_TPM2 ? 1 : 0}`,
     `ZFS_ALLOC_MODE=${escapeShellSingleQuotes(choices.ZFS_ALLOC_MODE)}`,
     `ZFS_GB=${choices.ZFS_GB}`,
     `ZFS_MB=${choices.ZFS_MB}`,
@@ -433,7 +457,6 @@ export function formatInstallerChoicesEnv(choices: InstallerChoices): string {
     `INSTALL_EDITION=${escapeShellSingleQuotes(installEdition)}`,
     `K3S_ROLE=${escapeShellSingleQuotes(k3sRole)}`,
     `K3S_SERVER_URL=${escapeShellSingleQuotes(k3sServerUrl)}`,
-    `K3S_JOIN_TOKEN=${escapeShellSingleQuotes(k3sJoinToken)}`,
     `ZFS_ARC_MAX_MB=${zfsArcMaxMb}`,
     ``,
   ].join('\n');
@@ -689,6 +712,7 @@ export interface CloudInitExportOptions {
 
 export interface HostIntrospectionData {
   desiredState: DesiredState;
+  edition?: 'axonwall' | 'minimal' | 'vault' | 'k3s-storage';
   hostname?: string;
   fqdn?: string;
   timezone?: string;
@@ -1121,6 +1145,26 @@ export function prepareDesiredStateForCloudInit(
         }
       }
     }
+    if (cloned.ddns && Array.isArray(cloned.ddns.entries)) {
+      for (const entry of cloned.ddns.entries) {
+        if (entry.apiToken) {
+          entry.apiToken = REDACTED_SECRET_PLACEHOLDER;
+        }
+      }
+    }
+    if (cloned.threatHarvester) {
+      if (cloned.threatHarvester.teacherLlm?.apiKey) {
+        cloned.threatHarvester.teacherLlm.apiKey = REDACTED_SECRET_PLACEHOLDER;
+      }
+      if (cloned.threatHarvester.fleetShipper) {
+        if (cloned.threatHarvester.fleetShipper.accessKey) {
+          cloned.threatHarvester.fleetShipper.accessKey = REDACTED_SECRET_PLACEHOLDER;
+        }
+        if (cloned.threatHarvester.fleetShipper.secretKey) {
+          cloned.threatHarvester.fleetShipper.secretKey = REDACTED_SECRET_PLACEHOLDER;
+        }
+      }
+    }
     if (cloned.captivePortal) {
       if ((cloned.captivePortal as any).radiusSecret) {
         (cloned.captivePortal as any).radiusSecret = REDACTED_SECRET_PLACEHOLDER;
@@ -1189,13 +1233,10 @@ export function inferCloudInitPackages(state: DesiredState, extraPackages: strin
     pkgs.add('strongswan');
     pkgs.add('strongswan-swanctl');
   }
-  if (state.ups?.enabled || enabledPluginIds.has('nut')) {
+  if (state.ups?.enabled || enabledPluginIds.has('nut-ups')) {
     pkgs.add('nut');
     pkgs.add('nut-client');
     pkgs.add('nut-server');
-  }
-  if (state.headscale?.enabled || enabledPluginIds.has('headscale')) {
-    pkgs.add('headscale');
   }
   if (state.haproxy?.enabled || enabledPluginIds.has('haproxy')) {
     pkgs.add('haproxy');
@@ -1203,7 +1244,7 @@ export function inferCloudInitPackages(state: DesiredState, extraPackages: strin
   if (state.freeradius?.enabled || enabledPluginIds.has('freeradius')) {
     pkgs.add('freeradius');
   }
-  if (state.snmp?.enabled || enabledPluginIds.has('snmpd')) {
+  if (state.snmp?.enabled || enabledPluginIds.has('snmp')) {
     pkgs.add('snmpd');
   }
   if (state.sso?.enabled) {
@@ -1268,7 +1309,7 @@ export function buildCloudInitFromSystem(
         name,
         gecos: osUser.gecos || `${name} User`,
         sudo: osUser.sudo,
-        shell: osUser.shell || '/usr/bin/zsh',
+        shell: osUser.shell || (data.edition === 'minimal' ? '/bin/bash' : '/usr/bin/zsh'),
         lock_passwd: osUser.lockPasswd ?? false,
         ssh_authorized_keys: Array.from(new Set(validKeys)),
       });
@@ -1315,6 +1356,7 @@ export function buildCloudInitFromSystem(
     ...(includePackages ? { packages: inferCloudInitPackages(data.desiredState, data.extraPackages) } : {}),
     runcmd: ['/usr/local/bin/axonwall-firstboot'],
     axonwall: {
+      ...(data.edition ? { edition: data.edition } : {}),
       ...(exportedStorage ? { storage: exportedStorage } : {}),
       auth: authSection,
       desired_state: preparedState,

@@ -1,7 +1,7 @@
 import path from 'node:path';
 import fs from 'node:fs/promises';
 import { execa } from 'execa';
-import { getVigilanteEvidenceDir, ensureVigilanteConfig, shQuote } from './config.js';
+import { getVigilanteEvidenceDir, ensureVigilanteConfig, shQuote, sanitizePathComponent, resolvePathInside, assertCliTarget, assertDnsLabel } from './config.js';
 import { saveEvidenceFile, listHostEvidence } from './evidence.js';
 import { logger } from '../utils/logger.js';
 
@@ -352,7 +352,11 @@ export async function runHostVulnerabilityScan({
   onProgress = null,
   onLog = null
 } = {}) {
-  const hostIp = typeof host === 'string' ? host : host?.ip || '127.0.0.1';
+  const rawHostIp = typeof host === 'string' ? host : host?.ip || '127.0.0.1';
+  const hostIp = assertCliTarget(String(rawHostIp).trim(), 'OpenVAS target host');
+  if (namespace !== null && namespace !== undefined) {
+    assertDnsLabel(namespace, 'namespace');
+  }
   const profileObj = SCAN_PROFILES.find(p => p.id === profile) || SCAN_PROFILES[0];
   const startTime = Date.now();
   const useSimulation = Boolean(simulate || process.env.VIGILANTE_SIMULATE_SCANS === '1');
@@ -533,11 +537,11 @@ export async function listSavedOpenVasReports(networkTarget = 'local_network', h
   try {
     await ensureVigilanteConfig();
     const evidenceDir = getVigilanteEvidenceDir();
-    const netDir = path.join(evidenceDir, networkTarget.replace(/\//g, '_'));
+    const netDir = resolvePathInside(evidenceDir, sanitizePathComponent(networkTarget || 'local_network'));
 
     if (hostIp) {
-      const hostDir = path.join(netDir, hostIp);
-      const reportFile = path.join(hostDir, 'openvas_report.json');
+      const hostDir = resolvePathInside(netDir, sanitizePathComponent(hostIp));
+      const reportFile = resolvePathInside(hostDir, 'openvas_report.json');
       try {
         const content = await fs.readFile(reportFile, 'utf8');
         return [JSON.parse(content)];

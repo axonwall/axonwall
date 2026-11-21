@@ -167,6 +167,11 @@ rsync -aHAX --exclude='/proc/*' --exclude='/sys/*' --exclude='/dev/*' \
   --exclude='/run/*' --exclude='/tmp/*' --exclude='/boot/efi/*' \
   --exclude='/var/lib/axonwall/*' "${CHROOT_SRC}/" "${TARGET}/"
 
+if [[ -d "${CHROOT_SRC}/var/lib/axonwall/core-k3s" ]]; then
+  echo "[+] Preserving pre-staged core-k3s binaries into persistent data partition..."
+  cp -a "${CHROOT_SRC}/var/lib/axonwall/core-k3s" "${TARGET}/var/lib/axonwall/"
+fi
+
 # Copy Axonwall chroot overrides and configurations
 if [[ -d "${ROOT_DIR}/packaging/iso/config/includes.chroot" ]]; then
   echo "[+] Applying Axonwall appliance includes and hooks..."

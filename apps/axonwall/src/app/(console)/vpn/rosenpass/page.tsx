@@ -852,12 +852,14 @@ export default function RosenpassPage() {
               </div>
               <span
                 className={`text-xs font-mono px-2.5 py-1 rounded border ${
-                  liveStatus?.serviceActive
-                    ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
-                    : 'bg-slate-800 text-slate-400 border-slate-700'
+                  liveStatus?.daemonDown
+                    ? 'bg-amber-500/15 text-amber-300 border-amber-500/30'
+                    : liveStatus?.serviceActive
+                      ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
+                      : 'bg-slate-800 text-slate-400 border-slate-700'
                 }`}
               >
-                rosenpass.service: {liveStatus?.serviceActive ? 'ACTIVE' : 'INACTIVE'}
+                rosenpass.service: {liveStatus?.daemonDown ? 'UNKNOWN (daemon unreachable)' : liveStatus?.serviceActive ? 'ACTIVE' : 'INACTIVE'}
               </span>
             </div>
 

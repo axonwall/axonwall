@@ -15,17 +15,21 @@ if [ -d binary/boot ] || [ -d binary/live ] || [ -d binary/isolinux ]; then
   CHROOT_DIR="chroot"
 fi
 
+FLAVOR_ID="axonwall"
 FLAVOR_TITLE="Axonwall OS"
 LIVE_HOST="axonwall"
 SPLASH_SRC=""
 
 if [ -f "${CHROOT_DIR}/etc/axonwall/.vault-edition" ] || grep -qi "Vault" "${BIN_DIR}/.disk/info" 2>/dev/null; then
+  FLAVOR_ID="vault"
   FLAVOR_TITLE="Axonwall Vault OS"
   LIVE_HOST="axonwall-vault"
 elif [ -f "${CHROOT_DIR}/etc/axonwall/.k3s-edition" ] || grep -qi "K3s" "${BIN_DIR}/.disk/info" 2>/dev/null; then
+  FLAVOR_ID="k3s-storage"
   FLAVOR_TITLE="Axonwall K3s Storage Host"
   LIVE_HOST="axonwall-storage"
 elif [ -f "${CHROOT_DIR}/etc/axonwall/.minimal-edition" ] || grep -qi "Minimal" "${BIN_DIR}/.disk/info" 2>/dev/null; then
+  FLAVOR_ID="minimal"
   FLAVOR_TITLE="Axonwall Minimal"
   LIVE_HOST="axonwall-minimal"
 fi
@@ -186,6 +190,9 @@ menuentry "Install ${FLAVOR_TITLE} (Next-Gen TUI Installer)" --hotkey=i {
 	linux	${LIVE_KERN} ${COMMON_LIVE_ARGS} axonwall_install=1 findiso=\${iso_path}
 	initrd	${LIVE_INITRD}
 }
+INSTALL_START_EOF
+  if [ "$FLAVOR_ID" = "axonwall" ]; then
+    cat >> "${BIN_DIR}/boot/grub/install_start.cfg" << INSTALL_START_EDITIONS_EOF
 menuentry "Install Axonwall Minimal Edition (Reduced Attack Surface)" --hotkey=n {
 	linux	${LIVE_KERN} ${COMMON_LIVE_ARGS} axonwall_install=1 axonwall_edition=minimal findiso=\${iso_path}
 	initrd	${LIVE_INITRD}
@@ -198,11 +205,14 @@ menuentry "Install Axonwall K3s + ZFS Storage Host (Minimal)" --hotkey=k {
 	linux	${LIVE_KERN} ${COMMON_LIVE_ARGS} axonwall_install=1 axonwall_edition=k3s-storage findiso=\${iso_path}
 	initrd	${LIVE_INITRD}
 }
+INSTALL_START_EDITIONS_EOF
+  fi
+  cat >> "${BIN_DIR}/boot/grub/install_start.cfg" << INSTALL_START_END_EOF
 menuentry "Zero-Touch Unattended Install (Cloud-Init / Auto-Partition)" --hotkey=z {
 	linux	${LIVE_KERN} ${COMMON_LIVE_ARGS} axonwall_install=1 axonwall.unattended=1 findiso=\${iso_path}
 	initrd	${LIVE_INITRD}
 }
-INSTALL_START_EOF
+INSTALL_START_END_EOF
 
   cat > "${BIN_DIR}/boot/grub/install.cfg" << INSTALL_SUB_EOF
 menuentry "Install ${FLAVOR_TITLE} via Serial Console (ttyS0 9600)" --hotkey=s {
@@ -214,7 +224,7 @@ menuentry "Legacy Debian Installer (d-i Preseed Dark Theme)" --hotkey=d {
 	initrd	/install/initrd.gz
 }
 menuentry "Legacy Debian Installer (Expert Mode)" --hotkey=x {
-	linux	/install/vmlinuz priority=low vga=788 theme=dark auto=true priority=critical preseed/file=/cdrom/preseed.cfg
+	linux	/install/vmlinuz priority=low vga=788 theme=dark preseed/file=/cdrom/preseed.cfg
 	initrd	/install/initrd.gz
 }
 menuentry "Legacy Rescue Mode" --hotkey=r {
@@ -288,6 +298,9 @@ label install-tui
 	linux ${LIVE_KERN}
 	initrd ${LIVE_INITRD}
 	append ${COMMON_LIVE_ARGS} axonwall_install=1
+ISOLINUX_LIVE_EOF
+  if [ "$FLAVOR_ID" = "axonwall" ]; then
+    cat >> "${BIN_DIR}/isolinux/live.cfg" << ISOLINUX_EDITIONS_EOF
 
 label install-minimal
 	menu label Install Axonwall ^Minimal Edition (Reduced Attack Surface)
@@ -306,6 +319,9 @@ label install-k3s-storage
 	linux ${LIVE_KERN}
 	initrd ${LIVE_INITRD}
 	append ${COMMON_LIVE_ARGS} axonwall_install=1 axonwall_edition=k3s-storage
+ISOLINUX_EDITIONS_EOF
+  fi
+  cat >> "${BIN_DIR}/isolinux/live.cfg" << ISOLINUX_REST_EOF
 
 label install-unattended
 	menu label ^Zero-Touch Unattended Install (Cloud-Init / Auto-Partition)
@@ -324,7 +340,7 @@ label live-amd64-failsafe
 	linux ${LIVE_KERN}
 	initrd ${LIVE_INITRD}
 	append boot=live components memtest noapic noapm nodma nomce nosmp nosplash vga=788
-ISOLINUX_LIVE_EOF
+ISOLINUX_REST_EOF
 
   cat > "${BIN_DIR}/isolinux/install.cfg" << ISOLINUX_INSTALL_EOF
 menu begin legacy-install
@@ -351,7 +367,7 @@ menu begin legacy-install
 		menu label Legacy Debian E^xpert Install
 		linux /install/vmlinuz
 		initrd /install/initrd.gz
-		append priority=low vga=788 theme=dark auto=true priority=critical preseed/file=/cdrom/preseed.cfg
+		append priority=low vga=788 theme=dark preseed/file=/cdrom/preseed.cfg
 
 	label darkrescue
 		menu label Legacy Debian ^Rescue Mode

@@ -10,12 +10,14 @@ import {
   discoverOidc,
   exchangeCodeForIdentity,
   getOidcConfig,
+  resolveOidcRedirectUri,
+  resolvePublicOrigin,
   roleFromGroups,
 } from '../../../../../server/oidc';
 
-function fail(request: NextRequest, message: string) {
+function fail(publicOrigin: string, message: string) {
   const response = NextResponse.redirect(
-    new URL(`/login?error=${encodeURIComponent(message)}`, request.url)
+    new URL(`/login?error=${encodeURIComponent(message)}`, publicOrigin)
   );
   response.cookies.set(OIDC_STATE_COOKIE, '', { path: '/api/auth', maxAge: 0 });
   return response;
@@ -28,9 +30,14 @@ function safeEqual(a: string, b: string): boolean {
 }
 
 export async function GET(request: NextRequest) {
-  const cfg = getOidcConfig();
+  const cfg = await getOidcConfig();
+  const publicOrigin = resolvePublicOrigin(
+    request.headers,
+    request.nextUrl.origin,
+    cfg?.redirectUri
+  );
   if (!cfg) {
-    return fail(request, 'SSO is not configured');
+    return fail(publicOrigin, 'SSO is not configured');
   }
 
   const { searchParams } = new URL(request.url);
@@ -43,16 +50,18 @@ export async function GET(request: NextRequest) {
   // Identity and role never come from query parameters -- they are read
   // from the provider-verified ID token below.
   if (!code || !state || !cookieValue) {
-    return fail(request, 'Invalid SSO callback');
+    return fail(publicOrigin, 'Invalid SSO callback');
   }
-  const [expectedState, expectedNonce] = cookieValue.split('.');
-  if (!expectedState || !safeEqual(state, expectedState)) {
-    return fail(request, 'Invalid SSO state');
+  const cookieParts = cookieValue.split('.');
+  const expectedState = cookieParts[0];
+  const expectedNonce = cookieParts[1];
+  if (cookieParts.length !== 2 || !expectedState || !expectedNonce || !safeEqual(state, expectedState)) {
+    return fail(publicOrigin, 'Invalid SSO state');
   }
 
   try {
     const discovery = await discoverOidc(cfg);
-    const redirectUri = `${request.nextUrl.origin}/api/auth/callback/oidc`;
+    const redirectUri = resolveOidcRedirectUri(publicOrigin, cfg.redirectUri);
     const claims = await exchangeCodeForIdentity(
       cfg,
       discovery,
@@ -78,7 +87,9 @@ export async function GET(request: NextRequest) {
     }
 
     // Map the verified IdP group claim to an Axonwall RBAC role
-    const role = roleFromGroups(claims.groups);
+    const claimKey = cfg.groupClaim || 'groups';
+    const rawGroups = (claims as Record<string, unknown>)[claimKey] ?? claims.groups;
+    const role = roleFromGroups(rawGroups, cfg.roleMappings);
     const roleObj = DEFAULT_ROLES[role];
 
     const session: UserSession = {
@@ -96,7 +107,7 @@ export async function GET(request: NextRequest) {
     stampSessionEpoch(session);
     const token = await mintSupabaseToken(session, getJwtSecret());
 
-    const response = NextResponse.redirect(new URL('/lobby', request.url));
+    const response = NextResponse.redirect(new URL('/lobby', publicOrigin));
     response.cookies.set(SESSION_COOKIE, token, {
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production' && process.env.AXONWALL_INSECURE_HTTP !== '1',
@@ -108,6 +119,6 @@ export async function GET(request: NextRequest) {
 
     return response;
   } catch {
-    return fail(request, 'SSO sign-in failed');
+    return fail(publicOrigin, 'SSO sign-in failed');
   }
 }

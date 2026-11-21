@@ -23,34 +23,61 @@ export async function middleware(request: NextRequest) {
   const isMutation = !['GET', 'HEAD', 'OPTIONS'].includes(request.method.toUpperCase());
 
   if (isMutation) {
-    const secFetchSite = request.headers.get('sec-fetch-site');
-    if (secFetchSite && secFetchSite.toLowerCase() === 'cross-site') {
+    const secFetchSite = request.headers.get('sec-fetch-site')?.trim().toLowerCase();
+    if (secFetchSite === 'cross-site') {
       return NextResponse.json(
         { error: 'Forbidden: Cross-site request rejected.' },
         { status: 403 }
       );
     }
     const origin = request.headers.get('origin');
-    const host = request.headers.get('host') || request.headers.get('x-forwarded-host');
+    const referer = request.headers.get('referer');
+    const host = request.headers.get('x-forwarded-host') || request.headers.get('host');
+    const expectedHost = host ? host.split(',')[0].trim().toLowerCase() : '';
     if (origin === 'null') {
       return NextResponse.json(
         { error: 'Forbidden: Null Origin header rejected.' },
         { status: 403 }
       );
     }
-    if (origin && host) {
+    let originVerified = false;
+    if (origin) {
       try {
         const originUrl = new URL(origin);
-        const expectedHost = host.split(',')[0].trim().toLowerCase();
-        if (originUrl.host.toLowerCase() !== expectedHost) {
+        if (!expectedHost || originUrl.host.toLowerCase() !== expectedHost) {
           return NextResponse.json(
             { error: 'Forbidden: Cross-origin request rejected.' },
             { status: 403 }
           );
         }
+        originVerified = true;
       } catch {
         return NextResponse.json({ error: 'Forbidden: Invalid Origin header.' }, { status: 403 });
       }
+    } else if (secFetchSite === 'same-origin') {
+      originVerified = true;
+    } else if (referer) {
+      try {
+        const refererUrl = new URL(referer);
+        if (!expectedHost || refererUrl.host.toLowerCase() !== expectedHost) {
+          return NextResponse.json(
+            { error: 'Forbidden: Cross-origin Referer rejected.' },
+            { status: 403 }
+          );
+        }
+        originVerified = true;
+      } catch {
+        return NextResponse.json({ error: 'Forbidden: Invalid Referer header.' }, { status: 403 });
+      }
+    }
+
+    const hasSessionCookie = Boolean(request.cookies.get(SESSION_COOKIE)?.value);
+    const hasBearerAuth = Boolean(request.headers.get('authorization')?.startsWith('Bearer '));
+    if (hasSessionCookie && !hasBearerAuth && !originVerified) {
+      return NextResponse.json(
+        { error: 'Forbidden: Missing same-origin request proof for cookie-authenticated mutation.' },
+        { status: 403 }
+      );
     }
   }
 

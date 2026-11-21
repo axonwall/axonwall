@@ -9,6 +9,7 @@ TARGET_VERSION=""
 UPDATE_CHANNEL="stable"
 FORCE_ROLLING=0
 FORCE_ZBM=0
+FORCE_BTRFS=0
 APT_UPGRADE=0
 
 while [ $# -gt 0 ]; do
@@ -33,18 +34,23 @@ while [ $# -gt 0 ]; do
       FORCE_ZBM=1
       shift
       ;;
+    --btrfs|--snapper)
+      FORCE_BTRFS=1
+      shift
+      ;;
     --apt|--apt-upgrade)
       APT_UPGRADE=1
       shift
       ;;
     --help|-h)
       cat << 'USAGE_EOF'
-Usage: axonwall-update [--slot A|B] [--version <ver>] [--channel <name>] [--rolling] [--zbm|--zfsbootmenu] [--apt|--apt-upgrade]
+Usage: axonwall-update [--slot A|B] [--version <ver>] [--channel <name>] [--rolling] [--zbm|--zfsbootmenu] [--btrfs|--snapper] [--apt|--apt-upgrade]
   --slot A|B          Target dual-root slot (default B)
   --version <ver>     Release version to stage (required for ZBM updates)
   --channel <name>    Release channel (default stable)
   --rolling           In-place rolling update (single-root)
   --zbm               ZFSBootMenu Boot Environment update
+  --btrfs             Btrfs + Snapper pre/post snapshot update
   --apt               Also run an APT upgrade
 USAGE_EOF
       exit 0
@@ -53,7 +59,7 @@ USAGE_EOF
       # D-L1: unknown options used to be silently swallowed, so a typo
       # like `--versoin 0.11.68 --slo C` ran a version-less update of
       # the default slot B and exited 0. Fail loudly instead.
-      echo "[-] Error: unknown option '$1'. Valid options: --slot, --version, --channel, --rolling, --zbm, --apt, --help." >&2
+      echo "[-] Error: unknown option '$1'. Valid options: --slot, --version, --channel, --rolling, --zbm, --btrfs, --apt, --help." >&2
       exit 1
       ;;
   esac
@@ -142,31 +148,24 @@ detect_edition() {
     return 0
   fi
   # 3. Kernel cmdline, the same source the TUI installer reads when no
-  # marker is present.
-  if grep -qsE '(^|[[:space:]])(axonwall_edition=vault|axonwall\.edition=vault)($|[[:space:]])' /proc/cmdline 2>/dev/null; then
-    echo "vault"
-    return 0
-  fi
-  if grep -qsE '(^|[[:space:]])(axonwall_edition=k3s-storage|axonwall\.edition=k3s-storage)($|[[:space:]])' /proc/cmdline 2>/dev/null; then
-    echo "k3s-storage"
-    return 0
-  fi
-  if grep -qsE '(^|[[:space:]])(axonwall_edition=minimal|axonwall\.edition=minimal)($|[[:space:]])' /proc/cmdline 2>/dev/null; then
-    echo "minimal"
-    return 0
-  fi
-  if grep -qsE '(^|[[:space:]])(axonwall_edition=axonwall|axonwall\.edition=axonwall)($|[[:space:]])' /proc/cmdline 2>/dev/null; then
-    echo "axonwall"
-    return 0
-  fi
-  # An edition the updater does not know (e.g. `edge`, which lives
-  # only on the vault branch) must fail closed: guessing axonwall
-  # would stage the NGFW payload onto a box that deliberately strips
-  # it. The operator fixes the cmdline/markers and re-runs.
-  _cmdline_edition="$(grep -oE '(axonwall_edition|axonwall\.edition)=[^[:space:]]+' /proc/cmdline 2>/dev/null | tail -n 1 | sed -E 's/^[^=]+=//')"
-  if [ -n "$_cmdline_edition" ]; then
-    echo "[-] ERROR: unknown edition '${_cmdline_edition}' in kernel cmdline (expected axonwall, minimal, vault, or k3s-storage); refusing to guess which package to fetch." >&2
-    exit 1
+  # marker is present. Fail closed on conflicting or unknown tokens.
+  if grep -qsE '(^|[[:space:]])(axonwall_edition|axonwall\.edition)=[^[:space:]]+' /proc/cmdline 2>/dev/null; then
+    _cmdline_editions="$(grep -oE '(^|[[:space:]])(axonwall_edition|axonwall\.edition)=[^[:space:]]+' /proc/cmdline 2>/dev/null | sed -E 's/^[[:space:]]*[^=]+=//' | sort -u)"
+    _cmdline_count="$(printf '%s\n' "$_cmdline_editions" | grep -c . || true)"
+    if [ "$_cmdline_count" -gt 1 ]; then
+      echo "[-] ERROR: conflicting edition tokens in /proc/cmdline ($(printf '%s' "$_cmdline_editions" | tr '\n' ' ')); refusing to guess which package to fetch." >&2
+      exit 1
+    fi
+    case "$_cmdline_editions" in
+      axonwall|minimal|vault|k3s-storage)
+        echo "$_cmdline_editions"
+        return 0
+        ;;
+      *)
+        echo "[-] ERROR: unknown edition '${_cmdline_editions}' in kernel cmdline (expected axonwall, minimal, vault, or k3s-storage); refusing to guess which package to fetch." >&2
+        exit 1
+        ;;
+    esac
   fi
   # 4. No edition signal at all. This is a legacy box: it predates the
   # edition file, has no legacy markers (the NGFW edition never wrote
@@ -206,8 +205,23 @@ elif command -v findmnt >/dev/null 2>&1 && findmnt -n -o FSTYPE / 2>/dev/null | 
   ZBM_MODE=1
 fi
 
-ROLLING_MODE=0
+BTRFS_MODE=0
 if [ "$ZBM_MODE" = "1" ]; then
+  BTRFS_MODE=0
+elif [ "$FORCE_BTRFS" = "1" ]; then
+  BTRFS_MODE=1
+elif [ -f /etc/axonwall/install-mode ] && grep -qiE 'btrfs|snapper' /etc/axonwall/install-mode 2>/dev/null; then
+  BTRFS_MODE=1
+elif [ -f /var/lib/axonwall/install-mode ] && grep -qiE 'btrfs|snapper' /var/lib/axonwall/install-mode 2>/dev/null; then
+  BTRFS_MODE=1
+elif grep -qs -E 'axon_btrfs|rootfstype=btrfs|subvol=@' /proc/cmdline 2>/dev/null; then
+  BTRFS_MODE=1
+elif command -v findmnt >/dev/null 2>&1 && findmnt -n -o FSTYPE / 2>/dev/null | grep -q 'btrfs'; then
+  BTRFS_MODE=1
+fi
+
+ROLLING_MODE=0
+if [ "$ZBM_MODE" = "1" ] || [ "$BTRFS_MODE" = "1" ]; then
   ROLLING_MODE=0
 elif [ "$FORCE_ROLLING" = "1" ]; then
   ROLLING_MODE=1
@@ -221,7 +235,7 @@ fi
 
 TARGET_SLOT="$(printf '%s' "$TARGET_SLOT" | tr '[:lower:]' '[:upper:]')"
 if [ "$TARGET_SLOT" != "A" ] && [ "$TARGET_SLOT" != "B" ]; then
-  if [ "$ROLLING_MODE" = "1" ] || [ "$ZBM_MODE" = "1" ]; then
+  if [ "$ROLLING_MODE" = "1" ] || [ "$ZBM_MODE" = "1" ] || [ "$BTRFS_MODE" = "1" ]; then
     TARGET_SLOT="A"
   else
     echo "[-] Error: Invalid target slot '${TARGET_SLOT}'. Must be 'A' or 'B'." >&2
@@ -233,6 +247,8 @@ echo "==========================================================================
 echo "Axonwall Appliance Firmware Updater"
 if [ "$ZBM_MODE" = "1" ]; then
   echo "  Install Mode  : ZFSBootMenu Root-on-ZFS (Boot Environments & Snapshots)"
+elif [ "$BTRFS_MODE" = "1" ]; then
+  echo "  Install Mode  : Btrfs + Snapper Root (CoW Pre/Post Snapshots)"
 elif [ "$ROLLING_MODE" = "1" ]; then
   echo "  Install Mode  : Rolling Standard Linux (Single-Root /)"
 else
@@ -319,16 +335,73 @@ extract_deb() {
         rm -rf "$deb_tmp_dir"
         return 1
       fi
-      # R2: tar -xf honors symlink/hardlink members, so a crafted
-      # data.tar could plant links pointing outside the staging
-      # tree, which later rsync/cp steps would follow. Reject link
-      # members before extraction. This fallback runs only when
-      # dpkg-deb is absent, and a malicious .deb must first pass
-      # the signature check, so a proportionate pre-extraction
-      # rejection (rather than a post-extraction audit) suffices.
-      # --no-same-owner is defense in depth for the same reason.
-      if tar -tvf "$data_tar" 2>/dev/null | grep -qE '^[lh]'; then
-        echo "[!] Update package contains link members; refusing to extract." >&2
+      # Reject hardlinks unconditionally and validate every symlink target
+      # so legitimate in-tree relative links (generate-zbm, zbm-kcl,
+      # kubectl/crictl/ctr -> k3s) extract cleanly on Alpine while
+      # absolute, escaping, or traversed links fail closed.
+      if tar -tvf "$data_tar" 2>/dev/null | grep -qE '^h'; then
+        echo "[!] Update package contains hardlink members; refusing to extract." >&2
+        rm -rf "$deb_tmp_dir"
+        return 1
+      fi
+      if ! tar -tvf "$data_tar" 2>/dev/null | awk '
+        BEGIN { bad = 0; nsym = 0; nmem = 0 }
+        {
+          line = $0
+          ftype = substr(line, 1, 1)
+          if (ftype == "h") { bad = 1; exit 1 }
+          rest = line
+          if (!sub(/^[^ \t]+[ \t]+.*[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9][ \t]+[0-9][0-9]:[0-9][0-9](:[0-9][0-9])?[ \t]+/, "", rest)) {
+            bad = 1; exit 1
+          }
+          if (ftype == "l") {
+            idx = index(rest, " -> ")
+            if (idx == 0) { bad = 1; exit 1 }
+            member = substr(rest, 1, idx - 1)
+            target = substr(rest, idx + 4)
+            if (member == "" || target == "" || substr(target, 1, 1) == "/") { bad = 1; exit 1 }
+            sub(/^\.\//, "", member)
+            sub(/\/+$/, "", member)
+            nm = split(member, mp, "/")
+            depth = 0
+            for (i = 1; i < nm; i++) {
+              if (mp[i] == "" || mp[i] == ".") continue
+              if (mp[i] == "..") { bad = 1; exit 1 }
+              depth++
+            }
+            nt = split(target, tp, "/")
+            for (i = 1; i <= nt; i++) {
+              if (tp[i] == "" || tp[i] == ".") continue
+              if (tp[i] == "..") {
+                depth--
+                if (depth < 0) { bad = 1; exit 1 }
+              } else {
+                depth++
+              }
+            }
+            syms[nsym++] = member
+          } else {
+            mpath = rest
+            sub(/^\.\//, "", mpath)
+            sub(/\/+$/, "", mpath)
+            members[nmem++] = mpath
+          }
+        }
+        END {
+          if (bad) exit 1
+          for (s = 0; s < nsym; s++) {
+            prefix = syms[s] "/"
+            plen = length(prefix)
+            for (m = 0; m < nmem; m++) {
+              if (substr(members[m], 1, plen) == prefix) exit 1
+            }
+            for (s2 = 0; s2 < nsym; s2++) {
+              if (s2 != s && substr(syms[s2], 1, plen) == prefix) exit 1
+            }
+          }
+        }
+      '; then
+        echo "[!] Update package contains unsafe symlink members; refusing to extract." >&2
         rm -rf "$deb_tmp_dir"
         return 1
       fi
@@ -428,7 +501,7 @@ apply_staged_tree() {
     done
   fi
 
-  for sub in usr/lib/axonwall usr/lib/sysusers.d usr/lib/tmpfiles.d usr/share/oh-my-zsh usr/share/axonwall usr/share/plymouth/themes/axonwall lib/systemd/system/plymouth-quit.service.d lib/systemd/system/plymouth-quit-wait.service.d etc/zsh etc/zfsbootmenu etc/modprobe.d etc/sysctl.d etc/vim; do
+  for sub in usr/lib/axonwall usr/lib/sysusers.d usr/lib/tmpfiles.d usr/share/oh-my-zsh usr/share/axonwall usr/share/plymouth/themes/axonwall lib/systemd/system/plymouth-quit.service.d lib/systemd/system/plymouth-quit-wait.service.d etc/zsh etc/zfsbootmenu etc/modprobe.d etc/modules-load.d etc/sysctl.d etc/vim; do
     if [ -d "${pkg_stage}/${sub}" ]; then
       mkdir -p "${dest_root}/${sub}" 2>/dev/null || true
       cp -af "${pkg_stage}/${sub}/." "${dest_root}/${sub}/" 2>/dev/null || _apply_failed=1
@@ -448,6 +521,7 @@ apply_staged_tree() {
     # timers must not fail the overlay on the unmatched *.timer glob.
     for unit_f in "${pkg_stage}/lib/systemd/system/"*.service "${pkg_stage}/lib/systemd/system/"*.timer; do
       if [ -e "$unit_f" ]; then
+        bunit="$(basename "$unit_f")"
         # D-M9: k3s.service must never land on a vault box (the vault
         # has no k3s at all) — but on a k3s-storage box the staged unit
         # IS the flavor's own k3s.service: the D-M9 updater fetches the
@@ -455,10 +529,13 @@ apply_staged_tree() {
         # packages at dpkg. Skipping it here (as main's fc576368 did
         # for both flavor markers) would silently drop flavor unit
         # updates on every k3s-storage update.
-        if [ "$(basename "$unit_f")" = "k3s.service" ] && { [ -f "${dest_root}/etc/axonwall/.vault-edition" ] || [ -f "${dest_root}/etc/axonwall/.minimal-edition" ]; }; then
+        if [ "$bunit" = "k3s.service" ] && { [ -f "${dest_root}/etc/axonwall/.vault-edition" ] || [ -f "${dest_root}/etc/axonwall/.minimal-edition" ]; }; then
           continue
         fi
         cp -af "$unit_f" "${dest_root}/lib/systemd/system/" 2>/dev/null || _apply_failed=1
+        if [ -f "${dest_root}/etc/systemd/system/${bunit}" ] && [ ! -L "${dest_root}/etc/systemd/system/${bunit}" ]; then
+          cp -af "$unit_f" "${dest_root}/etc/systemd/system/${bunit}" 2>/dev/null || _apply_failed=1
+        fi
       fi
     done
   fi
@@ -467,6 +544,36 @@ apply_staged_tree() {
     sync_static_etc_axonwall "${pkg_stage}/etc/axonwall" "${dest_root}/etc/axonwall"
     if [ -d /var/lib/axonwall/etc-axonwall ]; then
       sync_static_etc_axonwall "${pkg_stage}/etc/axonwall" /var/lib/axonwall/etc-axonwall
+    fi
+  fi
+
+  if [ -d "${pkg_stage}/var/lib/axonwall/core-k3s" ]; then
+    _dest_ed="$(tr -d ' \t\r\n' < "${dest_root}/etc/axonwall/edition" 2>/dev/null || tr -d ' \t\r\n' < /etc/axonwall/edition 2>/dev/null || true)"
+    if [ ! -f "${dest_root}/etc/axonwall/.vault-edition" ] && [ ! -f "${dest_root}/etc/axonwall/.minimal-edition" ] && [ "$_dest_ed" != "vault" ] && [ "$_dest_ed" != "minimal" ]; then
+      for _kdir in "${dest_root}/var/lib/axonwall" "/var/lib/axonwall"; do
+        [ -n "$_kdir" ] || continue
+        mkdir -p "$_kdir" 2>/dev/null || { _apply_failed=1; continue; }
+        _ktmp="${_kdir}/.core-k3s.staging.$$"
+        _kold="${_kdir}/.core-k3s.old.$$"
+        _ktgt="${_kdir}/core-k3s"
+        rm -rf "$_ktmp" "$_kold" 2>/dev/null || true
+        if cp -a "${pkg_stage}/var/lib/axonwall/core-k3s" "$_ktmp" 2>/dev/null; then
+          if [ -e "$_ktgt" ]; then
+            mv "$_ktgt" "$_kold" 2>/dev/null || { rm -rf "$_ktmp"; _apply_failed=1; continue; }
+          fi
+          if mv "$_ktmp" "$_ktgt" 2>/dev/null; then
+            rm -rf "$_kold" 2>/dev/null || true
+          else
+            [ -e "$_kold" ] && mv "$_kold" "$_ktgt" 2>/dev/null || true
+            rm -rf "$_ktmp" 2>/dev/null || true
+            _apply_failed=1
+          fi
+        else
+          rm -rf "$_ktmp" 2>/dev/null || true
+          _apply_failed=1
+        fi
+        [ "${dest_root}" = "" ] && break
+      done
     fi
   fi
 
@@ -554,11 +661,11 @@ if [ "$TARGET_SLOT" = "A" ]; then
   TARGET_LABEL="axon_root_a"
 fi
 TARGET_DEV=""
-if [ "$ROLLING_MODE" != "1" ]; then
+if [ "$ROLLING_MODE" != "1" ] && [ "$ZBM_MODE" != "1" ] && [ "$BTRFS_MODE" != "1" ]; then
   TARGET_DEV="$(resolve_label_dev "$TARGET_LABEL")"
 fi
 
-if [ -z "$TARGET_DEV" ] && [ "$ROLLING_MODE" != "1" ]; then
+if [ -z "$TARGET_DEV" ] && [ "$ROLLING_MODE" != "1" ] && [ "$ZBM_MODE" != "1" ] && [ "$BTRFS_MODE" != "1" ]; then
   # Fallback: identify unlabelled standby partition adjacent to running root partition
   RUNNING_ROOT="$(findmnt -n -o SOURCE / 2>/dev/null || true)"
   if [ -b "$RUNNING_ROOT" ]; then
@@ -1274,6 +1381,96 @@ elif [ -n "$TARGET_DEV" ] && [ -e "$TARGET_DEV" ]; then
     printf '%s' "$SV_JSON" > /etc/axonwall/slot_versions.json 2>/dev/null || true
     printf '%s' "$SV_JSON" > /var/lib/axonwall/slot_versions.json 2>/dev/null || true
   fi
+elif [ "$BTRFS_MODE" = "1" ]; then
+  echo "[+] Running in Btrfs + Snapper Root mode. Taking pre-update snapshot before in-place upgrade..."
+  mkdir -p /etc/axonwall /var/lib/axonwall 2>/dev/null || true
+
+  PRE_SNAP_ID=""
+  SNAP_DESC_VER="${CLEAN_VER:-update}"
+  if command -v snapper >/dev/null 2>&1; then
+    PRE_SNAP_ID="$(snapper -c root create --type pre --print-number --cleanup-algorithm number --description "Pre-update Axonwall v${SNAP_DESC_VER}" 2>/dev/null | tr -dc '0-9' || true)"
+  fi
+  if [ -z "$PRE_SNAP_ID" ] && [ -x /usr/local/bin/axonwall-btrfs-grub ]; then
+    PRE_SNAP_ID="$(/usr/local/bin/axonwall-btrfs-grub create-snapshot --type pre --description "Pre-update Axonwall v${SNAP_DESC_VER}" 2>/dev/null | tr -dc '0-9' || true)"
+  fi
+  if [ -z "$PRE_SNAP_ID" ]; then
+    echo "[-] ERROR: Failed to create pre-update Btrfs/Snapper snapshot; aborting update before modifying root subvolume @." >&2
+    exit 1
+  fi
+  echo "[+] Created pre-update Snapper snapshot #${PRE_SNAP_ID}."
+
+  if [ "$APT_UPGRADE" = "1" ] || [ "${AXONWALL_APT_UPGRADE:-0}" = "1" ]; then
+    if command -v apt-get >/dev/null 2>&1; then
+      echo "[+] Updating Debian APT repositories and upgrading system packages..."
+      if ! DEBIAN_FRONTEND=noninteractive apt-get update -y; then
+        echo "[-] ERROR: apt-get update failed; system packages were NOT upgraded (pre-update snapshot #${PRE_SNAP_ID} preserved)." >&2
+        exit 1
+      fi
+      if ! DEBIAN_FRONTEND=noninteractive apt-get -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" upgrade -y; then
+        echo "[-] ERROR: apt-get upgrade failed; pre-update snapshot #${PRE_SNAP_ID} is available for rollback." >&2
+        exit 1
+      fi
+    fi
+  fi
+
+  if [ -n "$DEB_TMP" ] && [ -f "$DEB_TMP" ]; then
+    PKG_STAGE="/tmp/axonwall-stage-${CLEAN_VER}"
+    rm -rf "${PKG_STAGE}"
+    mkdir -p "${PKG_STAGE}"
+    if ! extract_deb "${DEB_TMP}" "${PKG_STAGE}"; then
+      echo "[-] ERROR: Failed to extract firmware archive ${DEB_TMP}; the update did NOT complete." >&2
+      rm -rf "${PKG_STAGE}"
+      exit 1
+    fi
+    if ! apply_staged_tree "${PKG_STAGE}" "/"; then
+      echo "[-] ERROR: Failed to apply firmware payload onto Btrfs @ subvolume; rollback available via Snapper snapshot #${PRE_SNAP_ID}." >&2
+      rm -rf "${PKG_STAGE}"
+      exit 1
+    fi
+    if [ -d "${PKG_STAGE}/usr/local/bin" ]; then
+      for bin_f in "${PKG_STAGE}/usr/local/bin/"*; do
+        if [ -e "$bin_f" ] || [ -L "$bin_f" ]; then
+          bname="$(basename "$bin_f")"
+          if [ ! -e "/usr/local/bin/${bname}" ] || [ "$bname" = "axonwall-update" ] || [ "$bname" = "axonwall-btrfs-grub" ]; then
+            cp -af "$bin_f" /usr/local/bin/ 2>/dev/null || true
+            if [ -f "/usr/local/bin/${bname}" ] && [ ! -L "/usr/local/bin/${bname}" ]; then
+              chmod 755 "/usr/local/bin/${bname}" 2>/dev/null || true
+            fi
+          fi
+        fi
+      done
+    fi
+    ensure_cli_symlinks "/"
+    rm -rf "${PKG_STAGE}"
+
+    if command -v systemctl >/dev/null 2>&1 && [ ! -f /etc/axonwall/.vault-edition ] && [ ! -f /etc/axonwall/.k3s-edition ]; then
+      systemctl daemon-reload 2>/dev/null || true
+      echo "[+] Scheduling asynchronous reload of Axonwall services..."
+      nohup sh -c 'sleep 3 && systemctl try-restart axonwalld.service axonwall-controller.service axonwall-ui.service' >/dev/null 2>&1 &
+    fi
+  fi
+
+  POST_SNAP_ID=""
+  if command -v snapper >/dev/null 2>&1; then
+    POST_SNAP_ID="$(snapper -c root create --type post --pre-number "$PRE_SNAP_ID" --print-number --cleanup-algorithm number --description "Post-update Axonwall v${SNAP_DESC_VER}" 2>/dev/null | tr -dc '0-9' || true)"
+  fi
+  if [ -z "$POST_SNAP_ID" ] && [ -x /usr/local/bin/axonwall-btrfs-grub ]; then
+    POST_SNAP_ID="$(/usr/local/bin/axonwall-btrfs-grub create-snapshot --type post --pre-number "$PRE_SNAP_ID" --description "Post-update Axonwall v${SNAP_DESC_VER}" 2>/dev/null | tr -dc '0-9' || true)"
+  fi
+  if [ -x /usr/local/bin/axonwall-btrfs-grub ]; then
+    /usr/local/bin/axonwall-btrfs-grub sync 2>/dev/null || true
+  fi
+
+  if [ -n "$CLEAN_VER" ]; then
+    echo "$CLEAN_VER" > /etc/axonwall/version 2>/dev/null || true
+    echo "btrfs" > /etc/axonwall/install-mode 2>/dev/null || true
+    echo "btrfs" > /var/lib/axonwall/install-mode 2>/dev/null || true
+    SV_TIMESTAMP="$(date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || echo "")"
+    SV_JSON="$(printf '{\n  "slotA": "%s",\n  "slotB": "Snapper #%s",\n  "updatedAt": "%s"\n}\n' "$CLEAN_VER" "$PRE_SNAP_ID" "$SV_TIMESTAMP")"
+    printf '%s' "$SV_JSON" > /etc/axonwall/slot_versions.json 2>/dev/null || true
+    printf '%s' "$SV_JSON" > /var/lib/axonwall/slot_versions.json 2>/dev/null || true
+  fi
+  echo "[✓] Btrfs + Snapper update complete (pre=#${PRE_SNAP_ID}, post=#${POST_SNAP_ID:-n/a}); GRUB snapshot menu refreshed."
 elif [ "$ROLLING_MODE" != "1" ] && ( [ -e "/dev/disk/by-label/axon_root_a" ] || [ -e "/dev/disk/by-label/axon_root_b" ] || grep -qs -E 'slot=[AB]' /proc/cmdline ); then
   echo "[-] ERROR: Appliance is configured for Dual-Root A/B, but target block device for Slot ${TARGET_SLOT} could not be resolved." >&2
   exit 1

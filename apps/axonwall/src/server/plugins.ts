@@ -3,7 +3,7 @@
 import { getSession } from './auth';
 import { assertActionPermitted } from './auth-guard';
 import { callAgentApi, callAgentApiResponse } from './agent-client';
-import { invalidateDesiredStateCache } from './agent';
+import { invalidateDesiredStateCacheInternal } from './desired-state-internal';
 
 export interface ExtensionPluginLiveStatus {
   id: string;
@@ -29,7 +29,7 @@ export interface ExtensionPluginLiveStatus {
 
 export interface PluginsApiResponse {
   plugins: ExtensionPluginLiveStatus[];
-  osFamily: 'alpine' | 'debian';
+  osFamily: 'alpine' | 'debian' | 'arch';
 }
 
 export interface PluginActionResult {
@@ -81,6 +81,6 @@ export async function executePluginAction(
     };
   }
 
-  await invalidateDesiredStateCache();
+  invalidateDesiredStateCacheInternal();
   return res;
 }

@@ -1,4 +1,23 @@
-import { PluginManifestSchema, VowConfigSchema, VigilanteConfigSchema, HostMalwareDefenseConfigSchema, ThreatHarvesterConfigSchema, EluvixConfigSchema, type PluginManifest, type DesiredState, type CoreCapabilities } from '../schemas/index.js';
+import {
+  PluginManifestSchema,
+  VowConfigSchema,
+  VigilanteConfigSchema,
+  HostMalwareDefenseConfigSchema,
+  ThreatHarvesterConfigSchema,
+  EluvixConfigSchema,
+  NasConfigSchema,
+  VirtConfigSchema,
+  HaProxyPluginConfigSchema,
+  RosenpassConfigSchema,
+  FreeRadiusPluginConfigSchema,
+  SnmpPluginConfigSchema,
+  NutUpsConfigSchema,
+  HeadscaleConfigSchema,
+  ObservabilityConfigSchema,
+  type PluginManifest,
+  type DesiredState,
+  type CoreCapabilities,
+} from '../schemas/index.js';
 export type { PluginManifest };
 
 export const CORE_ROLE_PLUGIN_IDS = new Set([
@@ -62,6 +81,7 @@ export const BUILTIN_PLUGINS: PluginManifest[] = [
     name: 'Kubernetes (K3s) & OpenEBS Distributed Storage',
     version: '1.31.2',
     category: 'core_role',
+    defaultEnabled: false,
     description: 'Lightweight multi-node Kubernetes control plane with automatic HA second-node cluster join, OpenEBS ZFS-LocalPV, and synchronous 2-node Replicated Persistent Volumes.',
     author: 'CNCF / OpenEBS / Axonwall Core',
     systemdUnits: ['k3s.service'],
@@ -362,6 +382,7 @@ export const BUILTIN_PLUGINS: PluginManifest[] = [
     packages: {
       debian: [
         'zsh',
+        'starship',
         'tmux',
         'zsh-autosuggestions',
         'zsh-syntax-highlighting',
@@ -403,6 +424,7 @@ export const BUILTIN_PLUGINS: PluginManifest[] = [
         'fd',
         'git',
         'kubectl',
+        'helm',
       ],
     },
     cliBinaries: ['zsh', 'vim', 'nvim', 'starship', 'tmux'],
@@ -1041,17 +1063,17 @@ export function findPluginById(id: string): PluginManifest | undefined {
 }
 
 const PLUGIN_PRIVILEGE_ALIASES: Record<string, string[]> = {
-  'network.routing': ['routing.read', 'routing.write'],
-  'network.interfaces': ['interfaces.read', 'interfaces.write'],
-  'vpn.admin': ['vpn.wireguard.read', 'vpn.wireguard.write'],
-  'vpn.tailscale': ['vpn.wireguard.read', 'vpn.wireguard.write'],
+  'network.routing': ['routing.write'],
+  'network.interfaces': ['interfaces.write'],
+  'vpn.admin': ['vpn.wireguard.write'],
+  'vpn.tailscale': ['vpn.wireguard.write'],
   'system.monitoring': ['system.status.read'],
   'system.power': ['system.reboot'],
-  'system.hardware': ['system.status.read', 'system.config.write'],
-  'system.certificates': ['system.config.read', 'system.config.write'],
+  'system.hardware': ['system.config.write'],
+  'system.certificates': ['system.config.write'],
   'reporting.flows': ['diagnostics.read', 'system.status.read'],
-  'services.haproxy': ['system.config.read', 'system.config.write'],
-  'services.freeradius': ['system.config.read', 'system.config.write'],
+  'services.haproxy': ['system.config.write'],
+  'services.freeradius': ['system.config.write'],
 };
 
 export function isPluginAllowed(manifest: PluginManifest, grantedPrivileges: string[]): boolean {
@@ -1060,7 +1082,7 @@ export function isPluginAllowed(manifest: PluginManifest, grantedPrivileges: str
   }
   return manifest.privileges.every((priv) => {
     if (grantedPrivileges.includes(priv)) return true;
-    if (grantedPrivileges.some((g) => g.startsWith(`${priv}.`))) return true;
+    if (grantedPrivileges.some((g) => priv.startsWith(`${g}.`))) return true;
     const mapped = PLUGIN_PRIVILEGE_ALIASES[priv];
     if (mapped && mapped.some((m) => grantedPrivileges.includes(m))) return true;
     return false;
@@ -1091,6 +1113,30 @@ export function arePluginDependenciesMet(
   };
 }
 
+function isCoreRoleEnabledState(
+  capEnabled: boolean | undefined,
+  svcEnabled: boolean | undefined,
+  plugins: DesiredState['plugins'],
+  pluginId: string,
+): boolean {
+  const entry = plugins?.find((p) => p.id === pluginId);
+  if (entry?.enabled === false) return false;
+  if (capEnabled === false || svcEnabled === false) return false;
+  if (capEnabled === true || svcEnabled === true) return true;
+  return Boolean(entry?.enabled);
+}
+
+function isServiceExtensionEnabled(
+  svcEnabled: boolean | undefined,
+  plugins: DesiredState['plugins'],
+  pluginId: string,
+): boolean {
+  const entry = plugins?.find((p) => p.id === pluginId);
+  if (entry?.enabled === false) return false;
+  if (svcEnabled !== undefined) return svcEnabled;
+  return Boolean(entry?.enabled);
+}
+
 export function isPluginEnabled(pluginId: string, state?: Partial<DesiredState> | null): boolean {
   if (!state) {
     return (
@@ -1111,19 +1157,25 @@ export function isPluginEnabled(pluginId: string, state?: Partial<DesiredState> 
 
   // Check core roles
   if (pluginId === 'core-firewall') {
-    return state.capabilities?.firewallEnabled !== false;
+    const entry = state.plugins?.find((p) => p.id === 'core-firewall');
+    return state.capabilities?.firewallEnabled !== false && (entry ? entry.enabled !== false : true);
   }
   if (pluginId === 'core-nas') {
-    return Boolean(state.capabilities?.nasEnabled ?? state.nas?.enabled);
+    return isCoreRoleEnabledState(state.capabilities?.nasEnabled, state.nas?.enabled, state.plugins, 'core-nas');
   }
   if (pluginId === 'core-k3s') {
-    return Boolean(state.capabilities?.k3sEnabled ?? state.k3s?.enabled);
+    return isCoreRoleEnabledState(state.capabilities?.k3sEnabled, state.k3s?.enabled, state.plugins, 'core-k3s');
   }
   if (pluginId === 'core-virt') {
-    return Boolean(state.capabilities?.virtEnabled ?? state.virt?.enabled);
+    return isCoreRoleEnabledState(state.capabilities?.virtEnabled, state.virt?.enabled, state.plugins, 'core-virt');
   }
   if (pluginId === 'core-vigilante') {
-    return Boolean(state.capabilities?.vigilanteEnabled ?? state.vigilante?.enabled);
+    return isCoreRoleEnabledState(
+      state.capabilities?.vigilanteEnabled,
+      state.vigilante?.enabled,
+      state.plugins,
+      'core-vigilante',
+    );
   }
 
   // Modern Operator Shell & Editor (ZSH, Oh My Zsh, Starship, VIM) is enabled by default
@@ -1134,55 +1186,51 @@ export function isPluginEnabled(pluginId: string, state?: Partial<DesiredState> 
 
   // Host Malware, Rootkit & Ghost-in-the-Ring Kernel Hunter is enabled by default
   if (pluginId === 'host-malware-rootkit') {
+    const entry = state.plugins?.find((p) => p.id === 'host-malware-rootkit');
+    if (entry?.enabled === false) return false;
     if (state.hostDefense?.enabled !== undefined) {
       return state.hostDefense.enabled;
     }
-    const entry = state.plugins?.find((p) => p.id === 'host-malware-rootkit');
-    return entry ? entry.enabled !== false : true;
+    return true;
   }
 
   // Axonwall Blackbox: Extreme eBPF Threat-LLM Harvester is strictly opt-in
   if (pluginId === 'ebpf-threat-harvester') {
-    if (state.threatHarvester?.enabled !== undefined) {
-      return state.threatHarvester.enabled;
-    }
-    return Boolean(state.plugins?.some((p) => p.id === 'ebpf-threat-harvester' && p.enabled));
+    return isServiceExtensionEnabled(state.threatHarvester?.enabled, state.plugins, 'ebpf-threat-harvester');
   }
 
   // Check specific service/extension plugins
   if (pluginId === 'vigilant-octo-waffle') {
-    if (state.vow?.enabled !== undefined) {
-      return state.vow.enabled;
-    }
-    return Boolean(state.plugins?.some((p) => p.id === 'vigilant-octo-waffle' && p.enabled));
+    return isServiceExtensionEnabled(state.vow?.enabled, state.plugins, 'vigilant-octo-waffle');
   }
   if (pluginId === 'eluvix') {
-    return Boolean(state.eluvix?.enabled) || Boolean(state.plugins?.some((p) => p.id === 'eluvix' && p.enabled));
+    return isServiceExtensionEnabled(state.eluvix?.enabled, state.plugins, 'eluvix');
   }
   if (pluginId === 'nut-ups') {
-    return Boolean(state.ups?.enabled) || Boolean(state.plugins?.some((p) => p.id === 'nut-ups' && p.enabled));
+    return isServiceExtensionEnabled(state.ups?.enabled, state.plugins, 'nut-ups');
   }
   if (pluginId === 'headscale') {
-    return Boolean(state.headscale?.enabled) || Boolean(state.plugins?.some((p) => p.id === 'headscale' && p.enabled));
+    return isServiceExtensionEnabled(state.headscale?.enabled, state.plugins, 'headscale');
   }
   if (pluginId === 'rosenpass') {
-    return Boolean(state.rosenpass?.enabled) || Boolean(state.plugins?.some((p) => p.id === 'rosenpass' && p.enabled));
+    return isServiceExtensionEnabled(state.rosenpass?.enabled, state.plugins, 'rosenpass');
   }
   if (pluginId === 'haproxy') {
-    return Boolean(state.haproxy?.enabled) || Boolean(state.plugins?.some((p) => p.id === 'haproxy' && p.enabled));
+    return isServiceExtensionEnabled(state.haproxy?.enabled, state.plugins, 'haproxy');
   }
   if (pluginId === 'freeradius') {
-    return Boolean(state.freeradius?.enabled) || Boolean(state.plugins?.some((p) => p.id === 'freeradius' && p.enabled));
+    return isServiceExtensionEnabled(state.freeradius?.enabled, state.plugins, 'freeradius');
   }
   if (pluginId === 'snmp') {
-    return Boolean(state.snmp?.enabled) || Boolean(state.plugins?.some((p) => p.id === 'snmp' && p.enabled));
+    return isServiceExtensionEnabled(state.snmp?.enabled, state.plugins, 'snmp');
   }
   if (pluginId === 'coroot-ebpf-apm') {
     const pluginEntry = state.plugins?.find((p) => p.id === 'coroot-ebpf-apm');
+    if (pluginEntry?.enabled === false) return false;
     if (state.observability?.ebpfApm?.enabled !== undefined) {
-      return state.observability.ebpfApm.enabled && (pluginEntry ? pluginEntry.enabled !== false : true);
+      return state.observability.ebpfApm.enabled;
     }
-    return pluginEntry ? pluginEntry.enabled !== false : true;
+    return true;
   }
 
   // Generic extension plugin check
@@ -1200,6 +1248,14 @@ export function enablePluginWithDependencies(
   const next = structuredClone(inputState);
   const autoEnabledDependencies: string[] = [];
 
+  const ensureCapabilities = (): CoreCapabilities => ({
+    firewallEnabled: next.capabilities?.firewallEnabled !== false,
+    nasEnabled: Boolean(next.capabilities?.nasEnabled ?? next.nas?.enabled),
+    k3sEnabled: Boolean(next.capabilities?.k3sEnabled ?? next.k3s?.enabled),
+    virtEnabled: Boolean(next.capabilities?.virtEnabled ?? next.virt?.enabled),
+    vigilanteEnabled: Boolean(next.capabilities?.vigilanteEnabled ?? next.vigilante?.enabled),
+  });
+
   const enableSingle = (id: string, isAutoDep = false) => {
     // Recursively enable dependencies first
     for (const depId of getPluginDependencies(id)) {
@@ -1212,14 +1268,16 @@ export function enablePluginWithDependencies(
       autoEnabledDependencies.push(id);
     }
 
-    if (id === 'core-k3s') {
-      next.capabilities = {
-        firewallEnabled: next.capabilities?.firewallEnabled !== false,
-        nasEnabled: Boolean(next.capabilities?.nasEnabled ?? next.nas?.enabled),
-        k3sEnabled: true,
-        virtEnabled: Boolean(next.capabilities?.virtEnabled ?? next.virt?.enabled),
-        vigilanteEnabled: Boolean(next.capabilities?.vigilanteEnabled ?? next.vigilante?.enabled),
-      };
+    if (id === 'core-firewall') {
+      next.capabilities = { ...ensureCapabilities(), firewallEnabled: true };
+    } else if (id === 'core-nas') {
+      next.capabilities = { ...ensureCapabilities(), nasEnabled: true };
+      next.nas = next.nas ? { ...next.nas, enabled: true } : NasConfigSchema.parse({ enabled: true });
+    } else if (id === 'core-virt') {
+      next.capabilities = { ...ensureCapabilities(), virtEnabled: true };
+      next.virt = next.virt ? { ...next.virt, enabled: true } : VirtConfigSchema.parse({ enabled: true });
+    } else if (id === 'core-k3s') {
+      next.capabilities = { ...ensureCapabilities(), k3sEnabled: true };
       next.k3s = next.k3s || {
         enabled: true,
         clusterCidr: '10.42.0.0/16',
@@ -1242,13 +1300,7 @@ export function enablePluginWithDependencies(
       };
       next.k3s.enabled = true;
     } else if (id === 'core-vigilante') {
-      next.capabilities = {
-        firewallEnabled: next.capabilities?.firewallEnabled !== false,
-        nasEnabled: Boolean(next.capabilities?.nasEnabled ?? next.nas?.enabled),
-        k3sEnabled: Boolean(next.capabilities?.k3sEnabled ?? next.k3s?.enabled ?? true),
-        virtEnabled: Boolean(next.capabilities?.virtEnabled ?? next.virt?.enabled),
-        vigilanteEnabled: true,
-      };
+      next.capabilities = { ...ensureCapabilities(), vigilanteEnabled: true };
       next.vigilante = next.vigilante
         ? { ...next.vigilante, enabled: true }
         : VigilanteConfigSchema.parse({ enabled: true });
@@ -1266,6 +1318,39 @@ export function enablePluginWithDependencies(
       next.eluvix = next.eluvix
         ? { ...next.eluvix, enabled: true }
         : EluvixConfigSchema.parse({ enabled: true });
+    } else if (id === 'haproxy') {
+      next.haproxy = next.haproxy
+        ? { ...next.haproxy, enabled: true }
+        : HaProxyPluginConfigSchema.parse({ enabled: true });
+    } else if (id === 'rosenpass') {
+      next.rosenpass = next.rosenpass
+        ? { ...next.rosenpass, enabled: true }
+        : RosenpassConfigSchema.parse({ enabled: true });
+    } else if (id === 'freeradius') {
+      next.freeradius = next.freeradius
+        ? { ...next.freeradius, enabled: true }
+        : FreeRadiusPluginConfigSchema.parse({ enabled: true });
+    } else if (id === 'snmp') {
+      next.snmp = next.snmp
+        ? { ...next.snmp, enabled: true }
+        : SnmpPluginConfigSchema.parse({ enabled: true });
+    } else if (id === 'nut-ups') {
+      next.ups = next.ups
+        ? { ...next.ups, enabled: true }
+        : NutUpsConfigSchema.parse({ enabled: true });
+    } else if (id === 'headscale') {
+      next.headscale = next.headscale
+        ? { ...next.headscale, enabled: true }
+        : HeadscaleConfigSchema.parse({ enabled: true });
+    } else if (id === 'coroot-ebpf-apm') {
+      const obs = next.observability ?? ObservabilityConfigSchema.parse({});
+      next.observability = {
+        ...obs,
+        ebpfApm: {
+          ...(obs.ebpfApm ?? ObservabilityConfigSchema.parse({}).ebpfApm),
+          enabled: true,
+        },
+      };
     }
 
     const plugins = next.plugins || [];

@@ -317,18 +317,49 @@ function extractTargetFromFilename(filename) {
   return clean ? clean.replace(/_/g, '/') : 'unknown-target';
 }
 
-const FORBIDDEN_NMAP_ARGS = /^(?:--script|--script-args|--script-args-file|--datadir|--servicedb|--versiondb|-iL|-iR|--excludefile|-oN|-oX|-oG|-oA|-oS|--resume|-resume)(?:=|$)/i;
+const ALLOWED_NMAP_BOOLEAN_FLAGS = new Set([
+  '-sS', '-sT', '-sU', '-sV', '-sP', '-sn', '-Pn', '-PE', '-PP', '-PM', '-PO',
+  '-A', '-O', '-F', '-r', '-n', '-R', '-v', '-vv', '-6',
+  '-T0', '-T1', '-T2', '-T3', '-T4', '-T5',
+  '--open', '--reason', '--defeat-rst-ratelimit', '--osscan-limit', '--osscan-guess'
+]);
+
+const ALLOWED_NMAP_VALUE_FLAGS = new Map([
+  ['-p', /^[0-9,T:U:-]+$/],
+  ['--top-ports', /^\d{1,5}$/],
+  ['--version-intensity', /^[0-9]$/],
+  ['--min-rate', /^\d{1,7}$/],
+  ['--max-rate', /^\d{1,7}$/],
+  ['--max-retries', /^\d{1,2}$/],
+  ['--host-timeout', /^\d+(?:ms|s|m|h)?$/],
+  ['--scan-delay', /^\d+(?:ms|s|m|h)?$/],
+  ['--max-scan-delay', /^\d+(?:ms|s|m|h)?$/]
+]);
 
 function sanitizeNmapCustomArgs(customArgs) {
   const tokens = Array.isArray(customArgs)
     ? customArgs.map(a => String(a).trim()).filter(Boolean)
     : String(customArgs || '').trim().split(/\s+/).filter(Boolean);
-  for (const token of tokens) {
-    if (FORBIDDEN_NMAP_ARGS.test(token)) {
-      throw new Error(`Forbidden nmap custom argument '${token}': script execution and file I/O flags are not allowed`);
+  const validated = [];
+  for (let i = 0; i < tokens.length; i++) {
+    const token = tokens[i];
+    if (ALLOWED_NMAP_BOOLEAN_FLAGS.has(token)) {
+      validated.push(token);
+      continue;
     }
+    const eqIdx = token.indexOf('=');
+    const flagName = eqIdx >= 0 ? token.slice(0, eqIdx) : token;
+    const valuePattern = ALLOWED_NMAP_VALUE_FLAGS.get(flagName);
+    if (!valuePattern) {
+      throw new Error(`Unsupported or disallowed nmap custom argument '${token}': only allowlisted read-only scan flags are permitted`);
+    }
+    const flagVal = eqIdx >= 0 ? token.slice(eqIdx + 1) : tokens[++i];
+    if (!flagVal || !valuePattern.test(flagVal)) {
+      throw new Error(`Invalid value '${flagVal ?? ''}' for nmap flag '${flagName}'`);
+    }
+    validated.push(flagName, flagVal);
   }
-  return tokens;
+  return validated;
 }
 
 /**

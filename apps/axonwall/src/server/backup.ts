@@ -1,6 +1,7 @@
 import crypto from 'crypto';
 import { DesiredStateSchema, type DesiredState } from '@axonwall/lib/schemas';
 import { getSession } from './auth';
+import { isPasswordChangeEnforced } from './auth-guard';
 
 const BACKUP_MAGIC = Buffer.from('AXB1'); // Axonwall Encrypted Backup Version 1 (PBKDF2 100k)
 const BACKUP_MAGIC_V2 = Buffer.from('AXB2'); // Version 2 (PBKDF2 600k, current OWASP guidance)
@@ -25,7 +26,7 @@ export async function createEncryptedBackup(
   passphrase: string
 ): Promise<{ id: string; buffer: Buffer; metadata: BackupMetadata }> {
   const session = await getSession();
-  if (!session || session.passwordChangeRequired || !session.roles.includes('admin')) {
+  if (!session || isPasswordChangeEnforced(session) || !session.roles.includes('admin')) {
     throw new Error('Unauthorized: Admin privileges required for configuration backups (password change required if pending)');
   }
 
@@ -71,7 +72,7 @@ export async function restoreEncryptedBackup(
   passphrase: string
 ): Promise<{ metadata: BackupMetadata; state: DesiredState }> {
   const session = await getSession();
-  if (!session || session.passwordChangeRequired || !session.roles.includes('admin')) {
+  if (!session || isPasswordChangeEnforced(session) || !session.roles.includes('admin')) {
     throw new Error('Unauthorized: Admin privileges required to restore configuration (password change required if pending)');
   }
 

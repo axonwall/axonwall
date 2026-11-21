@@ -9,6 +9,16 @@ export interface CompiledIpsec {
  * Compiles an IpsecConfig into strongSwan swanctl.conf format and kernel XFRM interface commands.
  * Supports route-based (XFRM interface with if_id) and policy-based IKEv2 tunnels.
  */
+const SAFE_IPSEC_VALUE_REGEX = /^[a-zA-Z0-9._:@/%-]+$/;
+
+function assertIpsecToken(v: string, label: string): string {
+  const cleaned = String(v ?? '').trim();
+  if (!cleaned || !SAFE_IPSEC_VALUE_REGEX.test(cleaned)) {
+    throw new Error(`Invalid IPsec ${label}: ${v}`);
+  }
+  return cleaned;
+}
+
 export function compileIpsec(config?: IpsecConfig): CompiledIpsec {
   if (!config || !config.enabled || !config.tunnels || config.tunnels.length === 0) {
     return {
@@ -25,14 +35,14 @@ export function compileIpsec(config?: IpsecConfig): CompiledIpsec {
     if (!tunnel.enabled) continue;
 
     const safeName = tunnel.name.replace(/[^a-zA-Z0-9_-]/g, '_');
-    const localTs = tunnel.localTs.map((t) => t.replace(/[\r\n\s]+/g, '')).join(', ');
-    const remoteTs = tunnel.remoteTs.map((t) => t.replace(/[\r\n\s]+/g, '')).join(', ');
-    const ikeProps = tunnel.ikeProposals.map((p) => p.replace(/[\r\n\s]+/g, '')).join(', ');
-    const espProps = tunnel.espProposals.map((p) => p.replace(/[\r\n\s]+/g, '')).join(', ');
-    const safeDpdAction = (tunnel.dpdAction || 'restart').replace(/[\r\n\s]+/g, '');
-    const safeAuth = (tunnel.authMethod || 'psk').replace(/[\r\n\s]+/g, '');
-    const safeLocalAddr = (tunnel.localAddress || '%any').replace(/[\r\n\s]+/g, '');
-    const safeRemoteAddr = tunnel.remoteAddress.replace(/[\r\n\s]+/g, '');
+    const localTs = tunnel.localTs.map((t) => assertIpsecToken(t, 'localTs')).join(', ');
+    const remoteTs = tunnel.remoteTs.map((t) => assertIpsecToken(t, 'remoteTs')).join(', ');
+    const ikeProps = tunnel.ikeProposals.map((p) => assertIpsecToken(p, 'ikeProposal')).join(', ');
+    const espProps = tunnel.espProposals.map((p) => assertIpsecToken(p, 'espProposal')).join(', ');
+    const safeDpdAction = assertIpsecToken(tunnel.dpdAction || 'restart', 'dpdAction');
+    const safeAuth = assertIpsecToken(tunnel.authMethod || 'psk', 'authMethod');
+    const safeLocalAddr = assertIpsecToken(tunnel.localAddress || '%any', 'localAddress');
+    const safeRemoteAddr = assertIpsecToken(tunnel.remoteAddress, 'remoteAddress');
 
     let childAttrs = `        local_ts = ${localTs}
         remote_ts = ${remoteTs}
@@ -41,12 +51,13 @@ export function compileIpsec(config?: IpsecConfig): CompiledIpsec {
         start_action = start`;
 
     if (tunnel.routeBased && tunnel.xfrmInterfaceId) {
-      childAttrs += `\n        if_id_in = ${tunnel.xfrmInterfaceId}\n        if_id_out = ${tunnel.xfrmInterfaceId}`;
+      const xfrmId = Math.trunc(tunnel.xfrmInterfaceId);
+      childAttrs += `\n        if_id_in = ${xfrmId}\n        if_id_out = ${xfrmId}`;
 
       // Shell command to create the XFRM interface if it doesn't exist
-      const ifName = `xfrm${tunnel.xfrmInterfaceId}`;
+      const ifName = `xfrm${xfrmId}`;
       xfrmCommands.push(
-        `ip link add ${ifName} type xfrm if_id ${tunnel.xfrmInterfaceId} 2>/dev/null || true`,
+        `ip link add ${ifName} type xfrm if_id ${xfrmId} 2>/dev/null || true`,
         `ip link set dev ${ifName} up`
       );
     }
@@ -72,11 +83,16 @@ ${childAttrs}
     connectionBlocks.push(conn);
 
     if (tunnel.presharedKey) {
-      const safePsk = tunnel.presharedKey.replace(/[\r\n]+/g, '').replace(/[\\"]/g, '\\$&');
-      const secret = `  ike-${safeName} {
-    secret = "${safePsk}"
-  }`;
-      secretBlocks.push(secret);
+      const safePsk = tunnel.presharedKey.replace(/[\r\n\0]+/g, '').replace(/[\\"]/g, '\\$&');
+      const secretLines = [`  ike-${safeName} {`];
+      if (safeLocalAddr !== '%any') {
+        secretLines.push(`    id-local = ${safeLocalAddr}`);
+      }
+      if (safeRemoteAddr !== '%any') {
+        secretLines.push(`    id-remote = ${safeRemoteAddr}`);
+      }
+      secretLines.push(`    secret = "${safePsk}"`, '  }');
+      secretBlocks.push(secretLines.join('\n'));
     }
   }
 

@@ -5,7 +5,7 @@ import { CodeBlock } from '../components/CodeBlock';
 export const metadata = {
   title: 'Kubernetes (K3s), Cilium eBPF CNI, Etcd Snapshots & OpenEBS | Axonwall Documentation',
   description:
-    'Complete guide to running K3s Kubernetes and OpenEBS distributed storage on Axonwall v0.11.68: Cilium eBPF CNI (kube-proxy replacement + Hubble), embedded etcd snapshots & S3 backup/restore, automated HA peer join, WireGuard flannel mesh, axonwall-kubeconfig VIP sync, ZFS-LocalPV, and Mayastor NVMe-oF replication.',
+    'Complete guide to running K3s Kubernetes and OpenEBS distributed storage on Axonwall v0.13.0: Cilium eBPF CNI (kube-proxy replacement + Hubble), Browser K9s Live Explorer, Node Roles & Taints Modal, embedded etcd snapshots & S3 backup/restore, automated HA peer join, WireGuard flannel mesh, axonwall-kubeconfig VIP sync, ZFS-LocalPV, and Mayastor NVMe-oF replication.',
 };
 
 export default function K3sKubernetesDocPage() {
@@ -15,7 +15,7 @@ export default function K3sKubernetesDocPage() {
       <div className="space-y-4 border-b border-slate-800/80 pb-8">
         <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-950/60 border border-emerald-500/30 text-emerald-400 text-xs font-semibold">
           <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-          Container Orchestration &amp; Cloud-Native Storage • v0.11.68
+          Container Orchestration &amp; Cloud-Native Storage • v0.13.0
         </div>
         <h1 className="text-3xl sm:text-5xl font-extrabold text-white tracking-tight">
           Kubernetes (K3s) &amp; OpenEBS Distributed Storage
@@ -23,7 +23,7 @@ export default function K3sKubernetesDocPage() {
         <p className="text-base sm:text-lg text-slate-400 leading-relaxed max-w-3xl">
           Axonwall provides modern, lightweight K3s alongside enterprise-grade NAS storage configured via{' '}
           <code className="text-emerald-400 font-mono">/etc/axonwall/k3s.yaml</code>. Both <code className="text-slate-200 font-mono">kubectl</code>, interactive TUI{' '}
-          <code className="text-emerald-400 font-mono">k9s</code> (v0.51.0, alias <code className="text-slate-200 font-mono">k9</code>), and <code className="text-slate-200 font-mono">helm</code> v3 are bundled out-of-the-box, paired with our full <strong>Browser K9s Live Explorer</strong> (<code className="text-emerald-400 font-mono">/k3s/explorer</code>). Run containerized workloads
+          <code className="text-emerald-400 font-mono">k9s</code> (v0.51.0, alias <code className="text-slate-200 font-mono">k9</code>, bundled inside <code className="text-emerald-300 font-mono">core-k3s</code> alongside <code className="text-slate-200 font-mono">k3s</code>), and <code className="text-slate-200 font-mono">helm</code> v3 are bundled out-of-the-box, paired with our full <strong>Browser K9s Live Explorer</strong> (<code className="text-emerald-400 font-mono">/k3s/explorer</code>). Run containerized workloads
           directly on your appliance with encrypted WireGuard flannel networking, automated 2-node embedded-etcd HA cluster join, and
           OpenEBS replicated persistent volumes.
         </p>
@@ -253,11 +253,20 @@ kubectl --context axonwall get pods -A
 k9s --context axonwall`}
         />
 
-        <div className="p-6 rounded-2xl bg-slate-900 border border-emerald-500/30 space-y-2.5 text-xs">
-          <h3 className="font-bold text-emerald-300 text-base">Browser K9s Live Explorer, Pulse &amp; Topology Map</h3>
-          <p className="text-slate-300 leading-relaxed">
-            Open <a href="/k3s/explorer" className="text-emerald-400 underline font-mono">/k3s/explorer</a> in the Web Console to access full browser-native K9s functionality: keyboard-driven navigation (<code className="font-mono text-white">:po</code>, <code className="font-mono text-white">:svc</code>, <code className="font-mono text-white">:ing</code>, <code className="font-mono text-white">:pulse</code>, <code className="font-mono text-white">:topo</code>, <code className="font-mono text-white">/</code> filter, <code className="font-mono text-white">0..9</code> namespaces), Cluster Pulse CPU/Memory/Pod Recharts visualizations, an interactive <code className="font-mono text-cyan-300">Ingress → Service → Workload → Pod → Node / PVC</code> SVG Topology Map, live SSE log streaming, interactive container <code className="font-mono text-white">exec</code>, editable YAML with server dry-run, and admin Secret decoding.
-          </p>
+        <div id="browser-k9s" className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
+          <div className="p-6 rounded-2xl bg-slate-900 border border-emerald-500/30 space-y-2.5">
+            <h3 className="font-bold text-emerald-300 text-base">Browser K9s Live Explorer, Pulse &amp; Topology Map</h3>
+            <p className="text-slate-300 leading-relaxed">
+              Open <a href="/k3s/explorer" className="text-emerald-400 underline font-mono">/k3s/explorer</a> in the Web Console to access full browser-native K9s functionality: keyboard-driven navigation (<code className="font-mono text-white">:po</code>, <code className="font-mono text-white">:svc</code>, <code className="font-mono text-white">:ing</code>, <code className="font-mono text-white">:pulse</code>, <code className="font-mono text-white">:topo</code>, <code className="font-mono text-white">/</code> filter, <code className="font-mono text-white">0..9</code> namespaces), Cluster Pulse CPU/Memory/Pod Recharts visualizations, an interactive <code className="font-mono text-cyan-300">Ingress → Service → Workload → Pod → Node / PVC</code> SVG Topology Map, live SSE log streaming, interactive container <code className="font-mono text-white">exec</code>, editable YAML with server dry-run, and admin Secret decoding.
+            </p>
+          </div>
+
+          <div className="p-6 rounded-2xl bg-slate-900 border border-sky-500/30 space-y-2.5">
+            <h3 className="font-bold text-sky-300 text-base">Node Roles &amp; Taints Modal (<code className="font-mono">/k3s/cluster</code>)</h3>
+            <p className="text-slate-300 leading-relaxed">
+              Manage cluster scheduling boundaries directly from <a href="/k3s/cluster" className="text-sky-400 underline font-mono">/k3s/cluster</a> via <code className="font-mono text-slate-200">POST /v1/k3s/nodes/scheduling</code>. Apply one-click <strong>Edge Node</strong> taint/role presets, customize node labels and <code className="font-mono text-white">NoSchedule</code>/<code className="font-mono text-white">NoExecute</code> taints, and merge-patch node specs without manual <code className="font-mono text-slate-200">kubectl taint</code> invocations so edge gateways host only essential network pods.
+            </p>
+          </div>
         </div>
       </section>
 

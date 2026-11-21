@@ -8,7 +8,7 @@ MARKER="/etc/axonwall/.firstboot"
 K3S_MARKER="/etc/axonwall/.k3s-firstboot"
 
 # Barebones K3s + OpenZFS + OpenEBS Storage Host Edition (`k3s-storage`)
-if [ -f /etc/axonwall/.k3s-edition ]; then
+if [ -f /etc/axonwall/.k3s-edition ] || [ "$(tr -d ' \t\r\n' < /etc/axonwall/edition 2>/dev/null || true)" = "k3s-storage" ]; then
   if [ ! -f "$K3S_MARKER" ] && [ ! -f "$MARKER" ]; then
     exit 0
   fi
@@ -716,18 +716,21 @@ if ! grep -q ' /home ' /proc/mounts 2>/dev/null; then
   mount --bind /var/lib/axonwall/home /home 2>/dev/null || true
 fi
 
-# /usr/bin/zsh must resolve to a real shell. On full builds the zsh package
-# installs /bin/zsh, so point /usr/bin/zsh there (replacing any stale ash
-# symlink): an ash symlink makes busybox reject the shell with
-# "zsh: applet not found", which breaks the console shell drop. Only on
-# minimal builds (no zsh anywhere) fall back to ash, so SSO users replicated
-# with loginShell=/usr/bin/zsh can log in over SSH cleanly.
-if [ -x /bin/zsh ]; then
-  if [ -L /usr/bin/zsh ] || [ ! -x /usr/bin/zsh ]; then
-    ln -sf /bin/zsh /usr/bin/zsh 2>/dev/null || true
+# /usr/bin/zsh must resolve to a real shell on non-Minimal builds. On full
+# builds the zsh package installs /bin/zsh; on minimal-package NGFW builds
+# (no zsh binary), provide an executable wrapper (never a symlink to
+# /bin/ash -> busybox, which rejects argv[0]=zsh with "zsh: applet not found")
+# so SSO users with loginShell=/usr/bin/zsh can log in over SSH cleanly.
+if [ "$MINIMAL_MODE" != "1" ]; then
+  if [ -x /bin/zsh ]; then
+    if [ -L /usr/bin/zsh ] || [ ! -x /usr/bin/zsh ]; then
+      ln -sf /bin/zsh /usr/bin/zsh 2>/dev/null || true
+    fi
+  elif [ -L /usr/bin/zsh ] || [ ! -x /usr/bin/zsh ]; then
+    rm -f /usr/bin/zsh 2>/dev/null || true
+    printf '#!/bin/sh\nif [ -x /bin/bash ]; then exec /bin/bash "$@"; fi\nexec /bin/ash "$@"\n' > /usr/bin/zsh 2>/dev/null || true
+    chmod 0755 /usr/bin/zsh 2>/dev/null || true
   fi
-elif [ "$MINIMAL_MODE" != "1" ] && [ ! -x /usr/bin/zsh ] && [ -x /bin/ash ]; then
-  ln -sf /bin/ash /usr/bin/zsh 2>/dev/null || true
 fi
 
 # Generate appliance security tokens

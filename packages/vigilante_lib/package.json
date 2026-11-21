@@ -17,6 +17,7 @@
     "./ui/*": "./src/ui/*"
   },
   "dependencies": {
+    "@casl/ability": "^6.8.4",
     "@modelcontextprotocol/sdk": "^1.32.2",
     "detect-port": "^2.1.0",
     "execa": "^10.2.1",
@@ -25,9 +26,11 @@
     "ink": "^8.0.0",
     "ink-select-input": "^6.2.0",
     "ink-spinner": "^5.0.0",
+    "jose": "^6.0.8",
     "js-yaml": "^5.3.0",
     "nastymap": "workspace:*",
     "react": "^19.3.1",
-    "sudo-prompt": "^9.2.1"
+    "sudo-prompt": "^9.2.1",
+    "zod": "^4.6.7"
   }
 }

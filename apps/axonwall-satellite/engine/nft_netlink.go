@@ -65,6 +65,7 @@ const (
 	nftMsgNewRule      = 6
 	nftMsgNewSet       = 9
 	nftMsgNewSetElem   = 12
+	nftMsgDelSetElem   = 14
 	nftMsgNewFlowtable = 22
 
 	// nft_table_attributes
@@ -188,6 +189,8 @@ const (
 	nftaLimitUnit  = 2
 	nftaLimitBurst = 3
 	nftaLimitType  = 4
+	nftaLimitFlags = 5
+	nftLimitFInv   = 1 // NFT_LIMIT_F_INV: match when over rate
 
 	// nft_log_attributes
 	nftaLogPrefix = 2
@@ -870,9 +873,13 @@ func compileRuleTokens(chainName, line string, spec NftRuleSpec, tokens []string
 				return spec, fmt.Errorf("missing interface name after %s", tok)
 			}
 			dev := strings.Trim(tokens[valIdx], `"`)
+			ifBytes, err := encodeIfnameBytes(dev)
+			if err != nil {
+				return spec, err
+			}
 			exprs = append(exprs,
 				buildExprMetaLoad(nftMetaIIfName, nftReg1),
-				buildExprCmpOp(nftReg1, op, encodeIfnameBytes(dev)),
+				buildExprCmpOp(nftReg1, op, ifBytes),
 			)
 			i = valIdx + 1
 
@@ -882,9 +889,13 @@ func compileRuleTokens(chainName, line string, spec NftRuleSpec, tokens []string
 				return spec, fmt.Errorf("missing interface name after %s", tok)
 			}
 			dev := strings.Trim(tokens[valIdx], `"`)
+			ifBytes, err := encodeIfnameBytes(dev)
+			if err != nil {
+				return spec, err
+			}
 			exprs = append(exprs,
 				buildExprMetaLoad(nftMetaOIfName, nftReg1),
-				buildExprCmpOp(nftReg1, op, encodeIfnameBytes(dev)),
+				buildExprCmpOp(nftReg1, op, ifBytes),
 			)
 			i = valIdx + 1
 
@@ -1195,7 +1206,9 @@ func compileRuleTokens(chainName, line string, spec NftRuleSpec, tokens []string
 				// burst, and map the rate unit instead of
 				// assuming seconds.
 				j := i + 2
+				over := false
 				if j < len(tokens) && tokens[j] == "over" {
+					over = true
 					j++
 				}
 				if j >= len(tokens) {
@@ -1232,7 +1245,7 @@ func compileRuleTokens(chainName, line string, spec NftRuleSpec, tokens []string
 					burst = burstVal
 					consumed += 2
 				}
-				exprs = append(exprs, buildExprLimit(rateVal, unitSec, burst))
+				exprs = append(exprs, buildExprLimit(rateVal, unitSec, burst, over))
 				i = consumed
 				continue
 			}
@@ -1432,10 +1445,23 @@ func ctStateBit(name string) (uint32, bool) {
 	}
 }
 
-func encodeIfnameBytes(dev string) []byte {
+func encodeIfnameBytes(dev string) ([]byte, error) {
+	if dev == "" {
+		return nil, fmt.Errorf("empty interface name")
+	}
+	if strings.HasSuffix(dev, "*") {
+		prefix := strings.TrimSuffix(dev, "*")
+		if prefix == "" || len(prefix) >= 16 {
+			return nil, fmt.Errorf("invalid wildcard interface pattern %q", dev)
+		}
+		return []byte(prefix), nil
+	}
+	if len(dev) >= 16 {
+		return nil, fmt.Errorf("interface name %q exceeds IFNAMSIZ (15 chars)", dev)
+	}
 	b := make([]byte, len(dev)+1)
 	copy(b, dev)
-	return b
+	return b, nil
 }
 
 func parseICMPv6TypeByte(name string) (byte, bool) {
@@ -1483,14 +1509,25 @@ func parseICMPv6TypeByte(name string) (byte, bool) {
 // Netlink Attribute & Expression Builders
 // =============================================================================
 
-func nlAttr(typ uint16, payload []byte) []byte {
+func nlAttrChecked(typ uint16, payload []byte) ([]byte, error) {
 	rawLen := 4 + len(payload)
+	if rawLen > 0xffff {
+		return nil, fmt.Errorf("netlink attribute length %d exceeds uint16 max (65535)", rawLen)
+	}
 	alignedLen := (rawLen + 3) & ^3
 	buf := make([]byte, alignedLen)
 	binary.LittleEndian.PutUint16(buf[0:2], uint16(rawLen))
 	binary.LittleEndian.PutUint16(buf[2:4], typ)
 	copy(buf[4:], payload)
-	return buf
+	return buf, nil
+}
+
+func nlAttr(typ uint16, payload []byte) []byte {
+	attr, err := nlAttrChecked(typ, payload)
+	if err != nil {
+		return nil
+	}
+	return attr
 }
 
 func nlAttrStr(typ uint16, s string) []byte {
@@ -1608,13 +1645,17 @@ func buildExprBitwiseMaskBytes(sreg, dreg uint32, maskBytes []byte) []byte {
 	)
 }
 
-func buildExprLimit(rate, unitSec, burst uint64) []byte {
-	return wrapExpr("limit",
+func buildExprLimit(rate, unitSec, burst uint64, over bool) []byte {
+	attrs := [][]byte{
 		nlAttrU64BE(nftaLimitRate, rate),
 		nlAttrU64BE(nftaLimitUnit, unitSec),
 		nlAttrU32BE(nftaLimitBurst, uint32(burst)),
 		nlAttrU32BE(nftaLimitType, 0),
-	)
+	}
+	if over {
+		attrs = append(attrs, nlAttrU32BE(nftaLimitFlags, nftLimitFInv))
+	}
+	return wrapExpr("limit", attrs...)
 }
 
 func buildExprLog(prefix string) []byte {
@@ -1719,34 +1760,72 @@ func nftMsgType(op uint16) uint16 {
 	return (uint16(nfnlSubsysNftables) << 8) | op
 }
 
-// buildSetElemMsg builds one NFT_MSG_NEW_SET_ELEM message carrying all of a
-// set's initial elements, using the same element encoding as
-// AddSetElementNetlink / AddIntervalSetElementNetlink: a singleton is a
-// single key element, an interval is a start element plus an end element
-// flagged NFT_SET_ELEM_INTERVAL_END.
-func buildSetElemMsg(tableName, setName string, elems []NftSetElement, seq uint32) []byte {
+// buildSetElemMsgs splits a set's elements across one or more
+// NFT_MSG_NEW_SET_ELEM messages so nftaSetElemListElements never overflows
+// Netlink's uint16 nla_len limit (> ~1,638 IPv4 / > ~1,024 IPv6 elements).
+func buildSetElemMsgs(tableName, setName string, elems []NftSetElement, seqStart uint32) ([][]byte, uint32) {
+	const (
+		maxElemsPerMsg     = 500
+		maxElemBytesPerMsg = 32768
+	)
+	if len(elems) == 0 {
+		return nil, seqStart
+	}
+	var msgs [][]byte
+	seq := seqStart
 	var elemBuf bytes.Buffer
+	count := 0
+	flush := func() {
+		if count == 0 {
+			return
+		}
+		msgs = append(msgs, buildNfgenMsg(
+			nftMsgType(nftMsgNewSetElem),
+			syscall.NLM_F_REQUEST|syscall.NLM_F_CREATE,
+			seq,
+			nfprotoInet,
+			0,
+			nlAttrStr(nftaSetElemListTable, tableName),
+			nlAttrStr(nftaSetElemListSet, setName),
+			nlAttrNested(nftaSetElemListElements, elemBuf.Bytes()),
+		))
+		seq++
+		elemBuf.Reset()
+		count = 0
+	}
 	for _, e := range elems {
-		elemBuf.Write(nlAttrNested(nftaListElem,
+		var itemBuf bytes.Buffer
+		itemBuf.Write(nlAttrNested(nftaListElem,
 			nlAttrNested(nftaSetElemKey, nlAttr(nftaDataValue, e.Key)),
 		))
 		if e.End != nil {
-			elemBuf.Write(nlAttrNested(nftaListElem,
+			itemBuf.Write(nlAttrNested(nftaListElem,
 				nlAttrU32BE(nftaSetElemFlags, 1), // NFT_SET_ELEM_INTERVAL_END
 				nlAttrNested(nftaSetElemKey, nlAttr(nftaDataValue, e.End)),
 			))
 		}
+		item := itemBuf.Bytes()
+		if len(item) > maxElemBytesPerMsg {
+			continue
+		}
+		if count > 0 && (count >= maxElemsPerMsg || elemBuf.Len()+len(item) > maxElemBytesPerMsg) {
+			flush()
+		}
+		elemBuf.Write(item)
+		count++
 	}
-	return buildNfgenMsg(
-		nftMsgType(nftMsgNewSetElem),
-		syscall.NLM_F_REQUEST|syscall.NLM_F_CREATE,
-		seq,
-		nfprotoInet,
-		0,
-		nlAttrStr(nftaSetElemListTable, tableName),
-		nlAttrStr(nftaSetElemListSet, setName),
-		nlAttrNested(nftaSetElemListElements, elemBuf.Bytes()),
-	)
+	flush()
+	return msgs, seq
+}
+
+// buildSetElemMsg builds one NFT_MSG_NEW_SET_ELEM message carrying elements
+// (use buildSetElemMsgs when chunks may exceed 500 elements / 32 KiB).
+func buildSetElemMsg(tableName, setName string, elems []NftSetElement, seq uint32) []byte {
+	msgs, _ := buildSetElemMsgs(tableName, setName, elems, seq)
+	if len(msgs) == 0 {
+		return nil
+	}
+	return msgs[0]
 }
 
 func serializeNftBatch(b *NftCompiledBatch) [][]byte {
@@ -1797,11 +1876,11 @@ func serializeNftBatch(b *NftCompiledBatch) [][]byte {
 		))
 		seq++
 
-		// 3a. Populate initial `elements = { ... }` (A-H7, round 2):
-		// a set created without them silently enforces nothing.
+		// 3a. Populate initial `elements = { ... }` (A-H7, round 2) in safe Netlink chunks.
 		if len(s.Elements) > 0 {
-			msgs = append(msgs, buildSetElemMsg(b.TableName, s.Name, s.Elements, seq))
-			seq++
+			elemMsgs, nextSeq := buildSetElemMsgs(b.TableName, s.Name, s.Elements, seq)
+			msgs = append(msgs, elemMsgs...)
+			seq = nextSeq
 		}
 	}
 
@@ -2001,15 +2080,7 @@ func incrementIPBytes(ip []byte) ([]byte, bool) {
 	return nil, false
 }
 
-// AddSetElementNetlink adds an IPv4, IPv6, or MAC address to `table inet <tableName> <setName>` via Netlink.
-func AddSetElementNetlink(tableName, setName string, keyBytes []byte) error {
-	if setName == "blocked_ips" || setName == "blocked_ips6" {
-		endBytes, ok := incrementIPBytes(keyBytes)
-		if !ok {
-			return fmt.Errorf("cannot encode interval end for max address in %s", setName)
-		}
-		return AddIntervalSetElementNetlink(tableName, setName, keyBytes, endBytes)
-	}
+func sendSingletonSetElemNetlink(msgSubType uint16, nlFlags uint16, tableName, setName string, keyBytes []byte) error {
 	if tableName == "" {
 		tableName = "axonwall"
 	}
@@ -2019,8 +2090,8 @@ func AddSetElementNetlink(tableName, setName string, keyBytes []byte) error {
 	var wire bytes.Buffer
 	wire.Write(buildNfgenMsg(nfnlMsgBatchBegin, syscall.NLM_F_REQUEST, 1, nfprotoUnspec, nfnlSubsysNftables))
 	wire.Write(buildNfgenMsg(
-		nftMsgType(nftMsgNewSetElem),
-		syscall.NLM_F_REQUEST|syscall.NLM_F_CREATE|syscall.NLM_F_ACK,
+		nftMsgType(msgSubType),
+		nlFlags,
 		2,
 		nfprotoInet,
 		0,
@@ -2032,8 +2103,7 @@ func AddSetElementNetlink(tableName, setName string, keyBytes []byte) error {
 	return sendNetfilterNetlinkBatch(wire.Bytes())
 }
 
-// AddIntervalSetElementNetlink adds a half-open [startBytes, endBytes) interval to an NFT_SET_INTERVAL set via Netlink.
-func AddIntervalSetElementNetlink(tableName, setName string, startBytes, endBytes []byte) error {
+func sendIntervalSetElemNetlink(msgSubType uint16, nlFlags uint16, tableName, setName string, startBytes, endBytes []byte) error {
 	if tableName == "" {
 		tableName = "axonwall"
 	}
@@ -2051,8 +2121,8 @@ func AddIntervalSetElementNetlink(tableName, setName string, startBytes, endByte
 	var wire bytes.Buffer
 	wire.Write(buildNfgenMsg(nfnlMsgBatchBegin, syscall.NLM_F_REQUEST, 1, nfprotoUnspec, nfnlSubsysNftables))
 	wire.Write(buildNfgenMsg(
-		nftMsgType(nftMsgNewSetElem),
-		syscall.NLM_F_REQUEST|syscall.NLM_F_CREATE|syscall.NLM_F_ACK,
+		nftMsgType(msgSubType),
+		nlFlags,
 		2,
 		nfprotoInet,
 		0,
@@ -2062,6 +2132,40 @@ func AddIntervalSetElementNetlink(tableName, setName string, startBytes, endByte
 	))
 	wire.Write(buildNfgenMsg(nfnlMsgBatchEnd, syscall.NLM_F_REQUEST, 3, nfprotoUnspec, nfnlSubsysNftables))
 	return sendNetfilterNetlinkBatch(wire.Bytes())
+}
+
+// AddSetElementNetlink adds an IPv4, IPv6, or MAC address to `table inet <tableName> <setName>` via Netlink.
+func AddSetElementNetlink(tableName, setName string, keyBytes []byte) error {
+	if setName == "blocked_ips" || setName == "blocked_ips6" {
+		endBytes, ok := incrementIPBytes(keyBytes)
+		if !ok {
+			return fmt.Errorf("cannot encode interval end for max address in %s", setName)
+		}
+		return AddIntervalSetElementNetlink(tableName, setName, keyBytes, endBytes)
+	}
+	return sendSingletonSetElemNetlink(nftMsgNewSetElem, syscall.NLM_F_REQUEST|syscall.NLM_F_CREATE|syscall.NLM_F_ACK, tableName, setName, keyBytes)
+}
+
+// AddIntervalSetElementNetlink adds a half-open [startBytes, endBytes) interval to an NFT_SET_INTERVAL set via Netlink.
+func AddIntervalSetElementNetlink(tableName, setName string, startBytes, endBytes []byte) error {
+	return sendIntervalSetElemNetlink(nftMsgNewSetElem, syscall.NLM_F_REQUEST|syscall.NLM_F_CREATE|syscall.NLM_F_ACK, tableName, setName, startBytes, endBytes)
+}
+
+// DeleteSetElementNetlink deletes an IPv4, IPv6, or MAC address from `table inet <tableName> <setName>` via Netlink.
+func DeleteSetElementNetlink(tableName, setName string, keyBytes []byte) error {
+	if setName == "blocked_ips" || setName == "blocked_ips6" {
+		endBytes, ok := incrementIPBytes(keyBytes)
+		if !ok {
+			return fmt.Errorf("cannot encode interval end for max address in %s", setName)
+		}
+		return DeleteIntervalSetElementNetlink(tableName, setName, keyBytes, endBytes)
+	}
+	return sendSingletonSetElemNetlink(nftMsgDelSetElem, syscall.NLM_F_REQUEST|syscall.NLM_F_ACK, tableName, setName, keyBytes)
+}
+
+// DeleteIntervalSetElementNetlink deletes a half-open [startBytes, endBytes) interval from an NFT_SET_INTERVAL set via Netlink.
+func DeleteIntervalSetElementNetlink(tableName, setName string, startBytes, endBytes []byte) error {
+	return sendIntervalSetElemNetlink(nftMsgDelSetElem, syscall.NLM_F_REQUEST|syscall.NLM_F_ACK, tableName, setName, startBytes, endBytes)
 }
 
 func sendNetfilterNetlinkBatch(payload []byte) error {

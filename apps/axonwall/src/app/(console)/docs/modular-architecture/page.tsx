@@ -5,9 +5,9 @@ import { Callout } from '../components/Callout';
 import { CodeBlock } from '../components/CodeBlock';
 
 export const metadata = {
-  title: 'Modular Appliance Architecture: 5 Core Roles & 15 Plugins | Axonwall Documentation',
+  title: 'Modular Appliance Architecture: 5 Core Roles & 18 Plugins | Axonwall Documentation',
   description:
-    'Comprehensive documentation for Axonwall v0.11.71 modular core roles (core-firewall, core-nas, core-k3s, core-virt, core-vigilante) and 15 built-in systemd sandboxed extension plugins.',
+    'Comprehensive documentation for Axonwall v0.13.0 modular core roles (core-firewall, core-nas, core-k3s, core-virt, core-vigilante), 18 built-in systemd sandboxed extension plugins, SHA-256 bundled binary provisioning, and Minimal edition on-demand installation.',
 };
 
 export default function ModularArchitectureDocPage() {
@@ -17,14 +17,14 @@ export default function ModularArchitectureDocPage() {
       <div className="space-y-4 border-b border-slate-800/80 pb-8">
         <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-950/60 border border-emerald-500/30 text-emerald-400 text-xs font-semibold">
           <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-          Core Appliance System Architecture • v0.11.71
+          Core Appliance System Architecture • v0.13.0
         </div>
         <h1 className="text-3xl sm:text-5xl font-extrabold text-white tracking-tight">
           Modular Core Roles: Firewall, ZFS NAS, K3s, Hypervisor &amp; Vigilante SOC
         </h1>
         <p className="text-base sm:text-lg text-slate-400 leading-relaxed max-w-3xl">
           Axonwall is a hyper-converged, role-modular operating system governed by <strong>5 Core Roles</strong> and{' '}
-          <strong>15 built-in sandboxed extension plugins</strong>. Disable <code className="text-emerald-400 font-mono">core-firewall</code> to run as a dedicated Host-Mode ZFS NAS or KVM hypervisor, run as a wire-speed Next-Gen Firewall, or converge all five roles—Firewall, OpenZFS NAS, Kubernetes (K3s), KVM/LXC Virtualization, and Vigilante Autonomous SOC—on high-availability bare-metal clusters.
+          <strong>18 built-in sandboxed extension plugins</strong> (23 total plugins with SHA-256-verified bundled binary archives and on-demand installation on <code className="text-amber-300 font-mono">minimal</code> hosts). Disable <code className="text-emerald-400 font-mono">core-firewall</code> to run as a dedicated Host-Mode ZFS NAS or KVM hypervisor, run as a wire-speed Next-Gen Firewall, or converge all five roles on high-availability bare-metal clusters.
         </p>
       </div>
 
@@ -147,10 +147,10 @@ export default function ModularArchitectureDocPage() {
               <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-slate-800 text-slate-300">OPT-IN</span>
             </div>
             <p className="text-xs text-slate-400 leading-relaxed">
-              Schema key: <code className="text-emerald-300 font-mono">k3sEnabled: true</code>. Lightweight Kubernetes (<code className="text-slate-200 font-mono">/etc/axonwall/k3s.yaml</code>) with WireGuard native flannel mesh, embedded-etcd HA auto-join over mTLS, Linux 6.9+ <code className="text-slate-200 font-mono">UserNamespacesSupport</code> + <code className="text-slate-200 font-mono">BPF_TOKEN</code> profiles, and OpenEBS ZFS-LocalPV &amp; Mayastor NVMe-oF storage classes.
+              Schema key: <code className="text-emerald-300 font-mono">k3sEnabled: true</code>. Lightweight Kubernetes (<code className="text-slate-200 font-mono">/etc/axonwall/k3s.yaml</code>) with bundled <code className="text-slate-200 font-mono">k3s</code> &amp; <code className="text-slate-200 font-mono">k9s</code> binaries, WireGuard flannel or Cilium eBPF mesh, embedded-etcd HA auto-join over mTLS, Linux 6.9+ <code className="text-slate-200 font-mono">UserNamespacesSupport</code> + <code className="text-slate-200 font-mono">BPF_TOKEN</code> profiles, and OpenEBS ZFS-LocalPV &amp; Mayastor NVMe-oF storage classes.
             </p>
             <div className="pt-2 text-[11px] font-mono text-slate-500">
-              Kubeconfig: Synced locally or remotely via <code className="text-slate-300">axonwall-kubeconfig --vip</code>.
+              Kubeconfig &amp; UI: Synced via <code className="text-slate-300">axonwall-kubeconfig --vip</code> • Browser Explorer at <code className="text-slate-300">/k3s/explorer</code>
             </div>
           </div>
 
@@ -188,16 +188,23 @@ export default function ModularArchitectureDocPage() {
         </div>
       </section>
 
-      {/* 14 Built-in Extension Plugins */}
+      {/* 18 Built-in Extension Plugins */}
       <section id="extension-plugins" className="space-y-6 pt-6 border-t border-slate-800/80">
         <h2 className="text-2xl font-bold text-white flex items-center gap-2">
-          <Zap className="w-6 h-6 text-emerald-400" /> 14 Built-In Extension Plugins
+          <Zap className="w-6 h-6 text-emerald-400" /> 18 Built-In Extension Plugins &amp; Bundled Binaries
         </h2>
         <p className="text-sm text-slate-300 leading-relaxed">
-          Beyond the 5 Core Roles, Axonwall includes <strong>14 first-party extension plugins</strong> managed declaratively in{' '}
+          Beyond the 5 Core Roles, Axonwall includes <strong>18 first-party extension plugins</strong> managed declaratively in{' '}
           <code className="text-emerald-400 font-mono">/etc/axonwall/system.yaml</code> or imperatively via{' '}
-          <code className="text-emerald-400 font-mono">axonwallctl plugin</code>. Three workstation &amp; host-security plugins ship enabled out of the box, while eleven specialized network, VPN, AI, and SecOps plugins remain opt-in to keep the default attack surface minimal.
+          <code className="text-emerald-400 font-mono">axonwallctl plugin</code>. Three workstation &amp; host-security plugins ship enabled out of the box (unless provisioned with the <code className="text-amber-300 font-mono">minimal</code> edition), while fifteen specialized network, VPN, AI, editor, and SecOps plugins remain opt-in to keep the default attack surface minimal.
         </p>
+
+        <div className="p-4 rounded-xl bg-slate-900/90 border border-emerald-500/25 text-xs text-slate-300 leading-relaxed space-y-1.5">
+          <div className="font-bold text-emerald-300">SHA-256 Bundled Binary Supply Chain &amp; On-Demand Provisioning</div>
+          <p>
+            Plugins such as <code className="font-mono text-slate-200">core-k3s</code> (<code className="font-mono">k3s</code>, <code className="font-mono">k9s</code>), <code className="font-mono text-slate-200">cli-workstation</code> (<code className="font-mono">vim</code>, <code className="font-mono">neovim</code>), and <code className="font-mono text-slate-200">cli-emacs</code> (bundled Debian Emacs shared with <code className="font-mono">cli-emacs-doom</code> / <code className="font-mono">cli-emacs-spacemacs</code>) verify pinned SHA-256 archives before fail-closed extraction into per-plugin <code className="font-mono text-slate-200">bin/</code> directories, wired automatically into interactive shell <code className="font-mono text-slate-200">PATH</code> snippets and installable on demand from <code className="font-mono text-amber-300">/system/plugins</code>.
+          </p>
+        </div>
 
         <div className="overflow-x-auto rounded-xl border border-slate-800">
           <table className="w-full text-left text-xs border-collapse">
@@ -214,7 +221,7 @@ export default function ModularArchitectureDocPage() {
                 <td className="p-2.5 font-mono text-emerald-400 font-semibold">cli-workstation</td>
                 <td className="p-2.5 text-emerald-400 font-semibold">Enabled</td>
                 <td className="p-2.5 font-mono text-slate-400">system.yaml</td>
-                <td className="p-2.5">Neovim Super Configurator (<code className="font-mono">axonwall-config</code>), Oh My Zsh + Starship shell, Tmux, <code className="font-mono">kubectl</code> &amp; <code className="font-mono">helm</code> v3</td>
+                <td className="p-2.5">Bundled <code className="font-mono">vim</code> &amp; <code className="font-mono">neovim</code> Super Configurator (<code className="font-mono">axonwall-config</code>), Oh My Zsh + Starship shell, Tmux, <code className="font-mono">kubectl</code> &amp; <code className="font-mono">helm</code> v3</td>
               </tr>
               <tr>
                 <td className="p-2.5 font-mono text-emerald-400 font-semibold">host-malware-rootkit</td>
@@ -300,6 +307,24 @@ export default function ModularArchitectureDocPage() {
                 <td className="p-2.5 font-mono text-slate-400">system.yaml</td>
                 <td className="p-2.5">Interactive <code className="font-mono">axonwall-tui --nastymap</code> ASCII packet-path &amp; rule-trace topology simulator plus hardware diagnostics</td>
               </tr>
+              <tr>
+                <td className="p-2.5 font-mono text-sky-400 font-semibold">cli-emacs</td>
+                <td className="p-2.5 text-slate-400">Opt-In</td>
+                <td className="p-2.5 font-mono text-slate-400">system.yaml</td>
+                <td className="p-2.5">Bundled GNU Emacs runtime (<code className="font-mono">emacs</code>) staged into isolated per-plugin <code className="font-mono">bin/</code> with interactive shell <code className="font-mono">PATH</code> snippet</td>
+              </tr>
+              <tr>
+                <td className="p-2.5 font-mono text-sky-400 font-semibold">cli-emacs-doom</td>
+                <td className="p-2.5 text-slate-400">Opt-In</td>
+                <td className="p-2.5 font-mono text-slate-400">system.yaml</td>
+                <td className="p-2.5">Doom Emacs workstation starter sharing the bundled <code className="font-mono">cli-emacs</code> runtime</td>
+              </tr>
+              <tr>
+                <td className="p-2.5 font-mono text-sky-400 font-semibold">cli-emacs-spacemacs</td>
+                <td className="p-2.5 text-slate-400">Opt-In</td>
+                <td className="p-2.5 font-mono text-slate-400">system.yaml</td>
+                <td className="p-2.5">Spacemacs configuration starter sharing the bundled <code className="font-mono">cli-emacs</code> runtime</td>
+              </tr>
             </tbody>
           </table>
         </div>
@@ -343,7 +368,7 @@ plugins:
         <CodeBlock
           title="CLI Plugin Lifecycle Management (axonwallctl plugin)"
           language="bash"
-          code={`# List all 5 Core Roles & 15 extension plugins with live systemd state
+          code={`# List all 5 Core Roles & 18 extension plugins with live systemd & binary state
 axonwallctl plugin list
 
 # Enable or disable built-in plugins (updates /etc/axonwall/system.yaml & reconciles)

@@ -1,20 +1,22 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSession } from '@/server/auth';
+import { isPasswordChangeEnforced } from '@/server/auth-guard';
 import { restoreEncryptedBackup } from '@/server/backup';
 import { applyDesiredState } from '@/server/agent';
 import { DesiredStateSchema } from '@axonwall/lib/schemas';
 
 export async function POST(request: NextRequest) {
   const session = await getSession();
-  if (!session || session.passwordChangeRequired || !session.roles.includes('admin')) {
+  const pwdEnforced = isPasswordChangeEnforced(session);
+  if (!session || pwdEnforced || !session.roles.includes('admin')) {
     return NextResponse.json(
       {
         success: false,
-        error: session?.passwordChangeRequired
+        error: pwdEnforced
           ? 'Password change required: default admin password must be changed first'
           : 'Unauthorized: Admin access required',
       },
-      { status: session?.passwordChangeRequired ? 403 : 401 }
+      { status: pwdEnforced ? 403 : 401 }
     );
   }
 

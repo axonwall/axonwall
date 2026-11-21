@@ -63,9 +63,18 @@ OPT2_IF="$(echo "$IFACES" | sed -n '4p')"
 
 echo "[Axonwall Network Setup] Detected WAN: ${WAN_IF}, LAN: ${LAN_IF:-<none>}, OPT1: ${OPT1_IF:-<none>}, OPT2: ${OPT2_IF:-<none>}"
 
+is_host_mode_edition() {
+  [ -f "${ROOT}/etc/axonwall/.k3s-edition" ] && return 0
+  [ -f "${ROOT}/etc/axonwall/.minimal-edition" ] && return 0
+  case "$(tr -d ' \t\r\n' < "${ROOT}/etc/axonwall/edition" 2>/dev/null || true)" in
+    k3s-storage|minimal) return 0 ;;
+  esac
+  return 1
+}
+
 if [ ! -s "$CONF" ]; then
   mkdir -p "${ROOT}/etc/axonwall" || exit 0
-  if [ -f "${ROOT}/etc/axonwall/.k3s-edition" ]; then
+  if is_host_mode_edition; then
     _def_lan_mode="dhcp"
     _def_lan_ip=""
     _def_lan_dhcp="false"
@@ -126,7 +135,7 @@ if [ -s "$CONF" ]; then
 fi
 [ -z "$WAN_IF" ] && WAN_IF="eth0"
 WAN_MODE="${WAN_MODE:-dhcp}"
-if [ -f "${ROOT}/etc/axonwall/.k3s-edition" ]; then
+if is_host_mode_edition; then
   LAN_MODE="${LAN_MODE:-dhcp}"
   LAN_IPV4_ADDRESS="${LAN_IPV4_ADDRESS:-}"
 else

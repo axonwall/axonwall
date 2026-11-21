@@ -58,18 +58,22 @@ if [ "$_EDITION_FROM_FILE" = "0" ]; then
     AXONWALL_EDITION="k3s-storage"
   elif [ "$_minimal_marker" = "1" ]; then
     AXONWALL_EDITION="minimal"
-  elif grep -qsE '(^|[[:space:]])(axonwall_edition=vault|axonwall\.edition=vault)($|[[:space:]])' /proc/cmdline 2>/dev/null; then
-    AXONWALL_EDITION="vault"
-  elif grep -qsE '(^|[[:space:]])(axonwall_edition=k3s-storage|axonwall\.edition=k3s-storage)($|[[:space:]])' /proc/cmdline 2>/dev/null; then
-    AXONWALL_EDITION="k3s-storage"
-  elif grep -qsE '(^|[[:space:]])(axonwall_edition=minimal|axonwall\.edition=minimal)($|[[:space:]])' /proc/cmdline 2>/dev/null; then
-    AXONWALL_EDITION="minimal"
-  elif grep -qsE '(^|[[:space:]])(axonwall_edition=axonwall|axonwall\.edition=axonwall)($|[[:space:]])' /proc/cmdline 2>/dev/null; then
-    AXONWALL_EDITION="axonwall"
   elif grep -qsE '(^|[[:space:]])(axonwall_edition|axonwall\.edition)=[^[:space:]]+' /proc/cmdline 2>/dev/null; then
-    _cmdline_edition="$(grep -oE '(axonwall_edition|axonwall\.edition)=[^[:space:]]+' /proc/cmdline 2>/dev/null | tail -n 1 | sed -E 's/^[^=]+=//')"
-    echo "Error: unknown edition '${_cmdline_edition}' in kernel cmdline (expected axonwall, minimal, vault, or k3s-storage); refusing to guess. Fix the cmdline/markers and re-run dpkg --configure." >&2
-    exit 1
+    _cmdline_editions="$(grep -oE '(^|[[:space:]])(axonwall_edition|axonwall\.edition)=[^[:space:]]+' /proc/cmdline 2>/dev/null | sed -E 's/^[[:space:]]*[^=]+=//' | sort -u)"
+    _cmdline_count="$(printf '%s\n' "$_cmdline_editions" | grep -c . || true)"
+    if [ "$_cmdline_count" -gt 1 ]; then
+      echo "Error: conflicting edition tokens in /proc/cmdline ($(printf '%s' "$_cmdline_editions" | tr '\n' ' ')); refusing to guess. Fix the cmdline/markers and re-run dpkg --configure." >&2
+      exit 1
+    fi
+    case "$_cmdline_editions" in
+      axonwall|minimal|vault|k3s-storage)
+        AXONWALL_EDITION="$_cmdline_editions"
+        ;;
+      *)
+        echo "Error: unknown edition '${_cmdline_editions}' in kernel cmdline (expected axonwall, minimal, vault, or k3s-storage); refusing to guess. Fix the cmdline/markers and re-run dpkg --configure." >&2
+        exit 1
+        ;;
+    esac
   elif [ -x /usr/sbin/axonwalld ]; then
     echo "Warning: no edition signal found (no /etc/axonwall/edition, no legacy marker, no axonwall.edition kernel cmdline), but the NGFW daemon is present, so assuming axonwall. Create /etc/axonwall/edition containing the edition name to record it explicitly." >&2
     AXONWALL_EDITION="axonwall"
@@ -473,6 +477,12 @@ ENV_EOF
             sed -i 's/^ENABLED="false"/ENABLED="true"/' /etc/default/sysstat 2>/dev/null || true
         fi
 
+        if [ "${AXONWALL_EDITION}" = "minimal" ] && [ ! -f /var/lib/axonwall/plugins-disabled.json ]; then
+            mkdir -p /var/lib/axonwall
+            printf '{"core-firewall":true,"core-nas":true,"core-k3s":true,"core-virt":true,"core-vigilante":true,"cli-workstation":true,"host-malware-rootkit":true,"coroot-ebpf-apm":true}\n' > /var/lib/axonwall/plugins-disabled.json
+            chmod 0644 /var/lib/axonwall/plugins-disabled.json
+        fi
+
         # 5c. Sync any regular systemd unit files in /etc/systemd/system/ so ISO-placed copies do not shadow updated /lib/systemd/system/ units
         # D-M9: the sync list is the edition's own unit set; syncing the
         # NGFW list on a flavor box would resurrect units the flavor
@@ -482,10 +492,10 @@ ENV_EOF
         # from the vault list, and on k3s-storage it is the flavor's
         # own unit, which must be synced, not skipped.)
         case "${AXONWALL_EDITION}" in
-            minimal) UNITS="axonwalld.service axonwall-controller.service axonwall-ui.service axonwall-console.service" ;;
-            vault) UNITS="axonwall-console.service seaweedfs.service axonwall-vault-firstboot.service axonwall-vault-provision.service" ;;
-            k3s-storage) UNITS="axonwall-console.service k3s.service k3s-agent.service axonwall-k3s-firstboot.service axonwall-k3s-verify.service" ;;
-            *) UNITS="axonwalld.service axonwall-controller.service axonwall-ui.service axonwall-console.service headscale.service k3s.service" ;;
+            minimal) UNITS="axonwalld.service axonwall-controller.service axonwall-ui.service axonwall-console.service axonwall-hub-cert-renew.service axonwall-hub-cert-renew.timer" ;;
+            vault) UNITS="axonwall-console.service seaweedfs.service axonwall-vault-firstboot.service axonwall-vault-provision.service axonwall-hub-cert-renew.service axonwall-hub-cert-renew.timer" ;;
+            k3s-storage) UNITS="axonwall-console.service k3s.service k3s-agent.service axonwall-k3s-firstboot.service axonwall-k3s-verify.service axonwall-hub-cert-renew.service axonwall-hub-cert-renew.timer" ;;
+            *) UNITS="axonwalld.service axonwall-controller.service axonwall-ui.service axonwall-console.service headscale.service k3s.service axonwall-hub-cert-renew.service axonwall-hub-cert-renew.timer" ;;
         esac
         for unit in ${UNITS}; do
             if [ -f "/etc/systemd/system/${unit}" ] && [ ! -L "/etc/systemd/system/${unit}" ] && [ -f "/lib/systemd/system/${unit}" ]; then

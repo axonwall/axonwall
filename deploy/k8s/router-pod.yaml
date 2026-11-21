@@ -9,6 +9,19 @@ metadata:
       {"name": "macvlan-lan", "interface": "net2"}
     ]'
 spec:
+  initContainers:
+    - name: seed-config
+      image: busybox:1.36
+      command:
+        - sh
+        - -c
+        - cp -f /etc/axonwall-seed/* /etc/axonwall/ 2>/dev/null || true
+      volumeMounts:
+        - name: config-seed
+          mountPath: /etc/axonwall-seed
+          readOnly: true
+        - name: config
+          mountPath: /etc/axonwall
   containers:
     - name: router
       image: ghcr.io/axonwall/axonwalld:v0.12.4
@@ -28,6 +41,8 @@ spec:
         - name: config
           mountPath: /etc/axonwall
   volumes:
-    - name: config
+    - name: config-seed
       configMap:
         name: axonwall-router-config
+    - name: config
+      emptyDir: {}

@@ -1,7 +1,51 @@
+import net from 'node:net';
 import { execa } from 'execa';
 import { saveTriageBundle } from './evidence.js';
 import { logger } from '../utils/logger.js';
-import { assertCliTarget } from './config.js';
+import { assertCliTarget, isValidHostname } from './config.js';
+
+function assertDiagnosticHost(host, label) {
+  const trimmed = (host || '127.0.0.1').trim();
+  const clean = assertCliTarget(trimmed, label);
+  if (/[/?#@\s\u0000-\u001f\\]/.test(clean) || (!net.isIP(clean) && !isValidHostname(clean))) {
+    throw new Error(`Invalid ${label} '${host}': must be a valid hostname or IP address`);
+  }
+  return clean;
+}
+
+function assertNotMetadataHost(host) {
+  const lower = String(host || '').toLowerCase();
+  if (
+    lower === 'metadata.google.internal' ||
+    lower.startsWith('169.254.') ||
+    lower.startsWith('::ffff:169.254.') ||
+    lower.startsWith('fe80:') ||
+    lower.startsWith('fe80%')
+  ) {
+    throw new Error(`Access to link-local/metadata host '${host}' is blocked`);
+  }
+}
+
+function formatHostAuthority(host) {
+  return net.isIP(host) === 6 ? `[${host}]` : host;
+}
+
+function assertDiagnosticPort(port, defaultPort) {
+  if (port === null || port === undefined || port === '') return defaultPort;
+  const num = Number(port);
+  if (!Number.isInteger(num) || num < 1 || num > 65535) {
+    throw new Error(`Invalid port '${port}': expected integer between 1 and 65535`);
+  }
+  return num;
+}
+
+function assertBoundedCount(val, fallback, min, max, label) {
+  const num = val === undefined || val === null ? fallback : Number(val);
+  if (!Number.isInteger(num) || num < min || num > max) {
+    throw new Error(`Invalid ${label} '${val}': expected integer between ${min} and ${max}`);
+  }
+  return num;
+}
 
 /**
  * Check if a command binary is available in PATH
@@ -24,21 +68,22 @@ export async function isBinaryAvailable(binary) {
  * @returns {Promise<{ success: boolean, output: string, error?: string }>}
  */
 export async function runPing(host, count = 4) {
-  const target = assertCliTarget((host || '127.0.0.1').trim(), 'ping target');
-  logger.info('DIAG:PING', `Executing ping -c ${count} ${target}`);
+  const target = assertDiagnosticHost(host, 'ping target');
+  const cleanCount = assertBoundedCount(count, 4, 1, 20, 'ping count');
+  logger.info('DIAG:PING', `Executing ping -c ${cleanCount} ${target}`);
 
   try {
-    const { stdout, stderr } = await execa('ping', ['-c', String(count), '-W', '2', target]);
+    const { stdout, stderr } = await execa('ping', ['-c', String(cleanCount), '-W', '2', target]);
     return {
       success: true,
-      command: `ping -c ${count} ${target}`,
+      command: `ping -c ${cleanCount} ${target}`,
       output: stdout || stderr
     };
   } catch (err) {
     logger.warn('DIAG:PING:ERROR', err.message);
     return {
       success: false,
-      command: `ping -c ${count} ${target}`,
+      command: `ping -c ${cleanCount} ${target}`,
       output: err.stdout || err.message,
       error: err.message
     };
@@ -61,28 +106,31 @@ export async function runBenchmark(host, {
   requests = 50,
   concurrency = 5
 } = {}) {
-  const target = assertCliTarget((host || '127.0.0.1').trim(), 'benchmark target');
-  const protocol = isHttps || port === 443 ? 'https' : 'http';
-  const targetPort = port ? `:${port}` : (isHttps ? ':443' : ':80');
-  const targetUrl = `${protocol}://${target}${targetPort}/`;
+  const target = assertDiagnosticHost(host, 'benchmark target');
+  assertNotMetadataHost(target);
+  const portNum = assertDiagnosticPort(port, isHttps ? 443 : 80);
+  const protocol = isHttps || portNum === 443 ? 'https' : 'http';
+  const targetUrl = `${protocol}://${formatHostAuthority(target)}:${portNum}/`;
+  const cleanRequests = assertBoundedCount(requests, 50, 1, 500, 'benchmark requests');
+  const cleanConcurrency = assertBoundedCount(concurrency, 5, 1, 50, 'benchmark concurrency');
 
   const hasAb = await isBinaryAvailable('ab');
 
   if (hasAb) {
-    logger.info('DIAG:AB', `Executing ab -n ${requests} -c ${concurrency} ${targetUrl}`);
+    logger.info('DIAG:AB', `Executing ab -n ${cleanRequests} -c ${cleanConcurrency} ${targetUrl}`);
     try {
-      const { stdout } = await execa('ab', ['-n', String(requests), '-c', String(concurrency), '-k', targetUrl]);
+      const { stdout } = await execa('ab', ['-n', String(cleanRequests), '-c', String(cleanConcurrency), '-k', targetUrl]);
       return {
         success: true,
         tool: 'ab (ApacheBench)',
-        command: `ab -n ${requests} -c ${concurrency} -k ${targetUrl}`,
+        command: `ab -n ${cleanRequests} -c ${cleanConcurrency} -k ${targetUrl}`,
         output: stdout
       };
     } catch (err) {
       return {
         success: false,
         tool: 'ab (ApacheBench)',
-        command: `ab -n ${requests} -c ${concurrency} -k ${targetUrl}`,
+        command: `ab -n ${cleanRequests} -c ${cleanConcurrency} -k ${targetUrl}`,
         output: err.stdout || err.message,
         error: err.message
       };
@@ -137,7 +185,7 @@ export async function runBenchmark(host, {
  * @returns {Promise<{ success: boolean, output: string, tool: string }>}
  */
 export async function runMtr(host) {
-  const target = assertCliTarget((host || '127.0.0.1').trim(), 'mtr target');
+  const target = assertDiagnosticHost(host, 'mtr target');
   const hasMtr = await isBinaryAvailable('mtr');
 
   if (hasMtr) {
@@ -200,10 +248,11 @@ export async function runMtr(host) {
  * @returns {Promise<{ success: boolean, output: string }>}
  */
 export async function runCurlHeaders(host, { port = null, isHttps = false } = {}) {
-  const target = assertCliTarget((host || '127.0.0.1').trim(), 'curl target');
-  const protocol = isHttps || port === 443 ? 'https' : 'http';
-  const targetPort = port ? `:${port}` : (isHttps ? ':443' : ':80');
-  const targetUrl = `${protocol}://${target}${targetPort}/`;
+  const target = assertDiagnosticHost(host, 'curl target');
+  assertNotMetadataHost(target);
+  const portNum = assertDiagnosticPort(port, isHttps ? 443 : 80);
+  const protocol = isHttps || portNum === 443 ? 'https' : 'http';
+  const targetUrl = `${protocol}://${formatHostAuthority(target)}:${portNum}/`;
 
   logger.info('DIAG:CURL_HEADERS', `Executing curl -I -sS -k ${targetUrl}`);
   try {
@@ -235,7 +284,7 @@ export async function runCurlHeaders(host, { port = null, isHttps = false } = {}
  * @returns {Promise<{ success: boolean, output: string }>}
  */
 export async function runDnsLookup(host) {
-  const target = assertCliTarget((host || '127.0.0.1').trim(), 'dig target');
+  const target = assertDiagnosticHost(host, 'dig target');
   const hasDig = await isBinaryAvailable('dig');
 
   if (hasDig) {
@@ -277,32 +326,35 @@ export async function runDnsLookup(host) {
  * @returns {Promise<{ success: boolean, output: string, command: string }>}
  */
 export async function runTlsCertDump(host, port = 443) {
-  const target = assertCliTarget((host || '127.0.0.1').trim(), 'tls target');
-  const targetPort = String(port || 443);
-  logger.info('DIAG:TLS_CERTS', `Executing openssl s_client -showcerts -connect ${target}:${targetPort}`);
+  const target = assertDiagnosticHost(host, 'tls target');
+  const portNum = assertDiagnosticPort(port, 443);
+  const connectTarget = `${formatHostAuthority(target)}:${portNum}`;
+  logger.info('DIAG:TLS_CERTS', `Executing openssl s_client -showcerts -connect ${connectTarget}`);
 
   try {
-    const { stdout, stderr } = await execa('openssl', [
-      's_client',
-      '-showcerts',
-      '-connect', `${target}:${targetPort}`,
-      '-servername', target
-    ], {
+    const args = ['s_client', '-showcerts', '-connect', connectTarget];
+    if (!net.isIP(target)) {
+      args.push('-servername', target);
+    }
+    const { stdout, stderr } = await execa('openssl', args, {
       input: 'Q\n',
       timeout: 5000
     });
 
+    const cmdDisplay = net.isIP(target)
+      ? `openssl s_client -showcerts -connect ${connectTarget}`
+      : `openssl s_client -showcerts -connect ${connectTarget} -servername ${target}`;
     return {
       success: true,
       tool: 'OpenSSL TLS Certificate Chain',
-      command: `openssl s_client -showcerts -connect ${target}:${targetPort} -servername ${target}`,
+      command: cmdDisplay,
       output: stdout || stderr
     };
   } catch (err) {
     return {
       success: false,
       tool: 'OpenSSL TLS Certificate Chain',
-      command: `openssl s_client -showcerts -connect ${target}:${targetPort}`,
+      command: `openssl s_client -showcerts -connect ${connectTarget}`,
       output: err.stdout || err.message,
       error: err.message
     };

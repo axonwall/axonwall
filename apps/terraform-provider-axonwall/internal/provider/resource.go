@@ -207,9 +207,40 @@ func (r *DesiredStateResource) applyState(ctx context.Context, stateJson string)
 		return fmt.Errorf("API error %d: %s", httpResp.StatusCode, string(respBody))
 	}
 
+	applyRespBody, err := io.ReadAll(io.LimitReader(httpResp.Body, 1<<20))
+	if err != nil {
+		return fmt.Errorf("failed to read /apply response: %w", err)
+	}
+	confirmJobID := jobID
+	if len(bytes.TrimSpace(applyRespBody)) > 0 {
+		var applyEnvelope struct {
+			Status string `json:"status"`
+			Error  string `json:"error"`
+			Data   *struct {
+				Success *bool  `json:"success"`
+				Message string `json:"message"`
+				JobID   string `json:"jobId"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(applyRespBody, &applyEnvelope); err != nil {
+			return fmt.Errorf("invalid /apply response JSON: %w", err)
+		}
+		if applyEnvelope.Status != "" && applyEnvelope.Status != "ok" {
+			return fmt.Errorf("/apply failed (status=%s): %s", applyEnvelope.Status, applyEnvelope.Error)
+		}
+		if applyEnvelope.Data != nil {
+			if applyEnvelope.Data.Success != nil && !*applyEnvelope.Data.Success {
+				return fmt.Errorf("/apply rejected: %s", applyEnvelope.Data.Message)
+			}
+			if strings.TrimSpace(applyEnvelope.Data.JobID) != "" {
+				confirmJobID = strings.TrimSpace(applyEnvelope.Data.JobID)
+			}
+		}
+	}
+
 	// Confirm the configuration so it does not auto-rollback after the timeout
 	confirmUrl := baseEndpoint + "/confirm"
-	confirmPayload, _ := json.Marshal(map[string]string{"jobId": jobID})
+	confirmPayload, _ := json.Marshal(map[string]string{"jobId": confirmJobID})
 	confirmReq, err := http.NewRequestWithContext(ctx, "POST", confirmUrl, bytes.NewReader(confirmPayload))
 	if err != nil {
 		return fmt.Errorf("failed to create confirm request: %w", err)
@@ -228,6 +259,26 @@ func (r *DesiredStateResource) applyState(ctx context.Context, stateJson string)
 	if confirmResp.StatusCode < 200 || confirmResp.StatusCode >= 300 {
 		respBody, _ := io.ReadAll(io.LimitReader(confirmResp.Body, 1<<20))
 		return fmt.Errorf("confirm error %d: %s", confirmResp.StatusCode, string(respBody))
+	}
+
+	confirmRespBody, err := io.ReadAll(io.LimitReader(confirmResp.Body, 1<<20))
+	if err == nil && len(bytes.TrimSpace(confirmRespBody)) > 0 {
+		var confirmEnv struct {
+			Status string `json:"status"`
+			Error  string `json:"error"`
+			Data   *struct {
+				Success *bool  `json:"success"`
+				Message string `json:"message"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(confirmRespBody, &confirmEnv); err == nil {
+			if confirmEnv.Status != "" && confirmEnv.Status != "ok" {
+				return fmt.Errorf("/confirm failed (status=%s): %s", confirmEnv.Status, confirmEnv.Error)
+			}
+			if confirmEnv.Data != nil && confirmEnv.Data.Success != nil && !*confirmEnv.Data.Success {
+				return fmt.Errorf("/confirm rejected: %s", confirmEnv.Data.Message)
+			}
+		}
 	}
 
 	return nil

@@ -257,6 +257,11 @@ elif [[ "${FLAVOR}" == "minimal" ]]; then
   if [[ -f config/includes.chroot/usr/lib/tmpfiles.d/axonwall.conf ]]; then
     sed -i '/headscale/d' config/includes.chroot/usr/lib/tmpfiles.d/axonwall.conf
   fi
+  if [[ -f config/includes.chroot/etc/cloud/cloud.cfg.d/90_axonwall.cfg ]]; then
+    sed -i 's|shell:[[:space:]]*/usr/bin/zsh|shell: /bin/bash|g' config/includes.chroot/etc/cloud/cloud.cfg.d/90_axonwall.cfg
+  fi
+  cp "${SCRIPT_DIR}/config/includes.installer/preseed-minimal.cfg" config/includes.installer/preseed.cfg
+  cp "${SCRIPT_DIR}/config/includes.installer/preseed-minimal.cfg" config/includes.binary/preseed.cfg
   mkdir -p config/includes.chroot/etc/axonwall config/includes.chroot/var/lib/axonwall
   touch config/includes.chroot/etc/axonwall/.minimal-edition
   touch config/includes.chroot/etc/axonwall/.firstboot
@@ -396,6 +401,10 @@ if [[ -f config/includes.chroot/usr/local/bin/axonwall-zbm-theme ]]; then
   ln -sf axonwall-zbm-theme config/includes.chroot/usr/local/bin/zbm-kcl
 fi
 
+if [[ -f config/includes.chroot/usr/local/bin/axonwall-btrfs-grub ]]; then
+  chmod +x config/includes.chroot/usr/local/bin/axonwall-btrfs-grub
+fi
+
 for rk_script in axonwall-hunt-rootkits hunt-io-uring-implants.sh hunt-ebpf-rootkits.sh audit_hidden_bpf_prog_idr.py; do
   if [[ -f "config/includes.chroot/usr/local/bin/${rk_script}" ]]; then
     chmod +x "config/includes.chroot/usr/local/bin/${rk_script}"
@@ -465,13 +474,21 @@ rm -f config/includes.chroot/usr/local/bin/k3s config/includes.chroot/usr/local/
 # neither is — a plugin dir with no binaries must never ship a
 # record blessing an empty tree.
 write_core_k3s_bundled_json() {
-  local _dir="$1" _k3s_sum="" _k9s_sum="" _n=0
+  local _dir="$1"
+  local _k3s_src_sum="${2:-${K3S_SHA256:-}}"
+  local _k9s_src_sum="${3:-${K9S_SHA256:-}}"
+  local _k3s_sum="" _k9s_sum="" _n=0
   if [[ -x "${_dir}/bin/k3s" ]]; then
     _k3s_sum="$(sha256sum "${_dir}/bin/k3s" | awk '{print $1}')"
+    _k3s_src_sum="${_k3s_src_sum:-${_k3s_sum}}"
     _n=$((_n + 1))
   fi
   if [[ -x "${_dir}/bin/k9s" ]]; then
     _k9s_sum="$(sha256sum "${_dir}/bin/k9s" | awk '{print $1}')"
+    if [[ -z "${_k9s_src_sum}" ]]; then
+      echo "[!] ERROR: core-k3s plugin dir ${_dir} stages bin/k9s without pinned archive checksum K9S_SHA256." >&2
+      return 1
+    fi
     _n=$((_n + 1))
   fi
   if [[ "${_n}" -eq 0 ]]; then
@@ -479,7 +496,15 @@ write_core_k3s_bundled_json() {
     return 1
   fi
   {
-    printf '{\n  "pluginId": "core-k3s",\n  "files": [\n'
+    printf '{\n  "pluginId": "core-k3s",\n  "sources": {\n'
+    if [[ -n "${_k3s_sum}" ]]; then
+      printf '    "k3s": "%s"' "${_k3s_src_sum}"
+      if [[ -n "${_k9s_sum}" ]]; then printf ',\n'; fi
+    fi
+    if [[ -n "${_k9s_sum}" ]]; then
+      printf '    "k9s": "%s"' "${_k9s_src_sum}"
+    fi
+    printf '\n  },\n  "files": [\n'
     if [[ -n "${_k3s_sum}" ]]; then
       printf '    {\n      "path": "bin/k3s",\n      "sha256": "%s",\n      "entry": "k3s",\n      "kind": "binary"\n    }' "${_k3s_sum}"
       if [[ -n "${_k9s_sum}" ]]; then printf ',\n'; fi
@@ -587,7 +612,7 @@ for _klink in kubectl crictl ctr; do
   ln -sf k3s "config/includes.chroot/var/lib/axonwall/core-k3s/bin/${_klink}"
 done
 # Verification record for the staged tree (see the helper above).
-write_core_k3s_bundled_json config/includes.chroot/var/lib/axonwall/core-k3s
+write_core_k3s_bundled_json config/includes.chroot/var/lib/axonwall/core-k3s "${K3S_SHA256:-}" "${K9S_SHA256:-}"
 
 # Stage Vault Edition payload into /usr/share/axonwall/vault/ so the unified
 # main ISO can install EITHER Axonwall NGFW OR Axonwall Vault Edition.
@@ -691,7 +716,7 @@ elif [[ "${FLAVOR}" == "k3s-storage" ]]; then
     ln -sf k3s "config/includes.chroot/var/lib/axonwall/core-k3s/bin/${_klink}"
   done
   # Verification record for the staged tree (see the helper above).
-  write_core_k3s_bundled_json config/includes.chroot/var/lib/axonwall/core-k3s
+  write_core_k3s_bundled_json config/includes.chroot/var/lib/axonwall/core-k3s "${K3S_SHA256:-}" "${K9S_SHA256:-}"
 elif [[ "${FLAVOR}" == "vault" ]]; then
 # Fetch SeaweedFS binary (Vault Edition storage engine)
 WEED_VERSION="4.48"
@@ -960,6 +985,8 @@ cryptsetup
 systemd-cryptsetup
 tpm2-tools
 xfsprogs
+btrfs-progs
+snapper
 etckeeper
 git
 openssh-server
@@ -1081,6 +1108,8 @@ cryptsetup
 systemd-cryptsetup
 tpm2-tools
 xfsprogs
+btrfs-progs
+snapper
 etckeeper
 git
 openssh-server
@@ -1176,6 +1205,8 @@ cryptsetup
 systemd-cryptsetup
 tpm2-tools
 xfsprogs
+btrfs-progs
+snapper
 openssh-server
 openssh-client
 slapd
@@ -1307,6 +1338,8 @@ cryptsetup
 systemd-cryptsetup
 tpm2-tools
 xfsprogs
+btrfs-progs
+snapper
 samba
 nfs-kernel-server
 open-iscsi

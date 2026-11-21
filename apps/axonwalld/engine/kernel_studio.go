@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1022,6 +1023,8 @@ func (m *KernelStudioManager) InstallArtifactSafely(taskMgr *TaskManager, watchd
 		}
 		newBeName = "axonwall-kcustom-" + time.Now().UTC().Format("20060102-150405")
 		safetyNote = fmt.Sprintf("Clones a standby ZFS Boot Environment before installing the custom kernel so active root stays untouched for ZFSBootMenu rollback. New boot environment %s will be activated for the next boot once the install succeeds.", newBeName)
+	} else if installMode == "btrfs" {
+		safetyNote = "Captures a pre-kernel Snapper snapshot of Btrfs @ before installing the custom kernel and regenerates /boot/grub/btrfs-snapshots.cfg for one-click GRUB or Snapper rollback."
 	} else {
 		safetyNote = "Installs custom kernel alongside running Debian kernel and arms one-shot grub-reboot when available; previous kernel remains default fallback."
 	}
@@ -1057,35 +1060,50 @@ func (m *KernelStudioManager) InstallArtifactSafely(taskMgr *TaskManager, watchd
 			if err != nil {
 				return err
 			}
-			defer os.RemoveAll(mntDir)
-
-			if out, err := exec.Command("mount", "-t", "zfs", "-o", "zfsutil", dataset, mntDir).CombinedOutput(); err != nil {
-				return fmt.Errorf("mounting cloned ZFS BE %s: %v (%s)", dataset, err, strings.TrimSpace(string(out)))
-			}
+			cleanMntDir := filepath.Clean(mntDir)
+			rootMounted := false
+			var bindMounts []string
 			defer func() {
-				_ = exec.Command("umount", mntDir).Run()
+				unmountFailed := false
+				for i := len(bindMounts) - 1; i >= 0; i-- {
+					if err := exec.Command("umount", bindMounts[i]).Run(); err != nil {
+						unmountFailed = true
+						log.Printf("[KernelStudio] Warning: failed to unmount %s: %v", bindMounts[i], err)
+					}
+				}
+				if rootMounted {
+					if err := exec.Command("umount", cleanMntDir).Run(); err != nil {
+						if rErr := exec.Command("umount", "-R", cleanMntDir).Run(); rErr != nil {
+							unmountFailed = true
+							log.Printf("[KernelStudio] ERROR: failed to unmount ZFS BE %s: %v (recursive: %v)", cleanMntDir, err, rErr)
+						}
+					}
+				}
+				if unmountFailed || procMountHasPrefix(cleanMntDir) {
+					log.Printf("[KernelStudio] ERROR: refusing to remove mountpoint %s while mounts remain active", cleanMntDir)
+					return
+				}
+				if err := os.Remove(cleanMntDir); err != nil && !os.IsNotExist(err) {
+					log.Printf("[KernelStudio] Warning: could not remove staging mount dir %s: %v", cleanMntDir, err)
+				}
 			}()
 
-			var bindMounts []string
+			if out, err := exec.Command("mount", "-t", "zfs", "-o", "zfsutil", dataset, cleanMntDir).CombinedOutput(); err != nil {
+				return fmt.Errorf("mounting cloned ZFS BE %s: %v (%s)", dataset, err, strings.TrimSpace(string(out)))
+			}
+			rootMounted = true
+
 			for _, sub := range []string{"dev", "proc", "sys"} {
-				targetDir := filepath.Join(mntDir, sub)
+				targetDir := filepath.Join(cleanMntDir, sub)
 				_ = os.MkdirAll(targetDir, 0755)
 				if out, err := exec.Command("mount", "--bind", "/"+sub, targetDir).CombinedOutput(); err != nil {
-					for i := len(bindMounts) - 1; i >= 0; i-- {
-						_ = exec.Command("umount", bindMounts[i]).Run()
-					}
 					return fmt.Errorf("bind-mounting /%s into ZFS BE %s: %v (%s)", sub, newBeName, err, strings.TrimSpace(string(out)))
 				}
 				bindMounts = append(bindMounts, targetDir)
 			}
-			defer func() {
-				for i := len(bindMounts) - 1; i >= 0; i-- {
-					_ = exec.Command("umount", bindMounts[i]).Run()
-				}
-			}()
 
-			_ = os.MkdirAll(filepath.Join(mntDir, "tmp"), 01777)
-			tmpDeb := filepath.Join(mntDir, "tmp", cleanName)
+			_ = os.MkdirAll(filepath.Join(cleanMntDir, "tmp"), 01777)
+			tmpDeb := filepath.Join(cleanMntDir, "tmp", cleanName)
 			if raw, err := os.ReadFile(debPath); err != nil {
 				return err
 			} else if err := os.WriteFile(tmpDeb, raw, 0644); err != nil {
@@ -1094,11 +1112,11 @@ func (m *KernelStudioManager) InstallArtifactSafely(taskMgr *TaskManager, watchd
 			defer os.Remove(tmpDeb)
 
 			if strings.HasSuffix(cleanName, ".deb") {
-				if out, err := exec.Command("chroot", mntDir, "dpkg", "-i", "/tmp/"+cleanName).CombinedOutput(); err != nil {
+				if out, err := exec.Command("chroot", cleanMntDir, "dpkg", "-i", "/tmp/"+cleanName).CombinedOutput(); err != nil {
 					return fmt.Errorf("installing %s inside ZFS BE %s: %v (%s)", cleanName, newBeName, err, strings.TrimSpace(string(out)))
 				}
 			} else {
-				if out, err := exec.Command("chroot", mntDir, "pacman", "-U", "--noconfirm", "/tmp/"+cleanName).CombinedOutput(); err != nil {
+				if out, err := exec.Command("chroot", cleanMntDir, "pacman", "-U", "--noconfirm", "/tmp/"+cleanName).CombinedOutput(); err != nil {
 					return fmt.Errorf("installing %s inside ZFS BE %s: %v (%s)", cleanName, newBeName, err, strings.TrimSpace(string(out)))
 				}
 			}
@@ -1121,7 +1139,18 @@ func (m *KernelStudioManager) InstallArtifactSafely(taskMgr *TaskManager, watchd
 			return nil
 		}
 
-		// Standard A/B or rolling root: install side-by-side without removing running kernel
+		// Standard A/B, Btrfs, or rolling root: take pre-kernel Snapper snapshot on Btrfs, then install side-by-side
+		if installMode == "btrfs" {
+			if watchdog == nil {
+				return fmt.Errorf("btrfs kernel install aborted: watchdog unavailable for pre-kernel Snapper snapshot")
+			}
+			snapID, snapErr := watchdog.CreateBtrfsSnapshot("Pre-kernel install: "+cleanName, true)
+			if snapErr != nil {
+				return fmt.Errorf("creating pre-kernel Btrfs Snapper snapshot failed: %w", snapErr)
+			}
+			logfn("Created pre-kernel Snapper snapshot #%d before installing %s", snapID, cleanName)
+		}
+
 		if strings.HasSuffix(cleanName, ".deb") {
 			if out, err := exec.Command("dpkg", "-i", debPath).CombinedOutput(); err != nil {
 				return fmt.Errorf("dpkg -i %s failed: %v (%s)", cleanName, err, strings.TrimSpace(string(out)))
@@ -1140,8 +1169,33 @@ func (m *KernelStudioManager) InstallArtifactSafely(taskMgr *TaskManager, watchd
 			}
 			logfn("Installed Arch kernel package %s via pacman -U.", cleanName)
 		}
+		if installMode == "btrfs" && watchdog != nil {
+			if err := watchdog.SyncBtrfsGrubMenu(); err != nil {
+				logfn("Warning: axonwall-btrfs-grub sync returned error: %v", err)
+			} else {
+				logfn("Regenerated /boot/grub/btrfs-snapshots.cfg.")
+			}
+		}
 		return nil
 	})
 
 	return upid, installMode, safetyNote, nil
+}
+
+func procMountHasPrefix(cleanMount string) bool {
+	data, err := os.ReadFile("/proc/mounts")
+	if err != nil {
+		return false
+	}
+	prefix := cleanMount + "/"
+	for _, line := range strings.Split(string(data), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		if fields[1] == cleanMount || strings.HasPrefix(fields[1], prefix) {
+			return true
+		}
+	}
+	return false
 }

@@ -103,6 +103,19 @@ func (e *EdgeNetworkEngine) SetLinkUp(dev string, up bool) error {
 	return setInterfaceFlags(dev, up)
 }
 
+// SetLinkMAC sets an Ethernet interface hardware MAC address via ioctl SIOCSIFHWADDR.
+func (e *EdgeNetworkEngine) SetLinkMAC(dev, mac string) error {
+	dev = strings.TrimSpace(dev)
+	if dev == "" || !validRadioRegex.MatchString(dev) || len(dev) >= syscall.IFNAMSIZ {
+		return fmt.Errorf("invalid interface name %q", dev)
+	}
+	hw, err := net.ParseMAC(strings.TrimSpace(mac))
+	if err != nil || len(hw) != 6 {
+		return fmt.Errorf("invalid MAC address %q: %v", mac, err)
+	}
+	return setInterfaceMAC(dev, hw)
+}
+
 // RemoveAddress deletes an assigned CIDR address from an interface via Netlink RTM_DELADDR.
 // A-M41 (round 2): removing an address that is already absent is success,
 // not an error — the desired state (address not present) already holds.
@@ -152,6 +165,9 @@ func (e *EdgeNetworkEngine) ConfigureInterface(spec EdgeInterfaceSpec) error {
 
 	// 2. Set link UP or DOWN via ioctl SIOCSIFFLAGS
 	if err := setInterfaceFlags(dev, spec.Enabled); err != nil {
+		if !spec.Enabled {
+			return fmt.Errorf("failed to set interface %s down: %w", dev, err)
+		}
 		slog.Debug("Native ioctl link state note", "device", dev, "enabled", spec.Enabled, "note", err)
 	}
 
@@ -348,6 +364,51 @@ func setInterfaceFlags(dev string, up bool) error {
 	}
 
 	_, _, errno = syscall.Syscall(syscall.SYS_IOCTL, uintptr(fd), uintptr(syscall.SIOCSIFFLAGS), uintptr(unsafe.Pointer(&ifr)))
+	if errno != 0 {
+		return errno
+	}
+	return nil
+}
+
+type ifreqHwAddr struct {
+	Name   [syscall.IFNAMSIZ]byte
+	Family uint16
+	Data   [14]byte
+	Pad    [8]byte
+}
+
+func setInterfaceMAC(dev string, hw net.HardwareAddr) error {
+	const (
+		siocsifhwaddr = 0x8924
+		arphrdEther   = 1
+	)
+	if len(dev) >= syscall.IFNAMSIZ {
+		return fmt.Errorf("device name too long: %s", dev)
+	}
+	fd, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_DGRAM|syscall.SOCK_CLOEXEC, 0)
+	if err != nil {
+		return err
+	}
+	defer syscall.Close(fd)
+
+	var ifr ifreqHwAddr
+	copy(ifr.Name[:], dev)
+	ifr.Family = arphrdEther
+	copy(ifr.Data[:], hw[:6])
+
+	_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, uintptr(fd), uintptr(siocsifhwaddr), uintptr(unsafe.Pointer(&ifr)))
+	if errno == syscall.EBUSY {
+		// SIOCSIFHWADDR returns EBUSY while IFF_UP is set; bounce link cleanly.
+		if downErr := setInterfaceFlags(dev, false); downErr != nil {
+			return downErr
+		}
+		_, _, errno = syscall.Syscall(syscall.SYS_IOCTL, uintptr(fd), uintptr(siocsifhwaddr), uintptr(unsafe.Pointer(&ifr)))
+		if errno != 0 {
+			_ = setInterfaceFlags(dev, true)
+			return errno
+		}
+		return nil
+	}
 	if errno != 0 {
 		return errno
 	}

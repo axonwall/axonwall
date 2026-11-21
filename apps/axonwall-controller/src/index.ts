@@ -49,8 +49,9 @@ import * as https from 'node:https';
 import * as fs from 'node:fs';
 import * as net from 'node:net';
 import * as path from 'node:path';
-import { resolveControllerDirs } from './dev-paths.js';
+import { resolveControllerDirs, readAgentToken } from './dev-paths.js';
 import { readCanonicalConfig, writeCanonicalConfig } from './atomic-config.js';
+import { verifyToken } from '@axonwall/lib/ldap';
 import * as os from 'node:os';
 import * as child_process from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -2210,6 +2211,203 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
 
   const wss = new WebSocketServer({ noServer: true, maxPayload: 1048576 });
 
+  const loadControllerJwtSecret = (dirs: ReturnType<typeof resolveControllerDirs>): string | null => {
+    if (process.env.JWT_SECRET?.trim()) {
+      return process.env.JWT_SECRET.trim();
+    }
+    for (const envPath of Array.from(new Set([path.join(dirs.etcDir, 'axonwall.env'), '/etc/axonwall/axonwall.env']))) {
+      try {
+        if (!fs.existsSync(envPath)) continue;
+        for (const line of fs.readFileSync(envPath, 'utf8').split('\n')) {
+          const trimmed = line.trim();
+          if (trimmed.startsWith('JWT_SECRET=')) {
+            const val = trimmed.slice('JWT_SECRET='.length).trim();
+            if (val) return val;
+          }
+        }
+      } catch {}
+    }
+    return null;
+  };
+
+  const isControllerSessionRevoked = (dirs: ReturnType<typeof resolveControllerDirs>, sessionEpoch: number, jti?: string): boolean => {
+    let maxEpoch = 0;
+    for (const p of Array.from(new Set([path.join(dirs.varDir, 'session-epoch'), path.join(dirs.etcDir, 'session-epoch')]))) {
+      try {
+        const v = Number(fs.readFileSync(p, 'utf8').trim());
+        if (Number.isFinite(v) && v > maxEpoch) maxEpoch = v;
+      } catch {}
+    }
+    if (sessionEpoch !== maxEpoch) return true;
+    if (jti) {
+      for (const p of Array.from(new Set([path.join(dirs.varDir, 'revoked-jtis'), path.join(dirs.etcDir, 'revoked-jtis')]))) {
+        try {
+          const lines = fs.readFileSync(p, 'utf8').split('\n').map((l) => l.trim()).filter(Boolean);
+          if (lines.includes(jti)) return true;
+        } catch {}
+      }
+    }
+    return false;
+  };
+
+  const isLocalPasswordChangeRequired = (dirs: ReturnType<typeof resolveControllerDirs>): boolean => {
+    const markerCandidates = Array.from(
+      new Set([path.join(dirs.varDir, '.password_changed'), path.join(dirs.etcDir, '.password_changed'), './.password_changed'])
+    );
+    if (markerCandidates.some((p) => { try { return fs.existsSync(p); } catch { return false; } })) {
+      return false;
+    }
+    return process.env.NODE_ENV === 'production' || process.env.FORCE_PASSWORD_CHANGE === 'true';
+  };
+
+  const handleVirtConsoleWsUpgrade = (request: http.IncomingMessage, socket: net.Socket, head: Buffer) => {
+    const rejectUpgrade = (statusLine: string) => {
+      try {
+        if (!socket.destroyed) socket.end(`${statusLine}\r\nConnection: close\r\n\r\n`);
+      } catch {}
+      try { socket.destroy(); } catch {}
+    };
+
+    const rawUrl = request.url || '';
+    if (!rawUrl || /[\r\n]/.test(rawUrl) || !rawUrl.startsWith('/v1/virt/console/ws')) {
+      return rejectUpgrade('HTTP/1.1 400 Bad Request');
+    }
+
+    const originHeader = Array.isArray(request.headers.origin) ? request.headers.origin[0] : request.headers.origin;
+    const hostHeader = (Array.isArray(request.headers.host) ? request.headers.host[0] : request.headers.host) || '';
+    if (!originHeader || !hostHeader) {
+      return rejectUpgrade('HTTP/1.1 403 Forbidden');
+    }
+    try {
+      const originUrl = new URL(originHeader);
+      const expectedProto = (request.socket as any)?.encrypted ? 'https:' : 'http:';
+      if (originUrl.host !== hostHeader || originUrl.protocol !== expectedProto) {
+        return rejectUpgrade('HTTP/1.1 403 Forbidden');
+      }
+    } catch {
+      return rejectUpgrade('HTTP/1.1 403 Forbidden');
+    }
+
+    let token = '';
+    const rawCookie = Array.isArray(request.headers.cookie) ? request.headers.cookie.join('; ') : (request.headers.cookie || '');
+    for (const part of rawCookie.split(';')) {
+      const eq = part.indexOf('=');
+      if (eq <= 0) continue;
+      if (part.slice(0, eq).trim() === 'axonwall_session') {
+        try {
+          token = decodeURIComponent(part.slice(eq + 1).trim());
+        } catch {
+          return rejectUpgrade('HTTP/1.1 401 Unauthorized');
+        }
+        break;
+      }
+    }
+    if (!token) {
+      const authHdr = Array.isArray(request.headers.authorization) ? request.headers.authorization[0] : (request.headers.authorization || '');
+      if (authHdr.startsWith('Bearer ')) {
+        token = authHdr.slice(7).trim();
+      }
+    }
+    if (!token) {
+      return rejectUpgrade('HTTP/1.1 401 Unauthorized');
+    }
+
+    const dirs = resolveControllerDirs();
+    const jwtSecret = loadControllerJwtSecret(dirs);
+    if (!jwtSecret) {
+      return rejectUpgrade('HTTP/1.1 503 Service Unavailable');
+    }
+
+    void (async () => {
+      const session = await verifyToken(token, jwtSecret);
+      if (socket.destroyed) return;
+      if (!session || isControllerSessionRevoked(dirs, session.sessionEpoch ?? 0, session.jti)) {
+        return rejectUpgrade('HTTP/1.1 401 Unauthorized');
+      }
+      if (session.passwordChangeRequired || (session.source === 'local_admin' && isLocalPasswordChangeRequired(dirs))) {
+        return rejectUpgrade('HTTP/1.1 403 Forbidden');
+      }
+      const permitted =
+        Boolean(session.privileges?.includes('*')) ||
+        Boolean(session.roles?.some((r) => r === 'admin' || r === 'operator'));
+      if (!permitted) {
+        return rejectUpgrade('HTTP/1.1 403 Forbidden');
+      }
+
+      const agentToken = readAgentToken(dirs);
+      if (!agentToken) {
+        return rejectUpgrade('HTTP/1.1 503 Service Unavailable');
+      }
+
+      const upstreamHeaders: http.OutgoingHttpHeaders = {
+        Host: 'localhost',
+        Connection: 'Upgrade',
+        Upgrade: 'websocket',
+        'X-Axonwall-Agent-Token': agentToken,
+      };
+      for (const hName of ['sec-websocket-key', 'sec-websocket-version', 'sec-websocket-protocol', 'sec-websocket-extensions']) {
+        const val = request.headers[hName];
+        if (typeof val === 'string' && !/[\r\n]/.test(val)) {
+          upstreamHeaders[hName] = val;
+        }
+      }
+
+      const agentReq = http.request({
+        socketPath: dirs.agentSock,
+        path: rawUrl,
+        method: 'GET',
+        headers: upstreamHeaders,
+      });
+
+      let timedOut = false;
+      const destroyUpstream = () => {
+        try { agentReq.destroy(); } catch {}
+      };
+      agentReq.setTimeout(30000, () => {
+        timedOut = true;
+        destroyUpstream();
+        try { socket.destroy(); } catch {}
+      });
+      socket.on('close', destroyUpstream);
+
+      agentReq.on('upgrade', (agentRes, agentSocket, agentHead) => {
+        agentReq.setTimeout(0);
+        if (socket.destroyed) {
+          agentSocket.destroy();
+          return;
+        }
+        const headerLines: string[] = [];
+        for (let i = 0; i < agentRes.rawHeaders.length; i += 2) {
+          headerLines.push(`${agentRes.rawHeaders[i]}: ${agentRes.rawHeaders[i + 1]}`);
+        }
+        socket.write(`HTTP/1.1 101 Switching Protocols\r\n${headerLines.join('\r\n')}\r\n\r\n`);
+        if (agentHead && agentHead.length) socket.write(agentHead);
+        if (head && head.length) agentSocket.write(head);
+        agentSocket.on('error', () => socket.destroy());
+        socket.on('error', () => agentSocket.destroy());
+        agentSocket.pipe(socket);
+        socket.pipe(agentSocket);
+      });
+
+      agentReq.on('response', (agentRes) => {
+        agentReq.setTimeout(0);
+        if (!socket.destroyed) {
+          socket.end(`HTTP/1.1 ${agentRes.statusCode || 502} ${agentRes.statusMessage || 'Bad Gateway'}\r\nConnection: close\r\n\r\n`);
+        }
+        agentRes.resume();
+      });
+
+      agentReq.on('error', () => {
+        if (timedOut) return;
+        rejectUpgrade('HTTP/1.1 502 Bad Gateway');
+      });
+
+      agentReq.end();
+    })().catch(() => {
+      rejectUpgrade('HTTP/1.1 500 Internal Server Error');
+    });
+  };
+
   mainServer.on('upgrade', (request, socket, head) => {
     let pathname: string;
     try {
@@ -2323,6 +2521,11 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
       wss.handleUpgrade(request, socket, head, (ws) => {
         wss.emit('connection', ws, request, satId);
       });
+    } else if (pathname === '/v1/virt/console/ws') {
+      // W-H5: Proxy authenticated operator/admin VM/LXC console WebSockets
+      // directly over axonwalld's agent Unix socket instead of forwarding to
+      // Next.js (which has no /v1/virt/console/ws handler and returns 404).
+      handleVirtConsoleWsUpgrade(request, socket, head);
     } else {
       const rawWsHost = (request.headers.host || '127.0.0.1').replace(/[\r\n]/g, '');
       const uiWsReq = http.request({
@@ -2846,6 +3049,7 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
       } else {
         console.warn(`[Fleet Manager] Not re-asserting HA promotion for ${satId}: no LAN VIP recorded or configured`);
       }
+    } else if (activeHaEdgeId && state.role === 'edge-ngfw') {
       // B-H4 (round 3): match on the derived role only, exactly
       // like the untargeted DEMOTE in /fleet/ha-transition (B2-L1).
       // The id prefix is a fallback inside deriveSatelliteRole, not

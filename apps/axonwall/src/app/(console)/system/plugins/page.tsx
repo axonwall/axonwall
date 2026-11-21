@@ -32,7 +32,11 @@ import {
 import { getCurrentDesiredState } from '@/server/agent';
 import { useDesiredStateApply } from '@/lib/use-desired-state-apply';
 import { getExtensionPlugins, executePluginAction, type ExtensionPluginLiveStatus } from '@/server/plugins';
-import { type DesiredState, VigilanteConfigSchema } from '@axonwall/lib/schemas';
+import {
+  type DesiredState,
+  ObservabilityConfigSchema,
+  VigilanteConfigSchema,
+} from '@axonwall/lib/schemas';
 
 export default function PluginManagerPage() {
   const { applyState } = useDesiredStateApply();
@@ -42,7 +46,7 @@ export default function PluginManagerPage() {
   const [activeOutputModal, setActiveOutputModal] = useState<{ title: string; output: string } | null>(null);
 
   const [livePlugins, setLivePlugins] = useState<Record<string, ExtensionPluginLiveStatus>>({});
-  const [osFamily, setOsFamily] = useState<'alpine' | 'debian'>('debian');
+  const [osFamily, setOsFamily] = useState<'alpine' | 'debian' | 'arch'>('debian');
   const [pluginActionLoading, setPluginActionLoading] = useState<string | null>(null);
 
   const [selectedPlugin, setSelectedPlugin] = useState<PluginManifest | null>(null);
@@ -89,6 +93,17 @@ export default function PluginManagerPage() {
     if (id === 'core-virt') return Boolean(state.capabilities?.virtEnabled ?? state.virt?.enabled);
     if (id === 'core-vigilante') return Boolean(state.capabilities?.vigilanteEnabled ?? state.vigilante?.enabled);
     return false;
+  };
+
+  const upsertPluginEntry = (target: DesiredState, pluginId: string, enabled: boolean) => {
+    const plugins = target.plugins ? [...target.plugins] : [];
+    const idx = plugins.findIndex((p) => p.id === pluginId);
+    if (idx >= 0) {
+      plugins[idx] = { ...plugins[idx], id: pluginId, enabled };
+    } else {
+      plugins.push({ id: pluginId, enabled });
+    }
+    target.plugins = plugins;
   };
 
   const toggleCoreRole = async (id: string) => {
@@ -188,6 +203,18 @@ export default function PluginManagerPage() {
         }
       }
 
+      const roleEnabledAfter =
+        id === 'core-firewall'
+          ? nextCaps.firewallEnabled
+          : id === 'core-nas'
+            ? nextCaps.nasEnabled
+            : id === 'core-k3s'
+              ? nextCaps.k3sEnabled
+              : id === 'core-virt'
+                ? nextCaps.virtEnabled
+                : nextCaps.vigilanteEnabled;
+      upsertPluginEntry(next, id, roleEnabledAfter);
+
       const isEnablingRole =
         (id === 'core-firewall' && !currentFw && nextCaps.firewallEnabled) ||
         (id === 'core-nas' && !currentNas && nextCaps.nasEnabled) ||
@@ -195,8 +222,10 @@ export default function PluginManagerPage() {
         (id === 'core-virt' && !currentVirt && nextCaps.virtEnabled) ||
         (id === 'core-vigilante' && !currentVigilante && nextCaps.vigilanteEnabled);
 
+      let hostMutated = false;
       if (isEnablingRole) {
         if (id === 'core-vigilante' && !currentK3s) {
+          upsertPluginEntry(next, 'core-k3s', true);
           const k3sInstallRes = await executePluginAction('core-k3s', 'install');
           if (!k3sInstallRes.success) {
             setStatusBanner({
@@ -206,6 +235,7 @@ export default function PluginManagerPage() {
             });
             return;
           }
+          hostMutated = true;
         }
         const installRes = await executePluginAction(id, 'install');
         if (!installRes.success) {
@@ -216,9 +246,31 @@ export default function PluginManagerPage() {
           });
           return;
         }
+        hostMutated = true;
+      } else {
+        const disableRes = await executePluginAction(id, 'disable');
+        if (!disableRes.success) {
+          setStatusBanner({
+            type: 'error',
+            text: `Failed to disable ${id}: ${disableRes.message}`,
+            output: disableRes.output,
+          });
+          return;
+        }
+        hostMutated = true;
       }
 
-      const res = await applyState(next);
+      let res: { message: string };
+      try {
+        res = await applyState(next);
+      } catch (applyErr: any) {
+        refreshLivePlugins();
+        throw new Error(
+          hostMutated
+            ? `Host plugin action ran for ${id}, but DesiredState apply failed (refresh status to inspect host state): ${applyErr?.message || applyErr}`
+            : applyErr?.message || 'Failed to update appliance role'
+        );
+      }
       setState(next);
       refreshLivePlugins();
       window.dispatchEvent(new Event('axonwall-capabilities-updated'));
@@ -286,12 +338,20 @@ export default function PluginManagerPage() {
       const isCurrentlyEnabled = isPluginEnabled(id, next);
       let depNotice = '';
 
+      const needsK3sInstall =
+        id === 'vigilant-octo-waffle' &&
+        !isCurrentlyEnabled &&
+        !isPluginEnabled('core-k3s', state);
+
       if (id === 'vigilant-octo-waffle' || id === 'host-malware-rootkit' || id === 'eluvix') {
         if (!isCurrentlyEnabled) {
           const depRes = enablePluginWithDependencies(id, next);
           next = depRes.state;
           if (depRes.autoEnabledDependencies.length > 0) {
             depNotice = ` [Auto-enabled required dependency: ${depRes.autoEnabledDependencies.join(', ')}]`;
+          }
+          if (needsK3sInstall) {
+            upsertPluginEntry(next, 'core-k3s', true);
           }
         } else {
           const depRes = disablePluginWithDependents(id, next);
@@ -328,14 +388,6 @@ export default function PluginManagerPage() {
           peers: [],
         };
         next.rosenpass.enabled = !isCurrentlyEnabled;
-        const plugins = next.plugins || [];
-        const idx = plugins.findIndex((p) => p.id === 'rosenpass');
-        if (idx >= 0) {
-          plugins[idx].enabled = !isCurrentlyEnabled;
-        } else {
-          plugins.push({ id: 'rosenpass', enabled: !isCurrentlyEnabled });
-        }
-        next.plugins = plugins;
       } else if (id === 'haproxy') {
         next.haproxy = next.haproxy || {
           enabled: false,
@@ -362,28 +414,27 @@ export default function PluginManagerPage() {
           listenPort: 161,
         };
         next.snmp.enabled = !isCurrentlyEnabled;
-      } else {
-        const plugins = next.plugins || [];
-        const idx = plugins.findIndex((p) => p.id === id);
-        if (idx >= 0) {
-          plugins[idx].enabled = !isCurrentlyEnabled;
-        } else {
-          plugins.push({ id, enabled: !isCurrentlyEnabled });
+      } else if (id === 'coroot-ebpf-apm') {
+        next.observability = next.observability || ObservabilityConfigSchema.parse({});
+        next.observability.ebpfApm = {
+          ...next.observability.ebpfApm,
+          enabled: !isCurrentlyEnabled,
+        };
+      }
+      upsertPluginEntry(next, id, !isCurrentlyEnabled);
+
+      if (needsK3sInstall) {
+        const k3sInstallRes = await executePluginAction('core-k3s', 'install');
+        if (!k3sInstallRes.success) {
+          setStatusBanner({
+            type: 'error',
+            text: `Failed to install required core-k3s dependency: ${k3sInstallRes.message}`,
+            output: k3sInstallRes.output,
+          });
+          return;
         }
-        next.plugins = plugins;
       }
 
-      // C22: the plugin action's failure used to be swallowed, then the
-      // state apply ran and the banner claimed the toggle was done while
-      // the plugin service never started/stopped. The gate originally
-      // covered only cli-workstation and vigilant-octo-waffle, so disabling
-      // any other extension (haproxy, freeradius, snmp, NUT, rosenpass,
-      // eluvix, ...) reported success while the service kept running.
-      // Gate EVERY extension toggle on the daemon action and abort the
-      // state apply and the success banner on failure. (The daemon side
-      // still swallows systemctl errors — A-M33, owned by another batch —
-      // so a failed stop the daemon reports as success is still invisible
-      // here; this gate catches daemon-unreachable and daemon refusals.)
       const actionRes = await executePluginAction(id, !isCurrentlyEnabled ? 'enable' : 'disable');
       if (!actionRes.success) {
         setStatusBanner({
@@ -393,7 +444,15 @@ export default function PluginManagerPage() {
         return;
       }
 
-      const res = await applyState(next);
+      let res: { message: string };
+      try {
+        res = await applyState(next);
+      } catch (applyErr: any) {
+        refreshLivePlugins();
+        throw new Error(
+          `Host plugin action succeeded for ${id}, but DesiredState apply failed (refresh status to inspect host state): ${applyErr?.message || applyErr}`
+        );
+      }
       setState(next);
       if (typeof window !== 'undefined') {
         window.dispatchEvent(new Event('axonwall-capabilities-updated'));
@@ -624,7 +683,7 @@ export default function PluginManagerPage() {
           <div>
             <h2 className="text-base font-bold text-white tracking-tight">Sandboxed Extension Plugins</h2>
             <p className="text-xs text-slate-400">
-              Modular services, network telemetry, and operator CLI packages ({osFamily === 'alpine' ? 'Alpine apk' : 'Debian apt'}).
+              Modular services, network telemetry, and operator CLI packages ({osFamily === 'alpine' ? 'Alpine apk' : osFamily === 'arch' ? 'Arch pacman' : 'Debian apt'}).
             </p>
           </div>
           <button
@@ -718,6 +777,15 @@ export default function PluginManagerPage() {
                     {plugin.cliBinaries && plugin.cliBinaries.map((b) => (
                       <span key={b} className="px-2 py-0.5 rounded bg-emerald-950/40 border border-emerald-900/60 text-[10px] font-mono text-emerald-400 flex items-center gap-1">
                         <Terminal className="w-2.5 h-2.5" /> {b}
+                      </span>
+                    ))}
+                    {live?.bundledBinaries && live.bundledBinaries.map((b) => (
+                      <span
+                        key={`bundled-${b}`}
+                        title="Verified bundled binary inside plugin sandbox"
+                        className="px-2 py-0.5 rounded bg-sky-950/50 border border-sky-800/60 text-[10px] font-mono text-sky-300 flex items-center gap-1"
+                      >
+                        bundled: {b}
                       </span>
                     ))}
                   </div>
@@ -885,7 +953,11 @@ export default function PluginManagerPage() {
                 <div>
                   <span className="text-slate-500 block">OS PACKAGES ({osFamily.toUpperCase()})</span>
                   <div className="flex flex-wrap gap-1 mt-1">
-                    {((osFamily === 'alpine' ? selectedPlugin.packages.alpine : selectedPlugin.packages.debian) || []).map((pkg) => (
+                    {((osFamily === 'alpine'
+                      ? selectedPlugin.packages.alpine
+                      : osFamily === 'arch'
+                        ? selectedPlugin.packages.arch
+                        : selectedPlugin.packages.debian) || []).map((pkg) => (
                       <span key={pkg} className="px-2 py-0.5 rounded bg-slate-950 border border-slate-800 text-sky-400 font-mono">
                         {pkg}
                       </span>
@@ -893,6 +965,19 @@ export default function PluginManagerPage() {
                   </div>
                 </div>
               )}
+              {livePlugins[selectedPlugin.id]?.bundledBinaries &&
+                livePlugins[selectedPlugin.id]!.bundledBinaries!.length > 0 && (
+                  <div>
+                    <span className="text-slate-500 block">VERIFIED BUNDLED BINARIES</span>
+                    <div className="flex flex-wrap gap-1 mt-1">
+                      {livePlugins[selectedPlugin.id]!.bundledBinaries!.map((bin) => (
+                        <span key={bin} className="px-2 py-0.5 rounded bg-slate-950 border border-sky-800/60 text-sky-300 font-mono">
+                          {bin}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
               {selectedPlugin.cliBinaries && selectedPlugin.cliBinaries.length > 0 && (
                 <div>
                   <span className="text-slate-500 block">CLI BINARIES</span>

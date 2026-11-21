@@ -63,14 +63,19 @@ export function compileK3s(state: DesiredState, joinToken?: string): CompiledK3s
       ? 'agent'
       : 'server';
 
+  const yamlStr = (v: unknown): string =>
+    JSON.stringify(String(v ?? '').replace(/[\r\n\0]/g, '').trim());
+  const sanitizeK8sToken = (v: string): string =>
+    v.replace(/[^a-z0-9-.]/gi, '-').toLowerCase() || 'default';
+
   const formattedPeer = effectivePeer
     ? effectivePeer.includes(':') && !effectivePeer.startsWith('[')
       ? `[${effectivePeer}]`
       : effectivePeer
     : '';
-  const haPeerUrl = formattedPeer ? `https://${formattedPeer}:6443` : '';
-  const safeServerUrl = k3s.serverUrl ? String(k3s.serverUrl).replace(/[\r\n"]/g, '').trim() : '';
-  const safeJoinToken = joinToken ? String(joinToken).replace(/[\r\n"]/g, '').trim() : '';
+  const haPeerUrl = formattedPeer ? `https://${formattedPeer.replace(/[\r\n\0"\\]/g, '')}:6443` : '';
+  const safeServerUrl = k3s.serverUrl ? String(k3s.serverUrl).replace(/[\r\n\0]/g, '').trim() : '';
+  const safeJoinToken = joinToken ? String(joinToken).replace(/[\r\n\0]/g, '').trim() : '';
 
   const useCilium = k3s.cniPlugin === 'cilium-ebpf';
   const effectiveFlannel = useCilium ? 'none' : k3s.flannelBackend;
@@ -107,25 +112,25 @@ export function compileK3s(state: DesiredState, joinToken?: string): CompiledK3s
     const agentLines: string[] = ['# Axonwall Auto-Generated K3s Agent Configuration'];
     const targetServerUrl = safeServerUrl || haPeerUrl;
     if (targetServerUrl) {
-      agentLines.push(`server: "${targetServerUrl}"`);
+      agentLines.push(`server: ${yamlStr(targetServerUrl)}`);
     }
     if (safeJoinToken) {
-      agentLines.push(`token: "${safeJoinToken}"`);
+      agentLines.push(`token: ${yamlStr(safeJoinToken)}`);
     } else {
       agentLines.push(`token-file: "/var/lib/axonwall/k3s-join.token"`);
     }
     if (isValidDevice(ifaceObj?.device)) {
       if (!useCilium) {
-        agentLines.push(`flannel-iface: "${ifaceObj!.device}"`);
+        agentLines.push(`flannel-iface: ${yamlStr(ifaceObj!.device)}`);
       }
       if (primaryNodeIp) {
-        agentLines.push(`node-ip: "${primaryNodeIp}"`);
+        agentLines.push(`node-ip: ${yamlStr(primaryNodeIp)}`);
       }
     }
     if (kubeletArgs.length > 0) {
       agentLines.push('kubelet-arg:');
       for (const arg of kubeletArgs) {
-        agentLines.push(`  - "${arg}"`);
+        agentLines.push(`  - ${yamlStr(arg)}`);
       }
     }
     agentLines.push('');
@@ -139,7 +144,7 @@ export function compileK3s(state: DesiredState, joinToken?: string): CompiledK3s
 
   const tlsSans = new Set<string>(['127.0.0.1', 'localhost']);
   if (effectivePeer) {
-    const cleanPeerSan = effectivePeer.split('/')[0]?.replace(/[\r\n"\\[\]]/g, '').trim();
+    const cleanPeerSan = effectivePeer.split('/')[0]?.replace(/[\r\n\0"\\[\]]/g, '').trim();
     if (cleanPeerSan) tlsSans.add(cleanPeerSan);
   }
   for (const iface of state.interfaces ?? []) {
@@ -161,9 +166,9 @@ export function compileK3s(state: DesiredState, joinToken?: string): CompiledK3s
     '# Axonwall Auto-Generated K3s Control Plane Configuration',
     `write-kubeconfig-mode: "0640"`,
     `write-kubeconfig-group: "axonwall-api"`,
-    `cluster-cidr: "${k3s.clusterCidr}"`,
-    `service-cidr: "${k3s.serviceCidr}"`,
-    `flannel-backend: "${effectiveFlannel}"`,
+    `cluster-cidr: ${yamlStr(k3s.clusterCidr)}`,
+    `service-cidr: ${yamlStr(k3s.serviceCidr)}`,
+    `flannel-backend: ${yamlStr(effectiveFlannel)}`,
   ];
 
   if (useCilium) {
@@ -175,20 +180,19 @@ export function compileK3s(state: DesiredState, joinToken?: string): CompiledK3s
 
   if (isValidDevice(ifaceObj?.device)) {
     if (!useCilium) {
-      configLines.push(`flannel-iface: "${ifaceObj!.device}"`);
+      configLines.push(`flannel-iface: ${yamlStr(ifaceObj!.device)}`);
     }
     if (primaryNodeIp) {
-      configLines.push(`node-ip: "${primaryNodeIp}"`);
+      configLines.push(`node-ip: ${yamlStr(primaryNodeIp)}`);
     }
   }
 
   if (haTopology === 'external-datastore' && k3s.externalDatastoreEndpoint) {
-    const safeDs = String(k3s.externalDatastoreEndpoint).replace(/[\r\n"]/g, '').trim();
-    configLines.push(`datastore-endpoint: "${safeDs}"`);
+    configLines.push(`datastore-endpoint: ${yamlStr(k3s.externalDatastoreEndpoint)}`);
   } else if (safeServerUrl || (isSecondaryJoin && haPeerUrl)) {
-    configLines.push(`server: "${safeServerUrl || haPeerUrl}"`);
+    configLines.push(`server: ${yamlStr(safeServerUrl || haPeerUrl)}`);
     if (safeJoinToken) {
-      configLines.push(`token: "${safeJoinToken}"`);
+      configLines.push(`token: ${yamlStr(safeJoinToken)}`);
     } else {
       configLines.push(`token-file: "/var/lib/axonwall/k3s-join.token"`);
     }
@@ -217,19 +221,18 @@ export function compileK3s(state: DesiredState, joinToken?: string): CompiledK3s
   }
 
   if (k3s.etcdSnapshots?.enabled && haTopology === 'embedded-etcd' && datastore === 'etcd') {
-    const snapCron = String(k3s.etcdSnapshots.scheduleCron || '0 */6 * * *').replace(/[\r\n"]/g, '').trim();
-    const snapDir = String(k3s.etcdSnapshots.snapshotDir || '/var/lib/rancher/k3s/server/db/snapshots')
-      .replace(/[\r\n"]/g, '')
-      .trim();
-    configLines.push(`etcd-snapshot-schedule-cron: "${snapCron}"`);
-    configLines.push(`etcd-snapshot-retention: ${k3s.etcdSnapshots.retention ?? 14}`);
-    configLines.push(`etcd-snapshot-dir: "${snapDir}"`);
+    const snapCron = k3s.etcdSnapshots.scheduleCron || '0 */6 * * *';
+    const snapDir = k3s.etcdSnapshots.snapshotDir || '/var/lib/rancher/k3s/server/db/snapshots';
+    const retention = Number.isInteger(k3s.etcdSnapshots.retention) ? k3s.etcdSnapshots.retention : 14;
+    configLines.push(`etcd-snapshot-schedule-cron: ${yamlStr(snapCron)}`);
+    configLines.push(`etcd-snapshot-retention: ${retention}`);
+    configLines.push(`etcd-snapshot-dir: ${yamlStr(snapDir)}`);
     if (k3s.etcdSnapshots.s3Enabled && k3s.etcdSnapshots.s3Bucket) {
       configLines.push('etcd-s3: true');
-      configLines.push(`etcd-s3-bucket: "${String(k3s.etcdSnapshots.s3Bucket).replace(/[\r\n"]/g, '').trim()}"`);
-      configLines.push(`etcd-s3-region: "${String(k3s.etcdSnapshots.s3Region || 'us-east-1').replace(/[\r\n"]/g, '').trim()}"`);
+      configLines.push(`etcd-s3-bucket: ${yamlStr(k3s.etcdSnapshots.s3Bucket)}`);
+      configLines.push(`etcd-s3-region: ${yamlStr(k3s.etcdSnapshots.s3Region || 'us-east-1')}`);
       if (k3s.etcdSnapshots.s3Endpoint) {
-        configLines.push(`etcd-s3-endpoint: "${String(k3s.etcdSnapshots.s3Endpoint).replace(/[\r\n"]/g, '').trim()}"`);
+        configLines.push(`etcd-s3-endpoint: ${yamlStr(k3s.etcdSnapshots.s3Endpoint)}`);
       }
     }
   }
@@ -237,13 +240,13 @@ export function compileK3s(state: DesiredState, joinToken?: string): CompiledK3s
   if (kubeletArgs.length > 0) {
     configLines.push('kubelet-arg:');
     for (const arg of kubeletArgs) {
-      configLines.push(`  - "${arg}"`);
+      configLines.push(`  - ${yamlStr(arg)}`);
     }
   }
 
   configLines.push('tls-san:');
   for (const san of tlsSans) {
-    configLines.push(`  - "${san}"`);
+    configLines.push(`  - ${yamlStr(san)}`);
   }
   configLines.push('');
 
@@ -281,7 +284,7 @@ export function compileK3s(state: DesiredState, joinToken?: string): CompiledK3s
         '  compression: "lz4"',
         '  dedup: "off"',
         '  recordsize: "128k"',
-        `  poolname: "${zfsPool}"`,
+        `  poolname: ${yamlStr(zfsPool)}`,
         'reclaimPolicy: Retain',
         'volumeBindingMode: WaitForFirstConsumer',
       ].join('\n'),
@@ -303,7 +306,7 @@ export function compileK3s(state: DesiredState, joinToken?: string): CompiledK3s
         '  protocol: "nvmf"',
         '  ioTimeout: "30"',
         `  repl: "${replicaCount}"`,
-        `  backingZfsPool: "${k3s.openEbs?.replicatedBackingPool || `${zfsPool}/openebs-replicated`}"`,
+        `  backingZfsPool: ${yamlStr(k3s.openEbs?.replicatedBackingPool || `${zfsPool}/openebs-replicated`)}`,
         'reclaimPolicy: Retain',
         'volumeBindingMode: Immediate',
       ].join('\n'),
@@ -312,8 +315,7 @@ export function compileK3s(state: DesiredState, joinToken?: string): CompiledK3s
 
   const openEbsManifestYaml = openEbsDocs.join('\n---\n') + '\n';
 
-  const sanitizeK8sId = (v: string) => v.replace(/[^a-z0-9-.]/gi, '-').toLowerCase();
-  const sanitizeScalar = (v: string) => v.replace(/[\r\n]/g, '').trim();
+  const sanitizeK8sId = (v: string) => sanitizeK8sToken(v);
 
   const workloadDocs: string[] = [];
   for (const wl of k3s.workloads ?? []) {
@@ -321,8 +323,6 @@ export function compileK3s(state: DesiredState, joinToken?: string): CompiledK3s
     const safeName = sanitizeK8sId(wl.name);
     const ns = sanitizeK8sId(wl.namespace || 'default');
     const safeSc = sanitizeK8sId(wl.storageClass);
-    const safeImage = sanitizeScalar(wl.image);
-    const safeMount = sanitizeScalar(wl.mountPath);
 
     if (wl.storageClass !== 'none') {
       workloadDocs.push(
@@ -348,7 +348,7 @@ export function compileK3s(state: DesiredState, joinToken?: string): CompiledK3s
     if (wl.storageClass !== 'none') {
       volumeMountLines.push(
         `            - name: data`,
-        `              mountPath: ${safeMount}`,
+        `              mountPath: ${yamlStr(wl.mountPath)}`,
       );
       volumeLines.push(
         '        - name: data',
@@ -387,7 +387,7 @@ export function compileK3s(state: DesiredState, joinToken?: string): CompiledK3s
     deployLines.push(
       '      containers:',
       `        - name: ${safeName}`,
-      `          image: ${safeImage}`,
+      `          image: ${yamlStr(wl.image)}`,
       '          ports:',
       `            - containerPort: ${wl.port}`,
     );
@@ -448,7 +448,7 @@ export function compileK3s(state: DesiredState, joinToken?: string): CompiledK3s
     );
 
     if (wl.ingressHostname) {
-      const safeHost = sanitizeScalar(wl.ingressHostname).replace(/[^a-zA-Z0-9.-]/g, '');
+      const safeHost = String(wl.ingressHostname).replace(/[\r\n\0]/g, '').replace(/[^a-zA-Z0-9.-]/g, '');
       if (safeHost) {
         workloadDocs.push(
           [
@@ -461,7 +461,7 @@ export function compileK3s(state: DesiredState, joinToken?: string): CompiledK3s
             '    axonwall.io/auto-unbound-dns: "true"',
             'spec:',
             '  rules:',
-            `    - host: ${safeHost}`,
+            `    - host: ${yamlStr(safeHost)}`,
             '      http:',
             '        paths:',
             '          - path: /',
@@ -493,13 +493,13 @@ export function compileK3s(state: DesiredState, joinToken?: string): CompiledK3s
       '  targetNamespace: kube-system',
       '  valuesContent: |-',
       `    kubeProxyReplacement: "${k3s.ciliumKubeProxyReplacement !== false ? 'true' : 'false'}"`,
-      `    k8sServiceHost: "${k8sHost}"`,
+      `    k8sServiceHost: ${yamlStr(k8sHost)}`,
       '    k8sServicePort: 6443',
       '    bpf:',
       '      masquerade: true',
       '    ipam:',
       '      operator:',
-      `        clusterPoolIPv4PodCIDRList: ["${k3s.clusterCidr}"]`,
+      `        clusterPoolIPv4PodCIDRList: [${yamlStr(k3s.clusterCidr)}]`,
       '    l2announcements:',
       '      enabled: true',
       '    bgpControlPlane:',
@@ -526,7 +526,7 @@ export function compileK3s(state: DesiredState, joinToken?: string): CompiledK3s
           `  name: ${safePoolName}`,
           'spec:',
           '  blocks:',
-          `    - cidr: "${sanitizeScalar(pool.cidr)}"`,
+          `    - cidr: ${yamlStr(pool.cidr)}`,
           `  disabled: ${!pool.autoAssign}`,
         ].join('\n'),
       );

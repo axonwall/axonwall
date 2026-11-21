@@ -6,7 +6,7 @@ import { load as yamlLoad, dump as yamlDump } from 'js-yaml';
 import { execa } from 'execa';
 import { logger } from '../utils/logger.js';
 import { execStream, exec } from '../utils/exec.js';
-import { getVigilantePlaybooksDir, loadConfig, sanitizePathComponent, shQuote, assertDnsLabel } from './config.js';
+import { getVigilantePlaybooksDir, loadConfig, sanitizePathComponent, shQuote, assertDnsLabel, resolvePathInside } from './config.js';
 import { NIST_ATTACK_VECTORS } from './nist.js';
 
 /**
@@ -493,17 +493,44 @@ export async function loadPlaybook(idOrPath, options = {}) {
     throw new Error('Playbook ID or file path must be specified.');
   }
 
-  // Check if it is a direct file path
-  if (fsSync.existsSync(idOrPath)) {
-    const rawContent = await fs.readFile(idOrPath, 'utf8');
-    const parsed = idOrPath.endsWith('.json') ? JSON.parse(rawContent) : yamlLoad(rawContent);
+  const allowedDirs = [
+    options.customDir,
+    getVigilantePlaybooksDir(),
+    path.join(process.cwd(), 'playbooks'),
+    path.join(process.cwd(), 'config', 'playbooks')
+  ].filter(Boolean);
+
+  const looksLikePath =
+    idOrPath.includes('/') ||
+    idOrPath.includes('\\') ||
+    /\.(yaml|yml|json)$/i.test(idOrPath) ||
+    fsSync.existsSync(idOrPath);
+
+  if (looksLikePath) {
+    let confinedPath = null;
+    for (const baseDir of allowedDirs) {
+      try {
+        confinedPath = resolvePathInside(baseDir, idOrPath);
+        break;
+      } catch {
+        // try next allowed playbook directory
+      }
+    }
+    if (!confinedPath) {
+      throw new Error(`Refusing playbook path '${idOrPath}': must reside inside an allowed playbooks directory.`);
+    }
+    if (!fsSync.existsSync(confinedPath)) {
+      throw new Error(`Playbook file '${idOrPath}' not found inside allowed playbooks directory.`);
+    }
+    const rawContent = await fs.readFile(confinedPath, 'utf8');
+    const parsed = confinedPath.endsWith('.json') ? JSON.parse(rawContent) : yamlLoad(rawContent);
     const validation = validatePlaybook(parsed);
     if (!validation.valid) {
       throw new Error(`Invalid custom playbook: ${validation.errors.join('; ')}`);
     }
     return {
       ...parsed,
-      filePath: idOrPath,
+      filePath: confinedPath,
       isCustom: true
     };
   }
@@ -528,23 +555,18 @@ export function generateThreatJobManifest(playbook, options = {}) {
   // The namespace lands in YAML fields and in the default OpenSearch URL:
   // it must be a plain DNS label, never free text.
   const namespace = assertDnsLabel(options.namespace || 'opensearch', 'namespace');
-  const jobName = `threat-sim-${playbook.id.toLowerCase().replace(/[^a-z0-9-]/g, '-')}`.slice(0, 50);
+  const jobName = `threat-sim-${String(playbook.id || 'scenario').toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/^-+|-+$/g, '') || 'scenario'}`.slice(0, 50);
   const osUrl = options.osUrl || `http://opensearch-cluster-master.${namespace}.svc.cluster.local:9200`;
 
-  // Label values have a strict charset; use the id verbatim only when it
-  // already qualifies, otherwise the sanitized form used for the job name.
-  const playbookLabel = /^[a-zA-Z0-9]([a-zA-Z0-9_.-]{0,61}[a-zA-Z0-9])?$/.test(playbook.id)
+  const playbookLabel = /^[a-zA-Z0-9]([a-zA-Z0-9_.-]{0,61}[a-zA-Z0-9])?$/.test(String(playbook.id || ''))
     ? playbook.id
     : jobName.replace(/^threat-sim-/, '');
 
-  // Build curl POST commands for all events. Every playbook-controlled
-  // string that reaches the pod's shell script is either flattened to a
-  // single comment line or emitted as a single-quoted literal via shQuote,
-  // so $(...), backticks, quotes, and newlines in playbook data stay inert
-  // data instead of becoming shell lines inside the Job pod.
+  const baseMs = Date.now();
   const curlCommands = (playbook.events || []).map((ev, idx) => {
+    const offsetSec = Number.isFinite(Number(ev.timestampOffsetSec)) ? Number(ev.timestampOffsetSec) : 0;
     const enrichedEvent = {
-      '@timestamp': '$(date -u +"%Y-%m-%dT%H:%M:%SZ")',
+      '@timestamp': new Date(baseMs + offsetSec * 1000).toISOString(),
       scenario: {
         id: playbook.id,
         name: playbook.name,
@@ -555,45 +577,47 @@ export function generateThreatJobManifest(playbook, options = {}) {
 
     const comment = String(ev.action || ev.message || 'Threat Event').replace(/[\r\n]+/g, ' ');
     const jsonPayload = JSON.stringify(enrichedEvent, null, 2);
-    return `# Event ${idx + 1}: ${comment}
-curl -s -X POST ${shQuote(`${osUrl}/vigilante-network-events/_doc`)} \\
-  -H 'Content-Type: application/json' \\
-  -d ${shQuote(jsonPayload)}
-`;
+    return `# Event ${idx + 1}: ${comment}\ncurl -s -X POST ${shQuote(`${osUrl}/vigilante-network-events/_doc`)} \\\n  -H 'Content-Type: application/json' \\\n  -d ${shQuote(jsonPayload)}\n`;
   }).join('\n');
 
   const introMessage = `⚡ Injecting Threat Scenario '${playbook.name}' (${playbook.id}) into OpenSearch at ${osUrl}...`;
   const doneMessage = `✔ Threat simulation '${playbook.id}' completed successfully (${playbook.events?.length || 0} events ingested)!`;
+  const script = `set -e\necho ${shQuote(introMessage)}\n\n${curlCommands}\necho ${shQuote(doneMessage)}\n`;
 
-  return `apiVersion: batch/v1
-kind: Job
-metadata:
-  name: ${jobName}
-  namespace: ${namespace}
-  labels:
-    app.kubernetes.io/part-of: vigilante
-    vigilante.io/module: opensearch
-    vigilante.io/playbook: ${playbookLabel}
-spec:
-  ttlSecondsAfterFinished: 300
-  template:
-    metadata:
-      name: ${jobName}
-    spec:
-      restartPolicy: OnFailure
-      containers:
-      - name: injector
-        image: curlimages/curl:8.5.0
-        command: ["/bin/sh", "-c"]
-        args:
-        - |
-          set -e
-          echo ${shQuote(introMessage)}
-          
-${curlCommands}
-          
-          echo ${shQuote(doneMessage)}
-`;
+  const jobManifestObj = {
+    apiVersion: 'batch/v1',
+    kind: 'Job',
+    metadata: {
+      name: jobName,
+      namespace,
+      labels: {
+        'app.kubernetes.io/part-of': 'vigilante',
+        'vigilante.io/module': 'opensearch',
+        'vigilante.io/playbook': playbookLabel
+      }
+    },
+    spec: {
+      ttlSecondsAfterFinished: 300,
+      template: {
+        metadata: {
+          name: jobName
+        },
+        spec: {
+          restartPolicy: 'OnFailure',
+          containers: [
+            {
+              name: 'injector',
+              image: 'curlimages/curl:8.5.0',
+              command: ['/bin/sh', '-c'],
+              args: [script]
+            }
+          ]
+        }
+      }
+    }
+  };
+
+  return yamlDump(jobManifestObj, { lineWidth: -1, noRefs: true });
 }
 
 /**

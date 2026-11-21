@@ -1,12 +1,14 @@
 import { NextResponse } from 'next/server';
 import { getSession } from '@/server/auth';
+import { isPasswordChangeEnforced } from '@/server/auth-guard';
 
 export async function GET() {
   const session = await getSession();
-  if (!session || session.passwordChangeRequired) {
+  const pwdEnforced = isPasswordChangeEnforced(session);
+  if (!session || pwdEnforced) {
     return NextResponse.json(
-      { error: session?.passwordChangeRequired ? 'Forbidden: Password change required' : 'Unauthorized' },
-      { status: session?.passwordChangeRequired ? 403 : 401 }
+      { error: pwdEnforced ? 'Forbidden: Password change required' : 'Unauthorized' },
+      { status: pwdEnforced ? 403 : 401 }
     );
   }
 

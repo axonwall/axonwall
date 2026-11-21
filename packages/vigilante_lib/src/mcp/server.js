@@ -28,7 +28,8 @@ import { listInstances, loadInstanceMetadata, getDeployedNamespaces } from '../e
 import { listK3dClusters, getClusterInfo } from '../engine/cluster.js';
 import { checkCertificates } from '../engine/certs.js';
 import path from 'node:path';
-import { loadConfig, getVigilanteConfigDir, resolvePathInside } from '../engine/config.js';
+import { loadConfig, getVigilanteConfigDir, getVigilantePlaybooksDir, resolvePathInside } from '../engine/config.js';
+import { loadAuthzStore, authenticateToken, decide } from '../engine/authz.js';
 import { globalModuleRegistry } from '../modules/registry.js';
 import { listAvailablePlaybooks, executeThreatPlaybook } from '../engine/threats.js';
 import {
@@ -149,6 +150,7 @@ import {
 import { FalcoModule } from '../modules/falco/index.js';
 
 const SENSITIVE_SYSTEM_PREFIXES = ['/etc', '/root', '/var', '/proc', '/sys', '/boot', '/usr', '/dev'];
+const SENSITIVE_VIGILANTE_CONFIG_FILES = new Set(['config.yaml', 'authz.yaml', 'federation/node.json']);
 
 function canonicalizeWithMissingTail(targetPath) {
   const abs = path.resolve(targetPath);
@@ -194,12 +196,18 @@ function assertConfinedMcpPath(inputPath, label = 'path', allowedBaseDir = null)
       throw new Error(`Refusing '${label}': access to sensitive system directory '${prefix}' is forbidden`);
     }
   }
+  const realCfgDir = canonicalizeWithMissingTail(getVigilanteConfigDir());
+  if (realResolved.startsWith(realCfgDir + path.sep)) {
+    const relFromCfg = path.relative(realCfgDir, realResolved).replace(/\\/g, '/');
+    if (SENSITIVE_VIGILANTE_CONFIG_FILES.has(relFromCfg)) {
+      throw new Error(`Refusing '${label}': direct access to sensitive config file '${relFromCfg}' is forbidden`);
+    }
+  }
   if (allowedBaseDir) {
     const realBase = canonicalizeWithMissingTail(allowedBaseDir);
     return resolvePathInside(realBase, realResolved);
   }
   const realCwd = canonicalizeWithMissingTail(process.cwd());
-  const realCfgDir = canonicalizeWithMissingTail(getVigilanteConfigDir());
   const inCwd = realResolved === realCwd || realResolved.startsWith(realCwd + path.sep);
   const inCfg = realResolved === realCfgDir || realResolved.startsWith(realCfgDir + path.sep);
   if (!inCwd && !inCfg) {
@@ -208,31 +216,47 @@ function assertConfinedMcpPath(inputPath, label = 'path', allowedBaseDir = null)
   return realResolved;
 }
 
-function redactConfigForMcp(cfg) {
-  if (!cfg || typeof cfg !== 'object') return cfg;
-  const clone = JSON.parse(JSON.stringify(cfg));
-  if (clone.ctf && typeof clone.ctf === 'object' && clone.ctf.flagSecret) {
-    clone.ctf.flagSecret = '[REDACTED]';
+function redactRecursiveForMcp(node, seen = new WeakSet()) {
+  if (node === null || typeof node !== 'object') return node;
+  if (seen.has(node)) return '[Circular]';
+  seen.add(node);
+  if (Array.isArray(node)) {
+    return node.map((item) => redactRecursiveForMcp(item, seen));
   }
-  if (clone.ledger && typeof clone.ledger === 'object' && clone.ledger.signingSecret) {
-    clone.ledger.signingSecret = '[REDACTED]';
-  }
-  if (clone.evidencepack && typeof clone.evidencepack === 'object' && clone.evidencepack.tsaKey) {
-    clone.evidencepack.tsaKey = '[REDACTED]';
-  }
-  if (clone.snapshot && typeof clone.snapshot === 'object' && clone.snapshot.sealingKey) {
-    clone.snapshot.sealingKey = '[REDACTED]';
-  }
-  if (clone.ai && typeof clone.ai === 'object') {
-    for (const [k, v] of Object.entries(clone.ai)) {
-      if (v && typeof v === 'object' && v.apiKey) {
-        clone.ai[k].apiKey = '[REDACTED]';
-      } else if (/key|secret|token|password/i.test(k) && typeof v === 'string') {
-        clone.ai[k] = '[REDACTED]';
-      }
+  const out = {};
+  for (const [k, v] of Object.entries(node)) {
+    if (/key|secret|token|password|passphrase|private/i.test(k) && v !== null && v !== undefined && v !== '') {
+      out[k] = '[REDACTED]';
+    } else {
+      out[k] = redactRecursiveForMcp(v, seen);
     }
   }
-  return clone;
+  return out;
+}
+
+function redactConfigForMcp(cfg) {
+  if (!cfg || typeof cfg !== 'object') return cfg;
+  return redactRecursiveForMcp(JSON.parse(JSON.stringify(cfg)));
+}
+
+function assertMcpWriteAuthorized(toolName, permission, extraArgs = {}) {
+  if (process.env.VIGILANTE_MCP_ALLOW_WRITE !== '1') {
+    throw new Error(
+      `MCP write/destructive tool '${toolName}' is disabled by default. Set VIGILANTE_MCP_ALLOW_WRITE=1 to authorize mutating MCP operations.`
+    );
+  }
+  const loaded = loadAuthzStore();
+  if (loaded.state === 'invalid') {
+    throw new Error(`MCP write tool '${toolName}' denied: authz store is invalid (fail-closed).`);
+  }
+  if (loaded.state === 'ready' && loaded.store && Array.isArray(loaded.store.principals) && loaded.store.principals.length > 0) {
+    const mcpToken = process.env.VIGILANTE_MCP_TOKEN || extraArgs.authToken || '';
+    const principal = mcpToken ? authenticateToken(loaded.store, mcpToken) : null;
+    const verdict = decide(loaded, principal, permission, {}, { source: 'loopback', authMethod: 'token' });
+    if (!verdict.allowed) {
+      throw new Error(`MCP write tool '${toolName}' denied by Vigilante authz (${verdict.reason})`);
+    }
+  }
 }
 
 /**
@@ -3196,9 +3220,14 @@ export function createVigilanteMcpServer() {
     // Tool: run_threat_simulation
     if (name === 'run_threat_simulation') {
       const { scenario, namespace = 'opensearch', clusterName = 'vigilante-dev' } = args;
+      const safeScenario =
+        typeof scenario === 'string' &&
+        (scenario.includes('/') || scenario.includes('\\') || /\.(yaml|yml|json)$/i.test(scenario))
+          ? assertConfinedMcpPath(scenario, 'scenario', getVigilantePlaybooksDir())
+          : scenario;
       const logs = [];
       const result = await executeThreatPlaybook({
-        playbook: scenario,
+        playbook: safeScenario,
         namespace,
         clusterName,
         onLog: (msg) => logs.push(msg)
@@ -3491,6 +3520,7 @@ export function createVigilanteMcpServer() {
 
     // Tool: spin_up_challenge
     if (name === 'spin_up_challenge') {
+      assertMcpWriteAuthorized('spin_up_challenge', 'ctf:manage', args);
       const {
         templateId = 'pwn-nsjail-echo',
         customName = null,
@@ -3521,6 +3551,7 @@ export function createVigilanteMcpServer() {
 
     // Tool: delete_ctf_challenge
     if (name === 'delete_ctf_challenge') {
+      assertMcpWriteAuthorized('delete_ctf_challenge', 'ctf:manage', args);
       const { challengeName, namespace = 'kctf' } = args;
       if (!challengeName) {
         throw new Error("Argument 'challengeName' is required.");
@@ -3762,6 +3793,7 @@ ${observation ? `Observation noted: ${observation}` : ''}`;
 
     // Tool: uninstall_module
     if (name === 'uninstall_module') {
+      assertMcpWriteAuthorized('uninstall_module', 'modules:deploy', args);
       const { moduleId, namespace = 'default', clusterName = 'vigilante-dev', deleteNamespace = false } = args;
       if (!moduleId) {
         throw new Error("Argument 'moduleId' is required.");
@@ -3784,6 +3816,7 @@ ${observation ? `Observation noted: ${observation}` : ''}`;
 
     // Tool: reset_module
     if (name === 'reset_module') {
+      assertMcpWriteAuthorized('reset_module', 'modules:deploy', args);
       const { moduleId, namespace = 'default', clusterName = 'vigilante-dev', domain = 'vigilante.local' } = args;
       if (!moduleId) {
         throw new Error("Argument 'moduleId' is required.");
@@ -3934,7 +3967,11 @@ ${observation ? `Observation noted: ${observation}` : ''}`;
     if (name === 'run_trivy_audit') {
       const { target, profile = 'image' } = args;
       if (!target) throw new Error("Argument 'target' is required.");
-      const result = await runTrivyAudit(target, profile);
+      const safeTarget =
+        profile === 'secrets' || profile === 'fs' || profile === 'config'
+          ? assertConfinedMcpPath(target, 'target')
+          : target;
+      const result = await runTrivyAudit(safeTarget, profile);
       return {
         content: [
           {
@@ -4088,6 +4125,7 @@ ${observation ? `Observation noted: ${observation}` : ''}`;
 
     // Tool: isolate_workload
     if (name === 'isolate_workload') {
+      assertMcpWriteAuthorized('isolate_workload', 'telemetry:write', args);
       const { podName, namespace = 'default', reason = 'Emergency containment via MCP' } = args;
       const result = await isolatePod({ podName, namespace, reason });
       return {
@@ -4102,6 +4140,7 @@ ${observation ? `Observation noted: ${observation}` : ''}`;
 
     // Tool: release_isolation
     if (name === 'release_isolation') {
+      assertMcpWriteAuthorized('release_isolation', 'telemetry:write', args);
       const { containmentId } = args;
       const result = await releaseContainment(containmentId);
       return {
@@ -4478,6 +4517,7 @@ ${observation ? `Observation noted: ${observation}` : ''}`;
 
     // Tool: append_audit_ledger
     if (name === 'append_audit_ledger') {
+      assertMcpWriteAuthorized('append_audit_ledger', 'forensics:run', args);
       const safeLedgerDir = args.ledgerDir
         ? assertConfinedMcpPath(args.ledgerDir, 'ledgerDir', getVigilanteConfigDir())
         : undefined;
@@ -4603,6 +4643,7 @@ ${observation ? `Observation noted: ${observation}` : ''}`;
 
     // Tool: deploy_honeynet_mesh
     if (name === 'deploy_honeynet_mesh') {
+      assertMcpWriteAuthorized('deploy_honeynet_mesh', 'simulations:run', args);
       const mesh = await createHoneynetMesh({ services: args.services });
       return {
         content: [{ type: 'text', text: JSON.stringify({ meshId: mesh.meshId, status: mesh.status, decoys: mesh.decoys.map(d => ({ type: d.type, port: d.port })) }, null, 2) }]

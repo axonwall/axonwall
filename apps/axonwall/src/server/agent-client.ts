@@ -6,6 +6,10 @@ export const AGENT_API_SOCKET = getAgentApiSocketPath();
 
 let cachedAgentToken: string | undefined;
 
+export function clearCachedAgentToken(): void {
+  cachedAgentToken = undefined;
+}
+
 export function getAgentToken(): string | undefined {
   if (cachedAgentToken) {
     return cachedAgentToken;
@@ -162,14 +166,14 @@ export async function callAgentApiResponse<T extends { success?: boolean; messag
   return null;
 }
 
-export async function callAgentApiBinary(
+function sendAgentApiBinaryRequest(
   path: string,
-  method = 'GET',
-  timeoutMs = 30000
+  method: string,
+  agentToken: string | undefined,
+  socketPath: string,
+  timeoutMs: number
 ): Promise<{ ok: boolean; status: number; buffer?: Buffer; error?: string }> {
   return new Promise((resolve) => {
-    const agentToken = getAgentToken();
-    const socketPath = getAgentApiSocketPath();
     const req = http.request(
       {
         socketPath,
@@ -217,4 +221,18 @@ export async function callAgentApiBinary(
 
     req.end();
   });
+}
+
+export async function callAgentApiBinary(
+  path: string,
+  method = 'GET',
+  timeoutMs = 30000
+): Promise<{ ok: boolean; status: number; buffer?: Buffer; error?: string }> {
+  const socketPath = getAgentApiSocketPath();
+  let res = await sendAgentApiBinaryRequest(path, method, getAgentToken(), socketPath, timeoutMs);
+  if (!res.ok && res.status === 401) {
+    clearCachedAgentToken();
+    res = await sendAgentApiBinaryRequest(path, method, getAgentToken(), socketPath, timeoutMs);
+  }
+  return res;
 }

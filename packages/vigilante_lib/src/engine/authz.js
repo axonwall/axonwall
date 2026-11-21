@@ -440,7 +440,12 @@ export async function syncLdapPrincipal(
   if (!existing) {
     existing =
       store.principals.find(
-        p => !p.ldapUid && p.kind === 'human' && p.name.toLowerCase() === uid.toLowerCase()
+        p =>
+          !p.ldapUid &&
+          p.kind === 'human' &&
+          p.role !== 'owner' &&
+          p.role !== 'admin' &&
+          p.name.toLowerCase() === uid.toLowerCase()
       ) || null;
   }
 
@@ -683,7 +688,7 @@ export async function rotatePrincipalToken(id, { password } = {}, filePath = get
 /**
  * Build CASL MongoAbility for principal rules
  */
-export function buildAbilityFor(principal) {
+export function buildAbilityFor(principal, reqContext = {}) {
   const { can, cannot, build } = new AbilityBuilder(createMongoAbility);
 
   if (!principal || principal.disabled) {
@@ -704,9 +709,10 @@ export function buildAbilityFor(principal) {
     }
   }
 
-  // Explicit grants
+  // Explicit grants (enforcing time/source/authMethod grant context)
   if (Array.isArray(principal.grants)) {
     for (const grant of principal.grants) {
+      if (!matchesGrantContext(grant.context, reqContext)) continue;
       const subject = PERMISSION_SUBJECT[grant.permission];
       const [, action] = grant.permission.split(':');
       if (!subject || !action) continue;

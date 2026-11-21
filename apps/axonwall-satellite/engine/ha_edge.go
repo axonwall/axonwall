@@ -80,6 +80,12 @@ func (h *EdgeHAEngine) Promote(netEngine *EdgeNetworkEngine, p EdgeHATransitionP
 	}
 
 	slog.Info("Promoting Edge NGFW to ACTIVE master", "placement", h.placement, "wan", wanDev, "lan", lanDev)
+	// C-M3: program shared WAN MAC onto wanDev before unfencing WAN.
+	if mac := strings.TrimSpace(p.SharedWanMac); mac != "" {
+		if err := netEngine.SetLinkMAC(wanDev, mac); err != nil {
+			return fmt.Errorf("promote: failed to set shared WAN MAC %s on %s: %w", mac, wanDev, err)
+		}
+	}
 	// A-M11: every kernel operation is checked, and the recorded
 	// role changes only after all of them succeed. The old code
 	// discarded every error and recorded "active" unconditionally,
@@ -96,7 +102,6 @@ func (h *EdgeHAEngine) Promote(netEngine *EdgeNetworkEngine, p EdgeHATransitionP
 			Name:    "lan-vip4",
 			Device:  lanDev,
 			Address: p.LanVipV4,
-			MTU:     1500,
 			Enabled: true,
 		}); err != nil {
 			errs = append(errs, fmt.Errorf("promote: failed to assign LAN VIP %s on %s: %w", p.LanVipV4, lanDev, err))
@@ -109,7 +114,6 @@ func (h *EdgeHAEngine) Promote(netEngine *EdgeNetworkEngine, p EdgeHATransitionP
 			Name:    "lan-vip6",
 			Device:  lanDev,
 			Address: p.LanVipV6,
-			MTU:     1500,
 			Enabled: true,
 		}); err != nil {
 			errs = append(errs, fmt.Errorf("promote: failed to assign LAN VIP %s on %s: %w", p.LanVipV6, lanDev, err))
@@ -156,6 +160,7 @@ func (h *EdgeHAEngine) Promote(netEngine *EdgeNetworkEngine, p EdgeHATransitionP
 func (h *EdgeHAEngine) Demote(netEngine *EdgeNetworkEngine, p EdgeHATransitionPayload) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	priorRole := h.role
 
 	if p.Placement != "" {
 		h.placement = p.Placement
@@ -204,15 +209,13 @@ func (h *EdgeHAEngine) Demote(netEngine *EdgeNetworkEngine, p EdgeHATransitionPa
 		}
 	}
 	if len(errs) > 0 {
-		// A-M41 (round 2): the WAN is already fenced while the
-		// role still says "active" — a node that claims active but
-		// cannot forward. Roll the fence back (bring the WAN back
-		// up) so the recorded role matches the kernel state and a
-		// retry starts from a consistent state. (With idempotent
-		// RemoveAddress above, the routine "VIP already absent"
-		// case no longer reaches this path at all.)
-		if rerr := netEngine.SetLinkUp(wanDev, true); rerr != nil {
-			errs = append(errs, fmt.Errorf("demote: rollback failed to restore WAN %s: %w", wanDev, rerr))
+		// A-M41 (round 2): only bring WAN back up if this node was previously
+		// "active". If the node was already "standby", a failed VIP removal must
+		// NOT unfence the standby WAN link and trigger dual-active split-brain.
+		if priorRole == "active" {
+			if rerr := netEngine.SetLinkUp(wanDev, true); rerr != nil {
+				errs = append(errs, fmt.Errorf("demote: rollback failed to restore WAN %s: %w", wanDev, rerr))
+			}
 		}
 		return errors.Join(errs...)
 	}

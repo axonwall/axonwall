@@ -4,10 +4,17 @@ import {
   discoverOidc,
   getOidcConfig,
   randomToken,
+  resolveOidcRedirectUri,
+  resolvePublicOrigin,
 } from '../../../../../server/oidc';
 
 export async function GET(request: NextRequest) {
-  const cfg = getOidcConfig();
+  const cfg = await getOidcConfig();
+  const publicOrigin = resolvePublicOrigin(
+    request.headers,
+    request.nextUrl.origin,
+    cfg?.redirectUri
+  );
 
   // No simulation mode: if no live OIDC provider is configured, SSO is
   // simply unavailable. (Previously this redirected into the callback
@@ -15,7 +22,7 @@ export async function GET(request: NextRequest) {
   // for anyone who could reach the login page.)
   if (!cfg) {
     return NextResponse.redirect(
-      new URL('/login?error=SSO+is+not+configured', request.url)
+      new URL('/login?error=SSO+is+not+configured', publicOrigin)
     );
   }
 
@@ -23,13 +30,16 @@ export async function GET(request: NextRequest) {
     const discovery = await discoverOidc(cfg);
     const state = randomToken();
     const nonce = randomToken();
-    const redirectUri = `${request.nextUrl.origin}/api/auth/callback/oidc`;
+    const redirectUri = resolveOidcRedirectUri(publicOrigin, cfg.redirectUri);
 
     const authUrl = new URL(discovery.authorization_endpoint);
     authUrl.searchParams.set('client_id', cfg.clientId);
     authUrl.searchParams.set('redirect_uri', redirectUri);
     authUrl.searchParams.set('response_type', 'code');
-    authUrl.searchParams.set('scope', 'openid profile email groups');
+    authUrl.searchParams.set(
+      'scope',
+      cfg.scopes && cfg.scopes.length > 0 ? cfg.scopes.join(' ') : 'openid profile email groups'
+    );
     authUrl.searchParams.set('state', state);
     authUrl.searchParams.set('nonce', nonce);
 
@@ -47,7 +57,7 @@ export async function GET(request: NextRequest) {
     return response;
   } catch {
     return NextResponse.redirect(
-      new URL('/login?error=SSO+provider+unreachable', request.url)
+      new URL('/login?error=SSO+provider+unreachable', publicOrigin)
     );
   }
 }

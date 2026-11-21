@@ -27,6 +27,20 @@ import {
   Upload,
 } from 'lucide-react';
 import {
+  Bar,
+  BarChart,
+  CartesianGrid,
+  Cell,
+  Legend,
+  Pie,
+  PieChart,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from 'recharts';
+import { ThreatSketchWaveform } from '@/components/ebpf/EbpfSecurityVisualizer';
+import {
   disablePluginWithDependents,
   enablePluginWithDependencies,
   isPluginEnabled,
@@ -688,6 +702,124 @@ export default function ThreatHarvesterPage() {
               </div>
             </div>
           </div>
+
+          {/* Ring-0 Signal & Corpus Visualizations */}
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+            <div className="lg:col-span-7 bg-slate-900/80 border border-slate-800 rounded-2xl p-5 space-y-3">
+              <div className="flex items-center justify-between">
+                <h2 className="text-sm font-bold text-white">Ring-0 Capture Signal Distribution</h2>
+                <span className="text-xs font-mono tabular-nums text-cyan-300">
+                  {(stats?.packetsSeen ?? 0).toLocaleString()} pkts inspected
+                </span>
+              </div>
+              <div className="h-[210px]">
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart
+                    data={[
+                      { signal: 'Tier-0 Sketches', count: stats?.tier0Events ?? 0, fill: '#06b6d4' },
+                      { signal: 'Tier-1 Payloads', count: stats?.tier1PayloadEvents ?? 0, fill: '#f59e0b' },
+                      { signal: 'Dark-Port Hits', count: stats?.darkPortHits ?? 0, fill: '#f43f5e' },
+                      { signal: 'Memfd Alerts', count: stats?.memfdAlerts ?? 0, fill: '#ef4444' },
+                      { signal: 'TLS Uprobes', count: stats?.tlsUprobeEvents ?? 0, fill: '#a855f7' },
+                      { signal: 'DLP Redactions', count: stats?.redactedSecrets ?? 0, fill: '#10b981' },
+                    ]}
+                    layout="vertical"
+                    margin={{ left: 10, right: 16 }}
+                  >
+                    <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" horizontal={false} />
+                    <XAxis type="number" tick={{ fill: '#94a3b8', fontSize: 11 }} />
+                    <YAxis type="category" dataKey="signal" width={118} tick={{ fill: '#cbd5e1', fontSize: 11 }} />
+                    <Tooltip
+                      contentStyle={{
+                        backgroundColor: '#0f172a',
+                        borderColor: '#334155',
+                        borderRadius: '0.5rem',
+                        fontSize: '12px',
+                        color: '#f1f5f9',
+                      }}
+                    />
+                    <Bar dataKey="count" name="Events" radius={[0, 4, 4, 0]}>
+                      {[
+                        '#06b6d4',
+                        '#f59e0b',
+                        '#f43f5e',
+                        '#ef4444',
+                        '#a855f7',
+                        '#10b981',
+                      ].map((color, idx) => (
+                        <Cell key={idx} fill={color} />
+                      ))}
+                    </Bar>
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+            </div>
+
+            <div className="lg:col-span-5 bg-slate-900/80 border border-slate-800 rounded-2xl p-5 space-y-3">
+              <div className="flex items-center justify-between">
+                <h2 className="text-sm font-bold text-white">Oracle Episode Corpus Mix</h2>
+                <span className="text-xs font-mono tabular-nums text-slate-300">
+                  {stats?.totalEpisodes ?? 0} total
+                </span>
+              </div>
+              {(stats?.totalEpisodes ?? 0) === 0 ? (
+                <div className="h-[210px] flex items-center justify-center text-xs text-slate-400">
+                  No episodes spooled yet. Capture live threats or run a scenario simulation above.
+                </div>
+              ) : (
+                <div className="h-[210px]">
+                  <ResponsiveContainer width="100%" height="100%">
+                    {(() => {
+                      const corpusSlices = [
+                        { name: 'Gold Malicious', value: stats?.goldEpisodes ?? 0, fill: '#f43f5e' },
+                        { name: 'Silver Malicious', value: stats?.silverEpisodes ?? 0, fill: '#f59e0b' },
+                        { name: 'Benign Sampled', value: stats?.benignEpisodes ?? 0, fill: '#10b981' },
+                        {
+                          name: 'Unlabeled Anomaly',
+                          value: Math.max(
+                            0,
+                            (stats?.totalEpisodes ?? 0) -
+                              (stats?.goldEpisodes ?? 0) -
+                              (stats?.silverEpisodes ?? 0) -
+                              (stats?.benignEpisodes ?? 0)
+                          ),
+                          fill: '#06b6d4',
+                        },
+                      ].filter((s) => s.value > 0);
+                      return (
+                        <PieChart>
+                          <Pie
+                            data={corpusSlices}
+                            dataKey="value"
+                            nameKey="name"
+                            cx="50%"
+                            cy="50%"
+                            innerRadius={45}
+                            outerRadius={75}
+                            paddingAngle={2}
+                          >
+                            {corpusSlices.map((s) => (
+                              <Cell key={s.name} fill={s.fill} />
+                            ))}
+                          </Pie>
+                          <Tooltip
+                            contentStyle={{
+                              backgroundColor: '#0f172a',
+                              borderColor: '#334155',
+                              borderRadius: '0.5rem',
+                              fontSize: '12px',
+                              color: '#f1f5f9',
+                            }}
+                          />
+                          <Legend wrapperStyle={{ fontSize: '11px' }} />
+                        </PieChart>
+                      );
+                    })()}
+                  </ResponsiveContainer>
+                </div>
+              )}
+            </div>
+          </div>
         </div>
       )}
 
@@ -896,18 +1028,11 @@ export default function ThreatHarvesterPage() {
                     </div>
                   </div>
 
-                  {/* Packet Sketch & IAT */}
-                  <div className="bg-slate-950 border border-slate-800 rounded-xl p-3 space-y-1.5 font-mono text-xs">
-                    <div className="text-[10px] text-slate-400 uppercase">
-                      First-16 Signed Packet Sizes (Bytes) &amp; Inter-Arrival Deltas (us)
-                    </div>
-                    <div className="text-cyan-300 break-all">
-                      sizes: [{(selectedEpisode.pktSizes || []).join(', ')}]
-                    </div>
-                    <div className="text-slate-400 break-all">
-                      iat_us: [{(selectedEpisode.iatUs || []).join(', ')}]
-                    </div>
-                  </div>
+                  {/* Packet Sketch & IAT Waveform */}
+                  <ThreatSketchWaveform
+                    pktSizes={selectedEpisode.pktSizes}
+                    iatUs={selectedEpisode.iatUs}
+                  />
 
                   {/* Causal DSL */}
                   <div className="space-y-1.5">

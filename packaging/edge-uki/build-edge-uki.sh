@@ -212,7 +212,7 @@ CONFIG_CMDLINE="${DEFAULT_CMDLINE}"
 EOF
 
 echo "[✓] Generated merged monolithic kernel config: ${MERGED_KCONFIG}"
-sha256sum "${INITRAMFS_OUT}" > "${INITRAMFS_OUT}.sha256"
+(cd "${OUTPUT_DIR}" && sha256sum "$(basename "${INITRAMFS_OUT}")" > "$(basename "${INITRAMFS_OUT}").sha256")
 
 # Verify critical security invariants in merged config
 if ! grep -q "^CONFIG_MODULES=n$" "${MERGED_KCONFIG}"; then

@@ -220,9 +220,11 @@ export default function PowerManagementPage() {
             <Layers className="w-3.5 h-3.5" />
             {telemetry?.installMode === 'zbm'
               ? 'ZFS Boot Environments'
-              : telemetry?.installMode === 'rolling'
-                ? 'Rolling System Updates'
-                : 'A/B Firmware Updates'}
+              : telemetry?.installMode === 'btrfs'
+                ? 'Btrfs + Snapper Snapshots'
+                : telemetry?.installMode === 'rolling'
+                  ? 'Rolling System Updates'
+                  : 'A/B Firmware Updates'}
           </Link>
         </div>
       </div>

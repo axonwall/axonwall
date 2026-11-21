@@ -256,10 +256,10 @@ export function compileKernelHardeningSysctl(state?: Partial<DesiredState> | nul
 export function compileBpfLsmGuardC(state?: Partial<DesiredState> | null): string {
   const cfg = resolveHostDefenseConfig(state);
   const trustedPathsComment = cfg.trustedBpfLoaderPaths
-    .map((p) => ` *   - ${String(p).replace(/[\r\n]+/g, '')} (ALLOW_FLAG_BPF_LOAD)`)
+    .map((p) => `//   - ${String(p).replace(/[\r\n\0]+/g, '')} (ALLOW_FLAG_BPF_LOAD)`)
     .join('\n');
   const trustedAfAlgComment = (cfg.trustedAfAlgPaths ?? ['/usr/sbin/cryptsetup'])
-    .map((p) => ` *   - ${String(p).replace(/[\r\n]+/g, '')} (ALLOW_FLAG_AF_ALG_AEAD)`)
+    .map((p) => `//   - ${String(p).replace(/[\r\n\0]+/g, '')} (ALLOW_FLAG_AF_ALG_AEAD)`)
     .join('\n');
   const sqpollReturn = cfg.blockIoUringSqpoll ? '-EPERM' : '0';
   const copyfailReturn = cfg.blockAfAlgAeadCopyfail !== false ? '-EPERM' : '0';
@@ -653,7 +653,10 @@ export function compileRkhunterConfig(
   unifiedRunnerScript: string;
 } {
   const cfg = resolveHostDefenseConfig(state);
-  if (!/^[0-9*,/-]+\s+[0-9*,/-]+\s+[0-9*,/-]+\s+[0-9*,/-]+\s+[0-9*,/-]+$/.test(cfg.scheduledScanCron)) {
+  if (
+    /[\r\n\0]/.test(cfg.scheduledScanCron) ||
+    !/^[0-9*,/-]+[ \t]+[0-9*,/-]+[ \t]+[0-9*,/-]+[ \t]+[0-9*,/-]+[ \t]+[0-9*,/-]+$/.test(cfg.scheduledScanCron)
+  ) {
     throw new Error(`Invalid scheduledScanCron expression: ${cfg.scheduledScanCron}`);
   }
 

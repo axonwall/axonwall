@@ -185,12 +185,22 @@ if [ "$method" ] && [ -z "$disks" ]; then
 			vault|k3s-storage|minimal|axonwall) install_edition="$RET" ;;
 		esac
 	fi
-	if grep -qE '(^|[[:space:]])(axonwall_edition=vault|axonwall\.edition=vault)($|[[:space:]])' /proc/cmdline 2>/dev/null; then
-		install_edition="vault"
-	elif grep -qE '(^|[[:space:]])(axonwall_edition=k3s-storage|axonwall\.edition=k3s-storage)($|[[:space:]])' /proc/cmdline 2>/dev/null; then
-		install_edition="k3s-storage"
-	elif grep -qE '(^|[[:space:]])(axonwall_edition=minimal|axonwall\.edition=minimal)($|[[:space:]])' /proc/cmdline 2>/dev/null; then
-		install_edition="minimal"
+	if grep -qE '(^|[[:space:]])(axonwall_edition|axonwall\.edition)=[^[:space:]]+' /proc/cmdline 2>/dev/null; then
+		_cmd_eds="$(grep -oE '(^|[[:space:]])(axonwall_edition|axonwall\.edition)=[^[:space:]]+' /proc/cmdline 2>/dev/null | sed -E 's/^[[:space:]]*[^=]+=//' | sort -u)"
+		_cmd_cnt="$(printf '%s\n' "$_cmd_eds" | grep -c . || true)"
+		if [ "$_cmd_cnt" -gt 1 ]; then
+			echo "[!] ERROR: conflicting edition tokens in /proc/cmdline; refusing to guess edition." >&2
+			logger -t axonwall-partman "ERROR: conflicting axonwall_edition tokens in /proc/cmdline" 2>/dev/null || true
+			exit 1
+		fi
+		case "$_cmd_eds" in
+			vault|k3s-storage|minimal|axonwall) install_edition="$_cmd_eds" ;;
+			*)
+				echo "[!] ERROR: unknown edition '${_cmd_eds}' in /proc/cmdline." >&2
+				logger -t axonwall-partman "ERROR: unknown axonwall_edition '${_cmd_eds}' in /proc/cmdline" 2>/dev/null || true
+				exit 1
+				;;
+		esac
 	fi
 	if db_get axonwall/k3s_role 2>/dev/null && [ -n "$RET" ]; then
 		case "$RET" in
@@ -423,7 +433,7 @@ if [ "$method" ] && [ -z "$disks" ]; then
 		esac
 
 		# In Guided or Custom Storage Wizard mode, let operator choose Appliance Edition & K3s Role if not already preseeded
-		if [ "$partition_mode" = "wizard" ] && ! db_fget axonwall/appliance_edition seen 2>/dev/null; then
+		if [ "$partition_mode" = "wizard" ] && { ! db_fget axonwall/appliance_edition seen 2>/dev/null || [ "$RET" != "true" ]; }; then
 			ask_critical axonwall/appliance_edition
 			db_get axonwall/appliance_edition || true
 			case "$RET" in
@@ -989,6 +999,7 @@ if [ "$method" ] && [ -z "$disks" ]; then
 					"RAID-Z3"*) zfs_raid_topology="raidz3" ;;
 					"dRAID1"*) zfs_raid_topology="draid1" ;;
 					"dRAID2"*) zfs_raid_topology="draid2" ;;
+					"dRAID3"*) zfs_raid_topology="draid3" ;;
 					*) zfs_raid_topology="auto" ;;
 				esac
 			elif [ "$zfs_vdev_count" -eq 1 ]; then

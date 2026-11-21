@@ -513,52 +513,96 @@ export async function probeServiceSla({
   path = '/health',
   timeoutMs = 1500
 } = {}) {
+  const cleanHost = String(host ?? '127.0.0.1').trim();
+  if (
+    !cleanHost ||
+    cleanHost.startsWith('-') ||
+    /[/?#@\s\u0000-\u001f\\]/.test(cleanHost) ||
+    (!net.isIP(cleanHost) && !/^[a-zA-Z0-9.-]+$/.test(cleanHost))
+  ) {
+    throw new Error(`Invalid SLA probe host '${host}'`);
+  }
+  const lowerHost = cleanHost.toLowerCase();
+  if (
+    lowerHost === 'metadata.google.internal' ||
+    lowerHost.startsWith('169.254.') ||
+    lowerHost.startsWith('::ffff:169.254.') ||
+    lowerHost.startsWith('fe80:') ||
+    lowerHost.startsWith('fe80%')
+  ) {
+    throw new Error(`Blocked link-local/metadata SLA probe host '${host}'`);
+  }
+
+  const portNum = Number(port);
+  if (!Number.isInteger(portNum) || portNum < 1 || portNum > 65535) {
+    throw new Error(`Invalid SLA probe port '${port}'`);
+  }
+
+  const cleanPath = String(path ?? '/health');
+  if (!cleanPath.startsWith('/') || /[\s\u0000-\u001f]/.test(cleanPath)) {
+    throw new Error(`Invalid SLA probe path '${path}'`);
+  }
+
+  const boundedTimeout = Math.max(50, Math.min(60000, Number.isFinite(Number(timeoutMs)) ? Number(timeoutMs) : 1500));
+  const authority = net.isIP(cleanHost) === 6 ? `[${cleanHost}]` : cleanHost;
   const start = Date.now();
 
   if (serviceType && serviceType.toUpperCase() === 'TCP') {
     return new Promise((resolve) => {
       const socket = new net.Socket();
-      let timer = setTimeout(() => {
+      const timer = setTimeout(() => {
         socket.destroy();
-        resolve({ status: SLA_STATUS.DOWN, latencyMs: timeoutMs, target: `${host}:${port}` });
-      }, timeoutMs);
+        resolve({ status: SLA_STATUS.DOWN, latencyMs: boundedTimeout, target: `${authority}:${portNum}` });
+      }, boundedTimeout);
 
-      socket.connect(port, host, () => {
+      socket.connect(portNum, cleanHost, () => {
         clearTimeout(timer);
         const latencyMs = Date.now() - start;
         socket.destroy();
-        resolve({ status: SLA_STATUS.UP, latencyMs, target: `${host}:${port}` });
+        resolve({ status: SLA_STATUS.UP, latencyMs, target: `${authority}:${portNum}` });
       });
 
       socket.on('error', () => {
         clearTimeout(timer);
-        resolve({ status: SLA_STATUS.DOWN, latencyMs: Date.now() - start, target: `${host}:${port}` });
+        resolve({ status: SLA_STATUS.DOWN, latencyMs: Date.now() - start, target: `${authority}:${portNum}` });
       });
     });
   }
 
   // HTTP probe
+  const targetUrl = `http://${authority}:${portNum}${cleanPath}`;
   return new Promise((resolve) => {
+    let settled = false;
+    const finish = (resObj) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(resObj);
+    };
+
     const timer = setTimeout(() => {
-      resolve({ status: SLA_STATUS.DOWN, latencyMs: timeoutMs, target: `http://${host}:${port}${path}` });
-    }, timeoutMs);
+      finish({ status: SLA_STATUS.DOWN, latencyMs: boundedTimeout, target: targetUrl });
+    }, boundedTimeout);
 
-    const req = http.get(`http://${host}:${port}${path}`, (res) => {
-      clearTimeout(timer);
-      const latencyMs = Date.now() - start;
-      const status = res.statusCode >= 200 && res.statusCode < 300 ? SLA_STATUS.UP : SLA_STATUS.FAULTY;
-      resolve({ status, statusCode: res.statusCode, latencyMs, target: `http://${host}:${port}${path}` });
-    });
+    try {
+      const req = http.get(targetUrl, (res) => {
+        res.resume();
+        const latencyMs = Date.now() - start;
+        const status = res.statusCode >= 200 && res.statusCode < 300 ? SLA_STATUS.UP : SLA_STATUS.FAULTY;
+        finish({ status, statusCode: res.statusCode, latencyMs, target: targetUrl });
+      });
 
-    req.on('error', () => {
-      clearTimeout(timer);
-      resolve({ status: SLA_STATUS.DOWN, latencyMs: Date.now() - start, target: `http://${host}:${port}${path}` });
-    });
+      req.on('error', () => {
+        finish({ status: SLA_STATUS.DOWN, latencyMs: Date.now() - start, target: targetUrl });
+      });
 
-    req.setTimeout(timeoutMs, () => {
-      req.destroy();
-      resolve({ status: SLA_STATUS.DOWN, latencyMs: timeoutMs, target: `http://${host}:${port}${path}` });
-    });
+      req.setTimeout(boundedTimeout, () => {
+        req.destroy();
+        finish({ status: SLA_STATUS.DOWN, latencyMs: boundedTimeout, target: targetUrl });
+      });
+    } catch {
+      finish({ status: SLA_STATUS.DOWN, latencyMs: Date.now() - start, target: targetUrl });
+    }
   });
 }
 

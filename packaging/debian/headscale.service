@@ -4,6 +4,8 @@ After=network-online.target axonwall-firstboot.service
 Wants=network-online.target
 ConditionPathExists=!/etc/axonwall/.vault-edition
 ConditionPathExists=!/etc/axonwall/.k3s-edition
+ConditionPathExists=!/etc/axonwall/.minimal-edition
+ConditionPathExists=/usr/sbin/headscale
 ConditionKernelCommandLine=!axonwall_install=1
 ConditionKernelCommandLine=!axonwall.install=1
 ConditionKernelCommandLine=!axonwall.unattended=1

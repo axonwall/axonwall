@@ -2993,6 +2993,7 @@ func (m *K3sManager) InspectResource(ctx context.Context, resource, namespace, n
 	}
 
 	yamlText := string(yamlOut)
+	describeText := string(descOut)
 	var decodedSecret map[string]string
 	secretRedacted := false
 
@@ -3002,6 +3003,7 @@ func (m *K3sManager) InspectResource(ctx context.Context, resource, namespace, n
 		} else {
 			redactSecretMap(obj)
 			yamlText = redactSecretYaml(yamlText)
+			describeText = redactSecretDescribe(describeText)
 			secretRedacted = true
 		}
 	}
@@ -3031,12 +3033,59 @@ func (m *K3sManager) InspectResource(ctx context.Context, resource, namespace, n
 		Namespace:         effectiveNS,
 		Object:            obj,
 		Yaml:              yamlText,
-		Describe:          string(descOut),
+		Describe:          describeText,
 		Events:            events,
 		Related:           related,
 		DecodedSecretData: decodedSecret,
 		SecretRedacted:    secretRedacted,
 	}, nil
+}
+
+func redactSecretDescribe(desc string) string {
+	if desc == "" {
+		return ""
+	}
+	lines := strings.Split(desc, "\n")
+	out := make([]string, 0, len(lines))
+	inAnnotations := false
+	skipAnnotationVal := false
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		leadingSpaces := len(line) - len(strings.TrimLeft(line, " \t"))
+		if leadingSpaces == 0 && trimmed != "" {
+			inAnnotations = strings.HasPrefix(trimmed, "Annotations:")
+			skipAnnotationVal = false
+			if inAnnotations && strings.Contains(trimmed, "kubectl.kubernetes.io/last-applied-configuration:") {
+				idx := strings.Index(line, ":")
+				out = append(out, line[:idx+1]+" <redacted>")
+				skipAnnotationVal = true
+				continue
+			}
+			out = append(out, line)
+			continue
+		}
+		if inAnnotations {
+			if strings.HasPrefix(trimmed, "kubectl.kubernetes.io/last-applied-configuration:") {
+				out = append(out, line[:leadingSpaces]+"kubectl.kubernetes.io/last-applied-configuration: <redacted>")
+				skipAnnotationVal = true
+				continue
+			}
+			if skipAnnotationVal {
+				if trimmed == "" {
+					skipAnnotationVal = false
+					out = append(out, line)
+					continue
+				}
+				// Continuation lines of a multi-line annotation are further indented than the key (or JSON/YAML continuation).
+				if leadingSpaces > 20 || (!strings.Contains(trimmed, ": ") && leadingSpaces > 10) {
+					continue
+				}
+				skipAnnotationVal = false
+			}
+		}
+		out = append(out, line)
+	}
+	return strings.Join(out, "\n")
 }
 
 func computeRelatedResources(ctx context.Context, obj map[string]any, ns, name string) []K3sRelatedResource {

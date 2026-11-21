@@ -174,14 +174,25 @@ export function generateClientOvpnProfile(params: {
     'verb 3',
   ];
 
+const PEM_BLOCK_SEQUENCE_REGEX =
+  /^(?:\s*-----BEGIN [A-Z0-9 ]+-----\r?\n[A-Za-z0-9+/=\r\n]+?\r?\n-----END [A-Z0-9 ]+-----\s*)+$/;
+
+function validatePemBlock(raw: string, label: string): string {
+  const trimmed = String(raw).replace(/\0/g, '').trim();
+  if (!trimmed || /[<>]/.test(trimmed) || !PEM_BLOCK_SEQUENCE_REGEX.test(trimmed)) {
+    throw new Error(`Invalid PEM block for OpenVPN ${label}`);
+  }
+  return trimmed;
+}
+
   if (params.caCert) {
-    lines.push('<ca>', params.caCert.replace(/<\/ca>/gi, '').trim(), '</ca>');
+    lines.push('<ca>', validatePemBlock(params.caCert, 'caCert'), '</ca>');
   }
   if (params.clientCert) {
-    lines.push('<cert>', params.clientCert.replace(/<\/cert>/gi, '').trim(), '</cert>');
+    lines.push('<cert>', validatePemBlock(params.clientCert, 'clientCert'), '</cert>');
   }
   if (params.clientKey) {
-    lines.push('<key>', params.clientKey.replace(/<\/key>/gi, '').trim(), '</key>');
+    lines.push('<key>', validatePemBlock(params.clientKey, 'clientKey'), '</key>');
   }
 
   return lines.join('\n') + '\n';

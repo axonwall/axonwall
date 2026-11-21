@@ -344,7 +344,7 @@ func (d *CloudInitConfigDataSource) Read(ctx context.Context, req datasource.Rea
 		}
 	}
 
-	standbyEnabled := true
+	standbyEnabled := layoutMode != "single_root"
 	if !data.StorageStandbyEnabled.IsNull() && !data.StorageStandbyEnabled.IsUnknown() {
 		standbyEnabled = data.StorageStandbyEnabled.ValueBool()
 	}

@@ -8,7 +8,7 @@ import fs from 'node:fs/promises';
 import fsSync from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { getVigilanteEvidenceDir, requireTsaKey, resolveTsaKey } from './config.js';
+import { getVigilanteEvidenceDir, requireTsaKey, resolveTsaKey, sanitizePathComponent, resolvePathInside } from './config.js';
 import { logger } from '../utils/logger.js';
 
 export const OID_SHA256 = '2.16.840.1.101.3.4.2.1';
@@ -198,9 +198,10 @@ export async function createEvidenceBundle(caseMetadata = {}, evidenceItems = []
   await fs.mkdir(baseDir, { recursive: true });
 
   const timestamp = Date.now();
-  const caseNumber = caseMetadata.caseNumber || `CASE-${new Date().getFullYear()}-${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
+  const rawCaseNumber = caseMetadata.caseNumber || `CASE-${new Date().getFullYear()}-${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
+  const caseNumber = sanitizePathComponent(rawCaseNumber);
   const bundleId = `evidence-bundle-${caseNumber.toLowerCase()}-${timestamp}`;
-  const bundleDir = path.join(baseDir, bundleId);
+  const bundleDir = resolvePathInside(baseDir, bundleId);
   await fs.mkdir(bundleDir, { recursive: true });
 
   // 1. Write evidence items and record their SHA-256 hashes
@@ -208,14 +209,14 @@ export async function createEvidenceBundle(caseMetadata = {}, evidenceItems = []
   const seenFilenames = new Set();
 
   for (const item of evidenceItems) {
-    const filename = path.basename(item.filename || 'evidence.dat');
+    const filename = sanitizePathComponent(path.basename(item.filename || 'evidence.dat'));
     // Items are stored flat in the bundle: two items with the same basename
     // would silently overwrite each other and destroy evidence.
     if (seenFilenames.has(filename)) {
       throw new Error(`Duplicate evidence filename '${filename}': bundle items must have unique file names`);
     }
     seenFilenames.add(filename);
-    const destPath = path.join(bundleDir, filename);
+    const destPath = resolvePathInside(bundleDir, filename);
 
     let fileBuffer;
     if (item.content) {
@@ -301,7 +302,18 @@ export async function verifyEvidenceBundle(bundleDir, options = {}) {
   const failures = [];
 
   for (const item of manifest.evidenceItems) {
-    const itemPath = path.join(bundleDir, item.filename);
+    const baseName = path.basename(item.filename || '');
+    if (!baseName || baseName !== item.filename) {
+      failures.push(`Invalid manifest item filename '${item.filename}': must be a plain basename`);
+      continue;
+    }
+    let itemPath;
+    try {
+      itemPath = resolvePathInside(bundleDir, baseName);
+    } catch {
+      failures.push(`Path traversal rejected for evidence item '${item.filename}'`);
+      continue;
+    }
     if (!fsSync.existsSync(itemPath)) {
       failures.push(`Missing file: ${item.filename}`);
       continue;

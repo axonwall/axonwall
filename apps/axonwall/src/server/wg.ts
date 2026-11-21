@@ -4,42 +4,8 @@ import { execFileSync } from 'node:child_process';
 import QRCode from 'qrcode';
 import { getSession } from './auth';
 import { assertActionPermitted } from './auth-guard';
-import { applyDesiredState } from './agent';
 import { getDesiredStateInternal } from './desired-state-internal';
-
-/**
- * Derive the X25519 public key for a base64 WireGuard private key.
- * Prefers the `wg` CLI; falls back to Node.js crypto (PKCS#8 wrapping of
- * the raw 32-byte key) when the CLI is absent. Returns null when the key
- * is missing or unparseable instead of emitting a placeholder.
- */
-export async function deriveWireGuardPublicKey(privateKeyB64: string): Promise<string | null> {
-  const clean = (privateKeyB64 || '').trim();
-  if (!clean) return null;
-  try {
-    const derived = execFileSync('wg', ['pubkey'], { input: clean + '\n', timeout: 1000, stdio: ['pipe', 'pipe', 'ignore'], encoding: 'utf8' }).trim();
-    if (derived) return derived;
-  } catch {
-    // wg CLI absent — fall through to the Node.js crypto derivation below.
-  }
-  try {
-    const crypto = await import('node:crypto');
-    const raw = Buffer.from(clean, 'base64');
-    if (raw.length !== 32) return null;
-    // PKCS#8 prefix for an X25519 private key, then the 32 raw bytes.
-    const pkcs8Prefix = Buffer.from('302e020100300506032b656e04220420', 'hex');
-    const privKeyObj = crypto.createPrivateKey({
-      key: Buffer.concat([pkcs8Prefix, raw]),
-      format: 'der',
-      type: 'pkcs8',
-    });
-    const pubKeyObj = crypto.createPublicKey(privKeyObj);
-    const rawPub = pubKeyObj.export({ type: 'spki', format: 'der' }).subarray(-32);
-    return rawPub.toString('base64');
-  } catch {
-    return null;
-  }
-}
+import { deriveWireGuardPublicKey, registerWireGuardPeerInternal } from './wg-internal';
 
 /** Server public key for the console WireGuard page (G3): null when no server key is configured. */
 export async function getWireGuardServerPublicKey(): Promise<string | null> {
@@ -147,22 +113,12 @@ export async function generateWireGuardProfile(options?: { expectedFingerprint?:
     enabled: true,
   };
   try {
-    // C-M8: thread the caller's fingerprint through so two concurrent
-    // profile generations cannot both read S0 and drop each other's peer.
-    await applyDesiredState(
-      {
-        ...state,
-        wireguard: {
-          enabled: true,
-          address: wgCfg.address || '10.99.0.1/24',
-          listenPort: wgCfg.listenPort || 51820,
-          privateKey: wgCfg.privateKey,
-          peers: [...(wgCfg?.peers ?? []), newPeer],
-        },
-      },
-      120,
-      options?.expectedFingerprint ? { expectedFingerprint: options.expectedFingerprint } : undefined
-    );
+    // W-M2 & C-M8: register via narrowly scoped operator-safe helper with expectedFingerprint.
+    await registerWireGuardPeerInternal({
+      newPeer,
+      expectedFingerprint: options?.expectedFingerprint,
+      actorUsername: username,
+    });
   } catch (err: any) {
     throw new Error(`WireGuard peer could not be registered: ${err?.message || 'unknown error'}. No profile was issued — an admin must add this peer before it can connect.`);
   }

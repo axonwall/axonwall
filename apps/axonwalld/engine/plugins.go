@@ -1288,6 +1288,20 @@ func (pm *PluginManager) IsPluginEnabled(pluginID string) bool {
 	if pluginID == "host-malware-rootkit" {
 		return true
 	}
+	if pluginID == "core-k3s" {
+		if pm.installedMap[pluginID] != "" {
+			return true
+		}
+		if pluginDir, err := pm.pluginDir("core-k3s"); err == nil {
+			if isExecutableFile(filepath.Join(pluginDir, "bin", "k3s")) {
+				return true
+			}
+			if info, statErr := os.Stat(bundledRecordPath(pluginDir)); statErr == nil && !info.IsDir() {
+				return true
+			}
+		}
+		return false
+	}
 	return pm.installedMap[pluginID] != ""
 }
 
@@ -1556,6 +1570,7 @@ type bundledBinaryRecord struct {
 
 type bundledBinariesFile struct {
 	PluginID string                `json:"pluginId"`
+	Sources  map[string]string     `json:"sources,omitempty"`
 	Files    []bundledBinaryRecord `json:"files"`
 }
 
@@ -1563,8 +1578,17 @@ func bundledRecordPath(pluginDir string) string {
 	return filepath.Join(pluginDir, "bundled.json")
 }
 
-// sha256File returns the lowercase hex sha256 of a file's contents.
+// sha256File returns the lowercase hex sha256 of a regular file's contents.
+// Rejects symlinks and special files via Lstat so verification can never follow
+// a swapped symlink outside the plugin tree.
 func sha256File(path string) (string, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return "", err
+	}
+	if !info.Mode().IsRegular() {
+		return "", fmt.Errorf("refusing non-regular file %q", path)
+	}
 	f, err := os.Open(path)
 	if err != nil {
 		return "", err
@@ -1974,6 +1998,9 @@ func extractArchiveTree(archivePath, format string, strip int, pluginDir string)
 				return fmt.Errorf("extract archive tree: %w", err)
 			}
 			switch hdr.Typeflag {
+			case tar.TypeXGlobalHeader, tar.TypeXHeader:
+				// PAX global/extended metadata headers (e.g. git archive tarballs); ignore safely.
+				continue
 			case tar.TypeDir:
 				if err := placeMember(hdr.Name, true, false, hdr.FileInfo().Mode(), nil); err != nil {
 					return err
@@ -2072,18 +2099,30 @@ func installRawBinary(tmpPath, name, pluginDir string) (string, error) {
 // aborts and bundled.json is NOT written, so a half-extracted tree
 // can never pass verifyBundledBinaries. Callers must validate first.
 func (pm *PluginManager) installBundledBinaries(def PluginDefinition) error {
+	if len(def.Binaries) == 0 {
+		return nil
+	}
+	if err := pm.validateBundledBinaries(def); err != nil {
+		return err
+	}
 	pluginDir, err := pm.pluginDir(def.ID)
 	if err != nil {
 		return err
 	}
-	// Start from a clean tree: files left over from a previous
-	// version of the plugin must not linger and get recorded as if
-	// the new manifest installed them. (A failed install leaves no
-	// bundled.json, so the cleaned tree still fails verification.)
-	if err := os.RemoveAll(pluginDir); err != nil {
+	if err := os.MkdirAll(filepath.Dir(pluginDir), 0755); err != nil {
 		return err
 	}
-	if err := os.MkdirAll(pluginDir, 0755); err != nil {
+	stagingDir, err := os.MkdirTemp(filepath.Dir(pluginDir), ".staging-"+def.ID+"-*")
+	if err != nil {
+		return err
+	}
+	stagingCleaned := false
+	defer func() {
+		if !stagingCleaned {
+			_ = os.RemoveAll(stagingDir)
+		}
+	}()
+	if err := os.Chmod(stagingDir, 0755); err != nil {
 		return err
 	}
 	tmpDir, err := os.MkdirTemp("", "axonwall-plugin-bundled-*")
@@ -2093,18 +2132,16 @@ func (pm *PluginManager) installBundledBinaries(def PluginDefinition) error {
 	defer os.RemoveAll(tmpDir)
 
 	var records []bundledBinaryRecord
+	sources := make(map[string]string)
 	seen := make(map[string]bool)
 	for _, b := range def.Binaries {
 		// OS gate: an entry that does not apply on this host is
 		// skipped outright — never downloaded, never extracted,
-		// never recorded. A plugin whose entries are all gated
-		// out installs an (empty) plugin dir with an empty
-		// bundled.json; verify treats that as trivially verified
-		// (see verifyBundledBinaries) and the plugin's binaries
-		// keep resolving from the system packages.
+		// never recorded.
 		if !bundledEntryAppliesToOS(b, pm.osFamily) {
 			continue
 		}
+		sources[b.Name] = strings.ToLower(strings.TrimSpace(b.SHA256))
 		switch b.Kind {
 		case "archive":
 			tmpPath, err := downloadVerified(b.URL, b.SHA256, tmpDir)
@@ -2112,18 +2149,12 @@ func (pm *PluginManager) installBundledBinaries(def PluginDefinition) error {
 				return fmt.Errorf("bundled binary %q: %w", b.Name, err)
 			}
 			if strings.EqualFold(strings.TrimSpace(b.Extract), "tree") {
-				// Whole-tree extraction: the archive IS the
-				// install (bin/ + lib/ + share/ after the
-				// strip). Record every extracted file, exactly
-				// as distroPackage entries do, so verify-on-use
-				// covers the runtime and parsers too — not
-				// just the bin/nvim binary.
-				if err := extractArchiveTree(tmpPath, b.Format, b.StripComponents, pluginDir); err != nil {
+				if err := extractArchiveTree(tmpPath, b.Format, b.StripComponents, stagingDir); err != nil {
 					os.Remove(tmpPath)
 					return fmt.Errorf("bundled binary %q: %w", b.Name, err)
 				}
 				os.Remove(tmpPath)
-				if err := recordInstalledFiles(pluginDir, b, seen, &records); err != nil {
+				if err := recordInstalledFiles(stagingDir, b, seen, &records); err != nil {
 					return fmt.Errorf("bundled binary %q: %w", b.Name, err)
 				}
 				continue
@@ -2132,12 +2163,12 @@ func (pm *PluginManager) installBundledBinaries(def PluginDefinition) error {
 			if want == "" {
 				want = b.Name
 			}
-			rel, err := extractArchiveBinary(tmpPath, b.Format, want, b.Name, pluginDir)
+			rel, err := extractArchiveBinary(tmpPath, b.Format, want, b.Name, stagingDir)
 			os.Remove(tmpPath)
 			if err != nil {
 				return fmt.Errorf("bundled binary %q: %w", b.Name, err)
 			}
-			sum, err := sha256File(filepath.Join(pluginDir, rel))
+			sum, err := sha256File(filepath.Join(stagingDir, rel))
 			if err != nil {
 				return fmt.Errorf("bundled binary %q: %w", b.Name, err)
 			}
@@ -2148,12 +2179,12 @@ func (pm *PluginManager) installBundledBinaries(def PluginDefinition) error {
 			if err != nil {
 				return fmt.Errorf("bundled binary %q: %w", b.Name, err)
 			}
-			rel, err := installRawBinary(tmpPath, b.Name, pluginDir)
+			rel, err := installRawBinary(tmpPath, b.Name, stagingDir)
 			os.Remove(tmpPath)
 			if err != nil {
 				return fmt.Errorf("bundled binary %q: %w", b.Name, err)
 			}
-			sum, err := sha256File(filepath.Join(pluginDir, rel))
+			sum, err := sha256File(filepath.Join(stagingDir, rel))
 			if err != nil {
 				return fmt.Errorf("bundled binary %q: %w", b.Name, err)
 			}
@@ -2175,15 +2206,13 @@ func (pm *PluginManager) installBundledBinaries(def PluginDefinition) error {
 			if err != nil {
 				return fmt.Errorf("bundled binary %q: %w", b.Name, err)
 			}
-			// dpkg-deb -x extracts only; nothing is installed
-			// into the system and no maintainer scripts run.
-			cmd := exec.Command(dpkgDeb, "-x", tmpPath, pluginDir)
+			cmd := exec.Command(dpkgDeb, "-x", tmpPath, stagingDir)
 			if out, err := cmd.CombinedOutput(); err != nil {
 				os.Remove(tmpPath)
 				return fmt.Errorf("bundled binary %q: dpkg-deb -x failed: %w (output: %s)", b.Name, err, strings.TrimSpace(string(out)))
 			}
 			os.Remove(tmpPath)
-			if err := recordInstalledFiles(pluginDir, b, seen, &records); err != nil {
+			if err := recordInstalledFiles(stagingDir, b, seen, &records); err != nil {
 				return fmt.Errorf("bundled binary %q: %w", b.Name, err)
 			}
 		default:
@@ -2191,12 +2220,8 @@ func (pm *PluginManager) installBundledBinaries(def PluginDefinition) error {
 		}
 	}
 
-	// Executable bits on everything under the declared BinDirs:
-	// extracted .deb trees carry their own modes, but an archive
-	// entry's binary and any helper under a bin dir must be
-	// runnable by the daemon without relying on archive modes.
 	for _, binDir := range def.BinDirs {
-		root := filepath.Join(pluginDir, filepath.FromSlash(binDir))
+		root := filepath.Join(stagingDir, filepath.FromSlash(binDir))
 		_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 			if err != nil || d.IsDir() || !d.Type().IsRegular() {
 				return nil
@@ -2206,16 +2231,33 @@ func (pm *PluginManager) installBundledBinaries(def PluginDefinition) error {
 		})
 	}
 
-	// Only now, with every entry extracted and hashed, is the
-	// verification record written: a failed install leaves no
-	// bundled.json, so verify can never bless a partial tree.
 	sort.Slice(records, func(i, j int) bool { return records[i].Path < records[j].Path })
-	data, err := json.MarshalIndent(bundledBinariesFile{PluginID: def.ID, Files: records}, "", "  ")
+	data, err := json.MarshalIndent(bundledBinariesFile{PluginID: def.ID, Sources: sources, Files: records}, "", "  ")
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(bundledRecordPath(pluginDir), data, 0644); err != nil {
+	if err := os.WriteFile(bundledRecordPath(stagingDir), data, 0644); err != nil {
 		return err
+	}
+
+	// Atomically promote the verified staging tree into pluginDir so mid-install
+	// network/checksum failures preserve any previously working plugin tree.
+	var backupDir string
+	if _, lerr := os.Lstat(pluginDir); lerr == nil {
+		backupDir = pluginDir + ".bak-" + strconv.FormatInt(time.Now().UnixNano(), 10)
+		if err := os.Rename(pluginDir, backupDir); err != nil {
+			return fmt.Errorf("rotate prior plugin dir %s: %w", pluginDir, err)
+		}
+	}
+	if err := os.Rename(stagingDir, pluginDir); err != nil {
+		if backupDir != "" {
+			_ = os.Rename(backupDir, pluginDir)
+		}
+		return fmt.Errorf("promote staged plugin dir %s: %w", pluginDir, err)
+	}
+	stagingCleaned = true
+	if backupDir != "" {
+		_ = os.RemoveAll(backupDir)
 	}
 	return nil
 }
@@ -2523,12 +2565,13 @@ func (pm *PluginManager) verifyBundledBinaries(def PluginDefinition) error {
 	if err := json.Unmarshal(data, &rec); err != nil {
 		return fmt.Errorf("plugin %q: bundled verification record is corrupt: %w", def.ID, err)
 	}
-	if rec.PluginID != "" && rec.PluginID != def.ID {
-		return fmt.Errorf("plugin %q: bundled verification record belongs to plugin %q", def.ID, rec.PluginID)
+	if rec.PluginID != def.ID {
+		return fmt.Errorf("plugin %q: bundled verification record pluginId %q does not match %q", def.ID, rec.PluginID, def.ID)
 	}
 	if len(rec.Files) == 0 {
 		return fmt.Errorf("plugin %q: bundled verification record lists no files", def.ID)
 	}
+	entriesPresent := make(map[string]bool)
 	for _, r := range rec.Files {
 		if r.Path == "" || filepath.IsAbs(r.Path) || strings.Contains(r.Path, "..") {
 			return fmt.Errorf("plugin %q: bundled verification record has unsafe path %q", def.ID, r.Path)
@@ -2541,6 +2584,31 @@ func (pm *PluginManager) verifyBundledBinaries(def PluginDefinition) error {
 		if sum != strings.ToLower(r.SHA256) {
 			return fmt.Errorf("plugin %q: bundled file %q sha256 mismatch: got %s, want %s; refusing to use tampered bundled binaries", def.ID, r.Path, sum, r.SHA256)
 		}
+		if r.Entry != "" {
+			entriesPresent[r.Entry] = true
+		}
+	}
+	for _, b := range def.Binaries {
+		if !bundledEntryAppliesToOS(b, pm.osFamily) {
+			continue
+		}
+		wantPin := strings.ToLower(strings.TrimSpace(b.SHA256))
+		srcPin, hasSrc := rec.Sources[b.Name]
+		if !hasSrc || strings.ToLower(strings.TrimSpace(srcPin)) != wantPin {
+			return fmt.Errorf("plugin %q: bundled verification record source pin mismatch for %q (got %q, want %q); refusing stale or unpinned bundled binaries", def.ID, b.Name, srcPin, wantPin)
+		}
+		if !entriesPresent[b.Name] {
+			return fmt.Errorf("plugin %q: bundled verification record lists no files for manifest entry %q", def.ID, b.Name)
+		}
+		if b.Kind == "binary" {
+			onDiskHash, err := sha256File(filepath.Join(pluginDir, "bin", b.Name))
+			if err != nil {
+				return fmt.Errorf("plugin %q: bundled binary %q is missing or unreadable: %w", def.ID, b.Name, err)
+			}
+			if onDiskHash != wantPin {
+				return fmt.Errorf("plugin %q: bundled binary %q on-disk sha256 %s does not match manifest pin %s", def.ID, b.Name, onDiskHash, wantPin)
+			}
+		}
 	}
 	for _, expected := range pm.expectedBundledBinaries(def) {
 		if !isExecutableFile(expected) {
@@ -2550,6 +2618,14 @@ func (pm *PluginManager) verifyBundledBinaries(def PluginDefinition) error {
 	}
 	return nil
 }
+
+// Package-internal test seams so unit tests staging fake binaries can supply
+// synthetic PluginDefinitions matching their test hashes while production code
+// strictly enforces findPluginDefinition / GetExtensionPluginDefinitions.
+var (
+	lookupPluginDefinition         = findPluginDefinition
+	listExtensionPluginDefinitions = GetExtensionPluginDefinitions
+)
 
 // hasPluginBinaryForPlugin checks the system PATH first (including
 // the freeradius/radiusd alias), then the plugin's own BinDirs under
@@ -2589,7 +2665,7 @@ func (pm *PluginManager) hasPluginBinaryForPlugin(def PluginDefinition, bin stri
 // bundled binary shadows any same-named system binary — which is
 // the point of bundling it.
 func (pm *PluginManager) PluginEnv(pluginID string) ([]string, error) {
-	def, ok := findPluginDefinition(pluginID)
+	def, ok := lookupPluginDefinition(pluginID)
 	if !ok {
 		return nil, fmt.Errorf("unknown plugin ID %q", pluginID)
 	}
@@ -2651,7 +2727,7 @@ func (pm *PluginManager) PluginEnv(pluginID string) ([]string, error) {
 // (or nothing at all). CommandForPlugin uses it when the binary
 // cannot be resolved or the bundled binaries fail verification.
 func failingPluginCommand(msg string) *exec.Cmd {
-	return exec.Command("sh", "-c", "printf '%s\\n' "+strconv.Quote(msg)+" >&2; exit 127")
+	return exec.Command("sh", "-c", `printf '%s\n' "$1" >&2; exit 127`, "_", msg)
 }
 
 // CommandForPlugin builds a command to run a plugin's binary with
@@ -2662,7 +2738,7 @@ func failingPluginCommand(msg string) *exec.Cmd {
 // re-verified before exec and any failure yields a command that
 // fails descriptively rather than running an unverified binary.
 func (pm *PluginManager) CommandForPlugin(pluginID, name string, args ...string) *exec.Cmd {
-	def, ok := findPluginDefinition(pluginID)
+	def, ok := lookupPluginDefinition(pluginID)
 	if !ok {
 		return failingPluginCommand(fmt.Sprintf("axonwall: unknown plugin %q", pluginID))
 	}
@@ -2724,7 +2800,7 @@ func (pm *PluginManager) ListPlugins() []PluginStatus {
 	pm.mu.RLock()
 	defer pm.mu.RUnlock()
 
-	defs := GetExtensionPluginDefinitions()
+	defs := listExtensionPluginDefinitions()
 	results := make([]PluginStatus, 0, len(defs))
 
 	for _, d := range defs {
@@ -3345,6 +3421,10 @@ func ensureHeadscaleInstalled(osFamily string, output *strings.Builder) error {
 			}
 			return closeErr
 		}
+		if err := os.Chmod(stagePath, 0755); err != nil {
+			_ = os.Remove(stagePath)
+			return err
+		}
 		if err := os.Rename(stagePath, "/usr/sbin/headscale"); err != nil {
 			_ = os.Remove(stagePath)
 			return err
@@ -3354,13 +3434,17 @@ func ensureHeadscaleInstalled(osFamily string, output *strings.Builder) error {
 		}
 	}
 
-	if osFamily == "debian" {
+	if osFamily == "debian" || osFamily == "arch" {
+		nologinShell := "/usr/sbin/nologin"
+		if _, statErr := os.Stat(nologinShell); statErr != nil {
+			nologinShell = "/sbin/nologin"
+		}
 		if exec.Command("getent", "group", "axonwall-headscale").Run() != nil {
 			_ = exec.Command("groupadd", "--system", "axonwall-headscale").Run()
 		}
 		if exec.Command("getent", "passwd", "axonwall-headscale").Run() != nil {
 			_ = exec.Command("useradd", "--system", "--gid", "axonwall-headscale", "--home-dir", "/var/lib/axonwall",
-				"--no-create-home", "--shell", "/usr/sbin/nologin", "--comment", "Axonwall Headscale Service User", "axonwall-headscale").Run()
+				"--no-create-home", "--shell", nologinShell, "--comment", "Axonwall Headscale Service User", "axonwall-headscale").Run()
 		}
 	} else if osFamily == "alpine" {
 		if exec.Command("getent", "group", "axonwall-headscale").Run() != nil {
@@ -3522,8 +3606,87 @@ func resetMissingZshUsersToBash() {
 	}
 }
 
+func prepareNtopAptRepo() error {
+	tmpDir, err := os.MkdirTemp("", "axonwall-ntop-*")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(tmpDir)
+	if err := os.Chmod(tmpDir, 0700); err != nil {
+		return err
+	}
+	prereqCmd := exec.Command("apt-get", "install", "-y", "--no-install-recommends", "-o", "Dpkg::Options::=--force-unsafe-io", "gnupg", "ca-certificates")
+	prereqCmd.Env = append(os.Environ(), "DEBIAN_FRONTEND=noninteractive")
+	if out, err := prereqCmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("install gnupg/ca-certificates failed: %w (%s)", err, strings.TrimSpace(string(out)))
+	}
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Get("https://packages.ntop.org/apt/ntop.key")
+	if err != nil {
+		return fmt.Errorf("download ntop GPG key: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("download ntop GPG key: unexpected HTTP status %s", resp.Status)
+	}
+	keyPath := filepath.Join(tmpDir, "ntop.key")
+	keyFile, err := os.OpenFile(keyPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
+	if err != nil {
+		return err
+	}
+	_, copyErr := io.Copy(keyFile, io.LimitReader(resp.Body, 1<<20))
+	closeErr := keyFile.Close()
+	if copyErr != nil {
+		return fmt.Errorf("write ntop GPG key: %w", copyErr)
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	if err := os.MkdirAll("/usr/share/keyrings", 0755); err != nil {
+		return err
+	}
+	keyringPath := "/usr/share/keyrings/ntop-archive-keyring.gpg"
+	stagedKeyring := filepath.Join(tmpDir, "ntop-archive-keyring.gpg")
+	if out, err := exec.Command("gpg", "--dearmor", "--batch", "--yes", "-o", stagedKeyring, keyPath).CombinedOutput(); err != nil {
+		return fmt.Errorf("dearmor ntop GPG key failed: %w (%s)", err, strings.TrimSpace(string(out)))
+	}
+	keyringBytes, err := os.ReadFile(stagedKeyring)
+	if err != nil || len(keyringBytes) == 0 {
+		return fmt.Errorf("dearmored ntop keyring is empty or unreadable: %v", err)
+	}
+	if err := os.WriteFile(keyringPath, keyringBytes, 0644); err != nil {
+		return err
+	}
+	repoList := fmt.Sprintf("deb [signed-by=%s] https://packages.ntop.org/apt-stable/trixie/ x64/\ndeb [signed-by=%s] https://packages.ntop.org/apt-stable/trixie/ all/\n", keyringPath, keyringPath)
+	if err := os.WriteFile("/etc/apt/sources.list.d/ntop.list", []byte(repoList), 0644); err != nil {
+		return err
+	}
+	updCmd := exec.Command("apt-get", "update")
+	updCmd.Env = append(os.Environ(), "DEBIAN_FRONTEND=noninteractive")
+	if out, err := updCmd.CombinedOutput(); err != nil {
+		_ = os.Remove("/etc/apt/sources.list.d/ntop.list")
+		return fmt.Errorf("apt-get update for ntop repo failed: %w (%s)", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+func isKnownCorePluginID(pluginID string) bool {
+	switch pluginID {
+	case "core-firewall", "core-nas", "core-k3s", "core-virt", "core-vigilante":
+		return true
+	}
+	_, ok := lookupPluginDefinition(pluginID)
+	return ok
+}
+
 func (pm *PluginManager) InstallPlugin(pluginID string) PluginActionResponse {
 	if strings.HasPrefix(pluginID, "core-") {
+		if !isKnownCorePluginID(pluginID) {
+			return PluginActionResponse{
+				Success: false,
+				Message: fmt.Sprintf("Unknown core plugin ID '%s'", pluginID),
+			}
+		}
 		var pkgOut strings.Builder
 		if os.Geteuid() == 0 {
 			missing := missingPackagesForOS(pm.osFamily, coreRoleOSPackages(pm.osFamily, pluginID))
@@ -3540,14 +3703,16 @@ func (pm *PluginManager) InstallPlugin(pluginID string) PluginActionResponse {
 				}
 			}
 		}
-		pm.mu.Lock()
-		delete(pm.disabledMap, pluginID)
-		if pm.installedMap[pluginID] == "" {
-			pm.installedMap[pluginID] = time.Now().UTC().Format(time.RFC3339)
-		}
-		pm.saveState()
-		pm.mu.Unlock()
 		resp := pm.ReconfigurePlugin(pluginID)
+		if resp.Success {
+			pm.mu.Lock()
+			delete(pm.disabledMap, pluginID)
+			if pm.installedMap[pluginID] == "" {
+				pm.installedMap[pluginID] = time.Now().UTC().Format(time.RFC3339)
+			}
+			pm.saveState()
+			pm.mu.Unlock()
+		}
 		if pkgOut.Len() > 0 {
 			if resp.Output != "" {
 				resp.Output = pkgOut.String() + "\n" + resp.Output
@@ -3561,7 +3726,7 @@ func (pm *PluginManager) InstallPlugin(pluginID string) PluginActionResponse {
 	pm.actionMu.Lock()
 	defer pm.actionMu.Unlock()
 
-	defs := GetExtensionPluginDefinitions()
+	defs := listExtensionPluginDefinitions()
 	var target *PluginDefinition
 	for i := range defs {
 		if defs[i].ID == pluginID {
@@ -3592,10 +3757,8 @@ func (pm *PluginManager) InstallPlugin(pluginID string) PluginActionResponse {
 			}
 		} else if pluginID == "ntopng" {
 			if _, err := os.Stat("/etc/apt/sources.list.d/ntop.list"); os.IsNotExist(err) {
-				prepCmd := exec.Command("sh", "-c", "apt-get install -y --no-install-recommends -o Dpkg::Options::=--force-unsafe-io gnupg curl ca-certificates lsb-release wget && curl -fsSL https://packages.ntop.org/apt/trixie/all/apt-ntop.deb -o /tmp/apt-ntop.deb && (dpkg --force-unsafe-io -i /tmp/apt-ntop.deb || apt-get install -f -y) && apt-get update")
-				prepCmd.Env = append(os.Environ(), "DEBIAN_FRONTEND=noninteractive")
-				if out, err := prepCmd.CombinedOutput(); err != nil {
-					log.Printf("[PluginManager] Warning configuring ntopng apt repository: %v (%s)", err, string(out))
+				if err := prepareNtopAptRepo(); err != nil {
+					log.Printf("[PluginManager] Warning configuring ntopng apt repository: %v", err)
 				}
 			}
 		}
@@ -3757,7 +3920,9 @@ func (pm *PluginManager) InstallPlugin(pluginID string) PluginActionResponse {
 			}
 		}
 		if os.Geteuid() == 0 {
-			SyncZshInEtcShells(true)
+			if SyncZshInEtcShells(true) && hasSSSD() {
+				_ = restartSSSD()
+			}
 			InvalidateSSSDCache("")
 		}
 	}
@@ -3818,7 +3983,11 @@ func (pm *PluginManager) InstallPlugin(pluginID string) PluginActionResponse {
 
 	// Shell PATH (soft-fail): the bundled dirs exist now and the plugin
 	// is recorded installed, so interactive shells can use its binaries.
-	if err := SyncPluginShellPaths(pm, pluginID); err != nil {
+	if pluginID == "cli-workstation" {
+		if err := RebuildPluginShellPaths(pm); err != nil {
+			log.Printf("[PluginManager] Warning: failed to rebuild plugin shell PATHs: %v", err)
+		}
+	} else if err := SyncPluginShellPaths(pm, pluginID); err != nil {
 		log.Printf("[PluginManager] Warning: failed to sync shell PATH for plugin %s: %v", pluginID, err)
 	}
 
@@ -3845,6 +4014,9 @@ func (pm *PluginManager) UninstallPlugin(pluginID string) PluginActionResponse {
 		delete(pm.installedMap, pluginID)
 		pm.saveState()
 		pm.mu.Unlock()
+		if err := RemovePluginShellPath(pm, pluginID); err != nil {
+			log.Printf("[PluginManager] Warning: failed to remove shell PATH for core plugin %s: %v", pluginID, err)
+		}
 		return PluginActionResponse{
 			Success: true,
 			Message: fmt.Sprintf("Disabled core role plugin %s.", pluginID),
@@ -3854,7 +4026,7 @@ func (pm *PluginManager) UninstallPlugin(pluginID string) PluginActionResponse {
 	pm.actionMu.Lock()
 	defer pm.actionMu.Unlock()
 
-	defs := GetExtensionPluginDefinitions()
+	defs := listExtensionPluginDefinitions()
 	var target *PluginDefinition
 	for i := range defs {
 		if defs[i].ID == pluginID {
@@ -3927,7 +4099,7 @@ func (pm *PluginManager) UninstallPlugin(pluginID string) PluginActionResponse {
 	// check makes that explicit). A removal failure is logged, not
 	// fatal: the packages are already gone and the plugin record is
 	// cleared below either way. Core-role plugins never reach here.
-	if len(target.Binaries) > 0 {
+	if len(target.Binaries) > 0 || len(target.BinDirs) > 0 {
 		if dir, err := pm.pluginDir(pluginID); err == nil {
 			if info, err := os.Lstat(dir); err == nil {
 				var rmErr error
@@ -3944,6 +4116,22 @@ func (pm *PluginManager) UninstallPlugin(pluginID string) PluginActionResponse {
 	}
 
 	// Post-removal cleanup hooks
+	if pluginID == "headscale" {
+		if info, err := os.Lstat("/usr/sbin/headscale"); err == nil && !info.IsDir() {
+			if rmErr := os.Remove("/usr/sbin/headscale"); rmErr != nil {
+				log.Printf("[PluginManager] Warning: failed to remove headscale binary /usr/sbin/headscale: %v", rmErr)
+			}
+		}
+		if _, libErr := os.Stat("/lib/systemd/system/headscale.service"); os.IsNotExist(libErr) {
+			if _, usrErr := os.Stat("/usr/lib/systemd/system/headscale.service"); os.IsNotExist(usrErr) {
+				if info, err := os.Lstat("/etc/systemd/system/headscale.service"); err == nil && !info.IsDir() {
+					if rmErr := os.Remove("/etc/systemd/system/headscale.service"); rmErr == nil && systemctlAvailable() {
+						_ = exec.Command("systemctl", "--no-ask-password", "daemon-reload").Run()
+					}
+				}
+			}
+		}
+	}
 	if pluginID == "rosenpass" {
 		// Legacy cleanup: before the bundled-binaries migration
 		// the rosenpass binary (and `rp`) lived in /usr/local/bin.
@@ -3965,14 +4153,23 @@ func (pm *PluginManager) UninstallPlugin(pluginID string) PluginActionResponse {
 		_ = os.MkdirAll("/etc/axonwall", 0755)
 		_ = os.WriteFile("/etc/axonwall/workstation.disabled", []byte("disabled=true\n"), 0644)
 		if pm.osFamily == "alpine" && !isMinimalEditionRoot("/") {
-			// Restore /usr/bin/zsh -> /bin/ash fallback so OpenLDAP SSO users with loginShell=/usr/bin/zsh can always SSH in!
+			// Restore a real /bin/bash wrapper if /bin/bash exists (never symlink /bin/ash -> BusyBox argv[0]=zsh applet error)
 			_ = os.Remove("/usr/bin/zsh")
-			if _, err := os.Stat("/bin/ash"); err == nil {
-				_ = os.Symlink("/bin/ash", "/usr/bin/zsh")
+			if _, err := os.Stat("/bin/bash"); err == nil {
+				_ = os.WriteFile("/usr/bin/zsh", []byte("#!/bin/sh\nexec /bin/bash \"$@\"\n"), 0755)
+				SyncZshInEtcShells(true)
+			} else if os.Geteuid() == 0 {
+				resetMissingZshUsersToBash()
+				if SyncZshInEtcShells(false) && hasSSSD() {
+					_ = restartSSSD()
+				}
+				InvalidateSSSDCache("")
 			}
 		} else if os.Geteuid() == 0 {
 			resetMissingZshUsersToBash()
-			SyncZshInEtcShells(false)
+			if SyncZshInEtcShells(false) && hasSSSD() {
+				_ = restartSSSD()
+			}
 			InvalidateSSSDCache("")
 		}
 	}
@@ -4013,7 +4210,7 @@ func (pm *PluginManager) ReconfigurePlugin(pluginID string) PluginActionResponse
 		// multicall symlinks are (re)created in the plugin bin
 		// dir, soft-fail: the units and the daemon resolve k3s
 		// directly, and kubectl also resolves via `k3s kubectl`.
-		def, ok := findPluginDefinition(pluginID)
+		def, ok := lookupPluginDefinition(pluginID)
 		if !ok {
 			return PluginActionResponse{
 				Success: false,
@@ -4085,7 +4282,8 @@ func (pm *PluginManager) ReconfigurePlugin(pluginID string) PluginActionResponse
 		}
 	}
 	if pluginID == "rosenpass" {
-		if err := ProvisionRosenpassEnvironment(DefaultRosenpassDir); err != nil {
+		err := ProvisionRosenpassEnvironment(DefaultRosenpassDir)
+		if err != nil && (!errors.Is(err, errNoSupportedInit) || systemctlAvailable()) {
 			return PluginActionResponse{
 				Success: false,
 				Message: fmt.Sprintf("Failed to provision Rosenpass environment: %v", err),
@@ -4529,7 +4727,7 @@ alias rules='nft list ruleset'
 alias routes='ip -c route show'
 alias ifaces='ip -brief -c addr'
 `
-	if existing, err := os.ReadFile("/etc/zsh/axonwall.zsh"); err != nil || !strings.Contains(string(existing), "oh-my-zsh") {
+	if existing, err := os.ReadFile("/etc/zsh/axonwall.zsh"); err != nil || !strings.Contains(string(existing), "oh-my-zsh") || strings.Contains(string(existing), `export PATH="/usr/local/sbin:`) {
 		_ = os.WriteFile("/etc/zsh/axonwall.zsh", []byte(zshConf), 0644)
 	}
 

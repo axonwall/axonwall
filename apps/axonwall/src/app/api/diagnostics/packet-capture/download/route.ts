@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSession } from '@/server/auth';
+import { isPasswordChangeEnforced } from '@/server/auth-guard';
 import { getCaptureFile } from '@/server/pcap';
 import fs from 'fs';
 
@@ -8,7 +9,7 @@ export async function GET(request: NextRequest) {
   if (!session || !session.roles.includes('admin')) {
     return new NextResponse('Unauthorized: Admin credentials required', { status: 401 });
   }
-  if (session.passwordChangeRequired) {
+  if (isPasswordChangeEnforced(session)) {
     return new NextResponse('Forbidden: Password change required', { status: 403 });
   }
 

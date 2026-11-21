@@ -523,7 +523,13 @@ if [[ "${TARGET_ARCH}" == "arm64" ]]; then
   KMAKE_ARCH="arm64"
 fi
 
-if [[ -f "/boot/config-${RUNNING_KVER}" && "${TARGET_ARCH}" == "$(dpkg --print-architecture 2>/dev/null || echo "${TARGET_ARCH}")" ]]; then
+case "$(uname -m)" in
+  x86_64|amd64) HOST_ARCH="amd64" ;;
+  aarch64|arm64) HOST_ARCH="arm64" ;;
+  *) HOST_ARCH="$(dpkg --print-architecture 2>/dev/null || uname -m)" ;;
+esac
+
+if [[ -f "/boot/config-${RUNNING_KVER}" && "${TARGET_ARCH}" == "${HOST_ARCH}" ]]; then
   echo "[+] Seeding base config from /boot/config-${RUNNING_KVER}..."
   cp "/boot/config-${RUNNING_KVER}" "${KSRC}/.config"
 else
@@ -537,11 +543,11 @@ sed -i 's|^CONFIG_SYSTEM_REVOCATION_KEYS=.*|CONFIG_SYSTEM_REVOCATION_KEYS=""|' "
 
 if [[ "${MODE}" == "stripped" && -n "${LSMOD_FILE}" ]]; then
   echo "[+] Applying host lsmod strip via make localmodconfig..."
-  yes "" | make -C "${KSRC}" ARCH="${KMAKE_ARCH}" LSMOD="${LSMOD_FILE}" localmodconfig >/dev/null
+  (yes "" || true) | make -C "${KSRC}" ARCH="${KMAKE_ARCH}" LSMOD="${LSMOD_FILE}" localmodconfig >/dev/null
 fi
 
 echo "[+] Merging Axonwall hardening & capability fragments..."
-KCONFIG_CONFIG="${KSRC}/.config" "${KSRC}/scripts/kconfig/merge_config.sh" -m "${KSRC}/.config" "${MERGED_FRAGMENT_OUT}" >/dev/null
+ARCH="${KMAKE_ARCH}" KCONFIG_CONFIG="${KSRC}/.config" "${KSRC}/scripts/kconfig/merge_config.sh" -m "${KSRC}/.config" "${MERGED_FRAGMENT_OUT}" >/dev/null
 make -C "${KSRC}" ARCH="${KMAKE_ARCH}" olddefconfig >/dev/null
 
 # Re-assert invariants after full kernel dependency resolution

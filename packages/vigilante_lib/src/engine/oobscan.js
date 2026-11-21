@@ -435,18 +435,49 @@ function extractTargetFromFilename(filename) {
   return clean ? clean.replace(/_/g, '/') : 'unknown-target';
 }
 
-const FORBIDDEN_OOBSCAN_ARGS = /^(?:-o|--output|-nmap-cli|--nmap-cli|-list|--list|-iL|--input-list)(?:=|$)/i;
+const ALLOWED_OOBSCAN_SUBCOMMANDS = new Set(['scan', 'discover', 'ipmi', 'redfish']);
+const ALLOWED_OOBSCAN_BOOLEAN_FLAGS = new Set(['-v', '-no-logins', '-ipmi-full', '--verbose']);
+const ALLOWED_OOBSCAN_VALUE_FLAGS = new Map([
+  ['-timeout', /^\d{1,5}(?:ms|s)?$/],
+  ['-threads', /^\d{1,4}$/],
+  ['-concurrency', /^\d{1,4}$/],
+  ['-retries', /^\d{1,2}$/],
+  ['-rate', /^\d{1,6}$/],
+  ['-ports', /^[0-9,-]+$/],
+  ['-p', /^[0-9,-]+$/],
+  ['-c', /^\d{1,4}$/],
+  ['-t', /^[a-zA-Z0-9._:/%,-]+$/],
+  ['-targets', /^[a-zA-Z0-9._:/%,-]+$/]
+]);
 
 function sanitizeOobCustomArgs(customArgs) {
   const tokens = Array.isArray(customArgs)
     ? customArgs.map(a => String(a).trim()).filter(Boolean)
     : String(customArgs || '').trim().split(/\s+/).filter(Boolean);
-  for (const token of tokens) {
-    if (FORBIDDEN_OOBSCAN_ARGS.test(token)) {
-      throw new Error(`Forbidden oobscan custom argument '${token}': output path and external binary flags are not allowed`);
+  const validated = [];
+  for (let i = 0; i < tokens.length; i++) {
+    const token = tokens[i];
+    if (i === 0 && ALLOWED_OOBSCAN_SUBCOMMANDS.has(token)) {
+      validated.push(token);
+      continue;
     }
+    if (ALLOWED_OOBSCAN_BOOLEAN_FLAGS.has(token)) {
+      validated.push(token);
+      continue;
+    }
+    const eqIdx = token.indexOf('=');
+    const flagName = eqIdx >= 0 ? token.slice(0, eqIdx) : token;
+    const valuePattern = ALLOWED_OOBSCAN_VALUE_FLAGS.get(flagName);
+    if (!valuePattern) {
+      throw new Error(`Unsupported or disallowed oobscan custom argument '${token}'`);
+    }
+    const flagVal = eqIdx >= 0 ? token.slice(eqIdx + 1) : tokens[++i];
+    if (!flagVal || flagVal.startsWith('-') || !valuePattern.test(flagVal)) {
+      throw new Error(`Invalid value '${flagVal ?? ''}' for oobscan flag '${flagName}'`);
+    }
+    validated.push(flagName, flagVal);
   }
-  return tokens;
+  return validated;
 }
 
 /**

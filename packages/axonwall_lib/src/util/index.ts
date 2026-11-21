@@ -25,8 +25,10 @@ export function isValidCIDR(cidr: string): boolean {
   const parts = cidr.split('/');
   if (parts.length !== 2) return false;
   const [ip, prefix] = parts;
+  if (!/^\d{1,3}$/.test(prefix) || (prefix.length > 1 && prefix.startsWith('0'))) {
+    return false;
+  }
   const prefixNum = Number.parseInt(prefix, 10);
-  if (Number.isNaN(prefixNum)) return false;
 
   if (isValidIPv4(ip)) {
     return prefixNum >= 0 && prefixNum <= 32;
@@ -72,6 +74,10 @@ export function sanitizeIdentifier(name: string): string {
 
 export function isValidDevice(dev?: string | null): boolean {
   if (!dev) return false;
-  const d = dev.trim().toLowerCase();
-  return d !== '' && d !== 'none' && d !== 'null' && d !== 'disabled' && d !== 'unassigned';
+  const trimmed = dev.trim();
+  const d = trimmed.toLowerCase();
+  if (d === '' || d === 'none' || d === 'null' || d === 'disabled' || d === 'unassigned') {
+    return false;
+  }
+  return /^[a-zA-Z0-9_.:-]{1,15}$/.test(dev);
 }

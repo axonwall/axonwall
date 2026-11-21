@@ -297,7 +297,7 @@ export function ConsoleSidebar() {
   const [search, setSearch] = useState('');
   const [openSections, setOpenSections] = useState<Record<string, boolean>>({});
   const [desiredState, setDesiredState] = useState<DesiredState | null>(null);
-  const [installMode, setInstallMode] = useState<'ab' | 'rolling' | 'zbm'>('ab');
+  const [installMode, setInstallMode] = useState<'ab' | 'rolling' | 'zbm' | 'btrfs'>('ab');
   // Defaults mirror CoreCapabilitiesSchema (firewall on, NAS/K3s opt-in)
   // and the pre-fetch state must not advertise menus for roles that are
   // not enabled.
@@ -371,9 +371,11 @@ export function ConsoleSidebar() {
               const dynamicName =
                 installMode === 'zbm'
                   ? 'ZFS Boot Environments'
-                  : installMode === 'rolling'
-                    ? 'Rolling System Updates'
-                    : 'A/B System Updates';
+                  : installMode === 'btrfs'
+                    ? 'Btrfs + Snapper Updates'
+                    : installMode === 'rolling'
+                      ? 'Rolling System Updates'
+                      : 'A/B System Updates';
               return { ...item, name: dynamicName };
             }
             return item;

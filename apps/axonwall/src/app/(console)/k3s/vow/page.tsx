@@ -20,6 +20,7 @@ import {
   KeyRound,
 } from 'lucide-react';
 import { getCurrentDesiredState, getK3sClusterPulseAction } from '@/server/agent';
+import { executePluginAction } from '@/server/plugins';
 import { useDesiredStateApply } from '@/lib/use-desired-state-apply';
 import { VowConfigSchema, type DesiredState, type VowConfig, type VowCdRunner } from '@axonwall/lib/schemas';
 import type { K3sClusterPulse } from '@/components/k3s/types';
@@ -159,7 +160,18 @@ export default function VigilantOctoWafflePage() {
     setSaving(true);
     setBanner(null);
     try {
+      const k3sWasDisabled = !isPluginEnabled('core-k3s', state);
       const { state: next, autoEnabledDependencies } = enablePluginWithDependencies('vigilant-octo-waffle', state);
+      if (k3sWasDisabled || autoEnabledDependencies.includes('core-k3s')) {
+        const k3sInstall = await executePluginAction('core-k3s', 'install');
+        if (!k3sInstall.success) {
+          setBanner({
+            type: 'error',
+            text: `Failed to install required core-k3s dependency: ${k3sInstall.message}`,
+          });
+          return;
+        }
+      }
       const res = await applyState(next);
       setState(next);
       if (typeof window !== 'undefined') {

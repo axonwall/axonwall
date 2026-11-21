@@ -57,7 +57,7 @@ export function compileAcme(config?: AcmeConfig): CompiledAcme {
     }
 
     lines.push(`### Certificate: ${cert.domain} ###`);
-    const allDomains = domainArgs.map((d) => `-d ${d}`).join(' ');
+    const allDomains = domainArgs.map((d) => `-d '${d}'`).join(' ');
 
     if (cert.challengeType === 'http-01') {
       lines.push(
@@ -78,7 +78,9 @@ export function compileAcme(config?: AcmeConfig): CompiledAcme {
     }
 
     // Deploy hook commands for this certificate
-    const reloadCommands = (cert.deployServices || []).map((svc) => hookScripts[svc] || `# unknown svc: ${svc}`);
+    const reloadCommands = (cert.deployServices || []).flatMap((svc) =>
+      Object.prototype.hasOwnProperty.call(hookScripts, svc) ? [hookScripts[svc]] : [],
+    );
     deployHooks.push({
       path: `/var/lib/axonwall/certs/deploy-${safeName}.sh`,
       content: [

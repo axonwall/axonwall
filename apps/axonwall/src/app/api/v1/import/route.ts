@@ -4,6 +4,7 @@ import { compileNftables } from '@axonwall/lib/compile/nft';
 import { applyDesiredState } from '../../../../server/agent';
 import { parseConfirmTimeoutSeconds } from '../../../../server/confirm-timeout';
 import { getSession } from '../../../../server/auth';
+import { isPasswordChangeEnforced } from '../../../../server/auth-guard';
 
 export async function POST(req: Request) {
   try {
@@ -11,7 +12,7 @@ export async function POST(req: Request) {
     if (!session) {
       return NextResponse.json({ error: 'Unauthorized: Valid session required' }, { status: 401 });
     }
-    if (session.passwordChangeRequired) {
+    if (isPasswordChangeEnforced(session)) {
       return NextResponse.json({ error: 'Forbidden: Password change required' }, { status: 403 });
     }
     if (!session.roles?.includes('admin') && !session.roles?.includes('operator')) {

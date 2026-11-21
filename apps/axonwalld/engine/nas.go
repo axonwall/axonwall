@@ -20,6 +20,12 @@ import (
 
 var validS3BucketRe = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{1,61}[a-z0-9]$`)
 
+var (
+	nasRtslibDir       = "/etc/rtslib-fb-target"
+	nasMinioEnvPath    = "/etc/default/minio"
+	nasMinioArchEnvDir = "/etc/minio"
+)
+
 func nasSmbServiceName() string {
 	if DetectOSFamily() == "arch" {
 		return "smb"
@@ -987,6 +993,16 @@ func (m *NasManager) ApplyConfig(rawJSON []byte) error {
 			return fmt.Errorf("nas bundle rejected: %w", err)
 		}
 	}
+	if bundle.LioSaveconfigJson != "" {
+		if err := validateLioSaveconfigJSON(bundle.LioSaveconfigJson); err != nil {
+			return fmt.Errorf("nas bundle rejected: %w", err)
+		}
+	}
+	if bundle.S3EnvConf != "" {
+		if err := validateMinioEnvConf(bundle.S3EnvConf); err != nil {
+			return fmt.Errorf("nas bundle rejected: %w", err)
+		}
+	}
 
 	// A-M16: validate pool/dataset specs before storing the bundle, so
 	// an invalid bundle is neither stored as the live config nor
@@ -1022,7 +1038,7 @@ func (m *NasManager) ApplyConfig(rawJSON []byte) error {
 		m.cfg = bundle
 		m.mu.Unlock()
 		slog.Info("NAS plugin is disabled; stopping SMB and NFS share daemons")
-		_ = exec.Command("systemctl", "--no-ask-password", "stop", nasSmbServiceName(), "nfs-server").Run()
+		_, _ = engineRunServiceAction("stop", nasSmbServiceName(), "nfs-server")
 		return nil
 	}
 
@@ -1086,7 +1102,7 @@ func (m *NasManager) ApplyConfig(rawJSON []byte) error {
 		if err := f.Close(); err != nil {
 			return fmt.Errorf("failed to close /etc/samba/smb.conf: %w", err)
 		}
-		if out, err := exec.Command("systemctl", "--no-ask-password", "reload-or-restart", nasSmbServiceName()).CombinedOutput(); err != nil {
+		if out, err := engineRunServiceAction("reload-or-restart", nasSmbServiceName()); err != nil {
 			return fmt.Errorf("failed to reload %s: %s (%w)", nasSmbServiceName(), strings.TrimSpace(string(out)), err)
 		}
 	}
@@ -1116,17 +1132,18 @@ func (m *NasManager) ApplyConfig(rawJSON []byte) error {
 	// success. Every failure now fails the apply, matching the A-M16
 	// treatment of the pool/dataset/SMB/NFS steps.
 	if bundle.LioSaveconfigJson != "" {
-		if err := os.MkdirAll("/etc/rtslib-fb-target", 0750); err != nil {
-			return fmt.Errorf("failed to create /etc/rtslib-fb-target: %w", err)
+		if err := os.MkdirAll(nasRtslibDir, 0750); err != nil {
+			return fmt.Errorf("failed to create %s: %w", nasRtslibDir, err)
 		}
-		if err := os.WriteFile("/etc/rtslib-fb-target/saveconfig.json", []byte(bundle.LioSaveconfigJson), 0600); err != nil {
-			return fmt.Errorf("failed to write /etc/rtslib-fb-target/saveconfig.json: %w", err)
+		saveconfigPath := filepath.Join(nasRtslibDir, "saveconfig.json")
+		if err := os.WriteFile(saveconfigPath, []byte(bundle.LioSaveconfigJson), 0600); err != nil {
+			return fmt.Errorf("failed to write %s: %w", saveconfigPath, err)
 		}
 		targetctl, lookErr := exec.LookPath("targetctl")
 		if lookErr != nil {
 			return fmt.Errorf("cannot restore LIO iSCSI target configuration: targetctl is not installed on this system")
 		}
-		if out, err := exec.Command(targetctl, "restore", "/etc/rtslib-fb-target/saveconfig.json").CombinedOutput(); err != nil {
+		if out, err := exec.Command(targetctl, "restore", saveconfigPath).CombinedOutput(); err != nil {
 			return fmt.Errorf("targetctl restore failed: %s (%w)", strings.TrimSpace(string(out)), err)
 		}
 	}
@@ -1143,22 +1160,24 @@ func (m *NasManager) ApplyConfig(rawJSON []byte) error {
 		// silently skipped Arch config is the A-M5 failure mode
 		// on Arch). Main's --no-ask-password flag is kept on the
 		// reload.
-		if err := os.MkdirAll("/etc/default", 0755); err != nil {
-			return fmt.Errorf("failed to create /etc/default: %w", err)
+		envDir := filepath.Dir(nasMinioEnvPath)
+		if err := os.MkdirAll(envDir, 0755); err != nil {
+			return fmt.Errorf("failed to create %s: %w", envDir, err)
 		}
-		if err := os.WriteFile("/etc/default/minio", []byte(bundle.S3EnvConf), 0600); err != nil {
-			return fmt.Errorf("failed to write /etc/default/minio: %w", err)
+		if err := os.WriteFile(nasMinioEnvPath, []byte(bundle.S3EnvConf), 0600); err != nil {
+			return fmt.Errorf("failed to write %s: %w", nasMinioEnvPath, err)
 		}
-		if info, err := os.Stat("/etc/minio"); (err == nil && info.IsDir()) || DetectOSFamily() == "arch" {
-			if err := os.MkdirAll("/etc/minio", 0755); err != nil {
-				return fmt.Errorf("failed to create /etc/minio: %w", err)
+		if info, err := os.Stat(nasMinioArchEnvDir); (err == nil && info.IsDir()) || DetectOSFamily() == "arch" {
+			if err := os.MkdirAll(nasMinioArchEnvDir, 0755); err != nil {
+				return fmt.Errorf("failed to create %s: %w", nasMinioArchEnvDir, err)
 			}
-			if err := os.WriteFile("/etc/minio/minio.conf", []byte(bundle.S3EnvConf), 0600); err != nil {
-				return fmt.Errorf("failed to write /etc/minio/minio.conf: %w", err)
+			archConfPath := filepath.Join(nasMinioArchEnvDir, "minio.conf")
+			if err := os.WriteFile(archConfPath, []byte(bundle.S3EnvConf), 0600); err != nil {
+				return fmt.Errorf("failed to write %s: %w", archConfPath, err)
 			}
 		}
 		if isSystemdServiceActive("minio") {
-			if out, err := exec.Command("systemctl", "--no-ask-password", "reload-or-restart", "minio").CombinedOutput(); err != nil {
+			if out, err := engineRunServiceAction("reload-or-restart", "minio"); err != nil {
 				return fmt.Errorf("failed to reload-or-restart minio: %s (%w)", strings.TrimSpace(string(out)), err)
 			}
 		}
@@ -1234,7 +1253,7 @@ func (m *NasManager) PromoteFailoverMaster() {
 		_ = exec.Command("zfs", "mount", "-a").Run()
 	}
 	_ = exec.Command("exportfs", "-ra").Run()
-	_ = exec.Command("systemctl", "--no-ask-password", "reload-or-restart", nasSmbServiceName(), "nfs-server").Run()
+	_, _ = engineRunServiceAction("reload-or-restart", nasSmbServiceName(), "nfs-server")
 }
 
 // DemoteFailoverBackup is triggered by HAEngine when this node transitions to BACKUP or FAULT.
@@ -1277,4 +1296,73 @@ func PruneSnapshotList(snapshots []string, keepCount int) []string {
 func EnsureManagedDir(path string) error {
 	clean := filepath.Clean(path)
 	return os.MkdirAll(clean, 0755)
+}
+
+var validMinioEnvKeyRe = regexp.MustCompile(`^MINIO_[A-Z0-9_]+$`)
+
+func validateLioSaveconfigJSON(raw string) error {
+	var doc map[string]any
+	if err := json.Unmarshal([]byte(raw), &doc); err != nil {
+		return fmt.Errorf("invalid LIO saveconfig JSON: %w", err)
+	}
+	if sos, ok := doc["storage_objects"]; ok && sos != nil {
+		list, ok := sos.([]any)
+		if !ok {
+			return fmt.Errorf("LIO saveconfig storage_objects must be an array")
+		}
+		for idx, item := range list {
+			obj, ok := item.(map[string]any)
+			if !ok {
+				return fmt.Errorf("LIO storage_objects[%d] must be an object", idx)
+			}
+			if devRaw, hasDev := obj["dev"]; hasDev && devRaw != nil {
+				dev, ok := devRaw.(string)
+				if !ok {
+					return fmt.Errorf("LIO storage_objects[%d].dev must be a string", idx)
+				}
+				if strings.Contains(dev, "..") {
+					return fmt.Errorf("LIO storage_objects[%d].dev %q contains '..'", idx, dev)
+				}
+				clean := filepath.Clean(strings.TrimSpace(dev))
+				if !strings.HasPrefix(clean, "/dev/zvol/") && !strings.HasPrefix(clean, "/mnt/") {
+					return fmt.Errorf("LIO storage_objects[%d].dev %q is outside permitted paths (/dev/zvol/, /mnt/)", idx, dev)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func validateMinioEnvConf(raw string) error {
+	if strings.ContainsRune(raw, '\x00') {
+		return fmt.Errorf("minio env config contains NUL byte")
+	}
+	for lineNo, line := range strings.Split(raw, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		eq := strings.IndexByte(trimmed, '=')
+		if eq < 1 {
+			return fmt.Errorf("minio env line %d: expected MINIO_*=VALUE", lineNo+1)
+		}
+		key := strings.TrimSpace(trimmed[:eq])
+		val := strings.TrimSpace(trimmed[eq+1:])
+		if !validMinioEnvKeyRe.MatchString(key) {
+			return fmt.Errorf("minio env line %d: variable %q is not permitted (MINIO_* only)", lineNo+1, key)
+		}
+		if key == "MINIO_VOLUMES" {
+			unquoted := strings.Trim(val, `"'`)
+			if strings.Contains(unquoted, "..") {
+				return fmt.Errorf("minio env line %d: MINIO_VOLUMES %q contains '..'", lineNo+1, unquoted)
+			}
+			for _, tok := range strings.Fields(unquoted) {
+				clean := filepath.Clean(tok)
+				if !strings.HasPrefix(clean, "/mnt/") {
+					return fmt.Errorf("minio env line %d: MINIO_VOLUMES path %q is outside /mnt/", lineNo+1, tok)
+				}
+			}
+		}
+	}
+	return nil
 }

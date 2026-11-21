@@ -398,9 +398,34 @@ export function assertCliTarget(value, label = 'target') {
   return v;
 }
 
+function canonicalizeRealPath(targetPath) {
+  const abs = path.resolve(targetPath);
+  const missingSegments = [];
+  let cursor = abs;
+  while (true) {
+    try {
+      const realCursor = fsSync.realpathSync(cursor);
+      return missingSegments.length > 0
+        ? path.resolve(realCursor, ...missingSegments.reverse())
+        : realCursor;
+    } catch (err) {
+      if (err && err.code !== 'ENOENT') {
+        throw err;
+      }
+      const parent = path.dirname(cursor);
+      if (parent === cursor) {
+        return abs;
+      }
+      missingSegments.push(path.basename(cursor));
+      cursor = parent;
+    }
+  }
+}
+
 export function resolvePathInside(baseDir, ...segments) {
-  const base = path.resolve(baseDir);
-  const target = path.resolve(base, ...segments);
+  const base = canonicalizeRealPath(baseDir);
+  const rawTarget = path.resolve(path.resolve(baseDir), ...segments);
+  const target = canonicalizeRealPath(rawTarget);
   if (target !== base && !target.startsWith(base + path.sep)) {
     throw new Error(`Path '${segments.join('/')}' escapes its base directory '${base}'`);
   }
@@ -416,8 +441,8 @@ export function resolvePathInside(baseDir, ...segments) {
  * @returns {string} The resolved target path
  */
 export function assertPathStrictlyInside(baseDir, targetPath) {
-  const base = path.resolve(baseDir);
-  const target = path.resolve(targetPath);
+  const base = canonicalizeRealPath(baseDir);
+  const target = canonicalizeRealPath(targetPath);
   if (!target.startsWith(base + path.sep)) {
     throw new Error(`Refusing to operate on '${target}': not strictly inside '${base}'`);
   }

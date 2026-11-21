@@ -33,7 +33,9 @@ func TestBughunt3Batch2_NasApplyLioRestoreFailure(t *testing.T) {
 	dir := t.TempDir()
 	bughunt3WriteFakeBin(t, dir, "targetctl", "#!/bin/sh\necho 'targetctl: failed to restore: invalid saveconfig' >&2\nexit 1\n")
 	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
-	defer os.Remove("/etc/rtslib-fb-target/saveconfig.json")
+	oldRtslib := nasRtslibDir
+	nasRtslibDir = filepath.Join(t.TempDir(), "rtslib-fb-target")
+	t.Cleanup(func() { nasRtslibDir = oldRtslib })
 
 	mgr := NewNasManager()
 	err := mgr.ApplyConfig([]byte(`{"enabled":true,"lioSaveconfigJson":"{\"version\":1}"}`))
@@ -55,7 +57,13 @@ if [ "$1" = "reload-or-restart" ]; then echo 'Failed to reload minio.service' >&
 exit 0
 `)
 	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
-	defer os.Remove("/etc/default/minio")
+	oldEnvPath, oldArchDir := nasMinioEnvPath, nasMinioArchEnvDir
+	nasMinioEnvPath = filepath.Join(t.TempDir(), "default", "minio")
+	nasMinioArchEnvDir = filepath.Join(t.TempDir(), "minio")
+	t.Cleanup(func() {
+		nasMinioEnvPath = oldEnvPath
+		nasMinioArchEnvDir = oldArchDir
+	})
 
 	mgr := NewNasManager()
 	err := mgr.ApplyConfig([]byte(`{"enabled":true,"s3EnvConf":"MINIO_ROOT_USER=axw\n"}`))

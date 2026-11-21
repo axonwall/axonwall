@@ -9,7 +9,7 @@ import fsSync from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import zlib from 'node:zlib';
-import { getVigilanteEvidenceDir, requireSnapshotSealingKey, resolveSnapshotSealingKey } from './config.js';
+import { getVigilanteEvidenceDir, requireSnapshotSealingKey, resolveSnapshotSealingKey, sanitizePathComponent, resolvePathInside } from './config.js';
 import { logger } from '../utils/logger.js';
 
 /**
@@ -169,8 +169,8 @@ export async function createForensicsSnapshot(containerInfo = {}, options = {}) 
   // Fail closed before doing any work: an unkeyed seal authenticates
   // nothing, so refuse to create one without a provisioned key.
   const sealingKey = requireSnapshotSealingKey(options.sealingKey);
-  const podName = containerInfo.podName || 'unknown-pod';
-  const containerId = containerInfo.containerId || 'cid-' + crypto.randomBytes(4).toString('hex');
+  const podName = sanitizePathComponent(containerInfo.podName || 'unknown-pod');
+  const containerId = sanitizePathComponent(containerInfo.containerId || 'cid-' + crypto.randomBytes(4).toString('hex'));
   const pid = containerInfo.pid || 1;
 
   const baseEvidenceDir = options.outputDir || path.join(getVigilanteEvidenceDir(), 'snapshots');
@@ -178,7 +178,7 @@ export async function createForensicsSnapshot(containerInfo = {}, options = {}) 
 
   const timestamp = Date.now();
   const snapshotId = `snapshot-${podName}-${containerId.substring(0, 8)}-${timestamp}`;
-  const snapshotBundleDir = path.join(baseEvidenceDir, snapshotId);
+  const snapshotBundleDir = resolvePathInside(baseEvidenceDir, snapshotId);
   await fs.mkdir(snapshotBundleDir, { recursive: true });
 
   // 1. Harvest volatiles

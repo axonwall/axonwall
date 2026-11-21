@@ -10,125 +10,198 @@ export interface CompiledNas {
   zfsCommands: string[];
 }
 
+const SAFE_ZFS_POOL_REGEX = /^[a-zA-Z][a-zA-Z0-9_.:-]*$/;
+const SAFE_ZFS_DATASET_REGEX = /^[a-zA-Z0-9][a-zA-Z0-9_.:/-]*$/;
+const SAFE_ZFS_DISK_REGEX = /^\/dev\/[a-zA-Z0-9_.:/-]+$/;
+const SAFE_ZFS_TOKEN_REGEX = /^[a-zA-Z0-9_.-]+$/;
+const SAFE_RCLONE_PROVIDER_REGEX = /^[a-zA-Z0-9_-]+$/;
+const RESERVED_SMB_SECTIONS = new Set(['global', 'homes', 'printers', 'ipc$']);
+
+function shellSingleQuote(v: string): string {
+  if (/[\0\r\n]/.test(v)) {
+    throw new Error('Control characters are forbidden in shell arguments');
+  }
+  return `'${v.replace(/'/g, "'\\''")}'`;
+}
+
+function shellSafeZfsArg(v: string): string {
+  if (/[\0\r\n]/.test(v)) {
+    throw new Error('Control characters are forbidden in ZFS arguments');
+  }
+  if (/^[a-zA-Z0-9_./:=+-]+$/.test(v)) {
+    return v;
+  }
+  return shellSingleQuote(v);
+}
+
+function assertSafeZfsDisks(disks: string[] | undefined, kind: string): string[] {
+  return (disks ?? []).map((disk) => {
+    if (!disk || !SAFE_ZFS_DISK_REGEX.test(disk) || disk.includes('..')) {
+      throw new Error(`Invalid ZFS ${kind} disk path: ${disk}`);
+    }
+    return shellSafeZfsArg(disk);
+  });
+}
+
+function assertSafeZfsToken(val: string, label: string): string {
+  if (!val || !SAFE_ZFS_TOKEN_REGEX.test(val) || val.includes('..')) {
+    throw new Error(`Invalid ZFS ${label}: ${val}`);
+  }
+  return shellSafeZfsArg(val);
+}
+
 export function compileZfsPoolCommand(pool: ZfsPool): string {
+  if (!pool.name || !SAFE_ZFS_POOL_REGEX.test(pool.name) || pool.name.includes('..')) {
+    throw new Error(`Invalid ZFS pool name: ${pool.name}`);
+  }
+  const safePoolName = shellSafeZfsArg(pool.name);
+  const ashift = Number.isInteger(pool.ashift) ? Number(pool.ashift) : 12;
+  const compression = assertSafeZfsToken(pool.compression ?? 'lz4', 'compression');
+  const topology = pool.topology ? assertSafeZfsToken(pool.topology, 'topology') : undefined;
+
   const args: string[] = [
     'zpool create -f',
-    `-o ashift=${pool.ashift ?? 12}`,
+    `-o ashift=${ashift}`,
     `-o autotrim=${pool.autotrim !== false ? 'on' : 'off'}`,
-    `-O compression=${pool.compression ?? 'lz4'}`,
+    `-O compression=${compression}`,
     '-O acltype=posixacl',
     '-O xattr=sa',
     '-O dnodesize=auto',
     '-O normalization=formD',
   ];
   if (pool.specialSmallBlocks && pool.specialSmallBlocks !== '0') {
-    args.push(`-O special_small_blocks=${pool.specialSmallBlocks}`);
+    args.push(`-O special_small_blocks=${assertSafeZfsToken(pool.specialSmallBlocks, 'specialSmallBlocks')}`);
   }
-  args.push(`-O mountpoint=/mnt/${pool.name}`, pool.name);
+  args.push(`-O mountpoint=/mnt/${safePoolName}`, safePoolName);
 
-  if (pool.topology && pool.topology !== 'stripe') {
-    args.push(pool.topology);
+  if (topology && topology !== 'stripe') {
+    args.push(topology);
   }
-  args.push(...pool.dataDisks);
+  args.push(...assertSafeZfsDisks(pool.dataDisks, 'data'));
 
-  if (pool.specialDisks && pool.specialDisks.length > 0) {
+  const specialDisks = assertSafeZfsDisks(pool.specialDisks, 'special');
+  if (specialDisks.length > 0) {
     args.push('special');
-    if (pool.specialDisks.length >= 2) {
+    if (specialDisks.length >= 2) {
       args.push('mirror');
     }
-    args.push(...pool.specialDisks);
+    args.push(...specialDisks);
   }
 
-  if (pool.dedupDisks && pool.dedupDisks.length > 0) {
+  const dedupDisks = assertSafeZfsDisks(pool.dedupDisks, 'dedup');
+  if (dedupDisks.length > 0) {
     args.push('dedup');
-    if (pool.dedupDisks.length >= 2) {
+    if (dedupDisks.length >= 2) {
       args.push('mirror');
     }
-    args.push(...pool.dedupDisks);
+    args.push(...dedupDisks);
   }
 
-  if (pool.logDisks && pool.logDisks.length > 0) {
+  const logDisks = assertSafeZfsDisks(pool.logDisks, 'log');
+  if (logDisks.length > 0) {
     args.push('log');
-    if (pool.logDisks.length >= 2) {
+    if (logDisks.length >= 2) {
       args.push('mirror');
     }
-    args.push(...pool.logDisks);
+    args.push(...logDisks);
   }
 
-  if (pool.cacheDisks && pool.cacheDisks.length > 0) {
-    args.push('cache', ...pool.cacheDisks);
+  const cacheDisks = assertSafeZfsDisks(pool.cacheDisks, 'cache');
+  if (cacheDisks.length > 0) {
+    args.push('cache', ...cacheDisks);
   }
 
-  if (pool.spareDisks && pool.spareDisks.length > 0) {
-    args.push('spare', ...pool.spareDisks);
+  const spareDisks = assertSafeZfsDisks(pool.spareDisks, 'spare');
+  if (spareDisks.length > 0) {
+    args.push('spare', ...spareDisks);
   }
 
   return args.join(' ');
 }
 
 export function compileZfsDatasetCommands(dataset: ZfsDataset): string[] {
+  if (!dataset.pool || !SAFE_ZFS_POOL_REGEX.test(dataset.pool) || dataset.pool.includes('..')) {
+    throw new Error(`Invalid ZFS pool name: ${dataset.pool}`);
+  }
+  if (!dataset.name || !SAFE_ZFS_DATASET_REGEX.test(dataset.name) || dataset.name.includes('..') || dataset.name.endsWith('/')) {
+    throw new Error(`Invalid ZFS dataset name: ${dataset.name}`);
+  }
   const fullName = dataset.name.startsWith(`${dataset.pool}/`)
     ? dataset.name
     : `${dataset.pool}/${dataset.name}`;
+  if (!SAFE_ZFS_DATASET_REGEX.test(fullName) || fullName.includes('..') || fullName.endsWith('/')) {
+    throw new Error(`Invalid full ZFS dataset name: ${fullName}`);
+  }
+  const safeFullName = shellSafeZfsArg(fullName);
 
   const encOpts: string[] = [];
   if (dataset.encryption && dataset.encryption !== 'off') {
-    encOpts.push(`-o encryption=${dataset.encryption}`);
-    encOpts.push(`-o keyformat=${dataset.keyFormat || 'hex'}`);
-    encOpts.push(`-o keylocation=${dataset.keyLocation || 'prompt'}`);
+    const keyLoc = dataset.keyLocation || 'prompt';
+    if (keyLoc !== 'prompt' && (!/^file:\/\/\/[a-zA-Z0-9_./-]+$/.test(keyLoc) || keyLoc.includes('..'))) {
+      throw new Error(`Invalid ZFS keyLocation: ${keyLoc}`);
+    }
+    encOpts.push(`-o encryption=${assertSafeZfsToken(dataset.encryption, 'encryption')}`);
+    encOpts.push(`-o keyformat=${assertSafeZfsToken(dataset.keyFormat || 'hex', 'keyFormat')}`);
+    encOpts.push(`-o keylocation=${shellSafeZfsArg(keyLoc)}`);
   }
 
   if (dataset.type === 'zvol') {
-    const volSize = dataset.volSizeGb && dataset.volSizeGb > 0 ? `${dataset.volSizeGb}G` : '10G';
+    const volSize = dataset.volSizeGb && Number.isFinite(dataset.volSizeGb) && dataset.volSizeGb > 0
+      ? `${Math.trunc(dataset.volSizeGb)}G`
+      : '10G';
     const zvolParts = [
       `zfs create -p -V ${volSize}`,
-      `-o compression=${dataset.compression ?? 'lz4'}`,
+      `-o compression=${assertSafeZfsToken(dataset.compression ?? 'lz4', 'compression')}`,
       '-o volblocksize=16K',
       ...encOpts,
-      fullName,
+      safeFullName,
     ];
     return [zvolParts.join(' ')];
   }
 
   const createParts: string[] = [
     'zfs create -p',
-    `-o compression=${dataset.compression ?? 'lz4'}`,
-    `-o recordsize=${dataset.recordSize ?? '128K'}`,
-    `-o dedup=${dataset.dedup ?? 'off'}`,
-    `-o aclmode=${dataset.aclMode ?? 'passthrough'}`,
+    `-o compression=${assertSafeZfsToken(dataset.compression ?? 'lz4', 'compression')}`,
+    `-o recordsize=${assertSafeZfsToken(dataset.recordSize ?? '128K', 'recordSize')}`,
+    `-o dedup=${assertSafeZfsToken(dataset.dedup ?? 'off', 'dedup')}`,
+    `-o aclmode=${assertSafeZfsToken(dataset.aclMode ?? 'passthrough', 'aclMode')}`,
   ];
   if (dataset.atime) {
-    createParts.push(`-o atime=${dataset.atime}`);
+    createParts.push(`-o atime=${assertSafeZfsToken(dataset.atime, 'atime')}`);
   }
   if (dataset.sync) {
-    createParts.push(`-o sync=${dataset.sync}`);
+    createParts.push(`-o sync=${assertSafeZfsToken(dataset.sync, 'sync')}`);
   }
   if (dataset.specialSmallBlocks && dataset.specialSmallBlocks !== '0') {
-    createParts.push(`-o special_small_blocks=${dataset.specialSmallBlocks}`);
+    createParts.push(`-o special_small_blocks=${assertSafeZfsToken(dataset.specialSmallBlocks, 'specialSmallBlocks')}`);
   }
-  createParts.push(...encOpts, fullName);
+  createParts.push(...encOpts, safeFullName);
 
   const cmds: string[] = [createParts.join(' ')];
-  if (dataset.quotaGb && dataset.quotaGb > 0) {
-    cmds.push(`zfs set quota=${dataset.quotaGb}G ${fullName}`);
+  if (dataset.quotaGb && Number.isFinite(dataset.quotaGb) && dataset.quotaGb > 0) {
+    cmds.push(`zfs set quota=${Math.trunc(dataset.quotaGb)}G ${safeFullName}`);
   }
-  if (dataset.refQuotaGb && dataset.refQuotaGb > 0) {
-    cmds.push(`zfs set refquota=${dataset.refQuotaGb}G ${fullName}`);
+  if (dataset.refQuotaGb && Number.isFinite(dataset.refQuotaGb) && dataset.refQuotaGb > 0) {
+    cmds.push(`zfs set refquota=${Math.trunc(dataset.refQuotaGb)}G ${safeFullName}`);
   }
-  if (dataset.refReservationGb && dataset.refReservationGb > 0) {
-    cmds.push(`zfs set refreservation=${dataset.refReservationGb}G ${fullName}`);
+  if (dataset.refReservationGb && Number.isFinite(dataset.refReservationGb) && dataset.refReservationGb > 0) {
+    cmds.push(`zfs set refreservation=${Math.trunc(dataset.refReservationGb)}G ${safeFullName}`);
   }
   return cmds;
 }
 
 function sanitizeIniVal(v?: string): string {
   if (!v) return '';
-  return v.replace(/[\r\n]/g, '').trim();
+  return v.replace(/[\r\n\0]/g, '').trim().replace(/\\+$/g, '').trim();
 }
 
 function sanitizeIniSection(v?: string): string {
   if (!v) return '';
-  return v.replace(/[\r\n[\]]/g, '_').trim();
+  const sanitized = v.replace(/[\r\n\0[\]]/g, '_').trim();
+  if (!sanitized || RESERVED_SMB_SECTIONS.has(sanitized.toLowerCase())) {
+    throw new Error(`Invalid or reserved SMB share section name: ${v}`);
+  }
+  return sanitized;
 }
 
 export function compileSmbConf(nas?: NasConfig): string {
@@ -333,13 +406,25 @@ export function compileCloudSyncCommands(nas?: NasConfig): string[] {
   const cmds: string[] = [];
   for (const task of nas?.cloudSyncTasks ?? []) {
     if (!task.enabled) continue;
+    if (!task.provider || !SAFE_RCLONE_PROVIDER_REGEX.test(task.provider)) {
+      throw new Error(`Invalid cloud sync provider: ${task.provider}`);
+    }
+    if (!task.remoteBucket || /[\0\r\n]/.test(task.remoteBucket) || task.remoteBucket.includes('..')) {
+      throw new Error(`Invalid cloud sync remote bucket: ${task.remoteBucket}`);
+    }
+    if (!task.localPath || /[\0\r\n]/.test(task.localPath) || task.localPath.includes('..') || !task.localPath.startsWith('/')) {
+      throw new Error(`Invalid cloud sync local path: ${task.localPath}`);
+    }
     const verb = task.transferMode === 'copy' ? 'copy' : 'sync';
-    const bw = task.bandwidthLimitMbps > 0 ? ` --bwlimit ${task.bandwidthLimitMbps}M` : '';
+    const bw =
+      Number.isFinite(task.bandwidthLimitMbps) && task.bandwidthLimitMbps > 0
+        ? ` --bwlimit ${Math.trunc(task.bandwidthLimitMbps)}M`
+        : '';
     const remoteSpec = `${task.provider}:${task.remoteBucket}`;
     if (task.direction === 'pull') {
-      cmds.push(`rclone ${verb} "${remoteSpec}" "${task.localPath}"${bw}`);
+      cmds.push(`rclone ${verb} ${shellSingleQuote(remoteSpec)} ${shellSingleQuote(task.localPath)}${bw}`);
     } else {
-      cmds.push(`rclone ${verb} "${task.localPath}" "${remoteSpec}"${bw}`);
+      cmds.push(`rclone ${verb} ${shellSingleQuote(task.localPath)} ${shellSingleQuote(remoteSpec)}${bw}`);
     }
   }
   return cmds;

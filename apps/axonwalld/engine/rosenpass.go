@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -267,14 +268,29 @@ WantedBy=multi-user.target
 	return nil
 }
 
-// startAndVerifyService reloads systemd, enables and starts a unit, and
-// verifies it is actually active. It returns an error when systemd is
-// absent (no supported init to start the daemon under) or when any step
-// fails, so callers never report a service as "verified" while its daemon
-// never started (A-M29).
+var errNoSupportedInit = errors.New("systemd not available (no supported init)")
+
+// startAndVerifyService reloads systemd (or OpenRC on Alpine), enables/starts a unit,
+// and verifies it is actually active. Returns errNoSupportedInit (whose message retains
+// "systemd not available") when neither systemd nor OpenRC service scripts are present (A-M29).
 func startAndVerifyService(unit string) error {
 	if _, err := exec.LookPath("systemctl"); err != nil {
-		return fmt.Errorf("systemd not available; %s daemon was provisioned but not started (no supported init)", unit)
+		rcInitPath := filepath.Join("/etc/init.d", unit)
+		if _, statErr := os.Stat(rcInitPath); statErr == nil {
+			if rcBin, rcErr := exec.LookPath("rc-service"); rcErr == nil {
+				if _, updErr := exec.LookPath("rc-update"); updErr == nil {
+					_ = exec.Command("rc-update", "add", unit, "default").Run()
+				}
+				if out, startErr := exec.Command(rcBin, unit, "restart").CombinedOutput(); startErr != nil {
+					return fmt.Errorf("rc-service %s restart failed: %s (%w)", unit, strings.TrimSpace(string(out)), startErr)
+				}
+				if out, statOutErr := exec.Command(rcBin, unit, "status").CombinedOutput(); statOutErr != nil {
+					return fmt.Errorf("%s service is not active after OpenRC start: %s (%w)", unit, strings.TrimSpace(string(out)), statOutErr)
+				}
+				return nil
+			}
+		}
+		return fmt.Errorf("%w; %s daemon was provisioned but not started", errNoSupportedInit, unit)
 	}
 	if out, err := exec.Command("systemctl", "--no-ask-password", "daemon-reload").CombinedOutput(); err != nil {
 		return fmt.Errorf("systemctl daemon-reload failed: %s (%w)", strings.TrimSpace(string(out)), err)

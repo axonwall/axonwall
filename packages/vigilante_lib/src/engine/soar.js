@@ -1,17 +1,39 @@
 import { execa } from 'execa';
 import fs from 'node:fs/promises';
 import fsSync from 'node:fs';
+import net from 'node:net';
 import path from 'node:path';
 import { dump as yamlDump } from 'js-yaml';
 import {
   getVigilanteContainmentsDir,
   ensureVigilanteConfig,
   getHostEvidenceDir,
-  resolvePathInside
+  resolvePathInside,
+  assertDnsLabel
 } from './config.js';
 import { autoSignIfConfigured } from './gpg.js';
 import { saveEvidenceFile } from './evidence.js';
 import { logger } from '../utils/logger.js';
+
+function resolveSoarPodTarget(arg1, arg2 = 'default', arg3 = {}) {
+  let rawPod;
+  let rawNs = 'default';
+  let options = {};
+
+  if (typeof arg1 === 'object' && arg1 !== null) {
+    rawPod = arg1.podName || arg1.name || 'target-pod';
+    rawNs = arg1.namespace || 'default';
+    options = arg1;
+  } else {
+    rawPod = arg1 || 'target-pod';
+    rawNs = typeof arg2 === 'string' ? arg2 : 'default';
+    options = typeof arg3 === 'object' && arg3 !== null ? arg3 : {};
+  }
+
+  const podName = assertDnsLabel(rawPod, 'podName');
+  const namespace = assertDnsLabel(rawNs, 'namespace');
+  return { podName, namespace, options };
+}
 
 /**
  * Generate Kubernetes NetworkPolicy manifest to completely air-gap a pod
@@ -19,23 +41,9 @@ import { logger } from '../utils/logger.js';
  * @returns {string} NetworkPolicy YAML string
  */
 export function generateQuarantineNetworkPolicy(arg1, arg2 = 'default', arg3 = {}) {
-  let podName;
-  let namespace = 'default';
-  let options = {};
-
-  if (typeof arg1 === 'object' && arg1 !== null) {
-    podName = arg1.podName || arg1.name || 'target-pod';
-    namespace = arg1.namespace || 'default';
-    options = arg1;
-  } else {
-    podName = arg1 || 'target-pod';
-    namespace = typeof arg2 === 'string' ? arg2 : 'default';
-    options = typeof arg3 === 'object' && arg3 !== null ? arg3 : {};
-  }
-
-  const cleanPod = String(podName).toLowerCase().replace(/[^a-z0-9-]/g, '-');
-  const policyName = `quarantine-${cleanPod}`;
-  const matchLabels = options.labels || options.podLabels || { 'app.kubernetes.io/name': podName, app: cleanPod };
+  const { podName, namespace, options } = resolveSoarPodTarget(arg1, arg2, arg3);
+  const policyName = `quarantine-${podName}`;
+  const matchLabels = options.labels || options.podLabels || { 'app.kubernetes.io/name': podName, app: podName };
 
   const manifest = {
     apiVersion: 'networking.k8s.io/v1',
@@ -76,23 +84,10 @@ export async function isolatePod(arg1, arg2 = 'default', arg3 = {}) {
   await ensureVigilanteConfig();
   const containmentsDir = getVigilanteContainmentsDir();
 
-  let podName;
-  let namespace = 'default';
-  let options = {};
-
-  if (typeof arg1 === 'object' && arg1 !== null) {
-    podName = arg1.podName || arg1.name || 'target-pod';
-    namespace = arg1.namespace || 'default';
-    options = arg1;
-  } else {
-    podName = arg1 || 'target-pod';
-    namespace = typeof arg2 === 'string' ? arg2 : 'default';
-    options = typeof arg3 === 'object' && arg3 !== null ? arg3 : {};
-  }
+  const { podName, namespace, options } = resolveSoarPodTarget(arg1, arg2, arg3);
 
   const manifestYaml = generateQuarantineNetworkPolicy(podName, namespace, options);
   const containmentId = `cont-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
-  const cleanPod = String(podName).toLowerCase().replace(/[^a-z0-9-]/g, '-');
 
   const record = {
     id: containmentId,
@@ -100,7 +95,7 @@ export async function isolatePod(arg1, arg2 = 'default', arg3 = {}) {
     type: 'NETWORK_ISOLATION',
     target: podName,
     namespace,
-    policyName: `quarantine-${cleanPod}`,
+    policyName: `quarantine-${podName}`,
     policyYaml: manifestYaml,
     active: true,
     status: 'ACTIVE',
@@ -147,19 +142,7 @@ export async function freezePod(arg1, arg2 = 'default', arg3 = {}) {
   await ensureVigilanteConfig();
   const containmentsDir = getVigilanteContainmentsDir();
 
-  let podName;
-  let namespace = 'default';
-  let options = {};
-
-  if (typeof arg1 === 'object' && arg1 !== null) {
-    podName = arg1.podName || arg1.name || 'target-pod';
-    namespace = arg1.namespace || 'default';
-    options = arg1;
-  } else {
-    podName = arg1 || 'target-pod';
-    namespace = typeof arg2 === 'string' ? arg2 : 'default';
-    options = typeof arg3 === 'object' && arg3 !== null ? arg3 : {};
-  }
+  const { podName, namespace, options } = resolveSoarPodTarget(arg1, arg2, arg3);
 
   const containmentId = `cont-freeze-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
   const record = {
@@ -175,7 +158,7 @@ export async function freezePod(arg1, arg2 = 'default', arg3 = {}) {
     appliedToCluster: false
   };
 
-  const recordFile = path.join(containmentsDir, `${containmentId}.json`);
+  const recordFile = resolvePathInside(containmentsDir, `${containmentId}.json`);
   await fs.writeFile(recordFile, JSON.stringify(record, null, 2), 'utf8');
   return record;
 }
@@ -189,15 +172,20 @@ export async function blockIp(arg1, arg2 = {}) {
   await ensureVigilanteConfig();
   const containmentsDir = getVigilanteContainmentsDir();
 
-  let ipAddress;
+  let rawIp;
   let options = {};
 
   if (typeof arg1 === 'object' && arg1 !== null) {
-    ipAddress = arg1.ip || arg1.target || '127.0.0.1';
+    rawIp = arg1.ip || arg1.target || '127.0.0.1';
     options = arg1;
   } else {
-    ipAddress = arg1 || '127.0.0.1';
+    rawIp = arg1 || '127.0.0.1';
     options = typeof arg2 === 'object' && arg2 !== null ? arg2 : {};
+  }
+
+  const ipAddress = String(rawIp).trim();
+  if (!net.isIP(ipAddress)) {
+    throw new Error(`Invalid IP address '${rawIp}'`);
   }
 
   const containmentId = `cont-ip-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;

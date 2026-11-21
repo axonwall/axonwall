@@ -1,16 +1,61 @@
 import { execa } from 'execa';
 import fs from 'node:fs/promises';
 import fsSync from 'node:fs';
+import net from 'node:net';
 import path from 'node:path';
 import {
   getVigilanteNucleiDir,
   ensureVigilanteConfig,
-  getHostEvidenceDir
+  getHostEvidenceDir,
+  assertCliTarget,
+  isValidHostname
 } from './config.js';
 import { autoSignIfConfigured } from './gpg.js';
 import { saveEvidenceFile } from './evidence.js';
 import { calculateNistIncidentScore, generateNistIncidentRecord } from './nist.js';
 import { logger } from '../utils/logger.js';
+
+function assertNucleiTarget(target) {
+  const clean = assertCliTarget(target, 'nuclei target');
+  if (clean.includes('://')) {
+    const parsed = new URL(clean);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      throw new Error(`Invalid nuclei target scheme '${parsed.protocol}'`);
+    }
+    const host = parsed.hostname.replace(/^\[|\]$/g, '');
+    if (!isValidHostname(host) && !net.isIP(host)) {
+      throw new Error(`Invalid nuclei target hostname '${parsed.hostname}'`);
+    }
+  }
+  return clean;
+}
+
+function assertBoundedPositiveInt(value, label, max) {
+  const num = Number(value);
+  if (!Number.isInteger(num) || num < 1 || num > max) {
+    throw new Error(`Invalid ${label} '${value}': expected integer between 1 and ${max}`);
+  }
+  return String(num);
+}
+
+function buildValidatedNucleiArgs(target, baseFlags, opts = {}) {
+  const cleanTarget = assertNucleiTarget(target);
+  const a = ['-u', cleanTarget, ...baseFlags, '-jsonl'];
+  if (opts.severity) {
+    const sev = String(opts.severity).trim();
+    if (!/^[a-z,]+$/i.test(sev)) {
+      throw new Error(`Invalid nuclei severity '${opts.severity}'`);
+    }
+    a.push('-s', sev);
+  }
+  if (opts.concurrency !== undefined && opts.concurrency !== null && opts.concurrency !== '') {
+    a.push('-c', assertBoundedPositiveInt(opts.concurrency, 'concurrency', 1000));
+  }
+  if (opts.rateLimit !== undefined && opts.rateLimit !== null && opts.rateLimit !== '') {
+    a.push('-rl', assertBoundedPositiveInt(opts.rateLimit, 'rateLimit', 100000));
+  }
+  return a;
+}
 
 export const NUCLEI_PROFILES = [
   {
@@ -19,13 +64,7 @@ export const NUCLEI_PROFILES = [
     description: 'Scan targets for known published CVEs using community templates (-tags cve)',
     tags: ['cve'],
     severities: ['critical', 'high', 'medium'],
-    buildArgs: (target, opts = {}) => {
-      const a = ['-u', target, '-tags', 'cve', '-jsonl'];
-      if (opts.severity) a.push('-s', opts.severity);
-      if (opts.concurrency) a.push('-c', String(opts.concurrency));
-      if (opts.rateLimit) a.push('-rl', String(opts.rateLimit));
-      return a;
-    }
+    buildArgs: (target, opts = {}) => buildValidatedNucleiArgs(target, ['-tags', 'cve'], opts)
   },
   {
     id: 'critical-high',
@@ -34,8 +73,11 @@ export const NUCLEI_PROFILES = [
     tags: [],
     severities: ['critical', 'high'],
     buildArgs: (target, opts = {}) => {
-      const a = ['-u', target, '-s', 'critical,high', '-jsonl'];
-      if (opts.concurrency) a.push('-c', String(opts.concurrency));
+      const cleanTarget = assertNucleiTarget(target);
+      const a = ['-u', cleanTarget, '-s', 'critical,high', '-jsonl'];
+      if (opts.concurrency !== undefined && opts.concurrency !== null && opts.concurrency !== '') {
+        a.push('-c', assertBoundedPositiveInt(opts.concurrency, 'concurrency', 1000));
+      }
       return a;
     }
   },
@@ -45,10 +87,7 @@ export const NUCLEI_PROFILES = [
     description: 'Detect exposed panels, cloud credentials, debug endpoints, and configuration leaks',
     tags: ['misconfig', 'exposure', 'panel'],
     severities: ['critical', 'high', 'medium', 'low'],
-    buildArgs: (target, opts = {}) => {
-      const a = ['-u', target, '-tags', 'misconfig,exposure,panel', '-jsonl'];
-      return a;
-    }
+    buildArgs: (target) => buildValidatedNucleiArgs(target, ['-tags', 'misconfig,exposure,panel'])
   },
   {
     id: 'default-logins',
@@ -56,10 +95,7 @@ export const NUCLEI_PROFILES = [
     description: 'Audit services for default administrator passwords and unauthenticated portals',
     tags: ['default-login'],
     severities: ['critical', 'high', 'medium'],
-    buildArgs: (target, opts = {}) => {
-      const a = ['-u', target, '-tags', 'default-login', '-jsonl'];
-      return a;
-    }
+    buildArgs: (target) => buildValidatedNucleiArgs(target, ['-tags', 'default-login'])
   },
   {
     id: 'ssl',
@@ -67,10 +103,7 @@ export const NUCLEI_PROFILES = [
     description: 'Analyze SSL/TLS certificate configurations, cipher suites, and expiry',
     tags: ['ssl', 'tls'],
     severities: ['medium', 'low', 'info'],
-    buildArgs: (target, opts = {}) => {
-      const a = ['-u', target, '-tags', 'ssl,tls', '-jsonl'];
-      return a;
-    }
+    buildArgs: (target) => buildValidatedNucleiArgs(target, ['-tags', 'ssl,tls'])
   }
 ];
 
@@ -145,18 +178,20 @@ export function parseNucleiOutput(rawOutput) {
  * @returns {Promise<{ id: string, target: string, profile: string, timestamp: string, findings: Array, stats: object, filePath: string }>}
  */
 export async function runNucleiScan(target, profileId = 'cves', opts = {}) {
+  const cleanTarget = assertNucleiTarget(target);
   await ensureVigilanteConfig();
   const nucleiDir = getVigilanteNucleiDir();
   const profile = NUCLEI_PROFILES.find((p) => p.id === profileId) || NUCLEI_PROFILES[0];
+  const validatedArgs = profile.buildArgs(cleanTarget, opts);
   const tool = await checkNucleiInstalled();
 
   const timestamp = new Date().toISOString();
-  const scanId = `nuclei_${target.replace(/[^a-zA-Z0-9_.-]/g, '_')}_${Date.now()}`;
+  const scanId = `nuclei_${cleanTarget.replace(/[^a-zA-Z0-9_.-]/g, '_')}_${Date.now()}`;
   let rawOutput = '';
   let findings = [];
 
   if (tool.runner === 'host') {
-    const args = profile.buildArgs(target, opts);
+    const args = validatedArgs;
     try {
       const res = await execa('nuclei', args);
       rawOutput = res.stdout;
@@ -167,7 +202,7 @@ export async function runNucleiScan(target, profileId = 'cves', opts = {}) {
       findings = parseNucleiOutput(rawOutput);
     }
   } else if (tool.runner === 'docker') {
-    const args = ['run', '--rm', 'projectdiscovery/nuclei:latest', ...profile.buildArgs(target, opts)];
+    const args = ['run', '--rm', 'projectdiscovery/nuclei:latest', ...validatedArgs];
     try {
       const res = await execa('docker', args);
       rawOutput = res.stdout;
@@ -178,15 +213,15 @@ export async function runNucleiScan(target, profileId = 'cves', opts = {}) {
     }
   } else {
     // Synthetic emulation when Nuclei is not installed locally
-    logger.info('NUCLEI', `Nuclei not installed on host. Running baseline synthetic inspection for ${target}`);
+    logger.info('NUCLEI', `Nuclei not installed on host. Running baseline synthetic inspection for ${cleanTarget}`);
     findings = [
       {
         templateId: 'service-detection',
-        name: `Service banner probe on ${target}`,
+        name: `Service banner probe on ${cleanTarget}`,
         severity: 'info',
         description: 'Target detected during Vigilante baseline probe',
-        host: target,
-        matchedAt: target,
+        host: cleanTarget,
+        matchedAt: cleanTarget,
         tags: ['discovery', 'probe'],
         timestamp
       }
@@ -209,7 +244,7 @@ export async function runNucleiScan(target, profileId = 'cves', opts = {}) {
   // GPG-signed, so it must carry that distinction for consumers.
   const record = {
     id: scanId,
-    target,
+    target: cleanTarget,
     profile: profile.id,
     timestamp,
     synthetic: tool.runner === 'none',

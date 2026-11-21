@@ -78,8 +78,21 @@ export function tokenizeVyos(input: string): string[] {
   return tokens;
 }
 
-export function parseVyosTokens(tokens: string[], index = 0): [any, number] {
-  const result: any = {};
+const FORBIDDEN_VYOS_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+const MAX_VYOS_DEPTH = 64;
+
+function assertSafeVyosKey(key: string): string {
+  if (FORBIDDEN_VYOS_KEYS.has(key)) {
+    throw new Error(`Forbidden VyOS configuration key: ${key}`);
+  }
+  return key;
+}
+
+export function parseVyosTokens(tokens: string[], index = 0, depth = 0): [any, number] {
+  if (depth > MAX_VYOS_DEPTH) {
+    throw new Error(`VyOS configuration exceeds maximum nesting depth of ${MAX_VYOS_DEPTH}`);
+  }
+  const result: any = Object.create(null);
   const words: string[] = [];
 
   while (index < tokens.length) {
@@ -91,7 +104,7 @@ export function parseVyosTokens(tokens: string[], index = 0): [any, number] {
 
     if (t === ';') {
       if (words.length > 0) {
-        const key = words[0];
+        const key = assertSafeVyosKey(words[0]);
         const val = words.length === 2 ? words[1] : words.slice(1).join(' ');
         if (result[key] === undefined) {
           result[key] = val;
@@ -108,11 +121,11 @@ export function parseVyosTokens(tokens: string[], index = 0): [any, number] {
 
     if (t === '{') {
       index++;
-      const [child, nextIndex] = parseVyosTokens(tokens, index);
+      const [child, nextIndex] = parseVyosTokens(tokens, index, depth + 1);
       index = nextIndex;
 
       if (words.length === 1) {
-        const key = words[0];
+        const key = assertSafeVyosKey(words[0]);
         if (!result[key]) {
           result[key] = child;
         } else if (Array.isArray(result[key])) {
@@ -121,17 +134,18 @@ export function parseVyosTokens(tokens: string[], index = 0): [any, number] {
           result[key] = [result[key], child];
         }
       } else if (words.length === 2) {
-        const group = words[0];
-        const key = words[1];
-        if (!result[group]) result[group] = {};
+        const group = assertSafeVyosKey(words[0]);
+        const key = assertSafeVyosKey(words[1]);
+        if (!result[group]) result[group] = Object.create(null);
         result[group][key] = child;
       } else if (words.length > 2) {
         let cur = result;
         for (let w = 0; w < words.length - 1; w++) {
-          if (!cur[words[w]]) cur[words[w]] = {};
-          cur = cur[words[w]];
+          const seg = assertSafeVyosKey(words[w]);
+          if (!cur[seg]) cur[seg] = Object.create(null);
+          cur = cur[seg];
         }
-        cur[words[words.length - 1]] = child;
+        cur[assertSafeVyosKey(words[words.length - 1])] = child;
       }
       words.length = 0;
       continue;
@@ -142,7 +156,7 @@ export function parseVyosTokens(tokens: string[], index = 0): [any, number] {
   }
 
   if (words.length > 0) {
-    const key = words[0];
+    const key = assertSafeVyosKey(words[0]);
     const val = words.length === 2 ? words[1] : words.slice(1).join(' ');
     result[key] = val;
   }

@@ -600,10 +600,13 @@ func syncPluginShellZshLoaderFile(path string, ids []string) error {
 	if end >= 0 && begin < 0 {
 		return fmt.Errorf("zsh startup file %s has a %s marker without its BEGIN marker; refusing to rewrite it", path, pluginShellZshLoaderEnd)
 	}
+	if begin >= 0 && end < begin {
+		return fmt.Errorf("zsh startup file %s has its END marker before its BEGIN marker; refusing to rewrite it", path)
+	}
 	var head, tail string
 	if begin >= 0 {
 		head = content[:begin]
-		tail = content[end+len(pluginShellZshLoaderEnd):]
+		tail = strings.TrimPrefix(content[end+len(pluginShellZshLoaderEnd):], "\n")
 	} else {
 		head = content
 		tail = ""

@@ -905,3 +905,80 @@ func TestComputePartitionLayoutZbmNoLogsStealing(t *testing.T) {
 		t.Fatalf("expected ZBM layout.ZfsMB=%d (no logsMB deducted), got %d", wantZfsMB, layout.ZfsMB)
 	}
 }
+
+func TestBtrfsSnapperLayoutBarConfigAndEval(t *testing.T) {
+	// 1. Single-disk Btrfs + Snapper without LUKS2
+	cfg := DefaultInstallerConfig()
+	cfg.InstallMode = "btrfs"
+	cfg.LuksEnabled = false
+	cfg.LogsEnabled = true // Btrfs uses @var_log subvolume, must not steal separate LogsMB
+	layout := ComputePartitionLayout(65536, cfg)
+	if layout.EfiMB != 512 {
+		t.Fatalf("expected btrfs EfiMB=512, got %d", layout.EfiMB)
+	}
+	if layout.SlotAMB != 0 || layout.SlotBMB != 0 || layout.LogsMB != 0 || layout.ZfsMB != 0 {
+		t.Fatalf("expected btrfs layout slots/logs/zfs to be 0, got %+v", layout)
+	}
+	if layout.DataMB != 0 {
+		t.Fatalf("expected btrfs DataMB=0 without LUKS2, got %d", layout.DataMB)
+	}
+	wantBtrfs := 65536 - 512 - 16
+	if layout.BtrfsMB != wantBtrfs {
+		t.Fatalf("expected BtrfsMB=%d, got %d", wantBtrfs, layout.BtrfsMB)
+	}
+	bar := RenderPartitionBar(layout, cfg, 64)
+	if !strings.Contains(bar, "Btrfs:@+Snapper") {
+		t.Fatalf("expected Btrfs:@+Snapper in partition bar, got: %s", bar)
+	}
+	serialized := FormatInstallerConfig(cfg)
+	if !strings.Contains(serialized, "INSTALL_MODE='btrfs'") {
+		t.Fatalf("expected INSTALL_MODE='btrfs' in serialized config:\n%s", serialized)
+	}
+	if err := ValidatePartitionLayoutFit(65536, cfg); err != nil {
+		t.Fatalf("expected 64GiB btrfs layout to fit cleanly, got: %v", err)
+	}
+	if err := ValidatePartitionLayoutFit(4096, cfg); err == nil {
+		t.Fatalf("expected 4GiB btrfs layout to fail fit validation")
+	}
+
+	// 2. Two-disk Btrfs + Snapper with LUKS2 + dedicated extra ZFS disk
+	twoDisks := []DiskDevice{
+		{Name: "nvme0n1", Path: "/dev/nvme0n1", SizeMB: 65536, SizeGB: 64.0},
+		{Name: "nvme1n1", Path: "/dev/nvme1n1", SizeMB: 65536, SizeGB: 64.0},
+		{Name: "sda", Path: "/dev/sda", SizeMB: 1048576, SizeGB: 1024.0},
+	}
+	cfg2 := DefaultInstallerConfig()
+	cfg2.InstallMode = "btrfs"
+	cfg2.LuksEnabled = true
+	_, eval2 := EvaluateHardwareProfile(twoDisks, &cfg2)
+	if cfg2.SlotMB != 0 {
+		t.Fatalf("expected SlotMB=0 in btrfs mode, got %d", cfg2.SlotMB)
+	}
+	if !strings.Contains(eval2.SystemDiskSummary, "Btrfs RAID-1") {
+		t.Fatalf("expected Btrfs RAID-1 in SystemDiskSummary, got %q", eval2.SystemDiskSummary)
+	}
+	if !strings.Contains(eval2.ZfsPoolSummary, "tank") {
+		t.Fatalf("expected dedicated tank ZfsPoolSummary with 3rd disk, got %q", eval2.ZfsPoolSummary)
+	}
+	layoutLuks := ComputePartitionLayout(65536, cfg2)
+	if layoutLuks.DataMB != 4096 || layoutLuks.BtrfsMB != (65536-512-16-4096) {
+		t.Fatalf("unexpected btrfs LUKS2 layout: %+v", layoutLuks)
+	}
+}
+
+func TestClassifyDiskContentBtrfsSnapper(t *testing.T) {
+	kind, summary, _ := ClassifyDiskContent(DiskProbeInput{
+		DiskPath: "/dev/nvme0n1",
+		PTType:   "gpt",
+		Partitions: []PartitionProbe{
+			{Name: "nvme0n1p2", Path: "/dev/nvme0n1p2", FSType: "vfat", Label: "AXON_EFI"},
+			{Name: "nvme0n1p3", Path: "/dev/nvme0n1p3", FSType: "btrfs", Label: "axon_btrfs", PartLabel: "axon_btrfs_1"},
+		},
+	})
+	if kind != DiskContentAxonwall {
+		t.Fatalf("expected DiskContentAxonwall for axon_btrfs_1, got %v", kind)
+	}
+	if !strings.Contains(summary, "Btrfs + Snapper Root") {
+		t.Fatalf("expected summary to mention Btrfs + Snapper Root, got %q", summary)
+	}
+}

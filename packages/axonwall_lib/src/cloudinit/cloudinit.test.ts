@@ -10,6 +10,7 @@ import {
   buildNoCloudIso,
   cloudInitStorageToInstallerChoices,
   formatInstallerChoicesEnv,
+  formatInstallerSecretFiles,
   CloudInitStorageSchema,
   REDACTED_KEY32_PLACEHOLDER,
   REDACTED_SECRET_PLACEHOLDER,
@@ -386,10 +387,16 @@ axonwall:
 
     const envStr = formatInstallerChoicesEnv(choices);
     expect(envStr).toContain("INSTALL_EDITION='k3s-storage'");
+    expect(envStr).toContain("INSTALL_MODE='rolling'");
+    expect(envStr).toContain("PARTITION_MODE='rolling'");
+    expect(envStr).toContain('STANDBY_ENABLED=0');
     expect(envStr).toContain("K3S_ROLE='agent'");
     expect(envStr).toContain("K3S_SERVER_URL='https://10.10.20.5:6443'");
-    expect(envStr).toContain("K3S_JOIN_TOKEN='K10secret'\\''token::server:abcdef'");
+    expect(envStr).not.toContain('K3S_JOIN_TOKEN=');
+    expect(envStr).not.toContain('LUKS_PASSPHRASE=');
     expect(envStr).toContain('ZFS_ARC_MAX_MB=8192');
+    const secrets = formatInstallerSecretFiles(choices);
+    expect(secrets.k3sJoinToken).toBe("K10secret'token::server:abcdef");
   });
 
   it('rejects k3s_storage.join_token containing newlines or null bytes', () => {
@@ -433,5 +440,15 @@ axonwall:
 
     const envStr = formatInstallerChoicesEnv(choices);
     expect(envStr).toContain("INSTALL_EDITION='minimal'");
+    expect(envStr).toContain('STANDBY_ENABLED=1');
+    expect(envStr).toContain("INSTALL_MODE='ab'");
+
+    const exported = buildCloudInitFromSystem({
+      desiredState: DesiredStateSchema.parse({}),
+      edition: 'minimal',
+      osUsers: [{ name: 'ops', sshAuthorizedKeys: [] }],
+    });
+    expect(exported.axonwall?.edition).toBe('minimal');
+    expect(exported.users?.[0]?.shell).toBe('/bin/bash');
   });
 });

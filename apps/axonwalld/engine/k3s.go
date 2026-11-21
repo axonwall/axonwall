@@ -219,7 +219,7 @@ func (m *K3sManager) RestartK3sAfterTokenFetch() error {
 	m.mu.Lock()
 	unit := resolveK3sSystemdUnit(m.cfg.K3sConfigYaml)
 	m.mu.Unlock()
-	if out, err := exec.Command("systemctl", "--no-ask-password", "reload-or-restart", unit).CombinedOutput(); err != nil {
+	if out, err := engineRunServiceAction("reload-or-restart", unit); err != nil {
 		return fmt.Errorf("failed to reload-or-restart %s after retrieving K3s join token: %v (%s)", unit, err, strings.TrimSpace(string(out)))
 	}
 	return nil
@@ -266,13 +266,15 @@ func FetchPeerClusterToken(peerIp string, syncPort int, authToken string) (strin
 		return "", fmt.Errorf("invalid or disallowed HA peer IP: %s", peerIp)
 	}
 	if HasHAPKI() {
-		if tlsCfg, err := LoadHAPKITLSConfig(); err == nil {
-			client := &http.Client{
-				Timeout:   8 * time.Second,
-				Transport: &http.Transport{TLSClientConfig: tlsCfg},
-			}
-			return FetchPeerClusterTokenWithClient(cleanPeer, syncPort, authToken, client, "https")
+		tlsCfg, err := LoadHAPKITLSConfig()
+		if err != nil {
+			return "", fmt.Errorf("failed to load HA PKI TLS config for K3s token fetch: %w", err)
 		}
+		client := &http.Client{
+			Timeout:   8 * time.Second,
+			Transport: &http.Transport{TLSClientConfig: tlsCfg},
+		}
+		return FetchPeerClusterTokenWithClient(cleanPeer, syncPort, authToken, client, "https")
 	}
 	return FetchPeerClusterTokenWithClient(cleanPeer, syncPort, authToken, &http.Client{Timeout: 8 * time.Second}, "http")
 }
@@ -371,9 +373,9 @@ func (m *K3sManager) ApplyConfig(rawJSON []byte) error {
 	if !bundle.Enabled {
 		slog.Info("K3s plugin is disabled; stopping k3s service")
 		_ = removeFileIfExists(filepath.Join(k3sEtcDir, "config.yaml"))
-		_ = exec.Command("systemctl", "--no-ask-password", "stop", "k3s").Run()
+		_, _ = engineRunServiceAction("stop", "k3s")
 		if hasK3sAgentServiceUnit() || isK3sEditionAgent() {
-			_ = exec.Command("systemctl", "--no-ask-password", "stop", "k3s-agent").Run()
+			_, _ = engineRunServiceAction("stop", "k3s-agent")
 		}
 		// A-H2 (round 3): a disabled cluster must not keep
 		// reporting ClusterJoined. The latch used to survive the
@@ -499,7 +501,7 @@ func (m *K3sManager) ApplyConfig(rawJSON []byte) error {
 	// A-M15: a failed k3s restart fails the apply instead of being
 	// discarded while the bundle reports success and the cluster runs
 	// the old manifests or no k3s at all.
-	if out, err := exec.Command("systemctl", "--no-ask-password", "reload-or-restart", k3sServiceUnit).CombinedOutput(); err != nil {
+	if out, err := engineRunServiceAction("reload-or-restart", k3sServiceUnit); err != nil {
 		return fmt.Errorf("failed to reload-or-restart %s: %v (%s)", k3sServiceUnit, err, strings.TrimSpace(string(out)))
 	}
 
@@ -627,7 +629,7 @@ func (m *K3sManager) TriggerAutoJoin(peerIp string, syncPort int, authToken stri
 	curConfigYaml := m.cfg.K3sConfigYaml
 	m.mu.Unlock()
 	k3sUnit := resolveK3sSystemdUnit(curConfigYaml)
-	if out, err := exec.Command("systemctl", "--no-ask-password", "reload-or-restart", k3sUnit).CombinedOutput(); err != nil {
+	if out, err := engineRunServiceAction("reload-or-restart", k3sUnit); err != nil {
 		return fmt.Errorf("failed to reload-or-restart %s after auto-join: %v (%s)", k3sUnit, err, strings.TrimSpace(string(out)))
 	}
 	m.mu.Lock()
@@ -876,17 +878,17 @@ func (m *K3sManager) RestoreEtcdSnapshot(snapshotName string) error {
 	configYaml := m.cfg.K3sConfigYaml
 	m.mu.Unlock()
 	k3sUnit := resolveK3sSystemdUnit(configYaml)
-	if out, err := exec.Command("systemctl", "--no-ask-password", "stop", k3sUnit).CombinedOutput(); err != nil {
+	if out, err := engineRunServiceAction("stop", k3sUnit); err != nil {
 		return fmt.Errorf("failed to stop %s before etcd cluster reset: %s (%w)", k3sUnit, strings.TrimSpace(string(out)), err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 	out, err := exec.CommandContext(ctx, k3sBin, "server", "--cluster-reset", "--cluster-reset-restore-path="+fullPath).CombinedOutput()
 	if err != nil {
-		_ = exec.Command("systemctl", "--no-ask-password", "start", k3sUnit).Run()
+		_, _ = engineRunServiceAction("start", k3sUnit)
 		return fmt.Errorf("k3s cluster-reset restore failed: %s (%w)", strings.TrimSpace(string(out)), err)
 	}
-	if startOut, startErr := exec.Command("systemctl", "--no-ask-password", "start", k3sUnit).CombinedOutput(); startErr != nil {
+	if startOut, startErr := engineRunServiceAction("start", k3sUnit); startErr != nil {
 		return fmt.Errorf("etcd restored, but failed to restart k3s: %s (%w)", strings.TrimSpace(string(startOut)), startErr)
 	}
 	return nil
@@ -1012,30 +1014,91 @@ func (m *K3sManager) MarkHaAutoJoined(peerIp string) {
 
 // isSystemdServiceActive reports whether a systemd unit is active.
 // A missing systemctl binary or any error means "not active".
+func resolveOpenRCServiceNameForEngine(unit string) string {
+	switch strings.TrimSuffix(strings.TrimSpace(unit), ".service") {
+	case "smbd", "nmbd", "smb":
+		return "samba"
+	case "nfs-server", "nfs-kernel-server":
+		return "nfs"
+	default:
+		return strings.TrimSuffix(strings.TrimSpace(unit), ".service")
+	}
+}
+
+func engineHasSystemdOrFake() bool {
+	p, err := exec.LookPath("systemctl")
+	if err != nil {
+		return false
+	}
+	if IsSystemdRunning() {
+		return true
+	}
+	clean := filepath.Clean(p)
+	return clean != "/usr/bin/systemctl" && clean != "/bin/systemctl"
+}
+
 func isSystemdServiceActive(unit string) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	return exec.CommandContext(ctx, "systemctl", "is-active", "--quiet", unit).Run() == nil
+	if engineHasSystemdOrFake() {
+		return exec.CommandContext(ctx, "systemctl", "is-active", "--quiet", unit).Run() == nil
+	}
+	if rcBin, err := exec.LookPath("rc-service"); err == nil {
+		return exec.CommandContext(ctx, rcBin, resolveOpenRCServiceNameForEngine(unit), "status").Run() == nil
+	}
+	return false
 }
 
-// runKubectlJSON runs `kubectl get <args...> -o json`, preferring plain
-// kubectl (with the k3s kubeconfig when present) and falling back to
-// `k3s kubectl`, which finds its own config.
+func engineRunServiceAction(action string, units ...string) ([]byte, error) {
+	if len(units) == 0 {
+		return nil, nil
+	}
+	if engineHasSystemdOrFake() {
+		args := append([]string{"--no-ask-password", action}, units...)
+		return exec.Command("systemctl", args...).CombinedOutput()
+	}
+	rcBin, rcErr := exec.LookPath("rc-service")
+	if rcErr != nil {
+		return nil, fmt.Errorf("neither systemctl nor rc-service available for %s %v", action, units)
+	}
+	rcAction := action
+	switch action {
+	case "reload-or-restart":
+		rcAction = "restart"
+	}
+	var lastOut []byte
+	for _, u := range units {
+		out, err := exec.Command(rcBin, resolveOpenRCServiceNameForEngine(u), rcAction).CombinedOutput()
+		lastOut = out
+		if err != nil {
+			return out, err
+		}
+	}
+	return lastOut, nil
+}
+
+// runKubectlJSON runs `kubectl get <args...> -o json`, preferring bundled
+// core-k3s kubectl, then plain PATH kubectl (with k3s kubeconfig when present),
+// and falling back to bundled/PATH `k3s kubectl`.
 func runKubectlJSON(ctx context.Context, args ...string) ([]byte, error) {
 	fullArgs := append([]string{"get"}, args...)
 	fullArgs = append(fullArgs, "-o", "json")
-	if out, err := runKubectlCmd(ctx, "kubectl", fullArgs); err == nil {
-		return out, nil
+	kubeconfigPath := filepath.Join(k3sEtcDir, "k3s.yaml")
+	if kubectlBin, err := resolveCoreK3sKubectl(); err == nil {
+		if out, runErr := runKubectlCmdWithKubeconfig(ctx, kubectlBin, kubeconfigPath, fullArgs); runErr == nil {
+			return out, nil
+		}
 	}
-	return runKubectlCmd(ctx, "k3s", append([]string{"kubectl"}, fullArgs...))
+	if k3sBin, err := resolveK3sBinary(); err == nil {
+		return runKubectlCmdWithKubeconfig(ctx, k3sBin, kubeconfigPath, append([]string{"kubectl"}, fullArgs...))
+	}
+	return runKubectlCmdWithKubeconfig(ctx, "k3s", kubeconfigPath, append([]string{"kubectl"}, fullArgs...))
 }
 
-func runKubectlCmd(ctx context.Context, name string, args []string) ([]byte, error) {
-	cmd := exec.CommandContext(ctx, name, args...)
-	if name == "kubectl" {
-		if _, err := os.Stat("/etc/rancher/k3s/k3s.yaml"); err == nil {
-			cmd.Env = append(os.Environ(), "KUBECONFIG=/etc/rancher/k3s/k3s.yaml")
-		}
+func runKubectlCmdWithKubeconfig(ctx context.Context, bin, kubeconfigPath string, args []string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, bin, args...)
+	if _, err := os.Stat(kubeconfigPath); err == nil {
+		cmd.Env = append(os.Environ(), "KUBECONFIG="+kubeconfigPath)
 	}
 	return cmd.Output()
 }
@@ -1380,9 +1443,10 @@ func runKubectlPatch(ctx context.Context, nodeName, patchJSON string) ([]byte, e
 	// as before, with the plugin paths added ahead of PATH because
 	// the daemon's PATH never contains the plugin bin dir.
 	if kubectlBin, err := resolveCoreK3sKubectl(); err == nil {
+		kubeconfigPath := filepath.Join(k3sEtcDir, "k3s.yaml")
 		cmd := exec.CommandContext(ctx, kubectlBin, "patch", "node", nodeName, "--type=merge", "-p", patchJSON)
-		if _, statErr := os.Stat("/etc/rancher/k3s/k3s.yaml"); statErr == nil {
-			cmd.Env = append(os.Environ(), "KUBECONFIG=/etc/rancher/k3s/k3s.yaml")
+		if _, statErr := os.Stat(kubeconfigPath); statErr == nil {
+			cmd.Env = append(os.Environ(), "KUBECONFIG="+kubeconfigPath)
 		}
 		if out, runErr := cmd.CombinedOutput(); runErr == nil {
 			return out, nil

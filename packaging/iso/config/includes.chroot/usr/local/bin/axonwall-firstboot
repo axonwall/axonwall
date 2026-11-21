@@ -16,9 +16,13 @@ if command -v plymouth >/dev/null 2>&1 && plymouth --ping 2>/dev/null; then
 fi
 
 # D-M9 (marker): preserve minimal edition if installed as Minimal, otherwise
-# stamp 'axonwall' on the standard edition firstboot.
+# stamp 'axonwall' on the standard edition firstboot. Never clobber vault or k3s-storage.
 TARGET_EDITION="axonwall"
 _edition_now="$(tr -d ' \t\r\n' < /etc/axonwall/edition 2>/dev/null || true)"
+if [[ "$_edition_now" == "vault" || "$_edition_now" == "k3s-storage" || -f /etc/axonwall/.vault-edition || -f /etc/axonwall/.k3s-edition ]]; then
+  echo "[Axonwall Firstboot] Non-NGFW edition detected ('${_edition_now:-marker}'); refusing to overwrite /etc/axonwall/edition."
+  exit 0
+fi
 if [[ "$_edition_now" == "minimal" || -f /etc/axonwall/.minimal-edition ]]; then
   TARGET_EDITION="minimal"
 fi

@@ -1,14 +1,72 @@
 # Axonwall Release Notes
 
-All notable changes across **Axonwall** appliance editions (`axonwall` Converged NGFW, `vault` Immutable S3 Backup, and `k3s-storage` Barebones K3s + OpenZFS/OpenEBS), kernel pipelines, Ring-0 eBPF subsystems, and management consoles are documented in this file.
+All notable changes across **Axonwall** appliance editions (`axonwall` Converged NGFW, `minimal` Reduced Attack Surface, `vault` Immutable S3 Backup, and `k3s-storage` Barebones K3s + OpenZFS/OpenEBS), kernel pipelines, Ring-0 eBPF subsystems, and management consoles are documented in this file.
 
 Official build artifacts, SHA-256 checksums, and detached Ed25519 signatures (`.sha256.sig`) are published on [GitHub Releases](https://github.com/axonwall/axonwall/releases) and the [Axonwall Releases Portal](https://axonwall.com/releases).
 
 ---
 
-## Unreleased (`main`) — Axonwall Blackbox Threat-LLM Harvester & Custom Hardened Linux 6.12 LTS Kernels
+## `v0.13.0` (2026-11-21) — Btrfs + Snapper Root, Minimal Edition, Bundled-Binary Plugins, Expanded eBPF Visuals, Browser K9s & Deep-Dive Hardening
 
 ### Highlights
+- **Btrfs + Snapper Root Boot Architecture (`installMode: "btrfs"`)**:
+  - In-kernel Copy-on-Write alternative to ZFSBootMenu (`zbm`) without external DKMS modules, built across kernel config (`CONFIG_BTRFS_FS=y`, `CONFIG_BTRFS_FS_POSIX_ACL=y` in `packaging/kernel/fragments/03-storage-zfs.config`), Debian 13 & Alpine ISOs (`btrfs-progs`, `snapper`), `axonwall-console --install` TUI, unified `axonwall-install` (`[3] Btrfs + Snapper Root`, shifting `rolling` to `[4]`), Cloud-Init, and `.deb` packaging.
+  - Provisions single-disk `compress=zstd:1,noatime,space_cache=v2` or automatic multi-disk native Btrfs RAID-1 (`-d raid1 -m raid1`), flat subvolume isolation (`@`, `@snapshots`, `@var_log`, and `@var_lib_axonwall` or optional `4096 MiB` LUKS2 `axon_data`), plus optional dedicated extra ZFS `tank` disks (`ZFS_EXTRA_DISKS`).
+  - Introduces [`axonwall-btrfs-grub`](packaging/iso/config/includes.chroot/usr/local/bin/axonwall-btrfs-grub) (`sync`, `rollback <N>`, `create-snapshot`) to populate the GRUB2 `Axonwall Btrfs Snapshots (Snapper Rollback)` submenu (omitting `grubenv`/`save_env` to prevent sparse-file boot halts) and perform atomic `subvolid=5` flat-subvolume rollbacks.
+  - Wired end-to-end across `axonwall-update --btrfs` (fail-closed pre/post Snapper pairs + GRUB sync), `axonwalld` (`/v1/system/btrfs`), Custom Kernel Studio pre-kernel snapshots, `axonwall-tui` (`Btrfs Snapper` tab), `axonwallctl`, and Web Console (`/system/updates`, `/system/power`).
+- **Minimal Reduced-Attack-Surface Edition (`minimal`) & On-Demand Role/Plugin Provisioning**:
+  - Added `minimal` as the fourth unified edition alongside `axonwall`, `vault`, and `k3s-storage` across GRUB2/ISOLINUX boot menus, TUI & shell installers, Debian d-i (`preseed-minimal.cfg`), Cloud-Init, `axonwall-update`, and dedicated `axonwall-minimal_*.deb` packages.
+  - Ships with a stripped boot/management baseline (DHCP, DNS, NAS, and KVM/LXC disabled by default; optional packages purged on target; `/bin/bash` fallback for directory/SSSD when `zsh` is absent) and supports clean on-demand installation of Core Roles & Plugins via `/system/plugins`, `axonwallctl plugin`, and `/v1/system/plugins/action`.
+- **Plugin Bundled Binaries & 23-Plugin Catalog (5 Core Roles + 18 Extension Plugins)**:
+  - Extension and core plugins now declare SHA-256-verified bundled binary archives extracted fail-closed into isolated per-plugin `bin/` directories with automatic interactive-shell `PATH` snippets (`plugin_shell.go`).
+  - Migrated `k3s` & `k9s` into `core-k3s` and `vim` & `neovim` into `cli-workstation`; added `cli-emacs` (bundled Debian Emacs), `cli-emacs-doom`, and `cli-emacs-spacemacs` sharing the Emacs runtime.
+- **Expanded Ring-0 eBPF Visualizations & Live Kernel BPF Inventory (`/reporting/ebpf`, `/reporting/flows`, `/security/threat-harvester`)**:
+  - Added 6 interactive telemetry visualizers (`EbpfDataplaneCharts`, `EbpfFlowTopologyMap`, `EbpfKernelInventoryPanel`, `EbpfCrossDutyVisualizer`, `EbpfSecurityVisualizer` + `ThreatSketchWaveform`, `FlowsLiveVisualStrip`) powered by `CollectKernelBpfInventory()` inside `/v1/ebpf/overview` (`bpfInventory`).
+  - Visualizes live loaded kernel BPF programs (JIT/translated bytes, verified instructions, BTF, run count/time) and BPF maps (key/value/max entries, memlock, frozen flags), real-time XDP verdict rates, per-CPU core load, protocol/dual-stack/VLAN mix, top services, CIDR blocklist impact, per-source SYN rate meter, flow topology, ZFS ARC/ZIL & KVM `vnet`/`tap` cross-duty metrics, and Threat-LLM packet sketch waveforms.
+- **Multi-Round Full-Stack Security, Correctness & Platform Modernization (Bug Hunt Rounds 3, 4 & v0.12.4 Deep-Dive + Next.js 16 Stack Rollup)**:
+  - **Web Console & API**: DNS/IP/redirect SSRF guard (`ssrf-guard.ts`), CSRF `X-Forwarded-Host` + same-origin proof checks, `/api/auth/gateway` bypass fix, live `.password_changed` enforcement across admin/API routes, OIDC nonce/proxy integration fixes, immediate break-glass MFA reset, 8-field secret redaction, authenticated `GET /api/v1/state`, live ClickHouse Data Lake metrics, and honest daemon-down/unknown states replacing fabricated telemetry.
+  - **Go Daemons, Controller, Satellite & Terraform**: NSS shell escalation guards, SSSD `allowed_shells`/`shell_fallback`, fail-closed bundled-binary SHA-256/symlink validation, HelmChart/Samba/LIO/MinIO/QEMU/LXC validators, MCP audit secret redaction & cross-process rate-limit locking, pure-Go Netlink `over`/wildcard `ifname`/chunked sets/delete in `axonwall-satellite`, HA edge reconnect & VIP preservation, and Terraform TLS/timeout/`jobId` propagation.
+  - **Packaging, CI & Dependencies**: Next.js 16 (`--webpack`), TypeScript 7, Turbo, Go & Docker dependency rollups; safe POSIX `awk` symlink validation in `axonwall-update`; `core-k3s` preservation over `axon_data` mounts; pinned Alpine `3.21.8` SHA-256 base ISO; `nodejs (>= 20.0.0)` Trixie dependency fix; CI duplicate-script parity and artifact size limits.
+
+---
+
+## `v0.12.4` (2026-11-20) — Serial Console Parity, `nftables` 1.1+ Floor & Installer Parity
+
+### Highlights
+- Enabled 9600-baud serial console output with dual `gfxterm`/`serial` terminal input/output across GRUB configurations.
+- Raised the `nftables (>= 1.1.0)` dependency floor for `vault` and `k3s-storage` editions and synchronized installer hardening across Debian and Alpine copies of `axonwall-install`.
+- Completed Round-4 fail-closed updater/watchdog, controller `dist`, and daemon test hardening.
+
+---
+
+## `v0.12.3` (2026-11-19) — Browser K9s Live Explorer, Cluster Pulse/Topology & Node Roles/Taints Modal
+
+### Highlights
+- **Browser K9s Live Explorer (`/k3s/explorer`, `/v1/k3s/*` APIs & `/api/k3s/logs/stream`)**: Full browser-native K9s workbench (`K9sExplorerWorkbench`, `K3sInspectorDrawer`, `K3sPulseCharts`, `K3sTopologyMap`) with `:po`/`:svc`/`:ing`/`:pulse`/`:topo` command navigation, live SSE pod logs, interactive container `exec`, server dry-run YAML editing, admin Secret decoding, and default CLI `k9s` (`v0.51.0`).
+- **Node Roles & Taints Modal (`/k3s/cluster` & `/v1/k3s/nodes/scheduling`)**: Merge-patch scheduling controls with one-click edge node tainting and role presets.
+- **Identity & HA Hardening**: Authenticated SSSD read bind account (`cn=svc-sssd`), OpenLDAP DIT glue verification, and local node identity preservation during HA SQLite replica promotion to prevent split-brain.
+
+---
+
+## `v0.12.2` (2026-11-18) — Keepalived Sync-Group & ZFS Installer Topology Fixes
+
+### Highlights
+- Moved Keepalived `notify_master`, `notify_backup`, and `notify_fault` hooks into `vrrp_sync_group VG1` so multi-instance VRRP transitions fire synchronously without demoting active MASTER directory/NAS services.
+- Hoisted `resolve_zfs_topology()` definition before its call site in Debian and Alpine `axonwall-install`.
+
+---
+
+## `v0.12.1` (2026-11-18) — Full-Stack Security & Correctness Audit
+
+### Highlights
+- Completed comprehensive `v0.12.0` full-stack hardening across `@axonwall/lib`, `axonwalld`, `axonwall-satellite`, `axonwall-controller`, `axonwall-console`, Web Console, and packaging/CI pipelines.
+
+---
+
+## `v0.12.0` (2026-11-17) — Axonwall Blackbox Threat-LLM Harvester, Custom Hardened Linux 6.12 LTS Kernels & Unified Rebrand
+
+### Highlights
+- **Unified Brand Refresh & Plymouth Boot Splash**: Applied the brick-wall, shield, and crossed-axes rebrand across Web Console, GRUB, ZFSBootMenu, and Plymouth splash screens; added Vigilante base domain URL configuration and HelmChart validation support.
 - **Axonwall Blackbox: Extreme eBPF Threat-LLM Harvester (`ebpf-threat-harvester`)**:
   - **Multi-Plane CO-RE eBPF Capture**: `tc_harvester_ingress` and `tc_harvester_egress` (attached via Linux 6.6+ TCX) capture first-16 signed packet size/microsecond IAT flow sketches, TCP `JA4T` options, TLS SNI, DNS label Shannon entropy, and triggered Tier-1 L7 slices (`4096 B` default), joined in-kernel by `socket_cookie` / `cgroup_id` / `pid` with `tp_harvester_exec` (`sched_process_exec`), `tp_harvester_memfd` (`sys_enter_memfd_create`), and guarded `uprobe_harvester_ssl_write` (`uprobe/SSL_write`).
   - **Two-Tier Adaptive Flight Recorder & Firehose Modes**: Configurable `adaptive`, `firehose`, and `honeypot_only` modes with canary dark-ports (`23, 2323, 3389, 4444, 5900, 6379, 9200, 27017`), `memfd`/DNS-entropy escalation, stratified benign negative sampling, and a ring-buffer backpressure circuit breaker.

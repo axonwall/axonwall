@@ -60,9 +60,14 @@ export interface ThreatFeedCompileResult {
 }
 
 function parseIpv4ToUint(ip: string): number | null {
-  const parts = ip.split('.').map((p) => Number.parseInt(p, 10));
-  if (parts.length !== 4 || parts.some((p) => Number.isNaN(p) || p < 0 || p > 255)) {
-    return null;
+  const rawParts = ip.split('.');
+  if (rawParts.length !== 4) return null;
+  const parts: number[] = [];
+  for (const raw of rawParts) {
+    if (!/^(?:0|[1-9]\d{0,2})$/.test(raw)) return null;
+    const num = Number.parseInt(raw, 10);
+    if (num < 0 || num > 255) return null;
+    parts.push(num);
   }
   return ((parts[0] << 24) | (parts[1] << 16) | (parts[2] << 8) | parts[3]) >>> 0;
 }
@@ -74,14 +79,21 @@ interface ParsedPrefix {
   prefixLen: number;
 }
 
+function formatUint32Ip(ipInt: number): string {
+  return `${(ipInt >>> 24) & 255}.${(ipInt >>> 16) & 255}.${(ipInt >>> 8) & 255}.${ipInt & 255}`;
+}
+
 function parseCidrOrIp(input: string): ParsedPrefix | null {
   if (!input) return null;
-  const [ipPart, maskPart] = input.split('/');
+  const slashParts = input.split('/');
+  if (slashParts.length > 2) return null;
+  const [ipPart, maskPart] = slashParts;
   const baseIp = parseIpv4ToUint(ipPart);
   if (baseIp === null) return null;
 
   let prefixLen = 32;
   if (maskPart !== undefined) {
+    if (!/^(?:0|[1-9]\d?)$/.test(maskPart)) return null;
     const parsedMask = Number.parseInt(maskPart, 10);
     if (Number.isNaN(parsedMask) || parsedMask < 0 || parsedMask > 32) return null;
     prefixLen = parsedMask;
@@ -89,7 +101,8 @@ function parseCidrOrIp(input: string): ParsedPrefix | null {
 
   const mask = prefixLen === 0 ? 0 : (~0 << (32 - prefixLen)) >>> 0;
   const canonicalBase = (baseIp & mask) >>> 0;
-  const cidr = prefixLen === 32 ? ipPart : `${(canonicalBase >>> 24) & 255}.${(canonicalBase >>> 16) & 255}.${(canonicalBase >>> 8) & 255}.${canonicalBase & 255}/${prefixLen}`;
+  const canonicalIp = formatUint32Ip(canonicalBase);
+  const cidr = prefixLen === 32 ? canonicalIp : `${canonicalIp}/${prefixLen}`;
 
   return {
     cidr,
@@ -169,6 +182,12 @@ export function compileThreatFeedNft(
     chunkSize = 1000,
   } = options;
 
+  const identRe = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
+  if (!identRe.test(tableName) || !identRe.test(setName)) {
+    throw new Error(`Invalid nftables identifier: table=${tableName}, set=${setName}`);
+  }
+  const safeChunkSize = Math.max(1, Number.isFinite(chunkSize) ? Math.floor(chunkSize) : 1000);
+
   const { minimized, totalInput, prunedCount } = minimizeThreatCidrs(cidrs);
 
   const nftCommands: string[] = [];
@@ -178,8 +197,8 @@ export function compileThreatFeedNft(
   );
 
   // Chunk elements for atomic batch execution without exceeding netlink payload limits
-  for (let i = 0; i < minimized.length; i += chunkSize) {
-    const chunk = minimized.slice(i, i + chunkSize);
+  for (let i = 0; i < minimized.length; i += safeChunkSize) {
+    const chunk = minimized.slice(i, i + safeChunkSize);
     if (chunk.length > 0) {
       nftCommands.push(
         `add element inet ${tableName} ${setName} { ${chunk.join(', ')} }`

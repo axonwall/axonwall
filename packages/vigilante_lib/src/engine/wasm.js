@@ -6,7 +6,7 @@
 import fs from 'node:fs/promises';
 import fsSync from 'node:fs';
 import path from 'node:path';
-import { getVigilanteWasmDir } from './config.js';
+import { getVigilanteWasmDir, resolvePathInside, sanitizePathComponent } from './config.js';
 import { logger } from '../utils/logger.js';
 
 /**
@@ -134,8 +134,9 @@ export async function listWasmPlugins() {
 export async function installWasmPlugin(pluginName, wasmBytes = DEFAULT_DETECTOR_WASM_BYTES) {
   const wasmDir = getVigilanteWasmDir();
   await fs.mkdir(wasmDir, { recursive: true });
-  const fileName = pluginName.endsWith('.wasm') ? pluginName : `${pluginName}.wasm`;
-  const targetPath = path.join(wasmDir, fileName);
+  const safeName = sanitizePathComponent(pluginName || 'plugin');
+  const fileName = safeName.endsWith('.wasm') ? safeName : `${safeName}.wasm`;
+  const targetPath = resolvePathInside(wasmDir, fileName);
 
   await fs.writeFile(targetPath, wasmBytes);
   logger.info('WASM', `Installed WebAssembly plugin: ${targetPath}`);
@@ -193,21 +194,36 @@ export async function decompileWasmToWat(wasmSource) {
     11: 'data'
   };
 
+  const readUleb128 = (buf, pos) => {
+    let val = 0;
+    let shift = 0;
+    let p = pos;
+    while (p < buf.length) {
+      if (shift >= 35) {
+        throw new Error('Malformed WASM LEB128 varint: overflow');
+      }
+      const b = buf[p++];
+      val = (val | ((b & 0x7f) << shift)) >>> 0;
+      if ((b & 0x80) === 0) {
+        return { value: val, nextOffset: p };
+      }
+      shift += 7;
+    }
+    throw new Error('Truncated WASM LEB128 varint');
+  };
+
   let offset = 8;
   while (offset < bytes.length) {
     const sectionId = bytes[offset++];
-    // Read LEB128 section length
-    let sectionLen = 0;
-    let shift = 0;
-    while (offset < bytes.length) {
-      const byte = bytes[offset++];
-      sectionLen |= (byte & 0x7f) << shift;
-      if ((byte & 0x80) === 0) break;
-      shift += 7;
+    const lenParsed = readUleb128(bytes, offset);
+    const sectionLen = lenParsed.value;
+    offset = lenParsed.nextOffset;
+    if (sectionLen < 0 || offset + sectionLen > bytes.length) {
+      throw new Error(`Malformed WASM section ${sectionId}: length ${sectionLen} out of bounds`);
     }
 
     const sectionEnd = offset + sectionLen;
-    const sectionPayload = bytes.subarray(offset, Math.min(sectionEnd, bytes.length));
+    const sectionPayload = bytes.subarray(offset, sectionEnd);
     sections.push({
       id: sectionId,
       name: SECTION_NAMES[sectionId] || `unknown_${sectionId}`,
@@ -216,31 +232,26 @@ export async function decompileWasmToWat(wasmSource) {
     });
 
     // Parse Export section (ID 7)
-    if (sectionId === 7) {
-      let p = 0;
-      let count = 0;
-      let s = 0;
-      while (p < sectionPayload.length) {
-        const b = sectionPayload[p++];
-        count |= (b & 0x7f) << s;
-        if ((b & 0x80) === 0) break;
-        s += 7;
-      }
+    if (sectionId === 7 && sectionPayload.length > 0) {
+      const countInfo = readUleb128(sectionPayload, 0);
+      const count = countInfo.value;
+      let p = countInfo.nextOffset;
 
       for (let i = 0; i < count && p < sectionPayload.length; i++) {
-        let nameLen = 0;
-        let s2 = 0;
-        while (p < sectionPayload.length) {
-          const b = sectionPayload[p++];
-          nameLen |= (b & 0x7f) << s2;
-          if ((b & 0x80) === 0) break;
-          s2 += 7;
-        }
-        if (p + nameLen <= sectionPayload.length) {
+        const nameLenInfo = readUleb128(sectionPayload, p);
+        const nameLen = nameLenInfo.value;
+        p = nameLenInfo.nextOffset;
+        if (nameLen >= 0 && p + nameLen + 1 <= sectionPayload.length) {
           const exportName = sectionPayload.subarray(p, p + nameLen).toString('utf8');
           exportedNames.push(exportName);
           p += nameLen;
-          p += 2; // skip export kind and index
+          // export kind (1 byte) + ULEB128 index
+          p += 1;
+          if (p < sectionPayload.length) {
+            p = readUleb128(sectionPayload, p).nextOffset;
+          }
+        } else {
+          break;
         }
       }
     }

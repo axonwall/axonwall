@@ -1583,7 +1583,21 @@ func (s *AgentServer) restartNgfwDaemonsIfEnabled() error {
 	if err := json.Unmarshal(data, &fwCfg); err != nil || !fwCfg.Enabled {
 		return nil
 	}
+	units := []string{"kea-dhcp4-server", "suricata", "frr", "conntrackd", "crowdsec-firewall-bouncer"}
 	if !hasSystemdOrFakeSystemctl() {
+		for _, u := range units {
+			if (u == "kea-dhcp4-server" || u == "kea-dhcp4") && !keaHasActiveInterfaces() {
+				continue
+			}
+			rcUnit := resolveOpenRCServiceName(u)
+			if _, err := os.Stat(filepath.Join("/etc/init.d", rcUnit)); err != nil {
+				continue
+			}
+			if _, err := reloadOrRestartService(u); err != nil {
+				return fmt.Errorf("restarting OpenRC NGFW daemon %s after rollback: %w", rcUnit, err)
+			}
+		}
+		log.Printf("[Agent] Rollback: restarted OpenRC NGFW daemons (restored firewall config is enabled)")
 		return nil
 	}
 	sysPath, _ := exec.LookPath("systemctl")
@@ -1591,10 +1605,18 @@ func (s *AgentServer) restartNgfwDaemonsIfEnabled() error {
 	isFakeSystemctl := cleanSysPath != "" && cleanSysPath != "/usr/bin/systemctl" && cleanSysPath != "/bin/systemctl"
 
 	var unitsToStart []string
-	for _, u := range []string{"kea-dhcp4-server", "suricata", "frr", "conntrackd", "crowdsec-firewall-bouncer"} {
-		resolved := resolveDistroServiceUnit(u)
-		if !isFakeSystemctl && !systemdUnitFileExists(resolved) {
+	for _, u := range units {
+		if (u == "kea-dhcp4-server" || u == "kea-dhcp4") && !keaHasActiveInterfaces() {
 			continue
+		}
+		resolved := resolveDistroServiceUnit(u)
+		if !isFakeSystemctl {
+			if !systemdUnitFileExists(resolved) {
+				continue
+			}
+			if exec.Command("systemctl", "is-enabled", "--quiet", resolved).Run() != nil {
+				continue
+			}
 		}
 		unitsToStart = append(unitsToStart, resolved)
 	}
@@ -3430,6 +3452,101 @@ func main() {
 				http.Error(w, fmt.Sprintf("unknown action: %s", action), http.StatusBadRequest)
 			}
 		})
+		mux.HandleFunc("/v1/system/btrfs", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodGet {
+				snaps, err := watchdog.ListBtrfsSnapshots()
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusInternalServerError)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"success":   true,
+					"snapshots": snaps,
+					"status":    watchdog.GetStatus(),
+				})
+				return
+			}
+			if r.Method != http.MethodPost {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			var req struct {
+				Action      string `json:"action"` // "list", "snapshot", "delete-snapshot", "rollback-snapshot", "sync-grub"
+				Description string `json:"description,omitempty"`
+				Important   bool   `json:"important,omitempty"`
+				SnapshotID  int    `json:"snapshotId,omitempty"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, fmt.Sprintf("invalid json payload: %v", err), http.StatusBadRequest)
+				return
+			}
+			action := strings.ToLower(strings.TrimSpace(req.Action))
+			switch action {
+			case "list":
+				snaps, err := watchdog.ListBtrfsSnapshots()
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusInternalServerError)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"success":   true,
+					"snapshots": snaps,
+				})
+			case "snapshot":
+				id, err := watchdog.CreateBtrfsSnapshot(req.Description, req.Important)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				snaps, _ := watchdog.ListBtrfsSnapshots()
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"success":    true,
+					"message":    fmt.Sprintf("Created Btrfs Snapper snapshot #%d and updated GRUB snapshot menu.", id),
+					"snapshotId": id,
+					"snapshots":  snaps,
+				})
+			case "delete-snapshot":
+				if err := watchdog.DeleteBtrfsSnapshot(req.SnapshotID); err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				snaps, _ := watchdog.ListBtrfsSnapshots()
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"success":   true,
+					"message":   fmt.Sprintf("Deleted Btrfs Snapper snapshot #%d.", req.SnapshotID),
+					"snapshots": snaps,
+				})
+			case "rollback-snapshot":
+				msg, err := watchdog.RollbackBtrfsSnapshot(req.SnapshotID)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				snaps, _ := watchdog.ListBtrfsSnapshots()
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"success":   true,
+					"message":   msg,
+					"snapshots": snaps,
+				})
+			case "sync-grub":
+				if err := watchdog.SyncBtrfsGrubMenu(); err != nil {
+					http.Error(w, err.Error(), http.StatusInternalServerError)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"success": true,
+					"message": "Regenerated /boot/grub/btrfs-snapshots.cfg from current Snapper snapshots.",
+				})
+			default:
+				http.Error(w, fmt.Sprintf("unknown action: %s", action), http.StatusBadRequest)
+			}
+		})
 		mux.HandleFunc("/v1/system/slot/activate", func(w http.ResponseWriter, r *http.Request) {
 			if r.Method != http.MethodPost {
 				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -3485,8 +3602,11 @@ func main() {
 				return
 			}
 			effectiveSlot := strings.ToUpper(strings.TrimSpace(req.Slot))
-			if watchdog.GetStatus().InstallMode == "zbm" {
+			curMode := watchdog.GetStatus().InstallMode
+			if curMode == "zbm" {
 				effectiveSlot = "B"
+			} else if curMode == "btrfs" || curMode == "rolling" {
+				effectiveSlot = "A"
 			}
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(map[string]any{
@@ -5465,7 +5585,7 @@ func main() {
 			}
 			limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 			if limit <= 0 {
-				limit = 50
+				limit = 100
 			}
 			lsmAttached, lsmHooks, lsmAllowlist, lsmEvents := lsmGuardManager.Snapshot()
 			tokMgr := engine.GetDefaultBpfTokenManager()
@@ -5484,6 +5604,8 @@ func main() {
 					"profiles":     tokMgr.ListProfiles(),
 					"activeMounts": engine.DiscoverDelegatedBpffsMounts(),
 				},
+				"bpfInventory":    engine.CollectKernelBpfInventory(),
+				"kernelRca":       engine.CollectKernelRcaTelemetry(),
 				"virt":            virtManager.GetEbpfTelemetry(),
 				"k3s":             k3sManager.GetEbpfTelemetry(),
 				"nas":             nasManager.GetDeepTelemetry(),
@@ -5776,11 +5898,18 @@ func main() {
 			case http.MethodDelete:
 				idParam := strings.TrimSpace(r.URL.Query().Get("id"))
 				if idParam == "" {
+					idParam = strings.TrimSpace(r.URL.Query().Get("name"))
+				}
+				if idParam == "" {
 					var req struct {
-						ID string `json:"id"`
+						ID   string `json:"id"`
+						Name string `json:"name"`
 					}
 					_ = json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&req)
 					idParam = strings.TrimSpace(req.ID)
+					if idParam == "" {
+						idParam = strings.TrimSpace(req.Name)
+					}
 				}
 				if err := tokMgr.DeleteProfile(idParam); err != nil {
 					w.Header().Set("Content-Type", "application/json")

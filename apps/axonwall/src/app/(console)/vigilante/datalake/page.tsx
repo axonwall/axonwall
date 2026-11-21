@@ -14,14 +14,10 @@ import {
 import {
   getDataLakeMetricsAction,
 } from '@/server/vigilante';
+import type { DataLakeMetricsSnapshot } from '@/server/clickhouse';
 
 export default function SecurityDataLakePage() {
-  const [data, setData] = useState<{
-    tables: Array<{ name: string; rows: number; bytes: number; compressedRatio: string }>;
-    totalEvents24h: number;
-    eventsPerSecond: number;
-    storageUsedBytes: number;
-  } | null>(null);
+  const [data, setData] = useState<DataLakeMetricsSnapshot | null>(null);
   const [loading, setLoading] = useState(true);
 
   const loadData = async () => {
@@ -71,28 +67,47 @@ export default function SecurityDataLakePage() {
         </button>
       </div>
 
+      {/* Unconfigured or Unreachable Banner */}
+      {data && (!data.configured || data.unavailable) && (
+        <div className="p-4 rounded-xl bg-amber-500/10 border border-amber-500/30 text-xs text-amber-300">
+          {data.reason || (data.configured ? 'ClickHouse Data Lake unreachable.' : 'ClickHouse Data Lake is not configured.')}
+        </div>
+      )}
+
       {/* Metrics */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         <div className="p-5 rounded-2xl bg-slate-900/80 border border-slate-800 space-y-1">
-          <div className="text-xs text-slate-400">Ingestion Throughput</div>
-          <div className="text-3xl font-bold text-emerald-400">{data?.eventsPerSecond ?? 0} EPS</div>
-          <div className="text-[11px] text-slate-500">Peak burst: 350 EPS</div>
+          <div className="text-xs text-slate-400">Ingestion Throughput (Avg)</div>
+          <div className="text-3xl font-bold text-emerald-400">
+            {loading ? '…' : !data?.configured || data?.unavailable ? '—' : `${data.eventsPerSecond} EPS`}
+          </div>
+          <div className="text-[11px] text-slate-500">
+            {!data?.configured ? 'ClickHouse not configured' : data?.unavailable ? 'Telemetry unavailable' : 'Computed from active partitions'}
+          </div>
         </div>
 
         <div className="p-5 rounded-2xl bg-slate-900/80 border border-slate-800 space-y-1">
-          <div className="text-xs text-slate-400">Total Events Preserved (24h)</div>
+          <div className="text-xs text-slate-400">Stored Security Rows</div>
           <div className="text-3xl font-bold text-blue-400">
-            {data ? (data.totalEvents24h / 1e6).toFixed(2) : 0} Million
+            {loading
+              ? '…'
+              : !data?.configured || data?.unavailable
+                ? '—'
+                : data.totalEvents24h >= 1e6
+                  ? `${(data.totalEvents24h / 1e6).toFixed(2)} Million`
+                  : data.totalEvents24h.toLocaleString()}
           </div>
-          <div className="text-[11px] text-slate-500">Zero event drops across pipelines</div>
+          <div className="text-[11px] text-slate-500">Active MergeTree partition rows</div>
         </div>
 
         <div className="p-5 rounded-2xl bg-slate-900/80 border border-slate-800 space-y-1">
           <div className="text-xs text-slate-400">On-Disk Compressed Footprint</div>
           <div className="text-3xl font-bold text-white">
-            {data ? formatBytes(data.storageUsedBytes) : '0 GB'}
+            {loading ? '…' : !data?.configured || data?.unavailable ? '—' : formatBytes(data.storageUsedBytes)}
           </div>
-          <div className="text-[11px] text-slate-500">Average 4.3x compression ratio</div>
+          <div className="text-[11px] text-slate-500">
+            Compression ratio: {data?.averageCompression || 'N/A'}
+          </div>
         </div>
       </div>
 
@@ -104,7 +119,18 @@ export default function SecurityDataLakePage() {
         </div>
 
         <div className="space-y-3">
-          {(data?.tables ?? []).map((tbl) => (
+          {(data?.tables ?? []).length === 0 ? (
+            <div className="p-6 rounded-xl bg-slate-950/60 border border-slate-800 text-xs text-slate-400 text-center">
+              {loading
+                ? 'Querying ClickHouse tables…'
+                : !data?.configured
+                  ? 'ClickHouse Data Lake is not enabled or configured.'
+                  : data?.unavailable
+                    ? 'Unable to retrieve ClickHouse partition metrics.'
+                    : 'No active partitions found in ClickHouse database.'}
+            </div>
+          ) : (
+            (data?.tables ?? []).map((tbl) => (
             <div
               key={tbl.name}
               className="p-4 bg-slate-950/70 border border-slate-800 rounded-xl flex flex-col sm:flex-row sm:items-center justify-between gap-4 text-xs hover:border-slate-700 transition-all"
@@ -130,7 +156,8 @@ export default function SecurityDataLakePage() {
                 </div>
               </div>
             </div>
-          ))}
+          ))
+        )}
         </div>
       </div>
     </div>

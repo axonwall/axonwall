@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -507,6 +508,141 @@ func TestWatchdogZbmDetectionAndOperations(t *testing.T) {
 	}
 	if !strings.Contains(msg, "ZFS Boot Environment") {
 		t.Errorf("Expected update success message mentioning ZFS Boot Environment, got %q", msg)
+	}
+}
+
+func TestBtrfsSnapperModeAndSnapshots(t *testing.T) {
+	tempDir := t.TempDir()
+	grubEnvPath := filepath.Join(tempDir, "grubenv")
+	cmdlinePath := filepath.Join(tempDir, "cmdline")
+	snapsDir := filepath.Join(tempDir, "snapshots")
+
+	if err := os.WriteFile(cmdlinePath, []byte("BOOT_IMAGE=/@/boot/vmlinuz root=LABEL=axon_btrfs rootflags=subvol=@ ro rootfstype=btrfs quiet\n"), 0644); err != nil {
+		t.Fatalf("write mock cmdline: %v", err)
+	}
+	if detected := detectInstallModeCustom(cmdlinePath); detected != "btrfs" {
+		t.Fatalf("expected detectInstallModeCustom='btrfs', got %q", detected)
+	}
+
+	// Build bootable snapshot #1 XML + boot dir and non-bootable #2 XML
+	snap1Boot := filepath.Join(snapsDir, "1", "snapshot", "boot")
+	if err := os.MkdirAll(snap1Boot, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(snap1Boot, "vmlinuz"), []byte("vmlinuz"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	xml1 := `<?xml version="1.0"?><snapshot><type>single</type><num>1</num><date>2026-11-21 08:00:00</date><cleanup>number</cleanup><description>Axonwall Factory Initial</description><userdata><key>important</key><value>yes</value></userdata></snapshot>`
+	if err := os.WriteFile(filepath.Join(snapsDir, "1", "info.xml"), []byte(xml1), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(snapsDir, "2"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	xml2 := `<?xml version="1.0"?><snapshot><type>pre</type><num>2</num><date>2026-11-21 09:00:00</date><cleanup>number</cleanup><description>Pre-update, Axonwall v0.12.5</description></snapshot>`
+	if err := os.WriteFile(filepath.Join(snapsDir, "2", "info.xml"), []byte(xml2), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	we := NewWatchdogEngineCustom(grubEnvPath, cmdlinePath)
+	we.snapshotsDir = snapsDir
+	we.readInstalledVer = func() string { return "0.12.4" }
+	var calls [][]string
+
+	// First test XML fallback when snapper CLI errors
+	we.runSnapperCmd = func(args ...string) ([]byte, error) {
+		calls = append(calls, append([]string{"snapper"}, args...))
+		return nil, fmt.Errorf("snapper dbus down")
+	}
+	we.runBtrfsCmd = func(args ...string) ([]byte, error) {
+		calls = append(calls, append([]string{"btrfs"}, args...))
+		return []byte("Data, RAID1: total=10.00GiB, used=4.00GiB\n"), nil
+	}
+	we.runBtrfsGrubCmd = func(args ...string) ([]byte, error) {
+		calls = append(calls, append([]string{"axonwall-btrfs-grub"}, args...))
+		if len(args) > 0 && args[0] == "create-snapshot" {
+			return []byte("3\n"), nil
+		}
+		if len(args) > 0 && args[0] == "rollback" {
+			return []byte("Promoted Snapshot #" + args[1] + " to @\n"), nil
+		}
+		return []byte("ok\n"), nil
+	}
+
+	snapsXML, err := we.ListBtrfsSnapshots()
+	if err != nil {
+		t.Fatalf("ListBtrfsSnapshots XML fallback failed: %v", err)
+	}
+	if len(snapsXML) != 2 || snapsXML[0].ID != 2 || snapsXML[1].ID != 1 {
+		t.Fatalf("expected [2,1] sorted desc from XML fallback, got %+v", snapsXML)
+	}
+	if !snapsXML[1].Bootable || !snapsXML[1].Important {
+		t.Errorf("expected snapshot #1 to be Bootable=true and Important=true, got %+v", snapsXML[1])
+	}
+
+	// Now test snapper --csvout parsing (including commas inside quoted description)
+	we.runSnapperCmd = func(args ...string) ([]byte, error) {
+		calls = append(calls, append([]string{"snapper"}, args...))
+		if len(args) >= 4 && args[2] == "--csvout" {
+			return []byte("number,type,pre-number,date,cleanup,description,userdata\n0,single,,,,current,\n2,pre,,2026-11-21 09:00:00,number,\"Pre-update, v0.12.5\",important=yes\n1,single,,2026-11-21 08:00:00,number,Factory Initial,important=yes\n"), nil
+		}
+		if len(args) >= 3 && args[2] == "create" {
+			return []byte("3\n"), nil
+		}
+		return []byte("ok"), nil
+	}
+	we.detectInitialState()
+	st := we.GetStatus()
+	if st.InstallMode != "btrfs" {
+		t.Fatalf("expected InstallMode='btrfs', got %q", st.InstallMode)
+	}
+	if st.BtrfsTopology != "raid1" {
+		t.Errorf("expected BtrfsTopology='raid1', got %q", st.BtrfsTopology)
+	}
+	if len(st.BtrfsSnapshots) != 2 || st.BtrfsSnapshots[0].Description != "Pre-update, v0.12.5" {
+		t.Errorf("unexpected parsed CSV snapshots: %+v", st.BtrfsSnapshots)
+	}
+
+	if err := we.ActivateSlot("B"); err == nil {
+		t.Fatalf("expected ActivateSlot in btrfs mode to return actionable error")
+	}
+	if err := we.TriggerRollback(); err == nil {
+		t.Fatalf("expected TriggerRollback in btrfs mode to return actionable error")
+	}
+
+	createdID, err := we.CreateBtrfsSnapshot("Manual checkpoint\nnewline", true)
+	if err != nil || createdID != 3 {
+		t.Fatalf("CreateBtrfsSnapshot failed: id=%d err=%v", createdID, err)
+	}
+	if err := we.DeleteBtrfsSnapshot(0); err == nil {
+		t.Fatalf("expected DeleteBtrfsSnapshot(0) to fail")
+	}
+	if err := we.DeleteBtrfsSnapshot(2); err != nil {
+		t.Fatalf("DeleteBtrfsSnapshot(2) failed: %v", err)
+	}
+	rbMsg, err := we.RollbackBtrfsSnapshot(1)
+	if err != nil || !strings.Contains(rbMsg, "#1") {
+		t.Fatalf("RollbackBtrfsSnapshot(1) failed: msg=%q err=%v", rbMsg, err)
+	}
+
+	// Verify ApplyFirmwareUpdate passes --btrfs --version 0.12.5
+	argsOut := filepath.Join(tempDir, "updater-args.txt")
+	mockUpdater := filepath.Join(tempDir, "axonwall-update")
+	script := "#!/bin/sh\necho \"$@\" > '" + argsOut + "'\n"
+	if err := os.WriteFile(mockUpdater, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+	we.updaterPaths = []string{mockUpdater}
+	updMsg, err := we.ApplyFirmwareUpdate("B", "0.12.5")
+	if err != nil {
+		t.Fatalf("ApplyFirmwareUpdate btrfs failed: %v", err)
+	}
+	if !strings.Contains(updMsg, "Snapper") {
+		t.Errorf("expected Snapper in update message, got %q", updMsg)
+	}
+	gotArgs, _ := os.ReadFile(argsOut)
+	if !strings.Contains(string(gotArgs), "--btrfs --version 0.12.5") {
+		t.Errorf("expected updater args '--btrfs --version 0.12.5', got %q", string(gotArgs))
 	}
 }
 
