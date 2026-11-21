@@ -71,6 +71,41 @@ export const BUILTIN_PLUGINS: PluginManifest[] = [
       alpine: ['curl', 'iptables', 'open-iscsi'],
       arch: ['curl', 'iptables-nft', 'open-iscsi'],
     },
+    // Bundled binaries (k3s + k9s), shipped in the plugin's own
+    // directory (<baseDataDir>/core-k3s/bin/) instead of
+    // /usr/local/bin — see the Go-side definition in
+    // GetCorePluginDefinitions (apps/axonwalld/engine/plugins.go),
+    // which is the daemon's copy of this entry. The two must stay in
+    // sync (same versions, URLs and sha256s). No distroPackage
+    // entries: both binaries are upstream release artifacts.
+    //
+    // k3s v1.32.3+k3s1 is a raw single-file download (kind
+    // 'binary'); its sha256 is the upstream-published digest from
+    // https://github.com/k3s-io/k3s/releases/download/v1.32.3%2Bk3s1/sha256sum-amd64.txt
+    // and matches the pin the builders carried before this move.
+    // k9s v0.51.0 is a tarball (kind 'archive', format 'tar.gz');
+    // its sha256 is the upstream-published digest for
+    // k9s_Linux_amd64.tar.gz from
+    // https://github.com/derailed/k9s/releases/download/v0.51.0/checksums.sha256.
+    // The tarball's members sit at the top level (LICENSE,
+    // README.md, k9s — no wrapping directory), so pathInArchive
+    // defaults to the binary name 'k9s'.
+    binaries: [
+      {
+        kind: 'binary',
+        name: 'k3s',
+        url: 'https://github.com/k3s-io/k3s/releases/download/v1.32.3%2Bk3s1/k3s',
+        sha256: 'b19216803650b567bf980888dec39035edaf664339c55bc4462f7a003edbef83',
+      },
+      {
+        kind: 'archive',
+        name: 'k9s',
+        url: 'https://github.com/derailed/k9s/releases/download/v0.51.0/k9s_Linux_amd64.tar.gz',
+        sha256: 'c3752ad51a5a4015a113819c4eeb6e55a4d0e4b8e652494797532f6fc8161dd7',
+        format: 'tar.gz',
+      },
+    ],
+    binDirs: ['bin'],
     nftHooks: [
       { table: 'inet axonwall', chain: 'input', priority: 0 },
     ],
@@ -327,8 +362,6 @@ export const BUILTIN_PLUGINS: PluginManifest[] = [
     packages: {
       debian: [
         'zsh',
-        'vim',
-        'neovim',
         'tmux',
         'zsh-autosuggestions',
         'zsh-syntax-highlighting',
@@ -373,6 +406,284 @@ export const BUILTIN_PLUGINS: PluginManifest[] = [
       ],
     },
     cliBinaries: ['zsh', 'vim', 'nvim', 'starship', 'tmux', 'kubectl', 'helm'],
+    // VIM + NEOVIM ARE BUNDLED, NOT SYSTEM-INSTALLED — Debian only.
+    // vim is DROPPED entirely: vi/vim become symlinks to the bundled
+    // nvim in the plugin's bin/ dir, so the vim .deb set is not
+    // bundled. packages.debian therefore drops 'vim'/'neovim';
+    // alpine/arch keep them (old behavior) because the nvim tarball
+    // is glibc-linked and cannot run on Alpine (musl), and the
+    // archive entry is gated to debian via `oses` — on Alpine/Arch
+    // it is skipped at install and ignored by verification.
+    // CHECKSUM CAVEAT: neovim publishes NO checksum for this tarball;
+    // the sha256 below was computed locally from the bytes GitHub
+    // served on 2026-11-20 (asset size 11,404,582 bytes). Do NOT claim
+    // it is an official published checksum. TREE extraction: the
+    // tarball wraps everything under 'nvim-linux-x86_64/', so
+    // stripComponents 1 lands bin/nvim, lib/... and share/... at the
+    // plugin root (nvim needs its runtime + parsers from the same
+    // tree). cliBinaries keeps 'vim'/'nvim': both resolve via the
+    // plugin-local bin dir (vi/vim symlinks to the executable nvim),
+    // or from the system PATH on Alpine/Arch.
+    binaries: [
+      {
+        kind: 'archive',
+        name: 'nvim',
+        sha256: '474430d53e6264f6d6dd18db42d6dc9df3a1b56ca9e88a325bbf860e1a811d87',
+        url: 'https://github.com/neovim/neovim/releases/download/v0.12.6/nvim-linux-x86_64.tar.gz',
+        format: 'tar.gz',
+        extract: 'tree',
+        stripComponents: 1,
+        oses: ['debian'],
+      },
+    ],
+    binDirs: ['bin'],
+  },
+  {
+    // GNU Emacs, bundled — not system-installed. The trixie amd64
+    // .debs are downloaded, sha256-verified, and extracted
+    // (dpkg-deb -x layout) into the plugin's own directory; nothing
+    // is installed into the system, so `packages` is deliberately
+    // OMITTED here (the os_and_fixes test requires any present
+    // packages.arch to be non-empty, and an empty packages block
+    // would also invite InstallPlugin to apt-get install it).
+    // VERSION DEVIATION (coordinator decision): pinned
+    // 1:30.1+1-6+deb13u1, the current trixie security update, NOT
+    // the 1:30.1+1-6 named in the original plan — 1:30.1+1-6 is
+    // superseded and only available from snapshot.debian.org now.
+    // All sha256s below were verified by downloading the .debs and
+    // hashing locally against the live trixie Packages index.
+    // The three emacs .debs alone do NOT run: the extracted binary
+    // is usr/bin/emacs-nox (no /usr/bin/emacs alternatives symlink
+    // under dpkg-deb -x — bin/emacs is a launcher written at
+    // install time) and it hard-links libgccjit.so.0,
+    // libasound.so.2 and liblcms2.so.2, none of which are in the
+    // base image. The bundle also carries libgccjit0 (+ its .so
+    // deps libisl23, libmpc3, libmpfr6), libasound2t64 (+ tiny
+    // libasound2-data) and liblcms2-2; the lib .debs' binary
+    // packages are built from differently-named source packages,
+    // hence the `source` field on each. Full bundle: ~35.6 MB
+    // download, ~169 MB on disk. emacs-el is deliberately SKIPPED:
+    // only the .el sources (19.5 MB) — the .elc files live in
+    // emacs-common itself. Native-comp: VERIFIED live 2026-11-20
+    // that JIT-compiling new code FAILS at the link step ("ld:
+    // cannot find crtbeginS.o", a gcc-14 file, not bundled), so the
+    // plugin ships byte-compiled-only — init.el sets
+    // native-comp-jit-compilation to nil; the prebuilt .eln files
+    // for the preloaded libs still load.
+    id: 'cli-emacs',
+    name: 'Emacs Editor (GNU Emacs, no-X) for /etc/axonwall',
+    version: '0.1.0',
+    category: 'extension',
+    description:
+      'GNU Emacs (no-X) for editing /etc/axonwall configuration files, bundled with the plugin: the Debian emacs-nox 30.1 tree plus its missing shared libraries are downloaded, checksum-verified, and extracted into the plugin\'s own directory, and its bin directory is added to PATH for daemon invocations and interactive shells. Nothing is installed into the system.',
+    author: 'Axonwall Core',
+    systemdUnits: [],
+    privileges: ['system.users', 'system.config.write'],
+    cliBinaries: ['emacs', 'emacs-nox'],
+    binaries: [
+      {
+        kind: 'distroPackage',
+        name: 'emacs-nox',
+        sha256: 'fee9e5bc5d4c0da716e3e12eee8e1b063bd24a58a6ca6755be2516b377d50364',
+        distro: 'debian',
+        package: 'emacs-nox',
+        source: 'emacs',
+        version: '1:30.1+1-6+deb13u1',
+        arch: 'amd64',
+      },
+      {
+        kind: 'distroPackage',
+        name: 'emacs-bin-common',
+        sha256: '86ad88ffb8d0024fe22a4b95863918655ecb10523c4bcdd199540da75f67c4db',
+        distro: 'debian',
+        package: 'emacs-bin-common',
+        source: 'emacs',
+        version: '1:30.1+1-6+deb13u1',
+        arch: 'amd64',
+      },
+      {
+        kind: 'distroPackage',
+        name: 'emacs-common',
+        sha256: '1a20b06410720a432bd6c82a455a919b7083011e02a3c7b46243e65d8582791b',
+        distro: 'debian',
+        package: 'emacs-common',
+        source: 'emacs',
+        version: '1:30.1+1-6+deb13u1',
+        arch: 'all',
+      },
+      {
+        kind: 'distroPackage',
+        name: 'libgccjit0',
+        sha256: 'cab79f341f9b1ee14a03bc6ca1c1ecdb2d52b2a346d1e011c47682e5f45453f9',
+        distro: 'debian',
+        package: 'libgccjit0',
+        source: 'gcc-14',
+        version: '14.2.0-19',
+        arch: 'amd64',
+      },
+      {
+        kind: 'distroPackage',
+        name: 'libisl23',
+        sha256: 'ac8518042e81c00de1effb72bba7e88ac4ecd488f7ea8b9e3ebc63159cb53b35',
+        distro: 'debian',
+        package: 'libisl23',
+        source: 'isl',
+        version: '0.27-1',
+        arch: 'amd64',
+      },
+      {
+        kind: 'distroPackage',
+        name: 'libmpc3',
+        sha256: '2af0a5c128e03694a41c0b011bd8a958b7297436cdb3a15ddad7866dae8c300b',
+        distro: 'debian',
+        package: 'libmpc3',
+        source: 'mpclib3',
+        version: '1.3.1-1+b3',
+        arch: 'amd64',
+      },
+      {
+        kind: 'distroPackage',
+        name: 'libmpfr6',
+        sha256: '75dddce11dabc7fc543712c33dc27b7f2ee66a111763eb5eac654d010b42cd92',
+        distro: 'debian',
+        package: 'libmpfr6',
+        source: 'mpfr4',
+        version: '4.2.2-1',
+        arch: 'amd64',
+      },
+      {
+        kind: 'distroPackage',
+        name: 'libasound2t64',
+        sha256: '5495496142d57e5ad6d581ac5456ec3c87f872c109a2bfb815d154b673eebc67',
+        distro: 'debian',
+        package: 'libasound2t64',
+        source: 'alsa-lib',
+        version: '1.2.14-1+deb13u1',
+        arch: 'amd64',
+      },
+      {
+        kind: 'distroPackage',
+        name: 'libasound2-data',
+        sha256: '04688afdff3769c0f685541daed7b2f6f0cb946799ddf1d5847ddf11fe245559',
+        distro: 'debian',
+        package: 'libasound2-data',
+        source: 'alsa-lib',
+        version: '1.2.14-1+deb13u1',
+        arch: 'all',
+      },
+      {
+        kind: 'distroPackage',
+        name: 'liblcms2-2',
+        sha256: '32e53c2002ccea8c60c02779bea0ba49ac132fef702988a30d64af79b6617806',
+        distro: 'debian',
+        package: 'liblcms2-2',
+        source: 'lcms2',
+        version: '2.16-2+deb13u2',
+        arch: 'amd64',
+      },
+    ],
+    // bin/ first: the bin/emacs launcher (written at install time)
+    // wins over the raw usr/bin/emacs-nox for PATH resolution.
+    binDirs: ['bin', 'usr/bin'],
+    env: {
+      // EMACSDATA is the *etc* directory, not the version
+      // directory: data-directory IS the etc dir (GNU Emacs FAQ),
+      // and the startup charsets check looks for
+      // <EMACSDATA>/charsets. Pointing it at the version dir makes
+      // that check fail; verified live 2026-11-20.
+      EMACSDATA: '${PLUGIN_DIR}/usr/share/emacs/30.1/etc',
+      // EMACSPATH is the arch-dependent (libexec) dir. It does NOT
+      // redirect the pdmp lookup — install time symlinks the dump
+      // to usr/bin/emacs-nox.pdmp for that.
+      EMACSPATH: '${PLUGIN_DIR}/usr/libexec/emacs/30.1/x86_64-linux-gnu',
+      // EMACSLOADPATH is the lisp tree: the dumped load-path still
+      // names the compiled-in /usr/share/emacs/30.1/lisp, so
+      // without this emacs cannot find simple.el or any mode.
+      // Startup adds the lisp subdirectories automatically.
+      EMACSLOADPATH: '${PLUGIN_DIR}/usr/share/emacs/30.1/lisp:${PLUGIN_DIR}/usr/share/emacs/site-lisp',
+      // The bundled lib .debs extract to
+      // <plugindir>/usr/lib/x86_64-linux-gnu/ — the loader does NOT
+      // search there by default, so daemon invocations need it on
+      // LD_LIBRARY_PATH. The bin/emacs launcher sets the same value
+      // for interactive shells (the shell PATH snippets carry PATH
+      // only, not Env).
+      LD_LIBRARY_PATH: '${PLUGIN_DIR}/usr/lib/x86_64-linux-gnu',
+    },
+  },
+  {
+    // Doom Emacs, sharing the cli-emacs binary — no second copy of
+    // the emacs binary/data tree (no `binaries` entry for emacs here,
+    // by design; bin/emacs-doom execs the sibling cli-emacs plugin's
+    // usr/bin/emacs-nox). `dependencies: ['cli-emacs']` activates
+    // the generic guard (cli-emacs cannot be disabled/uninstalled
+    // while this plugin is enabled) and the DesiredState
+    // auto-enable. `packages` is deliberately OMITTED (like
+    // cli-emacs): nothing is system-installed.
+    // PINS (observed by cloning upstream 2026-11-20):
+    //   doomemacs/core    eab52d2fe5e58303696e129717553ec5bf031bb0 (2026-11-15)
+    //   doomemacs/modules f054be8fcdd2a0446eb8259d76dd4f6f76acc0b7 (2026-11-03)
+    // Doom pins are real: every package carries a :pin and `doom sync`
+    // (run at install time) respects them. DECISIONS: no evil
+    // (operators are emacs-preferring; one-line change to add it); no
+    // +lsp, no vterm, no flycheck (no Node/cmake/checkers on the box);
+    // no -nw forced. Module set: completion corfu+vertico, ui doom
+    // hl-todo, emacs dired electric undo vc, term eshell, tools magit
+    // editorconfig, os tty, lang data emacs-lisp json sh yaml, config
+    // default+bindings+smartparens. UNVERIFIED: non-interactive
+    // `doom sync`, `doom doctor` on Emacs 30.1, magit full clone,
+    // installed size, fd/fdfind — live first launch still mandatory.
+    id: 'cli-emacs-doom',
+    name: 'Doom Emacs for /etc/axonwall',
+    version: '0.1.0',
+    category: 'extension',
+    description:
+      'Doom Emacs for editing /etc/axonwall configuration files, sharing the cli-emacs bundled GNU Emacs 30.1 binary: the Doom core and modules are cloned at pinned commits and packages installed with doom sync at install time. No evil mode (operators are emacs-preferring), no LSP or vterm (no language servers or C toolchain on the box).',
+    author: 'Axonwall Core',
+    dependencies: ['cli-emacs'],
+    systemdUnits: [],
+    privileges: ['system.users', 'system.config.write'],
+    cliBinaries: ['emacs-doom'],
+    binDirs: ['bin'],
+  },
+  {
+    // Spacemacs (develop branch), sharing the cli-emacs binary — no
+    // second copy of the emacs binary/data tree (no `binaries` entry
+    // for emacs here, by design). `dependencies: ['cli-emacs']`
+    // activates the generic guard and the DesiredState auto-enable.
+    // `packages` is deliberately OMITTED: nothing is
+    // system-installed.
+    // PIN (observed by cloning upstream 2026-11-20):
+    //   syl20bnr/spacemacs develop
+    //     1f69b2a854a7a46f709def08412dbd5d6dc073a1 (2026-11-09)
+    // LATEST-AT-INSTALL, NOT PINNED: Spacemacs has no per-package
+    // version pinning (upstream issue #6531). Only the Spacemacs
+    // commit is pinned; first start downloads the latest snapshot of
+    // every layer package from MELPA/GNU ELPA and needs network. Do
+    // not describe this install as pinned. The vendored-elpa-snapshot
+    // follow-up is what would make it reproducible; it is NOT done
+    // on this branch. Install does no first start and no package
+    // install; the pre-seeded dotfile is the attempt at suppressing
+    // the first-start wizard, and whether it fully suppresses it is
+    // UNVERIFIED. DECISIONS: editing style 'emacs, NOT vim; shell
+    // layer uses eshell, NEVER vterm; prettier-js/web-beautify
+    // excluded (need Node). Layer set: helm, auto-completion,
+    // better-defaults, emacs-lisp, git, version-control, shell
+    // (eshell), syntax-checking, yaml, json. No -nw forced. Install
+    // fails closed if ~/.spacemacs exists (it always wins over
+    // SPACEMACSDIR). No explicit upstream "supports Emacs 30.1"
+    // statement — first-start smoke test on the box is mandatory.
+    id: 'cli-emacs-spacemacs',
+    name: 'Spacemacs for /etc/axonwall',
+    version: '0.1.0',
+    category: 'extension',
+    description:
+      'Spacemacs (develop branch) for editing /etc/axonwall configuration files, sharing the cli-emacs bundled GNU Emacs 30.1 binary. The Spacemacs core is cloned at a pinned commit; its packages are downloaded from MELPA/GNU ELPA on first start (latest versions — Spacemacs cannot pin package versions), so a first start needs network. Emacs editing style, not vim.',
+    author: 'Axonwall Core',
+    dependencies: ['cli-emacs'],
+    systemdUnits: [],
+    privileges: ['system.users', 'system.config.write'],
+    cliBinaries: ['emacs-spacemacs'],
+    binDirs: ['bin'],
   },
   {
     id: 'cli-diagnostics-nastymap',
@@ -398,7 +709,7 @@ export const BUILTIN_PLUGINS: PluginManifest[] = [
   {
     id: 'rosenpass',
     name: 'Rosenpass Post-Quantum WireGuard (McEliece + ML-KEM)',
-    version: '0.2.2',
+    version: '0.2.3',
     category: 'extension',
     description:
       'Hybrid Dual-KEM post-quantum key exchange daemon (Classic McEliece 460896 static authentication + ephemeral ML-KEM-512 forward secrecy) that rotates kernel WireGuard pre-shared keys every 120s with fail-closed boot protection.',
@@ -412,6 +723,32 @@ export const BUILTIN_PLUGINS: PluginManifest[] = [
       arch: ['rosenpass', 'wireguard-tools'],
     },
     cliBinaries: ['rosenpass', 'wg'],
+    // Bundled (was: unverified `curl | tar` into /usr/local/bin at
+    // install time). The v0.2.3 release tarball is now downloaded,
+    // sha256-verified, and extracted into the plugin's own directory
+    // (<plugindir>/bin/rosenpass); the systemd unit's ExecStart
+    // points there. Behaviour change: the binary moves from
+    // /usr/local/bin to the plugin dir; same version (0.2.3), same
+    // unit semantics. Uninstall removes the legacy
+    // /usr/local/bin/rosenpass and /usr/local/bin/rp if present.
+    // CHECKSUM CAVEAT: rosenpass publishes NO checksum for this
+    // tarball — the sha256 below was computed locally from the bytes
+    // GitHub served for that asset URL on 2026-11-20 (asset size
+    // 4,802,560 bytes). Do NOT claim it is an official published
+    // checksum. No second entry for `rp`: the tarball also contains
+    // bin/rp, but `rp` is used nowhere in the codebase, so it is not
+    // bundled.
+    binaries: [
+      {
+        kind: 'archive',
+        name: 'rosenpass',
+        sha256: '53158a8c339e3be1a9520b91c33a9e83eab05ea49af346cdb7e6eec522f2318b',
+        url: 'https://github.com/rosenpass/rosenpass/releases/download/v0.2.3/rosenpass-x86_64-linux-0.2.3.tar',
+        format: 'tar',
+        pathInArchive: 'bin/rosenpass',
+      },
+    ],
+    binDirs: ['bin'],
     menuEntry: {
       title: 'Post-Quantum (Rosenpass)',
       path: '/vpn/rosenpass',

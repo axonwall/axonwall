@@ -13,7 +13,17 @@ export _AXONWALL_ZSH_LOADED=1
 export EDITOR="vim"
 export VISUAL="vim"
 export PAGER="less -FRX"
-export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+# Preserve any PATH entries added earlier (e.g. plugin bin dirs from
+# /etc/zsh/zshenv): add each system dir only if missing, instead of
+# resetting PATH outright. The old hard reset wiped plugin PATH
+# entries in non-login interactive zsh (tmux panes, `zsh` started
+# from another shell), which zlogin never heals — only login shells
+# were restored. This loop is idempotent and preserves order.
+for _d in /bin /sbin /usr/bin /usr/sbin /usr/local/bin /usr/local/sbin; do
+  case ":$PATH:" in *":$_d:"*) ;; *) PATH="$_d:$PATH";; esac
+done
+export PATH
+unset _d
 
 # Auto-detect K3s kubeconfig if present so kubectl / helm / k9s work immediately
 if [[ -z "${KUBECONFIG:-}" ]]; then

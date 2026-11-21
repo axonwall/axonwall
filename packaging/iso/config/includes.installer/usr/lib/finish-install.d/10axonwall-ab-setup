@@ -567,9 +567,16 @@ if [ "${INSTALL_EDITION:-axonwall}" = "k3s-storage" ] || [ -f /target/etc/axonwa
 
   if [ -d /target/usr/share/axonwall/k3s-storage ]; then
     KSTAGE="/target/usr/share/axonwall/k3s-storage"
-    if [ -f "${KSTAGE}/k3s" ] && [ ! -x /target/usr/local/bin/k3s ]; then
-      cp -f "${KSTAGE}/k3s" /target/usr/local/bin/k3s
-      chmod 0755 /target/usr/local/bin/k3s
+    # k3s lives in the core-k3s plugin dir now (see axonwall-install
+    # for the same fallback). A staged bundled.json comes along when
+    # present so the daemon's verifyBundledBinaries passes without a
+    # re-download; when absent no record is written and the daemon
+    # downloads the missing binary on first core-k3s install.
+    if [ -f "${KSTAGE}/k3s" ] && [ ! -x /target/var/lib/axonwall/core-k3s/bin/k3s ]; then
+      mkdir -p /target/var/lib/axonwall/core-k3s/bin
+      cp -f "${KSTAGE}/k3s" /target/var/lib/axonwall/core-k3s/bin/k3s
+      chmod 0755 /target/var/lib/axonwall/core-k3s/bin/k3s
+      [ -f "${KSTAGE}/bundled.json" ] && cp -f "${KSTAGE}/bundled.json" /target/var/lib/axonwall/core-k3s/bundled.json
     fi
     for kunit in k3s.service k3s-agent.service axonwall-k3s-firstboot.service axonwall-k3s-verify.service; do
       if [ -f "${KSTAGE}/${kunit}" ]; then
@@ -596,7 +603,7 @@ if [ "${INSTALL_EDITION:-axonwall}" = "k3s-storage" ] || [ -f /target/etc/axonwa
   # Check the /target destinations so flavour ISOs whose payload is
   # already in /target still pass; abort loudly on anything missing.
   _k3s_missing=""
-  [ -x /target/usr/local/bin/k3s ] || _k3s_missing="${_k3s_missing} /target/usr/local/bin/k3s"
+  [ -x /target/var/lib/axonwall/core-k3s/bin/k3s ] || _k3s_missing="${_k3s_missing} /target/var/lib/axonwall/core-k3s/bin/k3s"
   for kunit in k3s.service k3s-agent.service axonwall-k3s-firstboot.service axonwall-k3s-verify.service; do
     [ -f "/target/etc/systemd/system/${kunit}" ] || _k3s_missing="${_k3s_missing} /target/etc/systemd/system/${kunit}"
   done
@@ -608,10 +615,10 @@ if [ "${INSTALL_EDITION:-axonwall}" = "k3s-storage" ] || [ -f /target/etc/axonwa
     exit 1
   fi
 
-  if [ -x /target/usr/local/bin/k3s ]; then
+  if [ -x /target/var/lib/axonwall/core-k3s/bin/k3s ]; then
     for _klink in kubectl crictl ctr; do
-      if [ ! -e "/target/usr/local/bin/${_klink}" ] && [ ! -e "/target/usr/bin/${_klink}" ]; then
-        ln -sf k3s "/target/usr/local/bin/${_klink}"
+      if [ ! -e "/target/var/lib/axonwall/core-k3s/bin/${_klink}" ] && [ ! -e "/target/usr/bin/${_klink}" ]; then
+        ln -sf k3s "/target/var/lib/axonwall/core-k3s/bin/${_klink}"
       fi
     done
   fi

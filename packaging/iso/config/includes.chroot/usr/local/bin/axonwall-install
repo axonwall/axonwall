@@ -1993,9 +1993,19 @@ if [ "${INSTALL_EDITION:-axonwall}" = "vault" ] || [ -f /mnt/slot_a/etc/axonwall
   # Stage k3s-storage payload from /usr/share/axonwall/k3s-storage if installing from unified ISO
   if [ -d /mnt/slot_a/usr/share/axonwall/k3s-storage ]; then
     KSTAGE="/mnt/slot_a/usr/share/axonwall/k3s-storage"
-    if [ -f "${KSTAGE}/k3s" ] && [ ! -x /mnt/slot_a/usr/local/bin/k3s ]; then
-      cp -f "${KSTAGE}/k3s" /mnt/slot_a/usr/local/bin/k3s
-      chmod 0755 /mnt/slot_a/usr/local/bin/k3s
+    # k3s lives in the core-k3s plugin dir now. The staged binary
+    # normally reaches the target with the live rootfs copy; this
+    # KSTAGE fallback only fires when a k3s binary was staged into
+    # /usr/share/axonwall/k3s-storage (no builder does that today).
+    # A staged bundled.json comes along when present so the daemon's
+    # verifyBundledBinaries passes without a re-download; when it is
+    # absent (k3s copied without k9s) no record is written and the
+    # daemon downloads the missing binary on first core-k3s install.
+    if [ -f "${KSTAGE}/k3s" ] && [ ! -x /mnt/slot_a/var/lib/axonwall/core-k3s/bin/k3s ]; then
+      mkdir -p /mnt/slot_a/var/lib/axonwall/core-k3s/bin
+      cp -f "${KSTAGE}/k3s" /mnt/slot_a/var/lib/axonwall/core-k3s/bin/k3s
+      chmod 0755 /mnt/slot_a/var/lib/axonwall/core-k3s/bin/k3s
+      [ -f "${KSTAGE}/bundled.json" ] && cp -f "${KSTAGE}/bundled.json" /mnt/slot_a/var/lib/axonwall/core-k3s/bundled.json
     fi
     if [ "$OS_FAMILY" != "alpine" ]; then
       mkdir -p /mnt/slot_a/etc/systemd/system/multi-user.target.wants
@@ -2019,11 +2029,14 @@ if [ "${INSTALL_EDITION:-axonwall}" = "vault" ] || [ -f /mnt/slot_a/etc/axonwall
     done
   fi
 
-  # Ensure kubectl / crictl / ctr convenience symlinks point to k3s if absent
-  if [ -x /mnt/slot_a/usr/local/bin/k3s ]; then
+  # Ensure kubectl / crictl / ctr convenience symlinks point to the
+  # plugin-dir k3s if absent. They live in the plugin bin dir now,
+  # not /usr/local/bin; the /usr/bin guard still wins for a real
+  # kubectl installed from apt.
+  if [ -x /mnt/slot_a/var/lib/axonwall/core-k3s/bin/k3s ]; then
     for _klink in kubectl crictl ctr; do
-      if [ ! -e "/mnt/slot_a/usr/local/bin/${_klink}" ] && [ ! -e "/mnt/slot_a/usr/bin/${_klink}" ]; then
-        ln -sf k3s "/mnt/slot_a/usr/local/bin/${_klink}"
+      if [ ! -e "/mnt/slot_a/var/lib/axonwall/core-k3s/bin/${_klink}" ] && [ ! -e "/mnt/slot_a/usr/bin/${_klink}" ]; then
+        ln -sf k3s "/mnt/slot_a/var/lib/axonwall/core-k3s/bin/${_klink}"
       fi
     done
   fi

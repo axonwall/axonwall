@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
@@ -201,6 +202,17 @@ func resolveKubectlBinary() (bin string, baseArgs []string, env []string, err er
 		return path, nil, env, nil
 	}
 	if path, lookErr := exec.LookPath("k3s"); lookErr == nil {
+		return path, []string{"kubectl"}, env, nil
+	}
+	// Bundled core-k3s plugin paths last: the daemon's PATH never
+	// contains the plugin bin dir, so on an appliance whose only
+	// kubectl/k3s is the staged plugin tree the LookPath attempts
+	// above both miss. The plugin kubectl symlink is preferred
+	// over `k3s kubectl`, matching resolveCoreK3sKubectl in k3s.go.
+	if path := filepath.Join(coreK3sBinDir(), "kubectl"); isExecutableFile(path) {
+		return path, nil, env, nil
+	}
+	if path := coreK3sBinaryPath(); isExecutableFile(path) {
 		return path, []string{"kubectl"}, env, nil
 	}
 	return "", nil, nil, fmt.Errorf("kubectl/k3s binary not found on system")

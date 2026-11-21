@@ -60,6 +60,35 @@ func ValidateRosenpassPeerName(name string) error {
 	return nil
 }
 
+// rosenpassPluginBinaryPath returns the plugin-dir path of the
+// bundled rosenpass binary (<stateDir>/rosenpass/bin/rosenpass).
+// The state dir follows the same rule as the daemon's
+// axonwallStateDir: AXONWALL_STATE_DIR when set, else
+// /var/lib/axonwall. Kept in this file (not on PluginManager)
+// because GenerateRosenpassKeypair / ProvisionRosenpassEnvironment
+// are free functions called from main.go as well as plugins.go.
+func rosenpassPluginBinaryPath() string {
+	stateDir := strings.TrimSpace(os.Getenv("AXONWALL_STATE_DIR"))
+	if stateDir == "" {
+		stateDir = "/var/lib/axonwall"
+	}
+	return filepath.Join(stateDir, "rosenpass", "bin", "rosenpass")
+}
+
+// resolveRosenpassBinary returns the rosenpass binary to run: the
+// plugin-dir bundled binary first (the migration from
+// /usr/local/bin), then any rosenpass on the system PATH (e.g. the
+// Alpine apk package at /usr/bin/rosenpass), else "".
+func resolveRosenpassBinary() string {
+	if p := rosenpassPluginBinaryPath(); isExecutableFile(p) {
+		return p
+	}
+	if resolved, err := exec.LookPath("rosenpass"); err == nil && resolved != "" {
+		return resolved
+	}
+	return ""
+}
+
 func GenerateRosenpassKeypair(baseDir string, force bool) (string, int64, error) {
 	if baseDir == "" {
 		baseDir = DefaultRosenpassDir
@@ -94,7 +123,7 @@ func GenerateRosenpassKeypair(baseDir string, force bool) (string, int64, error)
 	_ = os.Remove(skPath)
 
 	generatedByBinary := false
-	if binPath, err := exec.LookPath("rosenpass"); err == nil && binPath != "" {
+	if binPath := resolveRosenpassBinary(); binPath != "" {
 		cmd := exec.Command(binPath, "gen-keys", "--secret-key", skPath, "--public-key", pkPath)
 		if out, err := cmd.CombinedOutput(); err != nil {
 			return "", 0, fmt.Errorf("rosenpass gen-keys failed: %s (%w)", string(out), err)
@@ -186,11 +215,15 @@ verbosity = "Quiet"
 			}
 		}
 		// A-M29: ExecStart must point at the rosenpass binary that is
-		// actually installed. The unit hardcoded /usr/bin/rosenpass
-		// (correct only for the Alpine apk package) while InstallPlugin
-		// downloads the binary to /usr/local/bin/rosenpass on Debian.
+		// actually installed. Resolution order (see
+		// resolveRosenpassBinary): the plugin-dir bundled binary
+		// first, then any rosenpass on PATH (e.g. the Alpine apk
+		// package at /usr/bin/rosenpass), else the /usr/bin
+		// fallback. The old /usr/local/bin download location is
+		// gone: InstallPlugin no longer writes it, and uninstall
+		// removes any legacy copy left there.
 		binPath := "/usr/bin/rosenpass"
-		if resolved, err := exec.LookPath("rosenpass"); err == nil && resolved != "" {
+		if resolved := resolveRosenpassBinary(); resolved != "" {
 			binPath = resolved
 		}
 		unitContent := fmt.Sprintf(`[Unit]
@@ -323,7 +356,9 @@ func GetRosenpassStatus(baseDir string, wgDevice string) RosenpassStatus {
 	pkPath := filepath.Join(baseDir, "pq.pk")
 	skPath := filepath.Join(baseDir, "pq.sk")
 
-	_, binErr := exec.LookPath("rosenpass")
+	// BinaryInstalled is true when a runnable rosenpass exists:
+	// the plugin-dir bundled binary, or one on the system PATH.
+	binInstalled := resolveRosenpassBinary() != ""
 	serviceActive := false
 	if out, err := exec.Command("systemctl", "is-active", "rosenpass").Output(); err == nil {
 		if strings.TrimSpace(string(out)) == "active" {
@@ -332,7 +367,7 @@ func GetRosenpassStatus(baseDir string, wgDevice string) RosenpassStatus {
 	}
 
 	status := RosenpassStatus{
-		BinaryInstalled: binErr == nil,
+		BinaryInstalled: binInstalled,
 		ServiceActive:   serviceActive,
 		PublicKeyPath:   pkPath,
 		PeerKeys:        []RosenpassPeerKeyFile{},

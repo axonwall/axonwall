@@ -1,54 +1,219 @@
 package engine
 
 import (
+	"archive/tar"
+	"archive/zip"
+	"compress/gzip"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
+	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 )
 
 type PluginDefinition struct {
-	ID               string          `json:"id"`
-	Name             string          `json:"name"`
-	Version          string          `json:"version"`
-	Category         string          `json:"category"`
-	Description      string          `json:"description"`
-	Author           string          `json:"author"`
-	DefaultEnabled   bool            `json:"defaultEnabled"`
-	Dependencies     []string        `json:"dependencies,omitempty"`
-	SystemdUnits     []string        `json:"systemdUnits"`
-	Privileges       []string        `json:"privileges"`
-	DebianPackages   []string        `json:"debianPackages"`
-	AlpinePackages   []string        `json:"alpinePackages"`
-	ArchPackages     []string        `json:"archPackages"`
-	RequiredBinaries []string        `json:"requiredBinaries"`
-	LdapIntegration  *PluginLDAPSpec `json:"ldapIntegration,omitempty"`
+	ID               string   `json:"id"`
+	Name             string   `json:"name"`
+	Version          string   `json:"version"`
+	Category         string   `json:"category"`
+	Description      string   `json:"description"`
+	Author           string   `json:"author"`
+	DefaultEnabled   bool     `json:"defaultEnabled"`
+	Dependencies     []string `json:"dependencies,omitempty"`
+	SystemdUnits     []string `json:"systemdUnits"`
+	Privileges       []string `json:"privileges"`
+	DebianPackages   []string `json:"debianPackages"`
+	AlpinePackages   []string `json:"alpinePackages"`
+	ArchPackages     []string `json:"archPackages"`
+	RequiredBinaries []string `json:"requiredBinaries"`
+
+	// Binaries are binaries shipped with the plugin: downloaded into
+	// the plugin's own directory, sha256-verified, and extracted
+	// there — never installed into the system. Additive alongside
+	// RequiredBinaries, which keeps working as-is. See
+	// PluginBundledBinary.
+	// BinDirs are plugin-owned directories (relative to the per-plugin
+	// directory, e.g. "usr/bin" for a tree extracted from .debs) added
+	// to PATH for daemon invocations and interactive shells. Guard
+	// rules (enforced by the TS schema; the daemon must enforce them
+	// too before use): relative only — no absolute paths, no ".."
+	// segments, no empty entries.
+	// Env holds extra per-plugin environment variables (e.g. EMACSDATA
+	// pointing at a bundled data tree). Keys must be valid env-var
+	// names ([A-Za-z_][A-Za-z0-9_]*). Values may reference the plugin's
+	// own directory via the ${PLUGIN_DIR} placeholder, expanded by the
+	// daemon/shell integration to the per-plugin directory.
+	Binaries        []PluginBundledBinary `json:"binaries,omitempty"`
+	BinDirs         []string              `json:"binDirs,omitempty"`
+	Env             map[string]string     `json:"env,omitempty"`
+	LdapIntegration *PluginLDAPSpec       `json:"ldapIntegration,omitempty"`
+}
+
+// PluginBundledBinary declares one binary artifact bundled with a
+// plugin. Kind discriminates the three source kinds unambiguously:
+//
+//   - "archive": a downloadable archive. URL is required; Distro /
+//     Package / Version / Arch must be empty. Name is the binary the
+//     archive provides (e.g. "rosenpass", fetched from
+//     https://github.com/rosenpass/rosenpass/releases/download/v0.2.3/rosenpass-x86_64-linux-0.2.3.tar).
+//     Format is the container ("tar", "tar.gz"/"tgz", "zip"; default
+//     "tar"). PathInArchive is the binary's path inside the archive,
+//     relative with no ".."; it defaults to Name. By default an
+//     archive entry extracts exactly that one binary into
+//     <plugindir>/bin/<name> (Extract "" or "binary"); with
+//     Extract "tree" the WHOLE archive is extracted into the plugin
+//     dir, preserving member paths (bin/, lib/, share/, ...), after
+//     stripping StripComponents leading path components — e.g. the
+//     neovim release tarball wraps everything under a single
+//     top-level "nvim-linux-x86_64/" dir, so StripComponents 1
+//     lands the tree at <plugindir>/bin/nvim,
+//     <plugindir>/lib/..., <plugindir>/share/... . Tree extraction
+//     follows the same safety rules as single-binary extraction
+//     (no symlinks/hardlinks/devices, no absolute or ".." members,
+//     no member escaping the plugin dir); a tree member that would
+//     be dropped by the strip (a regular file at or above the strip
+//     depth) fails the install instead of being silently skipped.
+//     PathInArchive must be empty for a tree entry: the strip is
+//     the mechanism that selects the tree root, not a member path.
+//     OSes, when non-empty, gates the entry to the listed host OS
+//     families ("debian", "alpine", "arch" — the DetectOSFamily
+//     values): an entry whose OS list does not include this host is
+//     SKIPPED at install and ignored by verification, so a
+//     Debian-only artifact (a glibc-linked tarball) never fails an
+//     Alpine/Arch install. An empty OSes means every OS. A plugin
+//     whose every entry is gated out on this host verifies trivially
+//     (nothing bundled to check) and its binaries keep resolving
+//     from the system packages, which must then still provide them
+//     — see cli-workstation: vim/neovim stay in AlpinePackages and
+//     ArchPackages for exactly this reason.
+//   - "binary": a downloadable raw single file (no archive
+//     container). URL is required; Distro / Package / Version /
+//     Arch / Format / PathInArchive must be empty. The verified
+//     bytes are placed directly at <plugindir>/bin/<name> with
+//     mode 0755 (e.g. "k3s", fetched as a bare static binary from
+//     its GitHub release).
+//   - "distroPackage": a distro package to download and extract
+//     (never install). URL must be empty; Distro / Package / Version /
+//     Arch are required. Name is the package name (e.g. "emacs-nox");
+//     the binaries it contributes are found via BinDirs after
+//     extraction. Version is the full version including epoch where
+//     the distro uses one (e.g. "1:30.1+1-6"); the daemon derives the
+//     file name from Package + Version + Arch (Debian filenames drop
+//     the epoch, e.g. "emacs-nox_30.1+1-6_amd64.deb" under
+//     pool/main/e/emacs/). Source is the Debian *source* package
+//     name, which is usually — but not always — the same as Package:
+//     emacs-nox/emacs-bin-common/emacs-common are all built from
+//     source "emacs"; libgccjit0 is built from source gcc-14,
+//     libisl23 from isl, libmpc3 from mpclib3, libmpfr6 from mpfr4,
+//     libasound2t64 / libasound2-data from alsa-lib, liblcms2-2
+//     from lcms2. The pool path is derived from Source (default:
+//     Package); a distroPackage entry whose binary package comes
+//     from a differently-named source MUST set Source or its
+//     download URL 404s.
+//
+// SHA256 is REQUIRED on every entry. It must be a 64-char hex digest,
+// except for temporary "SHA256_TODO_<name>" markers used while a hash
+// is still being resolved from the upstream index — those MUST be
+// replaced with the real digest before install, and the daemon MUST
+// fail closed (refuse to download/extract) on any entry whose SHA256
+// is still a SHA256_TODO_* marker or is not 64 hex chars. The Go
+// struct itself cannot enforce this; the TS PluginManifestSchema
+// enforces the shape and the daemon must validate before use.
+// Kind is "archive" (URL, Format, PathInArchive set; distro fields
+// empty), "binary" (URL set; Format, PathInArchive and distro fields
+// empty), or "distroPackage" (Distro, Package, Version, Arch set; URL
+// empty).
+type PluginBundledBinary struct {
+	Kind          string `json:"kind"`
+	Name          string `json:"name"`
+	SHA256        string `json:"sha256"`
+	URL           string `json:"url,omitempty"`
+	Format        string `json:"format,omitempty"`
+	PathInArchive string `json:"pathInArchive,omitempty"`
+	// Extract selects the archive extraction mode: "" or "binary"
+	// (default — exactly one member, PathInArchive, into bin/) or
+	// "tree" (the whole archive into the plugin dir, after
+	// stripping StripComponents leading components). Meaningless
+	// for kinds other than "archive" and must be empty there.
+	Extract string `json:"extract,omitempty"`
+	// StripComponents is the number of leading path components
+	// stripped from every member during tree extraction. Only
+	// meaningful with Extract "tree" and must be 0 otherwise.
+	StripComponents int `json:"stripComponents,omitempty"`
+	// OSes gates the entry to the listed host OS families. Empty
+	// means every OS. A gated-out entry is skipped at install and
+	// ignored by verification (see the type doc above).
+	OSes    []string `json:"oses,omitempty"`
+	Distro  string   `json:"distro,omitempty"`
+	Package string   `json:"package,omitempty"`
+	Source  string   `json:"source,omitempty"`
+	Version string   `json:"version,omitempty"`
+	Arch    string   `json:"arch,omitempty"`
+}
+
+// bundledEntryAppliesToOS reports whether a bundled-binary entry
+// applies on a host of the given OS family: true when the entry
+// carries no OS gate, or when the host's family is listed.
+func bundledEntryAppliesToOS(b PluginBundledBinary, osFamily string) bool {
+	if len(b.OSes) == 0 {
+		return true
+	}
+	for _, o := range b.OSes {
+		if o == osFamily {
+			return true
+		}
+	}
+	return false
+}
+
+// validOSFamilyName reports whether s is a known host OS family
+// value (the DetectOSFamily values).
+func validOSFamilyName(s string) bool {
+	switch s {
+	case "debian", "alpine", "arch":
+		return true
+	}
+	return false
 }
 
 type PluginStatus struct {
-	ID               string          `json:"id"`
-	Name             string          `json:"name"`
-	Version          string          `json:"version"`
-	Category         string          `json:"category"`
-	Description      string          `json:"description"`
-	Author           string          `json:"author"`
-	Enabled          bool            `json:"enabled"`
-	DefaultEnabled   bool            `json:"defaultEnabled"`
-	Dependencies     []string        `json:"dependencies,omitempty"`
-	Installed        bool            `json:"installed"`
-	Bundled          bool            `json:"bundled"`
-	RequiredBinaries []string        `json:"requiredBinaries"`
-	MissingBinaries  []string        `json:"missingBinaries"`
-	Packages         []string        `json:"packages"`
-	InstalledAt      string          `json:"installedAt,omitempty"`
-	SystemdUnits     []string        `json:"systemdUnits"`
-	LdapIntegration  *PluginLDAPSpec `json:"ldapIntegration,omitempty"`
+	ID               string   `json:"id"`
+	Name             string   `json:"name"`
+	Version          string   `json:"version"`
+	Category         string   `json:"category"`
+	Description      string   `json:"description"`
+	Author           string   `json:"author"`
+	Enabled          bool     `json:"enabled"`
+	DefaultEnabled   bool     `json:"defaultEnabled"`
+	Dependencies     []string `json:"dependencies,omitempty"`
+	Installed        bool     `json:"installed"`
+	Bundled          bool     `json:"bundled"`
+	RequiredBinaries []string `json:"requiredBinaries"`
+	MissingBinaries  []string `json:"missingBinaries"`
+	// BundledBinaries names the bundled binaries that verified
+	// present under this plugin's own directory (archive entry
+	// names, plus required binaries found under BinDirs for
+	// distroPackage entries). Empty when the plugin declares no
+	// Binaries, or when verification failed — a failed verification
+	// must never be reported as a verified bundled binary.
+	BundledBinaries []string        `json:"bundledBinaries,omitempty"`
+	Packages        []string        `json:"packages"`
+	InstalledAt     string          `json:"installedAt,omitempty"`
+	SystemdUnits    []string        `json:"systemdUnits"`
+	LdapIntegration *PluginLDAPSpec `json:"ldapIntegration,omitempty"`
 }
 
 type PluginActionRequest struct {
@@ -172,6 +337,102 @@ func (pm *PluginManager) ensurePluginLDAP(pluginID string) {
 	}
 }
 
+// GetCorePluginDefinitions returns the Go-side definitions for the
+// core-role plugins that declare bundled binaries. Today that is
+// only core-k3s.
+//
+// WHY A SEPARATE LIST, AND WHY ListPlugins DOES NOT CONSULT IT:
+// core roles are NOT extension plugins in the daemon API.
+// /v1/system/plugins (main.go) returns ListPlugins(), which iterates
+// GetExtensionPluginDefinitions() only, and the console renders the
+// core roles from the TS BUILTIN_PLUGINS table plus the capabilities
+// (k3sEnabled, ...) — the plugins page even special-cases core-k3s
+// by id. Adding core-k3s to ListPlugins would duplicate that card
+// and change the API shape for a migration whose scope is where the
+// binaries live, so ListPlugins stays extension-only and this list
+// is consulted ONLY by the bundled-binary machinery, through
+// findPluginDefinition: ensureBundledBinaries /
+// verifyBundledBinaries, PluginEnv / CommandForPlugin, and the
+// core-k3s Reconfigure branch. That is the whole Go-side home of
+// the core-k3s definition: one function, mirroring the TS entry in
+// packages/axonwall_lib/src/plugins/index.ts (same version, URLs
+// and sha256s — the two must stay in sync).
+//
+// The entry declares NO distroPackage binaries: k3s and k9s are
+// upstream release artifacts (a raw binary and a tarball). The
+// DebianPackages/AlpinePackages/ArchPackages lists are the OS
+// packages the role needs (curl, iptables, open-iscsi), unchanged
+// from the TS entry — they are not bundled binaries.
+func GetCorePluginDefinitions() []PluginDefinition {
+	return []PluginDefinition{
+		{
+			// Kubernetes (K3s) & OpenEBS Distributed Storage.
+			// Version 1.31.2 is the *plugin's* version (TS
+			// BUILTIN_PLUGINS), not the k3s binary version
+			// (v1.32.3+k3s1) — do not confuse the two.
+			//
+			// k3s v1.32.3+k3s1 (kind "binary"): upstream ships it
+			// as a bare statically-linked binary; the sha256 is
+			// the upstream-published digest from
+			// https://github.com/k3s-io/k3s/releases/download/v1.32.3%2Bk3s1/sha256sum-amd64.txt
+			// and matches the pin the builders carried before
+			// this move. k9s v0.51.0 (kind "archive", tar.gz):
+			// sha256 is the upstream-published digest for
+			// k9s_Linux_amd64.tar.gz from
+			// https://github.com/derailed/k9s/releases/download/v0.51.0/checksums.sha256.
+			// The tarball's members sit at the top level
+			// (LICENSE, README.md, k9s — no wrapping directory,
+			// verified 2026-11-20), so PathInArchive defaults
+			// to the binary name "k9s".
+			ID:               "core-k3s",
+			Name:             "Kubernetes (K3s) & OpenEBS Distributed Storage",
+			Version:          "1.31.2",
+			Category:         "core_role",
+			Description:      "Lightweight multi-node Kubernetes control plane with automatic HA second-node cluster join, OpenEBS ZFS-LocalPV, and synchronous 2-node Replicated Persistent Volumes.",
+			Author:           "CNCF / OpenEBS / Axonwall Core",
+			DefaultEnabled:   true,
+			SystemdUnits:     []string{"k3s.service"},
+			Privileges:       []string{"k3s.cluster", "storage.openebs"},
+			DebianPackages:   []string{"curl", "iptables", "open-iscsi"},
+			AlpinePackages:   []string{"curl", "iptables", "open-iscsi"},
+			ArchPackages:     []string{"curl", "iptables-nft", "open-iscsi"},
+			RequiredBinaries: []string{"k3s", "k9s"},
+			Binaries: []PluginBundledBinary{
+				{
+					Kind:   "binary",
+					Name:   "k3s",
+					SHA256: "b19216803650b567bf980888dec39035edaf664339c55bc4462f7a003edbef83",
+					URL:    "https://github.com/k3s-io/k3s/releases/download/v1.32.3%2Bk3s1/k3s",
+				},
+				{
+					Kind:   "archive",
+					Name:   "k9s",
+					SHA256: "c3752ad51a5a4015a113819c4eeb6e55a4d0e4b8e652494797532f6fc8161dd7",
+					URL:    "https://github.com/derailed/k9s/releases/download/v0.51.0/k9s_Linux_amd64.tar.gz",
+					Format: "tar.gz",
+				},
+			},
+			BinDirs: []string{"bin"},
+		},
+	}
+}
+
+// findPluginDefinition returns the definition for any known plugin
+// id — core first, then extension — or false when the id is unknown
+// to both lists. The bundled-binary machinery (PluginEnv,
+// CommandForPlugin, ensureBundledBinaries) uses this so core-k3s
+// resolves through the same path as extension plugins; callers
+// that are extension-only by design (ListPlugins, the LDAP loops)
+// keep using GetExtensionPluginDefinitions() directly.
+func findPluginDefinition(pluginID string) (PluginDefinition, bool) {
+	for _, d := range GetCorePluginDefinitions() {
+		if d.ID == pluginID {
+			return d, true
+		}
+	}
+	return findExtensionPluginDefinition(pluginID)
+}
+
 func GetExtensionPluginDefinitions() []PluginDefinition {
 	return []PluginDefinition{
 		{
@@ -183,10 +444,55 @@ func GetExtensionPluginDefinitions() []PluginDefinition {
 			Author:         "Axonwall Core",
 			DefaultEnabled: true,
 			Privileges:     []string{"system.users", "system.hardware"},
+			// VIM + NEOVIM ARE BUNDLED, NOT SYSTEM-INSTALLED — Debian
+			// only (coordinator decisions 1–2, 2026-11-20). vim is
+			// DROPPED entirely: vi/vim become symlinks to the
+			// bundled nvim in the plugin's bin/ dir (see
+			// ensureWorkstationNvimSymlinks), so the vim .deb set
+			// (vim + vim-runtime + vim-common + libgpm2 +
+			// libsodium23) is not bundled — neovim is already the
+			// default editor and vim.basic adds nothing once vi/vim
+			// point at nvim. DebianPackages therefore drops "vim"
+			// and "neovim" below; AlpinePackages/ArchPackages keep
+			// them (old behavior) because the nvim tarball is
+			// glibc-linked and cannot run on Alpine (musl), and
+			// the archive entry is gated to debian via OSes — on
+			// Alpine/Arch it is skipped at install and ignored by
+			// verification, and vim/nvim keep resolving from the
+			// system packages.
+			//
+			// CHECKSUM CAVEAT: neovim publishes NO checksum for
+			// this tarball (no .sha256, no SHA256SUMS, no hash in
+			// the release notes — checked for v0.12.6 and the four
+			// releases before it, 2026-11-20). The sha256 below
+			// was computed locally from the bytes GitHub served
+			// for that asset URL on 2026-11-20 (asset size
+			// 11,404,582 bytes; re-verified against the research
+			// scratch copy). Do NOT claim it is an official
+			// published checksum — it is not published anywhere
+			// upstream. If the release asset were ever replaced,
+			// the pinned hash fails closed, as intended.
+			//
+			// TREE, NOT SINGLE BINARY: nvim alone is not a
+			// working install — it needs share/nvim/runtime and
+			// lib/nvim/parser/*.so from the same tarball (verified
+			// live 2026-11-20: bin/nvim needs only libm/libgcc_s/
+			// libc, all in the base image, and resolves its
+			// runtime relative to its own location). Extract
+			// "tree" with StripComponents 1 strips the tarball's
+			// single top-level dir ("nvim-linux-x86_64/") so the
+			// tree lands at <plugindir>/bin/nvim,
+			// <plugindir>/lib/..., <plugindir>/share/... ; the
+			// whole tree (2,228 files, ~40 MB extracted) is
+			// recorded in bundled.json and re-verified on use.
+			// RequiredBinaries keeps listing "vim" and "nvim":
+			// both resolve via the plugin-local lookup
+			// (hasPluginBinaryForPlugin checks BinDirs with
+			// os.Stat, which follows the vi/vim symlinks to the
+			// executable nvim), and on Alpine/Arch they resolve
+			// from the system PATH as before.
 			DebianPackages: []string{
 				"zsh",
-				"vim",
-				"neovim",
 				"starship",
 				"tmux",
 				"zsh-autosuggestions",
@@ -232,6 +538,366 @@ func GetExtensionPluginDefinitions() []PluginDefinition {
 				"helm",
 			},
 			RequiredBinaries: []string{"zsh", "vim", "nvim", "starship", "tmux", "kubectl", "helm"},
+			Binaries: []PluginBundledBinary{
+				{
+					Kind:            "archive",
+					Name:            "nvim",
+					SHA256:          "474430d53e6264f6d6dd18db42d6dc9df3a1b56ca9e88a325bbf860e1a811d87",
+					URL:             "https://github.com/neovim/neovim/releases/download/v0.12.6/nvim-linux-x86_64.tar.gz",
+					Format:          "tar.gz",
+					Extract:         "tree",
+					StripComponents: 1,
+					OSes:            []string{"debian"},
+				},
+			},
+			BinDirs: []string{"bin"},
+		},
+		{
+			// GNU Emacs, bundled — not system-installed. The trixie
+			// amd64 .debs are downloaded, sha256-verified, and
+			// extracted (dpkg-deb -x layout) into the plugin's own
+			// directory; nothing is installed into the system, so
+			// DebianPackages/AlpinePackages/ArchPackages are
+			// deliberately empty (ArchPackages is an empty slice, not
+			// nil, per TestArchPluginPackagesAndRootkitScannerSlot).
+			//
+			// VERSION DEVIATION (coordinator decision): pinned
+			// 1:30.1+1-6+deb13u1, the current trixie security
+			// update, NOT the 1:30.1+1-6 named in the original
+			// plan — 1:30.1+1-6 is superseded and only available
+			// from snapshot.debian.org now. All sha256s below were
+			// verified by downloading the .debs and hashing locally
+			// against the live trixie Packages index (research
+			// notes 2026-11-20).
+			//
+			// The three emacs .debs alone do NOT run: the extracted
+			// binary is usr/bin/emacs-nox (dpkg-deb -x runs no
+			// maintainer scripts, so there is no /usr/bin/emacs
+			// alternatives symlink — bin/emacs is a launcher
+			// written at install time, see provisionEmacsPluginFiles)
+			// and it hard-links libgccjit.so.0, libasound.so.2 and
+			// liblcms2.so.2, none of which are in the base image.
+			// So the bundle also carries libgccjit0 (+ its .so
+			// deps libisl23, libmpc3, libmpfr6 — libgmp10,
+			// libzstd1 and zlib1g are already in the image),
+			// libasound2t64 (+ tiny libasound2-data) and
+			// liblcms2-2. The lib .debs' binary packages are built
+			// from differently-named source packages, hence the
+			// Source field on each (pool path is derived from it).
+			// Full bundle: ~35.6 MB download, ~169 MB on disk.
+			//
+			// emacs-el is deliberately SKIPPED: it is only the
+			// .el sources (19.5 MB download / 19.7 MB disk) — the
+			// .elc files live in emacs-common itself. Trade-off:
+			// describe-function cannot show Lisp sources and user
+			// code cannot byte-compile against those sources.
+			//
+			// Native-comp is UNVERIFIED with just this .so set:
+			// libgccjit compiles in-process, but Emacs native-comp
+			// also invokes the assembler/linker for the final .eln
+			// link step and gcc-14/cc1 is NOT in the base image.
+			// A live-box test must byte+natively compile a trivial
+			// .el file; if it fails, the fallback is
+			// native-comp-jit-compilation nil (byte-compiled only).
+			// VERIFIED 2026-11-20 (live extraction + run): JIT
+			// compilation of new code FAILS at the link step —
+			// "ld: cannot find crtbeginS.o" (a gcc-14 /
+			// libgcc-14-dev file, not bundled, and bundling a
+			// compiler toolchain onto the appliance is out of
+			// scope). The plugin therefore ships byte-compiled
+			// only: init.el sets native-comp-jit-compilation to
+			// nil, so emacs never attempts a JIT compile (and
+			// never shows the ld error); the prebuilt .eln files
+			// for the preloaded libs still load, and
+			// native-comp-available-p reports t.
+			ID:               "cli-emacs",
+			Name:             "Emacs Editor (GNU Emacs, no-X) for /etc/axonwall",
+			Version:          "0.1.0",
+			Category:         "extension",
+			Description:      "GNU Emacs (no-X) for editing /etc/axonwall configuration files, bundled with the plugin: the Debian emacs-nox 30.1 tree plus its missing shared libraries are downloaded, checksum-verified, and extracted into the plugin's own directory, and its bin directory is added to PATH for daemon invocations and interactive shells. Nothing is installed into the system.",
+			Author:           "Axonwall Core",
+			Privileges:       []string{"system.users", "system.config.write"},
+			DebianPackages:   []string{},
+			AlpinePackages:   []string{},
+			ArchPackages:     []string{},
+			RequiredBinaries: []string{"emacs", "emacs-nox"},
+			Binaries: []PluginBundledBinary{
+				{
+					Kind:    "distroPackage",
+					Name:    "emacs-nox",
+					SHA256:  "fee9e5bc5d4c0da716e3e12eee8e1b063bd24a58a6ca6755be2516b377d50364",
+					Distro:  "debian",
+					Package: "emacs-nox",
+					Source:  "emacs",
+					Version: "1:30.1+1-6+deb13u1",
+					Arch:    "amd64",
+				},
+				{
+					Kind:    "distroPackage",
+					Name:    "emacs-bin-common",
+					SHA256:  "86ad88ffb8d0024fe22a4b95863918655ecb10523c4bcdd199540da75f67c4db",
+					Distro:  "debian",
+					Package: "emacs-bin-common",
+					Source:  "emacs",
+					Version: "1:30.1+1-6+deb13u1",
+					Arch:    "amd64",
+				},
+				{
+					Kind:    "distroPackage",
+					Name:    "emacs-common",
+					SHA256:  "1a20b06410720a432bd6c82a455a919b7083011e02a3c7b46243e65d8582791b",
+					Distro:  "debian",
+					Package: "emacs-common",
+					Source:  "emacs",
+					Version: "1:30.1+1-6+deb13u1",
+					Arch:    "all",
+				},
+				{
+					Kind:    "distroPackage",
+					Name:    "libgccjit0",
+					SHA256:  "cab79f341f9b1ee14a03bc6ca1c1ecdb2d52b2a346d1e011c47682e5f45453f9",
+					Distro:  "debian",
+					Package: "libgccjit0",
+					Source:  "gcc-14",
+					Version: "14.2.0-19",
+					Arch:    "amd64",
+				},
+				{
+					Kind:    "distroPackage",
+					Name:    "libisl23",
+					SHA256:  "ac8518042e81c00de1effb72bba7e88ac4ecd488f7ea8b9e3ebc63159cb53b35",
+					Distro:  "debian",
+					Package: "libisl23",
+					Source:  "isl",
+					Version: "0.27-1",
+					Arch:    "amd64",
+				},
+				{
+					Kind:    "distroPackage",
+					Name:    "libmpc3",
+					SHA256:  "2af0a5c128e03694a41c0b011bd8a958b7297436cdb3a15ddad7866dae8c300b",
+					Distro:  "debian",
+					Package: "libmpc3",
+					Source:  "mpclib3",
+					Version: "1.3.1-1+b3",
+					Arch:    "amd64",
+				},
+				{
+					Kind:    "distroPackage",
+					Name:    "libmpfr6",
+					SHA256:  "75dddce11dabc7fc543712c33dc27b7f2ee66a111763eb5eac654d010b42cd92",
+					Distro:  "debian",
+					Package: "libmpfr6",
+					Source:  "mpfr4",
+					Version: "4.2.2-1",
+					Arch:    "amd64",
+				},
+				{
+					Kind:    "distroPackage",
+					Name:    "libasound2t64",
+					SHA256:  "5495496142d57e5ad6d581ac5456ec3c87f872c109a2bfb815d154b673eebc67",
+					Distro:  "debian",
+					Package: "libasound2t64",
+					Source:  "alsa-lib",
+					Version: "1.2.14-1+deb13u1",
+					Arch:    "amd64",
+				},
+				{
+					Kind:    "distroPackage",
+					Name:    "libasound2-data",
+					SHA256:  "04688afdff3769c0f685541daed7b2f6f0cb946799ddf1d5847ddf11fe245559",
+					Distro:  "debian",
+					Package: "libasound2-data",
+					Source:  "alsa-lib",
+					Version: "1.2.14-1+deb13u1",
+					Arch:    "all",
+				},
+				{
+					Kind:    "distroPackage",
+					Name:    "liblcms2-2",
+					SHA256:  "32e53c2002ccea8c60c02779bea0ba49ac132fef702988a30d64af79b6617806",
+					Distro:  "debian",
+					Package: "liblcms2-2",
+					Source:  "lcms2",
+					Version: "2.16-2+deb13u2",
+					Arch:    "amd64",
+				},
+			},
+			// bin/ first: the bin/emacs launcher (written at
+			// install time) wins over the raw usr/bin/emacs-nox
+			// for PATH resolution and for RequiredBinaries checks.
+			BinDirs: []string{"bin", "usr/bin"},
+			Env: map[string]string{
+				// EMACSDATA is the *etc* directory, not the
+				// version directory: data-directory IS the etc
+				// dir (GNU Emacs FAQ), and the startup charsets
+				// check looks for <EMACSDATA>/charsets — i.e.
+				// <plugindir>/usr/share/emacs/30.1/etc/charsets.
+				// Pointing it at the version dir makes that check
+				// fail ("Emacs will not function correctly
+				// without the character map files"), verified
+				// live 2026-11-20.
+				"EMACSDATA": "${PLUGIN_DIR}/usr/share/emacs/30.1/etc",
+				// EMACSPATH is the arch-dependent (libexec) dir:
+				// it silences the "arch-dependent data dir"
+				// warning and lets emacs find hexl/rcs2log. It
+				// does NOT redirect the pdmp lookup — the pdmp
+				// is only found next to the binary or at the
+				// compiled-in libexec path, so install time
+				// symlinks it to usr/bin/emacs-nox.pdmp (see
+				// provisionEmacsPluginFiles).
+				"EMACSPATH": "${PLUGIN_DIR}/usr/libexec/emacs/30.1/x86_64-linux-gnu",
+				// EMACSLOADPATH is the lisp tree: the dumped
+				// load-path still names the compiled-in
+				// /usr/share/emacs/30.1/lisp, which does not
+				// exist on the appliance, so without this emacs
+				// cannot find simple.el or any mode (verified
+				// live 2026-11-20). Startup adds the lisp
+				// subdirectories (progmodes, textmodes, vc, ...)
+				// automatically; only the two top dirs are needed.
+				"EMACSLOADPATH": "${PLUGIN_DIR}/usr/share/emacs/30.1/lisp:${PLUGIN_DIR}/usr/share/emacs/site-lisp",
+				// The bundled lib .debs extract to
+				// <plugindir>/usr/lib/x86_64-linux-gnu/ — the
+				// loader does NOT search there by default, so
+				// daemon invocations need it on
+				// LD_LIBRARY_PATH. The bin/emacs launcher sets
+				// the same value for interactive shells (the
+				// shell PATH snippets carry PATH only, not Env).
+				"LD_LIBRARY_PATH": "${PLUGIN_DIR}/usr/lib/x86_64-linux-gnu",
+			},
+		},
+		{
+			// Doom Emacs, sharing the cli-emacs binary — no second
+			// copy of the emacs binary/data tree (there is no
+			// Binaries entry for emacs here, by design; the
+			// bin/emacs-doom launcher execs the sibling cli-emacs
+			// plugin's usr/bin/emacs-nox). dependencies:
+			// ["cli-emacs"] activates the generic guard in
+			// enabledDependentsOf: cli-emacs cannot be disabled
+			// or uninstalled while this plugin is enabled. Install
+			// also fails closed without cli-emacs present (see
+			// installDoomEmacs).
+			//
+			// PINS (observed by cloning upstream 2026-11-20; see
+			// plugin_emacs_doom_spacemacs.go):
+			//   doomemacs/core    eab52d2fe5e58303696e129717553ec5bf031bb0 (2026-11-15)
+			//   doomemacs/modules f054be8fcdd2a0446eb8259d76dd4f6f76acc0b7 (2026-11-03)
+			//   bundled emacs     30.1 (the cli-emacs tree; Doom
+			//                       supports 27.1-31.1)
+			// Doom pins are real: every package carries a :pin in
+			// its module's packages.el and `doom sync` (run at
+			// install time) respects them, so the pinned
+			// (core + modules) pair determines the package set.
+			// The modules library ships as a git submodule of core
+			// (sources/doom+); install populates it explicitly
+			// and verifies it landed on the pinned commit.
+			//
+			// DECISIONS: no evil (operators are emacs-preferring;
+			// one-line change to add (evil +everywhere)); no +lsp
+			// and no vterm (no Node/npm or cmake/libtool on the
+			// box); no flycheck (its YAML/JSON checkers need
+			// yamllint/js-yaml/node); no -nw forced (the operator
+			// chooses). Module set: completion corfu+vertico, ui
+			// doom hl-todo, emacs dired electric undo vc, term
+			// eshell, tools magit editorconfig, os tty, lang data
+			// emacs-lisp json sh yaml, config default+bindings+
+			// smartparens. :lang data covers csv-mode only at the
+			// pinned modules commit; TOML/.env/Caddyfile/Lua are
+			// covered by guards in config.el.
+			//
+			// UNVERIFIED (recorded, not claimed): that `doom sync`
+			// runs non-interactively in practice; `doom doctor`
+			// behaviour on Emacs 30.1 at the pinned commit; the
+			// magit full-clone handling and download size; the
+			// installed straight-tree size; the fd/fdfind name
+			// question. A live first launch of emacs-doom on the
+			// box is still mandatory.
+			//
+			// No system packages, no systemd units, no menu entry.
+			// Binaries are deliberately absent (see above);
+			// BinDirs ["bin"] is the launcher dir, added to PATH
+			// for daemon invocations and interactive shells.
+			// Reconfigure does not restore a deleted launcher or
+			// config — only a reinstall does.
+			ID:               "cli-emacs-doom",
+			Name:             "Doom Emacs for /etc/axonwall",
+			Version:          "0.1.0",
+			Category:         "extension",
+			Description:      "Doom Emacs for editing /etc/axonwall configuration files, sharing the cli-emacs bundled GNU Emacs 30.1 binary: the Doom core and modules are cloned at pinned commits and packages installed with doom sync at install time. No evil mode (operators are emacs-preferring), no LSP or vterm (no language servers or C toolchain on the box).",
+			Author:           "Axonwall Core",
+			Dependencies:     []string{"cli-emacs"},
+			Privileges:       []string{"system.users", "system.config.write"},
+			DebianPackages:   []string{},
+			AlpinePackages:   []string{},
+			ArchPackages:     []string{},
+			RequiredBinaries: []string{"emacs-doom"},
+			BinDirs:          []string{"bin"},
+		},
+		{
+			// Spacemacs (develop branch), sharing the cli-emacs
+			// binary — no second copy of the emacs binary/data
+			// tree (no Binaries entry for emacs here, by design;
+			// the bin/emacs-spacemacs launcher execs the sibling
+			// cli-emacs plugin's usr/bin/emacs-nox). dependencies:
+			// ["cli-emacs"] activates the generic guard in
+			// enabledDependentsOf; install also fails closed
+			// without cli-emacs present (see
+			// installSpacemacsEmacs).
+			//
+			// PIN (observed by cloning upstream 2026-11-20; see
+			// plugin_emacs_doom_spacemacs.go):
+			//   syl20bnr/spacemacs develop
+			//     1f69b2a854a7a46f709def08412dbd5d6dc073a1 (2026-11-09)
+			//   bundled emacs 30.1 (Spacemacs requires 28.2+ with
+			//     no stated upper bound; there is NO explicit
+			//     upstream "supports Emacs 30.1" statement — a
+			//     first-start smoke test on the box is mandatory).
+			//
+			// LATEST-AT-INSTALL, NOT PINNED: Spacemacs has no
+			// per-package version pinning (upstream issue #6531).
+			// Only the Spacemacs commit is pinned; first start
+			// downloads the latest snapshot of every layer package
+			// from MELPA/GNU ELPA and needs network. Do not
+			// describe this install as pinned. The
+			// vendored-elpa-snapshot follow-up (ship a built elpa/
+			// tree with sha256s) is what would make it
+			// reproducible; it is NOT done on this branch.
+			// Install does NOT attempt a first start or a package
+			// install; the pre-seeded dotfile is the attempt at
+			// suppressing the first-start wizard, and whether it
+			// fully suppresses it is UNVERIFIED.
+			//
+			// DECISIONS: editing style 'emacs, NOT vim (operators
+			// are emacs-preferring; 'vim would pull the evil
+			// stack); distribution 'spacemacs (default;
+			// 'spacemacs-base is an unverified slimming option);
+			// shell layer uses eshell, NEVER vterm (needs
+			// cmake/libtool); prettier-js/web-beautify excluded
+			// (need Node). Layer set: helm, auto-completion,
+			// better-defaults, emacs-lisp, git, version-control,
+			// shell (eshell), syntax-checking, yaml, json. No
+			// -nw forced (the operator chooses). Install fails
+			// closed if ~/.spacemacs exists (it always wins over
+			// SPACEMACSDIR).
+			//
+			// No system packages, no systemd units, no menu entry.
+			// Binaries are deliberately absent (see above);
+			// BinDirs ["bin"] is the launcher dir. Reconfigure
+			// does not restore a deleted launcher or dotfile —
+			// only a reinstall does.
+			ID:               "cli-emacs-spacemacs",
+			Name:             "Spacemacs for /etc/axonwall",
+			Version:          "0.1.0",
+			Category:         "extension",
+			Description:      "Spacemacs (develop branch) for editing /etc/axonwall configuration files, sharing the cli-emacs bundled GNU Emacs 30.1 binary. The Spacemacs core is cloned at a pinned commit; its packages are downloaded from MELPA/GNU ELPA on first start (latest versions — Spacemacs cannot pin package versions), so a first start needs network. Emacs editing style, not vim.",
+			Author:           "Axonwall Core",
+			Dependencies:     []string{"cli-emacs"},
+			Privileges:       []string{"system.users", "system.config.write"},
+			DebianPackages:   []string{},
+			AlpinePackages:   []string{},
+			ArchPackages:     []string{},
+			RequiredBinaries: []string{"emacs-spacemacs"},
+			BinDirs:          []string{"bin"},
 		},
 		{
 			ID:               "cli-diagnostics-nastymap",
@@ -361,7 +1027,7 @@ func GetExtensionPluginDefinitions() []PluginDefinition {
 		{
 			ID:               "rosenpass",
 			Name:             "Rosenpass Post-Quantum WireGuard (McEliece + ML-KEM)",
-			Version:          "0.2.2",
+			Version:          "0.2.3",
 			Category:         "extension",
 			Description:      "Hybrid Dual-KEM post-quantum key exchange daemon (Classic McEliece 460896 static authentication + ephemeral ML-KEM-512 forward secrecy) that rotates kernel WireGuard pre-shared keys every 120s with fail-closed boot protection.",
 			Author:           "Rosenpass Project / Axonwall Core",
@@ -371,6 +1037,44 @@ func GetExtensionPluginDefinitions() []PluginDefinition {
 			AlpinePackages:   []string{"rosenpass", "wireguard-tools"},
 			ArchPackages:     []string{"rosenpass", "wireguard-tools"},
 			RequiredBinaries: []string{"rosenpass", "wg"},
+			// Bundled (was: unverified `curl | tar` into
+			// /usr/local/bin at install time). The v0.2.3 release
+			// tarball is now downloaded, sha256-verified, and
+			// extracted into the plugin's own directory
+			// (<plugindir>/bin/rosenpass); the systemd unit's
+			// ExecStart points there, and gen-keys runs the
+			// plugin-dir binary (see rosenpass.go). Behaviour
+			// change: the binary moves from /usr/local/bin to the
+			// plugin dir; same version (0.2.3), same unit
+			// semantics. Uninstall removes the legacy
+			// /usr/local/bin/rosenpass and /usr/local/bin/rp if
+			// present.
+			//
+			// CHECKSUM CAVEAT: rosenpass publishes NO checksum
+			// for this tarball (no .sha256, no SHA256SUMS, no hash
+			// in the release notes — verified 2026-11-20). The
+			// sha256 below was computed locally from the bytes
+			// GitHub served for that asset URL on 2026-11-20
+			// (asset size 4,802,560 bytes). Do NOT claim it is an
+			// official published checksum — it is not published
+			// anywhere upstream. If the release asset were ever
+			// replaced, the pinned hash fails closed, as intended.
+			//
+			// No second entry for `rp`: the tarball also contains
+			// bin/rp (a Bourne shell script), but `rp` is used
+			// nowhere in the codebase — the only reference was
+			// the old curl|tar copy block — so it is not bundled.
+			Binaries: []PluginBundledBinary{
+				{
+					Kind:          "archive",
+					Name:          "rosenpass",
+					SHA256:        "53158a8c339e3be1a9520b91c33a9e83eab05ea49af346cdb7e6eec522f2318b",
+					URL:           "https://github.com/rosenpass/rosenpass/releases/download/v0.2.3/rosenpass-x86_64-linux-0.2.3.tar",
+					Format:        "tar",
+					PathInArchive: "bin/rosenpass",
+				},
+			},
+			BinDirs: []string{"bin"},
 		},
 		{
 			ID:               "vigilant-octo-waffle",
@@ -613,6 +1317,1409 @@ func hasPluginBinary(osFamily, bin string) bool {
 	return false
 }
 
+// ---------------------------------------------------------------------------
+// Plugin-bundled binaries (daemon runtime)
+//
+// Layout: every plugin that declares Binaries owns one directory,
+// <baseDataDir>/<pluginID>/ ("plugin dir"). distroPackage entries are
+// extracted merged into it with `dpkg-deb -x`, so a .deb's usr/bin,
+// usr/share/... land directly under the plugin dir. Archive entries
+// extract into <plugindir>/bin/, their declared binary landing at
+// <plugindir>/bin/<name> unless PathInArchive says otherwise — or,
+// with Extract "tree", the whole archive lands in the plugin dir
+// after stripping StripComponents leading path components — and
+// binary entries are placed there directly.
+// BinDirs are relative to the plugin dir (e.g. "usr/bin") and are
+// prepended to PATH for daemon invocations of that plugin's commands.
+//
+// Trust model: nothing under a plugin dir is trusted on the strength
+// of having been downloaded once. Install sha256-verifies every
+// artifact before extraction and writes bundled.json (one record per
+// installed file — for a tree archive entry, every file in the
+// tree); every later use re-verifies bundled.json and the
+// manifest's expected binaries before exec, and ListPlugins reports
+// the plugin uninstalled while verification fails. A plugin whose
+// manifest still carries SHA256_TODO_* placeholders can never
+// install: validation rejects non-hex digests outright.
+// ---------------------------------------------------------------------------
+
+var (
+	pluginIDPattern   = regexp.MustCompile(`^[a-z0-9-]+$`)
+	sha256HexPattern  = regexp.MustCompile(`^[0-9a-fA-F]{64}$`)
+	envKeyPattern     = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+	debNamePattern    = regexp.MustCompile(`^[a-z0-9][a-z0-9+.-]*$`)
+	debVersionPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9.+~:-]*$`)
+	debArchPattern    = regexp.MustCompile(`^[a-z0-9]+$`)
+)
+
+// pluginDir returns the per-plugin directory for pluginID. The id is
+// validated first: an unvalidated id joined onto baseDataDir would let
+// a caller escape the plugins tree ("../..."), so anything outside
+// ^[a-z0-9-]+$ is refused, never cleaned up silently.
+func (pm *PluginManager) pluginDir(pluginID string) (string, error) {
+	if !pluginIDPattern.MatchString(pluginID) {
+		return "", fmt.Errorf("invalid plugin id %q: must match ^[a-z0-9-]+$", pluginID)
+	}
+	return filepath.Join(pm.baseDataDir, pluginID), nil
+}
+
+// validBinDir reports whether a BinDirs entry is safe to join onto a
+// plugin dir: relative, non-empty, no ".." segment, no backslash
+// (a Windows separator smuggled into a Unix path).
+func validBinDir(dir string) bool {
+	if dir == "" || filepath.IsAbs(dir) || strings.Contains(dir, "\\") {
+		return false
+	}
+	for _, seg := range strings.Split(filepath.ToSlash(dir), "/") {
+		if seg == ".." || seg == "" {
+			return false
+		}
+	}
+	return true
+}
+
+// validateBundledBinaries checks a plugin definition's Binaries,
+// BinDirs and Env and fails closed on the first problem, naming the
+// offending entry. It runs at install time, before anything is
+// downloaded: a SHA256_TODO_* placeholder, an unknown kind, a
+// non-http(s) archive URL, or a distroPackage entry for a distro
+// other than this host's all refuse the install rather than
+// proceeding with an unverified or wrong-distro artifact.
+func (pm *PluginManager) validateBundledBinaries(def PluginDefinition) error {
+	seenNames := make(map[string]bool, len(def.Binaries))
+	for _, b := range def.Binaries {
+		if b.Name == "" {
+			return fmt.Errorf("bundled binary entry has an empty name (kind %q)", b.Kind)
+		}
+		if strings.ContainsAny(b.Name, `/\`) || b.Name == "." || b.Name == ".." {
+			return fmt.Errorf("bundled binary %q: name must be a plain file name, not a path", b.Name)
+		}
+		if seenNames[b.Name] {
+			return fmt.Errorf("bundled binary %q: duplicate binary name", b.Name)
+		}
+		seenNames[b.Name] = true
+		// SHA256 must be exactly 64 hex chars. This rejects the
+		// SHA256_TODO_* placeholders by construction: an install
+		// of a plugin whose hashes are not yet resolved must fail
+		// here, never download an unverifiable artifact.
+		if !sha256HexPattern.MatchString(b.SHA256) {
+			return fmt.Errorf("bundled binary %q: sha256 must be a 64-char hex digest (placeholders are not installable)", b.Name)
+		}
+		// OS gate: every listed family must be a known one, with
+		// no duplicates. An entry gated away from this host is
+		// skipped at install, not an error — the gate is checked
+		// here only for shape, never for a match against this host.
+		seenOSes := make(map[string]bool, len(b.OSes))
+		for _, o := range b.OSes {
+			if !validOSFamilyName(o) {
+				return fmt.Errorf("bundled binary %q: os %q is not a known OS family (want debian, alpine or arch)", b.Name, o)
+			}
+			if seenOSes[o] {
+				return fmt.Errorf("bundled binary %q: duplicate os %q", b.Name, o)
+			}
+			seenOSes[o] = true
+		}
+		switch b.Kind {
+		case "archive":
+			if b.URL == "" {
+				return fmt.Errorf("bundled binary %q (archive): url is required", b.Name)
+			}
+			u, err := url.Parse(b.URL)
+			if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+				return fmt.Errorf("bundled binary %q (archive): url %q must be an http(s) URL", b.Name, b.URL)
+			}
+			if b.Distro != "" || b.Package != "" || b.Source != "" || b.Version != "" || b.Arch != "" {
+				return fmt.Errorf("bundled binary %q (archive): distro/package/source/version/arch must be empty for kind archive", b.Name)
+			}
+			switch strings.ToLower(strings.TrimSpace(b.Format)) {
+			case "", "tar", "tar.gz", "tgz", "zip":
+			default:
+				return fmt.Errorf("bundled binary %q (archive): unsupported format %q (want tar, tar.gz, tgz or zip)", b.Name, b.Format)
+			}
+			// Extraction mode: ""/"binary" extracts exactly one
+			// member (PathInArchive, default Name) into bin/;
+			// "tree" extracts the whole archive into the plugin
+			// dir after stripping StripComponents leading path
+			// components. A tree entry takes no PathInArchive —
+			// the strip selects the tree root — and a strip only
+			// makes sense for a tree.
+			switch strings.ToLower(strings.TrimSpace(b.Extract)) {
+			case "", "binary", "tree":
+			default:
+				return fmt.Errorf("bundled binary %q (archive): unsupported extract %q (want binary or tree)", b.Name, b.Extract)
+			}
+			isTree := strings.EqualFold(strings.TrimSpace(b.Extract), "tree")
+			if b.StripComponents < 0 || b.StripComponents > 8 {
+				return fmt.Errorf("bundled binary %q (archive): stripComponents %d out of range (want 0-8)", b.Name, b.StripComponents)
+			}
+			if !isTree && b.StripComponents != 0 {
+				return fmt.Errorf("bundled binary %q (archive): stripComponents is only meaningful with extract \"tree\"", b.Name)
+			}
+			if isTree && b.PathInArchive != "" {
+				return fmt.Errorf("bundled binary %q (archive): pathInArchive must be empty with extract \"tree\" (the strip selects the tree root)", b.Name)
+			}
+			if b.PathInArchive != "" {
+				if filepath.IsAbs(b.PathInArchive) || strings.Contains(b.PathInArchive, "\\") {
+					return fmt.Errorf("bundled binary %q (archive): pathInArchive %q must be a relative path", b.Name, b.PathInArchive)
+				}
+				for _, seg := range strings.Split(filepath.ToSlash(b.PathInArchive), "/") {
+					if seg == ".." {
+						return fmt.Errorf("bundled binary %q (archive): pathInArchive %q must not contain ..", b.Name, b.PathInArchive)
+					}
+				}
+			}
+		case "binary":
+			if b.URL == "" {
+				return fmt.Errorf("bundled binary %q (binary): url is required", b.Name)
+			}
+			u, err := url.Parse(b.URL)
+			if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+				return fmt.Errorf("bundled binary %q (binary): url %q must be an http(s) URL", b.Name, b.URL)
+			}
+			if b.Distro != "" || b.Package != "" || b.Source != "" || b.Version != "" || b.Arch != "" {
+				return fmt.Errorf("bundled binary %q (binary): distro/package/source/version/arch must be empty for kind binary", b.Name)
+			}
+			if b.Format != "" {
+				return fmt.Errorf("bundled binary %q (binary): format must be empty for kind binary (a raw file has no container)", b.Name)
+			}
+			if b.PathInArchive != "" {
+				return fmt.Errorf("bundled binary %q (binary): pathInArchive must be empty for kind binary (a raw file has no member path)", b.Name)
+			}
+			if b.Extract != "" {
+				return fmt.Errorf("bundled binary %q (binary): extract must be empty for kind binary (a raw file has no archive to extract)", b.Name)
+			}
+			if b.StripComponents != 0 {
+				return fmt.Errorf("bundled binary %q (binary): stripComponents must be 0 for kind binary (a raw file has no archive members)", b.Name)
+			}
+		case "distroPackage":
+			if b.URL != "" {
+				return fmt.Errorf("bundled binary %q (distroPackage): url must be empty for kind distroPackage", b.Name)
+			}
+			if b.Distro == "" || b.Package == "" || b.Version == "" || b.Arch == "" {
+				return fmt.Errorf("bundled binary %q (distroPackage): distro, package, version and arch are all required", b.Name)
+			}
+			// Debian-only for now, and only for this host's distro:
+			// a non-matching distro is an error at install, not a
+			// silent skip — silently skipping would leave the
+			// plugin "installed" without the binary it needs.
+			if b.Distro != "debian" {
+				return fmt.Errorf("bundled binary %q (distroPackage): distro %q is not supported (debian only)", b.Name, b.Distro)
+			}
+			if pm.osFamily != "debian" {
+				return fmt.Errorf("bundled binary %q (distroPackage): host osFamily is %q, not debian; distroPackage entries cannot install here", b.Name, pm.osFamily)
+			}
+			if !debNamePattern.MatchString(b.Package) {
+				return fmt.Errorf("bundled binary %q (distroPackage): package %q is not a valid Debian package name", b.Name, b.Package)
+			}
+			if b.Source != "" && !debNamePattern.MatchString(b.Source) {
+				return fmt.Errorf("bundled binary %q (distroPackage): source %q is not a valid Debian source package name", b.Name, b.Source)
+			}
+			if !debVersionPattern.MatchString(b.Version) || strings.ContainsAny(b.Version, `/\`) {
+				return fmt.Errorf("bundled binary %q (distroPackage): version %q is not a valid Debian version", b.Name, b.Version)
+			}
+			if !debArchPattern.MatchString(b.Arch) {
+				return fmt.Errorf("bundled binary %q (distroPackage): arch %q is not valid", b.Name, b.Arch)
+			}
+			if b.Extract != "" {
+				return fmt.Errorf("bundled binary %q (distroPackage): extract must be empty for kind distroPackage (a .deb extracts as a merged tree by definition)", b.Name)
+			}
+			if b.StripComponents != 0 {
+				return fmt.Errorf("bundled binary %q (distroPackage): stripComponents must be 0 for kind distroPackage", b.Name)
+			}
+		default:
+			return fmt.Errorf("bundled binary %q: unknown kind %q (want archive, binary or distroPackage)", b.Name, b.Kind)
+		}
+	}
+	for _, dir := range def.BinDirs {
+		if !validBinDir(dir) {
+			return fmt.Errorf("plugin %q: binDir %q must be a non-empty relative path with no .., no backslash and no leading /", def.ID, dir)
+		}
+	}
+	for key := range def.Env {
+		if !envKeyPattern.MatchString(key) {
+			return fmt.Errorf("plugin %q: env key %q is not a valid environment variable name", def.ID, key)
+		}
+	}
+	return nil
+}
+
+// bundledBinaryRecord is one row of <plugindir>/bundled.json: the
+// installed file (relative to the plugin dir), the sha256 of the
+// bytes actually on disk after extraction, and the manifest entry it
+// came from. It is the record verifyBundledBinaries checks on use.
+type bundledBinaryRecord struct {
+	Path   string `json:"path"`
+	SHA256 string `json:"sha256"`
+	Entry  string `json:"entry"`
+	Kind   string `json:"kind"`
+}
+
+type bundledBinariesFile struct {
+	PluginID string                `json:"pluginId"`
+	Files    []bundledBinaryRecord `json:"files"`
+}
+
+func bundledRecordPath(pluginDir string) string {
+	return filepath.Join(pluginDir, "bundled.json")
+}
+
+// sha256File returns the lowercase hex sha256 of a file's contents.
+func sha256File(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// downloadVerified fetches rawURL with a timeout, streams it to a
+// temp file under tmpDir while hashing, and fails closed unless the
+// bytes' sha256 equals wantSHA256. The temp file is returned on
+// success; the caller removes it. No shell curl: pure net/http.
+func downloadVerified(rawURL, wantSHA256, tmpDir string) (string, error) {
+	client := &http.Client{Timeout: 5 * time.Minute}
+	resp, err := client.Get(rawURL)
+	if err != nil {
+		return "", fmt.Errorf("download %s: %w", rawURL, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("download %s: unexpected HTTP status %s", rawURL, resp.Status)
+	}
+	tmp, err := os.CreateTemp(tmpDir, "axonwall-plugin-download-*")
+	if err != nil {
+		return "", err
+	}
+	tmpPath := tmp.Name()
+	// Cap the download so a malicious or misconfigured upstream
+	// cannot fill the disk: bundled binaries are small artifacts.
+	h := sha256.New()
+	if _, err := io.Copy(tmp, io.TeeReader(io.LimitReader(resp.Body, 1<<30), h)); err != nil {
+		tmp.Close()
+		os.Remove(tmpPath)
+		return "", fmt.Errorf("download %s: %w", rawURL, err)
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpPath)
+		return "", fmt.Errorf("download %s: %w", rawURL, err)
+	}
+	if got := hex.EncodeToString(h.Sum(nil)); got != strings.ToLower(wantSHA256) {
+		os.Remove(tmpPath)
+		return "", fmt.Errorf("download %s: sha256 mismatch: got %s, want %s; refusing to use unverified bytes", rawURL, got, wantSHA256)
+	}
+	return tmpPath, nil
+}
+
+// debianPoolURL builds the download URL for a distroPackage entry
+// from the Debian pool convention:
+//
+//	http://deb.debian.org/debian/pool/main/<dir>/<source>/<pkg>_<version-no-epoch>_<arch>.deb
+//
+// where <dir> is the source package's first letter ("lib" + first
+// letter for lib* sources, per the pool layout) and the epoch
+// ("1:" in "1:30.1+1-6") is dropped from the filename. The source
+// package is b.Source when set, else the binary package name —
+// the two differ for the bundled libraries (libgccjit0 is built
+// from source gcc-14, libisl23 from isl, libmpc3 from mpclib3,
+// libmpfr6 from mpfr4, libasound2t64/libasound2-data from alsa-lib,
+// liblcms2-2 from lcms2), and the pool directory is derived from
+// the source, not the binary package name.
+func debianPoolURL(b PluginBundledBinary) (string, error) {
+	source := b.Source
+	if source == "" {
+		source = b.Package
+	}
+	if source == "" {
+		return "", fmt.Errorf("bundled binary %q: package is empty", b.Name)
+	}
+	dir := source[:1]
+	if strings.HasPrefix(source, "lib") && len(source) >= 4 {
+		dir = source[:4]
+	}
+	ver := b.Version
+	if i := strings.Index(ver, ":"); i >= 0 {
+		ver = ver[i+1:]
+	}
+	if ver == "" {
+		return "", fmt.Errorf("bundled binary %q: version %q has no version after the epoch", b.Name, b.Version)
+	}
+	file := fmt.Sprintf("%s_%s_%s.deb", b.Package, ver, b.Arch)
+	return fmt.Sprintf("http://deb.debian.org/debian/pool/main/%s/%s/%s", dir, source, file), nil
+}
+
+// safeArchiveName cleans an archive member name and rejects anything
+// that could escape the destination: absolute paths, ".." segments,
+// backslashes, and non-regular entries (symlinks/hardlinks/devices
+// are refused, never followed — a crafted archive must not be able
+// to plant a symlink pointing outside the plugin dir).
+func safeArchiveName(name string) (string, bool) {
+	// Refuse BEFORE cleaning: Clean would silently resolve ".."
+	// against the archive root (pkg/../../escape.txt -> escape.txt)
+	// and strip a leading "/" (/etc/evil.txt -> etc/evil.txt),
+	// landing the file somewhere the archive never declared.
+	// A crafted member must fail the install, not be sanitised
+	// into the tree. Backslashes are refused too: they are never
+	// legitimate in a release-tarball member name on this platform.
+	if strings.HasPrefix(name, "/") || strings.Contains(name, "\\") {
+		return "", false
+	}
+	for _, seg := range strings.Split(strings.TrimPrefix(name, "./"), "/") {
+		if seg == ".." {
+			return "", false
+		}
+	}
+	cleaned := filepath.ToSlash(filepath.Clean("/" + strings.TrimPrefix(name, "./")))
+	cleaned = strings.TrimPrefix(cleaned, "/")
+	if cleaned == "" || cleaned == "." {
+		return "", false
+	}
+	for _, seg := range strings.Split(cleaned, "/") {
+		if seg == ".." {
+			return "", false
+		}
+	}
+	return cleaned, true
+}
+
+// archiveMemberMatches reports whether archive member name matches
+// the declared PathInArchive (default: the binary Name). An exact
+// cleaned-path match wins; a bare file name also matches a member
+// whose base name is that file, so release tarballs that wrap the
+// binary in a top-level directory still resolve.
+func archiveMemberMatches(member, want string) bool {
+	cleaned, ok := safeArchiveName(member)
+	if !ok {
+		return false
+	}
+	if cleaned == want {
+		return true
+	}
+	if !strings.Contains(want, "/") && filepath.Base(cleaned) == want {
+		return true
+	}
+	return false
+}
+
+// extractArchiveBinary extracts exactly one file — the declared
+// binary — from archivePath into <pluginDir>/bin/<name> and returns
+// its relative path. Only that file is written; every other member
+// is ignored, and a symlink/hardlink member or a second member
+// matching the wanted file fails the install.
+func extractArchiveBinary(archivePath, format, want, name, pluginDir string) (string, error) {
+	binDir := filepath.Join(pluginDir, "bin")
+	if err := os.MkdirAll(binDir, 0755); err != nil {
+		return "", err
+	}
+	dest := filepath.Join(binDir, name)
+	relDest := filepath.Join("bin", name)
+
+	writeMember := func(r io.Reader) error {
+		f, err := os.OpenFile(dest, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0755)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		if _, err := io.Copy(f, r); err != nil {
+			os.Remove(dest)
+			return err
+		}
+		return nil
+	}
+
+	format = strings.ToLower(strings.TrimSpace(format))
+	if format == "" {
+		format = "tar"
+	}
+	found := false
+	switch format {
+	case "zip":
+		zr, err := zip.OpenReader(archivePath)
+		if err != nil {
+			return "", fmt.Errorf("extract archive: %w", err)
+		}
+		defer zr.Close()
+		for _, member := range zr.File {
+			if member.FileInfo().IsDir() {
+				continue
+			}
+			if member.FileInfo().Mode()&os.ModeSymlink != 0 || !member.FileInfo().Mode().IsRegular() {
+				return "", fmt.Errorf("extract archive: refusing non-regular member %q", member.Name)
+			}
+			if !archiveMemberMatches(member.Name, want) {
+				continue
+			}
+			if found {
+				return "", fmt.Errorf("extract archive: multiple members match %q; refusing ambiguous archive", want)
+			}
+			rc, err := member.Open()
+			if err != nil {
+				return "", fmt.Errorf("extract archive: %w", err)
+			}
+			err = writeMember(rc)
+			rc.Close()
+			if err != nil {
+				return "", err
+			}
+			found = true
+		}
+	case "tar", "tar.gz", "tgz":
+		f, err := os.Open(archivePath)
+		if err != nil {
+			return "", err
+		}
+		defer f.Close()
+		var tr *tar.Reader
+		if format == "tar" {
+			tr = tar.NewReader(f)
+		} else {
+			gz, err := gzip.NewReader(f)
+			if err != nil {
+				return "", fmt.Errorf("extract archive: %w", err)
+			}
+			defer gz.Close()
+			tr = tar.NewReader(gz)
+		}
+		for {
+			hdr, err := tr.Next()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				return "", fmt.Errorf("extract archive: %w", err)
+			}
+			if hdr.Typeflag != tar.TypeReg {
+				// Symlinks, hardlinks, devices, dirs: never
+				// follow or create them from an untrusted archive.
+				if hdr.Typeflag == tar.TypeSymlink || hdr.Typeflag == tar.TypeLink {
+					return "", fmt.Errorf("extract archive: refusing link member %q", hdr.Name)
+				}
+				continue
+			}
+			if !archiveMemberMatches(hdr.Name, want) {
+				continue
+			}
+			if found {
+				return "", fmt.Errorf("extract archive: multiple members match %q; refusing ambiguous archive", want)
+			}
+			if err := writeMember(tr); err != nil {
+				return "", err
+			}
+			found = true
+		}
+	default:
+		return "", fmt.Errorf("extract archive: unsupported format %q", format)
+	}
+	if !found {
+		return "", fmt.Errorf("extract archive: no member %q found in archive", want)
+	}
+	if err := os.Chmod(dest, 0755); err != nil {
+		return "", err
+	}
+	return relDest, nil
+}
+
+// stripArchiveComponents drops the first strip leading components
+// of a cleaned archive member path (e.g. strip 1 turns
+// "nvim-linux-x86_64/bin/nvim" into "bin/nvim"). It reports false
+// when the member sits at or above the strip depth — the member IS
+// (part of) the stripped prefix itself, so there is nothing left to
+// place. Callers skip such directories and fail on such regular
+// files (a file the strip would silently drop is a manifest/archive
+// mismatch, not something to ignore).
+func stripArchiveComponents(cleaned string, strip int) (string, bool) {
+	if strip <= 0 {
+		return cleaned, true
+	}
+	parts := strings.Split(cleaned, "/")
+	if len(parts) <= strip {
+		return "", false
+	}
+	return strings.Join(parts[strip:], "/"), true
+}
+
+// extractArchiveTree extracts the WHOLE archive into pluginDir,
+// preserving member paths after stripping StripComponents leading
+// components (see stripArchiveComponents). It is the extraction
+// mode for archives that are a working tree, not a single binary:
+// the neovim release tarball is bin/nvim plus the lib/ parsers and
+// share/nvim/runtime it needs to run, and extracting nvim alone
+// would leave it runtime-less. Every member is written (no
+// exclusion list — the whole tree is the install, icons/man
+// included: 8 small files in the nvim tarball, not worth a filter
+// that could silently drop a file a future release adds under a
+// path the filter did not expect). Safety follows
+// extractArchiveBinary: a symlink/hardlink/device member anywhere
+// in the archive fails the install (never followed or created), an
+// absolute or ".." member fails it, a member that would land
+// outside pluginDir fails it, and a duplicate member (two members
+// stripping to the same destination) fails it. Directories are
+// created as needed; regular files are written with O_EXCL and the
+// archive's mode (masked to 0755 at most — never setuid/setgid).
+// The caller records the extracted files (recordInstalledFiles);
+// the named binary's executability is then checked by
+// expectedBundledBinaries as for a single-binary entry.
+func extractArchiveTree(archivePath, format string, strip int, pluginDir string) error {
+	format = strings.ToLower(strings.TrimSpace(format))
+	if format == "" {
+		format = "tar"
+	}
+
+	writeMember := func(rel string, mode os.FileMode, r io.Reader) error {
+		dest := filepath.Join(pluginDir, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(dest), 0755); err != nil {
+			return err
+		}
+		perm := mode.Perm() & 0755
+		if perm == 0 {
+			perm = 0644
+		}
+		f, err := os.OpenFile(dest, os.O_CREATE|os.O_EXCL|os.O_WRONLY, perm)
+		if err != nil {
+			return err
+		}
+		if _, err := io.Copy(f, r); err != nil {
+			f.Close()
+			os.Remove(dest)
+			return err
+		}
+		if err := f.Close(); err != nil {
+			os.Remove(dest)
+			return err
+		}
+		return nil
+	}
+
+	// One member: clean + strip it, then either skip it (a
+	// directory at/below the strip depth), write it (a regular
+	// file), or fail the install (a link/device, or a regular file
+	// the strip would drop). Returns false when the member is a
+	// directory that was skipped.
+	placeMember := func(name string, isDir bool, isLink bool, mode os.FileMode, r io.Reader) error {
+		cleaned, ok := safeArchiveName(name)
+		if !ok {
+			return fmt.Errorf("extract archive tree: refusing unsafe member %q", name)
+		}
+		if isLink {
+			return fmt.Errorf("extract archive tree: refusing link member %q", name)
+		}
+		rel, ok := stripArchiveComponents(cleaned, strip)
+		if !ok {
+			if isDir {
+				return nil
+			}
+			return fmt.Errorf("extract archive tree: member %q would be dropped by stripComponents %d; refusing to silently drop a file", name, strip)
+		}
+		if isDir {
+			return os.MkdirAll(filepath.Join(pluginDir, filepath.FromSlash(rel)), 0755)
+		}
+		return writeMember(rel, mode, r)
+	}
+
+	switch format {
+	case "zip":
+		zr, err := zip.OpenReader(archivePath)
+		if err != nil {
+			return fmt.Errorf("extract archive tree: %w", err)
+		}
+		defer zr.Close()
+		for _, member := range zr.File {
+			mode := member.FileInfo().Mode()
+			if member.FileInfo().IsDir() {
+				if err := placeMember(member.Name, true, false, mode, nil); err != nil {
+					return err
+				}
+				continue
+			}
+			if mode&os.ModeSymlink != 0 || !mode.IsRegular() {
+				return fmt.Errorf("extract archive tree: refusing non-regular member %q", member.Name)
+			}
+			rc, err := member.Open()
+			if err != nil {
+				return fmt.Errorf("extract archive tree: %w", err)
+			}
+			err = placeMember(member.Name, false, false, mode, rc)
+			rc.Close()
+			if err != nil {
+				return err
+			}
+		}
+	case "tar", "tar.gz", "tgz":
+		f, err := os.Open(archivePath)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		var tr *tar.Reader
+		if format == "tar" {
+			tr = tar.NewReader(f)
+		} else {
+			gz, err := gzip.NewReader(f)
+			if err != nil {
+				return fmt.Errorf("extract archive tree: %w", err)
+			}
+			defer gz.Close()
+			tr = tar.NewReader(gz)
+		}
+		for {
+			hdr, err := tr.Next()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				return fmt.Errorf("extract archive tree: %w", err)
+			}
+			switch hdr.Typeflag {
+			case tar.TypeDir:
+				if err := placeMember(hdr.Name, true, false, hdr.FileInfo().Mode(), nil); err != nil {
+					return err
+				}
+			case tar.TypeReg:
+				if err := placeMember(hdr.Name, false, false, hdr.FileInfo().Mode(), tr); err != nil {
+					return err
+				}
+			default:
+				// Symlinks, hardlinks, devices, and anything
+				// else non-regular: never follow or create
+				// them from an untrusted archive.
+				return fmt.Errorf("extract archive tree: refusing non-regular member %q", hdr.Name)
+			}
+		}
+	default:
+		return fmt.Errorf("extract archive tree: unsupported format %q", format)
+	}
+	return nil
+}
+
+// recordInstalledFiles walks pluginDir after an entry was extracted
+// and records every regular file not yet recorded, attributed to
+// that entry, hashing the bytes on disk. It runs per entry, so files
+// from an earlier entry are already recorded and the new ones belong
+// to the entry just extracted. bundled.json itself is excluded.
+func recordInstalledFiles(pluginDir string, entry PluginBundledBinary, seen map[string]bool, records *[]bundledBinaryRecord) error {
+	return filepath.WalkDir(pluginDir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() || !d.Type().IsRegular() {
+			return nil
+		}
+		rel, err := filepath.Rel(pluginDir, path)
+		if err != nil {
+			return err
+		}
+		rel = filepath.ToSlash(rel)
+		if rel == "bundled.json" || seen[rel] {
+			return nil
+		}
+		sum, err := sha256File(path)
+		if err != nil {
+			return err
+		}
+		seen[rel] = true
+		*records = append(*records, bundledBinaryRecord{Path: rel, SHA256: sum, Entry: entry.Name, Kind: entry.Kind})
+		return nil
+	})
+}
+
+// installRawBinary places a verified raw download at
+// <pluginDir>/bin/<name> with mode 0755 and returns its relative
+// path. The temp file's bytes were already sha256-verified by
+// downloadVerified; the on-disk hash is recorded by the caller.
+func installRawBinary(tmpPath, name, pluginDir string) (string, error) {
+	binDir := filepath.Join(pluginDir, "bin")
+	if err := os.MkdirAll(binDir, 0755); err != nil {
+		return "", err
+	}
+	dest := filepath.Join(binDir, name)
+	src, err := os.Open(tmpPath)
+	if err != nil {
+		return "", err
+	}
+	defer src.Close()
+	f, err := os.OpenFile(dest, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0755)
+	if err != nil {
+		return "", err
+	}
+	if _, err := io.Copy(f, src); err != nil {
+		f.Close()
+		os.Remove(dest)
+		return "", err
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(dest)
+		return "", err
+	}
+	if err := os.Chmod(dest, 0755); err != nil {
+		return "", err
+	}
+	return filepath.Join("bin", name), nil
+}
+
+// installBundledBinaries downloads, sha256-verifies and extracts
+// every Binaries entry of def into the plugin dir. Archive entries
+// land in <plugindir>/bin/ — or, with Extract "tree", the whole
+// archive lands in the plugin dir after the strip; binary entries
+// are placed in bin/ directly; distroPackage entries are extracted
+// merged into the plugin dir with `dpkg-deb -x` (the one shell-out
+// allowed here — dpkg-deb itself is the format's extractor, and a
+// missing dpkg-deb fails closed). Entries gated away from this host
+// by OSes are skipped, never downloaded. On any error the install
+// aborts and bundled.json is NOT written, so a half-extracted tree
+// can never pass verifyBundledBinaries. Callers must validate first.
+func (pm *PluginManager) installBundledBinaries(def PluginDefinition) error {
+	pluginDir, err := pm.pluginDir(def.ID)
+	if err != nil {
+		return err
+	}
+	// Start from a clean tree: files left over from a previous
+	// version of the plugin must not linger and get recorded as if
+	// the new manifest installed them. (A failed install leaves no
+	// bundled.json, so the cleaned tree still fails verification.)
+	if err := os.RemoveAll(pluginDir); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(pluginDir, 0755); err != nil {
+		return err
+	}
+	tmpDir, err := os.MkdirTemp("", "axonwall-plugin-bundled-*")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(tmpDir)
+
+	var records []bundledBinaryRecord
+	seen := make(map[string]bool)
+	for _, b := range def.Binaries {
+		// OS gate: an entry that does not apply on this host is
+		// skipped outright — never downloaded, never extracted,
+		// never recorded. A plugin whose entries are all gated
+		// out installs an (empty) plugin dir with an empty
+		// bundled.json; verify treats that as trivially verified
+		// (see verifyBundledBinaries) and the plugin's binaries
+		// keep resolving from the system packages.
+		if !bundledEntryAppliesToOS(b, pm.osFamily) {
+			continue
+		}
+		switch b.Kind {
+		case "archive":
+			tmpPath, err := downloadVerified(b.URL, b.SHA256, tmpDir)
+			if err != nil {
+				return fmt.Errorf("bundled binary %q: %w", b.Name, err)
+			}
+			if strings.EqualFold(strings.TrimSpace(b.Extract), "tree") {
+				// Whole-tree extraction: the archive IS the
+				// install (bin/ + lib/ + share/ after the
+				// strip). Record every extracted file, exactly
+				// as distroPackage entries do, so verify-on-use
+				// covers the runtime and parsers too — not
+				// just the bin/nvim binary.
+				if err := extractArchiveTree(tmpPath, b.Format, b.StripComponents, pluginDir); err != nil {
+					os.Remove(tmpPath)
+					return fmt.Errorf("bundled binary %q: %w", b.Name, err)
+				}
+				os.Remove(tmpPath)
+				if err := recordInstalledFiles(pluginDir, b, seen, &records); err != nil {
+					return fmt.Errorf("bundled binary %q: %w", b.Name, err)
+				}
+				continue
+			}
+			want := b.PathInArchive
+			if want == "" {
+				want = b.Name
+			}
+			rel, err := extractArchiveBinary(tmpPath, b.Format, want, b.Name, pluginDir)
+			os.Remove(tmpPath)
+			if err != nil {
+				return fmt.Errorf("bundled binary %q: %w", b.Name, err)
+			}
+			sum, err := sha256File(filepath.Join(pluginDir, rel))
+			if err != nil {
+				return fmt.Errorf("bundled binary %q: %w", b.Name, err)
+			}
+			seen[filepath.ToSlash(rel)] = true
+			records = append(records, bundledBinaryRecord{Path: filepath.ToSlash(rel), SHA256: sum, Entry: b.Name, Kind: b.Kind})
+		case "binary":
+			tmpPath, err := downloadVerified(b.URL, b.SHA256, tmpDir)
+			if err != nil {
+				return fmt.Errorf("bundled binary %q: %w", b.Name, err)
+			}
+			rel, err := installRawBinary(tmpPath, b.Name, pluginDir)
+			os.Remove(tmpPath)
+			if err != nil {
+				return fmt.Errorf("bundled binary %q: %w", b.Name, err)
+			}
+			sum, err := sha256File(filepath.Join(pluginDir, rel))
+			if err != nil {
+				return fmt.Errorf("bundled binary %q: %w", b.Name, err)
+			}
+			seen[filepath.ToSlash(rel)] = true
+			records = append(records, bundledBinaryRecord{Path: filepath.ToSlash(rel), SHA256: sum, Entry: b.Name, Kind: b.Kind})
+		case "distroPackage":
+			if pm.osFamily != "debian" {
+				return fmt.Errorf("bundled binary %q (distroPackage): host osFamily is %q, not debian", b.Name, pm.osFamily)
+			}
+			dpkgDeb, err := exec.LookPath("dpkg-deb")
+			if err != nil {
+				return fmt.Errorf("bundled binary %q (distroPackage): dpkg-deb is not available on this host; cannot extract .deb packages", b.Name)
+			}
+			poolURL, err := debianPoolURL(b)
+			if err != nil {
+				return fmt.Errorf("bundled binary %q: %w", b.Name, err)
+			}
+			tmpPath, err := downloadVerified(poolURL, b.SHA256, tmpDir)
+			if err != nil {
+				return fmt.Errorf("bundled binary %q: %w", b.Name, err)
+			}
+			// dpkg-deb -x extracts only; nothing is installed
+			// into the system and no maintainer scripts run.
+			cmd := exec.Command(dpkgDeb, "-x", tmpPath, pluginDir)
+			if out, err := cmd.CombinedOutput(); err != nil {
+				os.Remove(tmpPath)
+				return fmt.Errorf("bundled binary %q: dpkg-deb -x failed: %w (output: %s)", b.Name, err, strings.TrimSpace(string(out)))
+			}
+			os.Remove(tmpPath)
+			if err := recordInstalledFiles(pluginDir, b, seen, &records); err != nil {
+				return fmt.Errorf("bundled binary %q: %w", b.Name, err)
+			}
+		default:
+			return fmt.Errorf("bundled binary %q: unknown kind %q", b.Name, b.Kind)
+		}
+	}
+
+	// Executable bits on everything under the declared BinDirs:
+	// extracted .deb trees carry their own modes, but an archive
+	// entry's binary and any helper under a bin dir must be
+	// runnable by the daemon without relying on archive modes.
+	for _, binDir := range def.BinDirs {
+		root := filepath.Join(pluginDir, filepath.FromSlash(binDir))
+		_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+			if err != nil || d.IsDir() || !d.Type().IsRegular() {
+				return nil
+			}
+			_ = os.Chmod(path, 0755)
+			return nil
+		})
+	}
+
+	// Only now, with every entry extracted and hashed, is the
+	// verification record written: a failed install leaves no
+	// bundled.json, so verify can never bless a partial tree.
+	sort.Slice(records, func(i, j int) bool { return records[i].Path < records[j].Path })
+	data, err := json.MarshalIndent(bundledBinariesFile{PluginID: def.ID, Files: records}, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(bundledRecordPath(pluginDir), data, 0644); err != nil {
+		return err
+	}
+	return nil
+}
+
+// ensureBundledBinaries is the install/ensure path for a plugin
+// that declares Binaries: it verifies the tree that is already on
+// disk first (the image builders pre-stage core-k3s, so a first
+// boot must NOT re-download ~110 MB) and downloads ONLY when a
+// file is missing, mismatched, or the verification record is
+// absent/corrupt. A verify failure therefore costs a full
+// re-download of every entry (installBundledBinaries starts from a
+// clean tree — it cannot know which entry went bad), but a healthy
+// staged tree costs no network at all. Callers must validate
+// first; validation runs here too so a direct caller cannot skip
+// it. A plugin with no Binaries is a no-op.
+func (pm *PluginManager) ensureBundledBinaries(def PluginDefinition) error {
+	if len(def.Binaries) == 0 {
+		return nil
+	}
+	if err := pm.validateBundledBinaries(def); err != nil {
+		return err
+	}
+	if err := pm.verifyBundledBinaries(def); err == nil {
+		return nil
+	}
+	return pm.installBundledBinaries(def)
+}
+
+// ensureCoreK3sBinSymlinks creates the k3s multicall symlinks
+// (kubectl, crictl, ctr) in the core-k3s plugin bin dir, pointing
+// at the staged k3s binary, and removes a dangling legacy
+// /usr/local/bin/kubectl symlink left by the pre-migration
+// workstation hook (only when it no longer resolves — a symlink
+// that still points at a working k3s is left alone, and a real
+// standalone kubectl binary there is never touched). The plugin
+// bin dir is the only place these symlinks are created now; the
+// builders stage the same three at image build time and this is
+// the repair path if they are deleted. An existing real file under
+// one of the three names is left alone, never overwritten.
+func (pm *PluginManager) ensureCoreK3sBinSymlinks() error {
+	pluginDir, err := pm.pluginDir("core-k3s")
+	if err != nil {
+		return err
+	}
+	k3sBin := filepath.Join(pluginDir, "bin", "k3s")
+	if !isExecutableFile(k3sBin) {
+		return fmt.Errorf("core-k3s k3s binary %q is missing or not executable; cannot create multicall symlinks", filepath.ToSlash(filepath.Join("core-k3s", "bin", "k3s")))
+	}
+	for _, link := range []string{"kubectl", "crictl", "ctr"} {
+		p := filepath.Join(pluginDir, "bin", link)
+		if info, err := os.Lstat(p); err == nil {
+			if info.Mode()&os.ModeSymlink != 0 {
+				if target, rerr := os.Readlink(p); rerr == nil && target == "k3s" {
+					continue
+				}
+				_ = os.Remove(p)
+			} else {
+				continue
+			}
+		}
+		if err := os.Symlink("k3s", p); err != nil {
+			return fmt.Errorf("core-k3s: failed to create symlink %q: %w", link, err)
+		}
+	}
+	// Legacy cleanup: the old workstation/VOW install hook created
+	// /usr/local/bin/kubectl -> k3s. Uninstall/disable never removed
+	// it, so upgraded boxes keep a symlink at the old location that
+	// dangles once /usr/local/bin/k3s is gone. Remove it only when
+	// it dangles (Stat follows the link and fails); a working
+	// symlink and any real file are left alone.
+	if info, err := os.Lstat("/usr/local/bin/kubectl"); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		if target, rerr := os.Readlink("/usr/local/bin/kubectl"); rerr == nil && (target == "k3s" || strings.HasSuffix(target, "/k3s")) {
+			if _, serr := os.Stat("/usr/local/bin/kubectl"); serr != nil {
+				_ = os.Remove("/usr/local/bin/kubectl")
+			}
+		}
+	}
+	return nil
+}
+
+// ensureWorkstationNvimSymlinks creates the vi/vim symlinks in the
+// cli-workstation plugin bin dir, pointing at the bundled nvim.
+// The links use the RELATIVE target "nvim" (same dir), so the
+// plugin dir stays relocatable (state-dir override, restore) and
+// the links keep working wherever the dir moves. They live INSIDE
+// the plugin dir on purpose — the old kubectl precedent wrote a
+// system symlink (/usr/local/bin/kubectl) that uninstall/disable
+// never removed; these die with the plugin dir on uninstall
+// (UninstallPlugin removes the dir for plugins with Binaries) and
+// leave PATH on disable (DisablePlugin removes the shell snippet,
+// and the daemon resolves them only through the plugin's BinDirs).
+// An existing real file under either name is left alone, never
+// overwritten; a stale symlink pointing elsewhere is replaced. The
+// bundled nvim must exist and be executable first — on Alpine/Arch
+// there is no bundled nvim (the archive entry is Debian-gated), so
+// callers must not invoke this there: system vi/vim are the editors
+// on those hosts and this helper would fail closed.
+func (pm *PluginManager) ensureWorkstationNvimSymlinks() error {
+	pluginDir, err := pm.pluginDir("cli-workstation")
+	if err != nil {
+		return err
+	}
+	nvimBin := filepath.Join(pluginDir, "bin", "nvim")
+	if !isExecutableFile(nvimBin) {
+		return fmt.Errorf("cli-workstation bundled nvim %q is missing or not executable; cannot create vi/vim symlinks", filepath.ToSlash(filepath.Join("cli-workstation", "bin", "nvim")))
+	}
+	for _, link := range []string{"vi", "vim"} {
+		p := filepath.Join(pluginDir, "bin", link)
+		if info, err := os.Lstat(p); err == nil {
+			if info.Mode()&os.ModeSymlink != 0 {
+				if target, rerr := os.Readlink(p); rerr == nil && target == "nvim" {
+					continue
+				}
+				_ = os.Remove(p)
+			} else {
+				continue
+			}
+		}
+		if err := os.Symlink("nvim", p); err != nil {
+			return fmt.Errorf("cli-workstation: failed to create symlink %q: %w", link, err)
+		}
+	}
+	return nil
+}
+
+// checkWorkstationNvimLibraries runs `ldd` on the bundled nvim
+// binary and fails loudly listing any shared library reported "not
+// found" — a missing lib means the binary cannot start at all, and
+// the install must fail rather than record a broken plugin. The
+// nvim tarball needs only libm/libgcc_s/libc (verified live
+// 2026-11-20), all in the base image, so this is expected to pass;
+// it is the tripwire if a future neovim release gains a dependency
+// the image does not carry. No LD_LIBRARY_PATH is needed: the
+// bundled tree carries no .so files outside lib/nvim/parser (loaded
+// by nvim itself, not the dynamic loader). If `ldd` itself is
+// absent, this logs a warning and continues — a missing ldd must
+// not block the install; the failure will surface at first launch
+// instead. (Same shape as checkEmacsBundledLibraries.)
+func (pm *PluginManager) checkWorkstationNvimLibraries() error {
+	lddPath, err := exec.LookPath("ldd")
+	if err != nil {
+		log.Printf("[Plugins] Warning: ldd is not available; skipping bundled-library check for cli-workstation nvim (a missing shared library will fail at first launch instead)")
+		return nil
+	}
+	pluginDir, err := pm.pluginDir("cli-workstation")
+	if err != nil {
+		return err
+	}
+	binary := filepath.Join(pluginDir, "bin", "nvim")
+	cmd := exec.Command(lddPath, binary)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("ldd %s failed: %w (output: %s)", binary, err, strings.TrimSpace(string(out)))
+	}
+	var missing []string
+	for _, line := range strings.Split(string(out), "\n") {
+		if !strings.Contains(line, "not found") {
+			continue
+		}
+		if fields := strings.Fields(strings.TrimSpace(line)); len(fields) > 0 {
+			missing = append(missing, fields[0])
+		}
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("bundled nvim binary %s is missing shared libraries: %s; refusing to install a plugin whose binary cannot start", binary, strings.Join(missing, ", "))
+	}
+	return nil
+}
+
+// expectedBundledBinary returns the on-disk location of the binary a
+// manifest entry provides, and whether that location is meaningful
+// to check. Archive and binary entries provide
+// <plugindir>/bin/<name> directly.
+// A distroPackage entry provides no single binary by name — its
+// package name (e.g. "emacs-nox") is not a file — so its expected
+// binaries are the plugin's RequiredBinaries under its BinDirs
+// (for cli-emacs: bin/emacs — the launcher — and usr/bin/emacs-nox,
+// the real extracted binary). A required binary counts as expected
+// at the FIRST BinDir that holds it: BinDirs are alternatives in
+// priority order (bin/ wins over usr/bin/), not every combination —
+// a binary present in one BinDir must not fail verification for
+// being absent from another. When a required binary is in NO
+// BinDir, the path under the first BinDir is returned so the
+// failure names a concrete missing location.
+func (pm *PluginManager) expectedBundledBinaries(def PluginDefinition) []string {
+	pluginDir, err := pm.pluginDir(def.ID)
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, b := range def.Binaries {
+		if !bundledEntryAppliesToOS(b, pm.osFamily) {
+			continue
+		}
+		switch b.Kind {
+		case "archive", "binary":
+			out = append(out, filepath.Join(pluginDir, "bin", b.Name))
+		case "distroPackage":
+			for _, bin := range def.RequiredBinaries {
+				found := ""
+				for _, binDir := range def.BinDirs {
+					candidate := filepath.Join(pluginDir, filepath.FromSlash(binDir), bin)
+					if isExecutableFile(candidate) {
+						found = candidate
+						break
+					}
+				}
+				if found != "" {
+					out = append(out, found)
+					continue
+				}
+				if len(def.BinDirs) > 0 {
+					out = append(out, filepath.Join(pluginDir, filepath.FromSlash(def.BinDirs[0]), bin))
+				}
+			}
+		}
+	}
+	return out
+}
+
+// bundledBinariesVerifiedNames lists the bundled binaries that are
+// present and executable, for PluginStatus.BundledBinaries: archive
+// and binary entry names, plus required binaries found under a
+// BinDir for distroPackage entries.
+func (pm *PluginManager) bundledBinariesVerifiedNames(def PluginDefinition) []string {
+	pluginDir, err := pm.pluginDir(def.ID)
+	if err != nil {
+		return nil
+	}
+	seen := make(map[string]bool)
+	var out []string
+	add := func(name string) {
+		if !seen[name] {
+			seen[name] = true
+			out = append(out, name)
+		}
+	}
+	for _, b := range def.Binaries {
+		if !bundledEntryAppliesToOS(b, pm.osFamily) {
+			continue
+		}
+		switch b.Kind {
+		case "archive", "binary":
+			if isExecutableFile(filepath.Join(pluginDir, "bin", b.Name)) {
+				add(b.Name)
+			}
+		case "distroPackage":
+			for _, bin := range def.RequiredBinaries {
+				for _, binDir := range def.BinDirs {
+					if isExecutableFile(filepath.Join(pluginDir, filepath.FromSlash(binDir), bin)) {
+						add(bin)
+					}
+				}
+			}
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+func isExecutableFile(path string) bool {
+	info, err := os.Stat(path)
+	if err != nil || info.IsDir() {
+		return false
+	}
+	return info.Mode().Perm()&0111 != 0
+}
+
+// verifyBundledBinaries re-verifies a plugin's bundled binaries
+// before use and fails closed on any discrepancy. It re-reads
+// <plugindir>/bundled.json and requires every listed file to exist
+// with a matching sha256, and requires every manifest entry's
+// expected binary to be present and executable at its expected
+// location. A missing bundled.json, a missing or tampered file, or
+// a missing expected binary is an error — never a warning — so a
+// caller can never exec a binary it has not just verified.
+func (pm *PluginManager) verifyBundledBinaries(def PluginDefinition) error {
+	if len(def.Binaries) == 0 {
+		return nil
+	}
+	// OS gate: a plugin whose every entry is gated away from this
+	// host bundles nothing here — there is nothing to verify, and
+	// requiring a bundled.json would wrongly fail the install on
+	// that host (the plugin's binaries resolve from the system
+	// packages instead; see cli-workstation on Alpine/Arch).
+	applicable := false
+	for _, b := range def.Binaries {
+		if bundledEntryAppliesToOS(b, pm.osFamily) {
+			applicable = true
+			break
+		}
+	}
+	if !applicable {
+		return nil
+	}
+	pluginDir, err := pm.pluginDir(def.ID)
+	if err != nil {
+		return err
+	}
+	data, err := os.ReadFile(bundledRecordPath(pluginDir))
+	if err != nil {
+		return fmt.Errorf("plugin %q: bundled verification record %s is missing or unreadable: %w; refusing to use unverified bundled binaries", def.ID, bundledRecordPath(pluginDir), err)
+	}
+	var rec bundledBinariesFile
+	if err := json.Unmarshal(data, &rec); err != nil {
+		return fmt.Errorf("plugin %q: bundled verification record is corrupt: %w", def.ID, err)
+	}
+	if rec.PluginID != "" && rec.PluginID != def.ID {
+		return fmt.Errorf("plugin %q: bundled verification record belongs to plugin %q", def.ID, rec.PluginID)
+	}
+	if len(rec.Files) == 0 {
+		return fmt.Errorf("plugin %q: bundled verification record lists no files", def.ID)
+	}
+	for _, r := range rec.Files {
+		if r.Path == "" || filepath.IsAbs(r.Path) || strings.Contains(r.Path, "..") {
+			return fmt.Errorf("plugin %q: bundled verification record has unsafe path %q", def.ID, r.Path)
+		}
+		full := filepath.Join(pluginDir, filepath.FromSlash(r.Path))
+		sum, err := sha256File(full)
+		if err != nil {
+			return fmt.Errorf("plugin %q: bundled file %q is missing or unreadable: %w", def.ID, r.Path, err)
+		}
+		if sum != strings.ToLower(r.SHA256) {
+			return fmt.Errorf("plugin %q: bundled file %q sha256 mismatch: got %s, want %s; refusing to use tampered bundled binaries", def.ID, r.Path, sum, r.SHA256)
+		}
+	}
+	for _, expected := range pm.expectedBundledBinaries(def) {
+		if !isExecutableFile(expected) {
+			rel, _ := filepath.Rel(pluginDir, expected)
+			return fmt.Errorf("plugin %q: expected bundled binary %q is missing or not executable", def.ID, filepath.ToSlash(rel))
+		}
+	}
+	return nil
+}
+
+// hasPluginBinaryForPlugin checks the system PATH first (including
+// the freeradius/radiusd alias), then the plugin's own BinDirs under
+// its plugin dir, for an executable file named bin. A bundled
+// binary therefore counts as present without ever being installed
+// into the system.
+func (pm *PluginManager) hasPluginBinaryForPlugin(def PluginDefinition, bin string) bool {
+	if hasPluginBinary(pm.osFamily, bin) {
+		return true
+	}
+	pluginDir, err := pm.pluginDir(def.ID)
+	if err != nil {
+		return false
+	}
+	for _, binDir := range def.BinDirs {
+		if !validBinDir(binDir) {
+			continue
+		}
+		if isExecutableFile(filepath.Join(pluginDir, filepath.FromSlash(binDir), bin)) {
+			return true
+		}
+	}
+	// Archive entries live in <plugindir>/bin/ even when the
+	// manifest declares no BinDirs.
+	if isExecutableFile(filepath.Join(pluginDir, "bin", bin)) {
+		return true
+	}
+	return false
+}
+
+// PluginEnv returns the environment for invoking a plugin's
+// commands, as KEY=value strings: the full current environment,
+// with PATH rebuilt as the plugin's BinDirs (absolute paths, in
+// declared order) prepended to the current PATH, and the plugin's
+// Env map overlaid with ${PLUGIN_DIR} expanded to the plugin dir.
+// Binaries are resolved through this PATH by CommandForPlugin, so a
+// bundled binary shadows any same-named system binary — which is
+// the point of bundling it.
+func (pm *PluginManager) PluginEnv(pluginID string) ([]string, error) {
+	def, ok := findPluginDefinition(pluginID)
+	if !ok {
+		return nil, fmt.Errorf("unknown plugin ID %q", pluginID)
+	}
+	pluginDir, err := pm.pluginDir(pluginID)
+	if err != nil {
+		return nil, err
+	}
+	pathParts := make([]string, 0, len(def.BinDirs)+1)
+	for _, binDir := range def.BinDirs {
+		if !validBinDir(binDir) {
+			continue
+		}
+		pathParts = append(pathParts, filepath.Join(pluginDir, filepath.FromSlash(binDir)))
+	}
+	if cur := os.Getenv("PATH"); cur != "" {
+		pathParts = append(pathParts, cur)
+	}
+	env := os.Environ()
+	out := make([]string, 0, len(env)+len(def.Env)+1)
+	replacedPath := false
+	for _, kv := range env {
+		if strings.HasPrefix(kv, "PATH=") {
+			out = append(out, "PATH="+strings.Join(pathParts, string(os.PathListSeparator)))
+			replacedPath = true
+			continue
+		}
+		out = append(out, kv)
+	}
+	if !replacedPath {
+		out = append(out, "PATH="+strings.Join(pathParts, string(os.PathListSeparator)))
+	}
+	keys := make([]string, 0, len(def.Env))
+	for k := range def.Env {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	expanded := make(map[string]string, len(def.Env))
+	for _, k := range keys {
+		expanded[k] = strings.ReplaceAll(def.Env[k], "${PLUGIN_DIR}", pluginDir)
+	}
+	for i, kv := range out {
+		if k, _, ok := strings.Cut(kv, "="); ok {
+			if v, exists := expanded[k]; exists {
+				out[i] = k + "=" + v
+				delete(expanded, k)
+			}
+		}
+	}
+	for _, k := range keys {
+		if v, ok := expanded[k]; ok {
+			out = append(out, k+"="+v)
+		}
+	}
+	return out, nil
+}
+
+// failingPluginCommand returns a command that fails with a
+// descriptive error instead of silently running the wrong binary
+// (or nothing at all). CommandForPlugin uses it when the binary
+// cannot be resolved or the bundled binaries fail verification.
+func failingPluginCommand(msg string) *exec.Cmd {
+	return exec.Command("sh", "-c", "printf '%s\\n' "+strconv.Quote(msg)+" >&2; exit 127")
+}
+
+// CommandForPlugin builds a command to run a plugin's binary with
+// that plugin's environment (see PluginEnv). The binary is resolved
+// through the plugin's BinDirs first, then the system PATH, so a
+// bundled binary is preferred over a system one of the same name.
+// For plugins that declare Binaries, the bundled tree is
+// re-verified before exec and any failure yields a command that
+// fails descriptively rather than running an unverified binary.
+func (pm *PluginManager) CommandForPlugin(pluginID, name string, args ...string) *exec.Cmd {
+	def, ok := findPluginDefinition(pluginID)
+	if !ok {
+		return failingPluginCommand(fmt.Sprintf("axonwall: unknown plugin %q", pluginID))
+	}
+	if name == "" || strings.Contains(name, "..") || filepath.IsAbs(name) {
+		return failingPluginCommand(fmt.Sprintf("axonwall: plugin %q: refusing to run binary name %q", pluginID, name))
+	}
+	if len(def.Binaries) > 0 {
+		if err := pm.verifyBundledBinaries(def); err != nil {
+			return failingPluginCommand(fmt.Sprintf("axonwall: plugin %q: %v", pluginID, err))
+		}
+	}
+	pluginDir, err := pm.pluginDir(pluginID)
+	if err != nil {
+		return failingPluginCommand(fmt.Sprintf("axonwall: plugin %q: %v", pluginID, err))
+	}
+	var resolved string
+	if !strings.ContainsRune(name, '/') {
+		for _, binDir := range def.BinDirs {
+			if !validBinDir(binDir) {
+				continue
+			}
+			candidate := filepath.Join(pluginDir, filepath.FromSlash(binDir), name)
+			if isExecutableFile(candidate) {
+				resolved = candidate
+				break
+			}
+		}
+		if resolved == "" {
+			if candidate := filepath.Join(pluginDir, "bin", name); isExecutableFile(candidate) {
+				resolved = candidate
+			}
+		}
+	} else {
+		// A relative path such as "usr/bin/emacs": resolve it
+		// under the plugin dir only, never the system.
+		candidate := filepath.Join(pluginDir, filepath.FromSlash(name))
+		if isExecutableFile(candidate) {
+			resolved = candidate
+		}
+	}
+	if resolved == "" {
+		if found, err := exec.LookPath(name); err == nil {
+			resolved = found
+		}
+	}
+	if resolved == "" {
+		return failingPluginCommand(fmt.Sprintf("axonwall: plugin %q: binary %q not found in plugin directories or system PATH", pluginID, name))
+	}
+	env, err := pm.PluginEnv(pluginID)
+	if err != nil {
+		return failingPluginCommand(fmt.Sprintf("axonwall: plugin %q: %v", pluginID, err))
+	}
+	cmd := exec.Command(resolved, args...)
+	cmd.Env = env
+	return cmd
+}
+
 func (pm *PluginManager) ListPlugins() []PluginStatus {
 	pm.mu.RLock()
 	defer pm.mu.RUnlock()
@@ -626,8 +2733,35 @@ func (pm *PluginManager) ListPlugins() []PluginStatus {
 			if bin == "debsums" && pm.osFamily != "debian" {
 				continue
 			}
-			if !hasPluginBinary(pm.osFamily, bin) {
+			if !pm.hasPluginBinaryForPlugin(d, bin) {
 				missing = append(missing, bin)
+			}
+		}
+
+		// Bundled binaries: a plugin whose binaries are all
+		// bundled and verified reads as installed with zero
+		// missing binaries even when the system has none of them
+		// — but only while verification passes. A failed
+		// verification counts every required binary as missing
+		// and the plugin is not reported installed, so the UI can
+		// never show a plugin installed on an unverified tree.
+		var bundledBinaries []string
+		if len(d.Binaries) > 0 {
+			if err := pm.verifyBundledBinaries(d); err != nil {
+				for _, bin := range d.RequiredBinaries {
+					found := false
+					for _, m := range missing {
+						if m == bin {
+							found = true
+							break
+						}
+					}
+					if !found {
+						missing = append(missing, bin)
+					}
+				}
+			} else {
+				bundledBinaries = pm.bundledBinariesVerifiedNames(d)
 			}
 		}
 
@@ -665,6 +2799,7 @@ func (pm *PluginManager) ListPlugins() []PluginStatus {
 			Bundled:          bundled,
 			RequiredBinaries: d.RequiredBinaries,
 			MissingBinaries:  missing,
+			BundledBinaries:  bundledBinaries,
 			Packages:         pkgs,
 			InstalledAt:      installedAt,
 			SystemdUnits:     d.SystemdUnits,
@@ -690,6 +2825,13 @@ func (pm *PluginManager) EnablePlugin(pluginID string) PluginActionResponse {
 		}
 		pm.saveState()
 		pm.mu.Unlock()
+		// Shell PATH: provisioning rewrote /etc/zsh/zshenv, which wipes
+		// the plugin PATH loader block — rebuild every enabled plugin's
+		// snippet so the loader is restored. Soft-fail: the plugin works
+		// via the daemon either way; the snippet is only a convenience.
+		if err := RebuildPluginShellPaths(pm); err != nil {
+			log.Printf("[PluginManager] Warning: failed to rebuild plugin shell PATHs: %v", err)
+		}
 		return PluginActionResponse{
 			Success: true,
 			Message: "Enabled Modern Operator Shell & Editor (ZSH + Oh My Zsh + Starship + VIM + Full Stack Completions).",
@@ -728,10 +2870,24 @@ func (pm *PluginManager) EnablePlugin(pluginID string) PluginActionResponse {
 	}
 	pm.saveState()
 	pm.mu.Unlock()
+	// Shell PATH (soft-fail: log + continue, never fail the enable —
+	// the plugin works via the daemon's PluginEnv either way).
+	if err := SyncPluginShellPaths(pm, pluginID); err != nil {
+		log.Printf("[PluginManager] Warning: failed to sync shell PATH for plugin %s: %v", pluginID, err)
+	}
 	return resp
 }
 
 func (pm *PluginManager) DisablePlugin(pluginID string) PluginActionResponse {
+	// Dependency guard: refuse while any other currently-enabled
+	// plugin depends on this one — disabling it would break the
+	// dependent. Runs before the cli-workstation special case.
+	if dependents := pm.enabledDependentsOf(pluginID); len(dependents) > 0 {
+		return PluginActionResponse{
+			Success: false,
+			Message: fmt.Sprintf("Cannot disable plugin %s: enabled plugin(s) %s depend on it. Disable %s first.", pluginID, strings.Join(dependents, ", "), strings.Join(dependents, ", ")),
+		}
+	}
 	if pluginID == "cli-workstation" {
 		_ = os.MkdirAll("/etc/axonwall", 0755)
 		_ = os.WriteFile("/etc/axonwall/workstation.disabled", []byte("disabled=true\n"), 0644)
@@ -739,6 +2895,11 @@ func (pm *PluginManager) DisablePlugin(pluginID string) PluginActionResponse {
 		pm.disabledMap[pluginID] = true
 		pm.saveState()
 		pm.mu.Unlock()
+		// Shell PATH (soft-fail): remove the snippet so the disabled
+		// plugin's binaries leave interactive shells too.
+		if err := RemovePluginShellPath(pm, pluginID); err != nil {
+			log.Printf("[PluginManager] Warning: failed to remove shell PATH for plugin %s: %v", pluginID, err)
+		}
 		return PluginActionResponse{
 			Success: true,
 			Message: "Disabled Modern Operator Shell & Editor (attack-surface reduction mode active).",
@@ -774,6 +2935,12 @@ func (pm *PluginManager) DisablePlugin(pluginID string) PluginActionResponse {
 	pm.saveState()
 	pm.mu.Unlock()
 
+	// Shell PATH (soft-fail): remove the snippet so the disabled
+	// plugin's binaries leave interactive shells too.
+	if err := RemovePluginShellPath(pm, pluginID); err != nil {
+		log.Printf("[PluginManager] Warning: failed to remove shell PATH for plugin %s: %v", pluginID, err)
+	}
+
 	return PluginActionResponse{
 		Success: true,
 		Message: fmt.Sprintf("Disabled plugin %s.", pluginID),
@@ -784,6 +2951,38 @@ func (pm *PluginManager) DisablePlugin(pluginID string) PluginActionResponse {
 func systemctlAvailable() bool {
 	_, err := exec.LookPath("systemctl")
 	return err == nil
+}
+
+// enabledDependentsOf returns the IDs of currently-enabled plugins
+// that declare pluginID in their Dependencies (sorted). It is the
+// guard for DisablePlugin/UninstallPlugin: a plugin another enabled
+// plugin depends on must not be turned off or removed underneath
+// it — e.g. once Doom/Spacemacs declare dependencies:
+// ["cli-emacs"], cli-emacs cannot be disabled while either is
+// enabled. It reads definitions generically; no plugin ID is
+// hardcoded here.
+func (pm *PluginManager) enabledDependentsOf(pluginID string) []string {
+	var out []string
+	for _, d := range GetExtensionPluginDefinitions() {
+		if d.ID == pluginID {
+			continue
+		}
+		depends := false
+		for _, dep := range d.Dependencies {
+			if dep == pluginID {
+				depends = true
+				break
+			}
+		}
+		if !depends {
+			continue
+		}
+		if pm.IsPluginEnabled(d.ID) {
+			out = append(out, d.ID)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // findExtensionPluginDefinition returns the definition for an extension
@@ -1003,16 +3202,139 @@ func (pm *PluginManager) InstallPlugin(pluginID string) PluginActionResponse {
 		}
 	}
 
-	// Post-install configuration hooks
-	if pluginID == "cli-workstation" || pluginID == "vigilant-octo-waffle" {
-		if _, err := exec.LookPath("kubectl"); err != nil {
-			if k3sPath, kerr := exec.LookPath("k3s"); kerr == nil && k3sPath != "" {
-				_ = os.MkdirAll("/usr/local/bin", 0755)
-				_ = os.Symlink(k3sPath, "/usr/local/bin/kubectl")
+	// Bundled binaries: validate then download/verify/extract into
+	// the plugin's own directory, before any post-install hook runs.
+	// Any failure aborts the install — the plugin is NOT recorded
+	// installed and hooks do not run — so a half-bundled plugin can
+	// never be reported installed.
+	if len(target.Binaries) > 0 {
+		if err := pm.validateBundledBinaries(*target); err != nil {
+			return PluginActionResponse{
+				Success: false,
+				Message: fmt.Sprintf("Bundled binary validation failed for plugin %s: %v", pluginID, err),
+				Output:  output.String(),
+			}
+		}
+		if err := pm.installBundledBinaries(*target); err != nil {
+			return PluginActionResponse{
+				Success: false,
+				Message: fmt.Sprintf("Bundled binary installation failed for plugin %s: %v", pluginID, err),
+				Output:  output.String(),
 			}
 		}
 	}
+
+	// cli-emacs post-install: the bundled tree is extracted, so
+	// (1) ldd-check the real binary (usr/bin/emacs-nox) for
+	// missing shared libraries, and (2) write the bin/emacs
+	// launcher + config/init.el. The ldd check runs first: on
+	// failure the plugin tree is removed again so ListPlugins
+	// cannot report the plugin installed on a tree whose binary
+	// cannot start, and the install fails loudly listing the
+	// missing libraries. The launcher/config files are generated
+	// locally from repo constants (not downloaded), so they are
+	// not part of bundled.json — verify checks bin/emacs exists
+	// and is executable, but does not hash it.
+	if pluginID == "cli-emacs" {
+		failEmacsInstall := func(err error) PluginActionResponse {
+			if dir, derr := pm.pluginDir(pluginID); derr == nil {
+				_ = os.RemoveAll(dir)
+			}
+			return PluginActionResponse{
+				Success: false,
+				Message: fmt.Sprintf("Bundled emacs post-install failed for plugin %s: %v", pluginID, err),
+				Output:  output.String(),
+			}
+		}
+		if err := pm.checkEmacsBundledLibraries(); err != nil {
+			return failEmacsInstall(err)
+		}
+		if err := pm.provisionEmacsPluginFiles(); err != nil {
+			return failEmacsInstall(err)
+		}
+	}
+
+	// Doom / Spacemacs post-install: each shares the cli-emacs
+	// binary, so each fails closed without cli-emacs present, then
+	// clones its distribution at the pinned commit and writes its
+	// launcher + config. Doom additionally runs `doom sync`;
+	// Spacemacs does no package install and no first start (its
+	// packages are latest-at-install — see
+	// plugin_emacs_doom_spacemacs.go). On failure the plugin is NOT
+	// recorded installed and the helpers remove their partial
+	// artifacts; the failure message names the cause.
+	if pluginID == "cli-emacs-doom" {
+		if err := pm.installDoomEmacs(); err != nil {
+			return PluginActionResponse{
+				Success: false,
+				Message: fmt.Sprintf("Doom Emacs install failed for plugin %s: %v", pluginID, err),
+				Output:  output.String(),
+			}
+		}
+	}
+	if pluginID == "cli-emacs-spacemacs" {
+		if err := pm.installSpacemacsEmacs(); err != nil {
+			return PluginActionResponse{
+				Success: false,
+				Message: fmt.Sprintf("Spacemacs install failed for plugin %s: %v", pluginID, err),
+				Output:  output.String(),
+			}
+		}
+	}
+
+	// Post-install configuration hooks
+	if pluginID == "cli-workstation" || pluginID == "vigilant-octo-waffle" {
+		// kubectl now comes from the core-k3s plugin's bin dir,
+		// not /usr/local/bin: if no kubectl resolves on the
+		// system PATH and the staged k3s binary exists, link
+		// <plugindir>/bin/kubectl -> k3s (plus crictl/ctr) there.
+		// Never writes /usr/local/bin — the old hook created
+		// /usr/local/bin/kubectl -> k3s and uninstall/disable
+		// never removed it; a dangling copy is now cleaned up
+		// by ensureCoreK3sBinSymlinks. A standalone kubectl
+		// binary (Debian builders still ship one in
+		// /usr/local/bin) satisfies the LookPath check and this
+		// stays a no-op, as before.
+		if _, err := exec.LookPath("kubectl"); err != nil {
+			_ = pm.ensureCoreK3sBinSymlinks()
+		}
+	}
 	if pluginID == "cli-workstation" {
+		// Debian-only nvim post-install: the bundled tree is
+		// extracted, so (1) ldd-check the real binary (bin/nvim)
+		// for missing shared libraries, and (2) create the
+		// bin/vi + bin/vim symlinks to it. The ldd check runs
+		// first: on failure the plugin tree is removed again so
+		// ListPlugins cannot report the plugin installed on a
+		// tree whose binary cannot start. On Alpine/Arch there
+		// is no bundled nvim (the archive entry is Debian-gated
+		// and skipped), so this whole block is a no-op there and
+		// vi/vim keep resolving from the system packages. The
+		// symlinks are generated locally (not downloaded), so
+		// they are not part of bundled.json — verify checks
+		// bin/nvim exists and is executable, but does not hash
+		// them; hasPluginBinaryForPlugin resolves vim/nvim
+		// through them because os.Stat follows a symlink to an
+		// executable target (verified by reasoning + the
+		// isExecutableFile definition, not by a live launch).
+		if pm.osFamily == "debian" {
+			failWorkstationNvimInstall := func(err error) PluginActionResponse {
+				if dir, derr := pm.pluginDir(pluginID); derr == nil {
+					_ = os.RemoveAll(dir)
+				}
+				return PluginActionResponse{
+					Success: false,
+					Message: fmt.Sprintf("Bundled nvim post-install failed for plugin %s: %v", pluginID, err),
+					Output:  output.String(),
+				}
+			}
+			if err := pm.checkWorkstationNvimLibraries(); err != nil {
+				return failWorkstationNvimInstall(err)
+			}
+			if err := pm.ensureWorkstationNvimSymlinks(); err != nil {
+				return failWorkstationNvimInstall(err)
+			}
+		}
 		_ = os.Remove("/etc/axonwall/workstation.disabled")
 		pm.mu.Lock()
 		delete(pm.disabledMap, pluginID)
@@ -1029,12 +3351,11 @@ func (pm *PluginManager) InstallPlugin(pluginID string) PluginActionResponse {
 		}
 	}
 	if pluginID == "rosenpass" {
-		if _, err := exec.LookPath("rosenpass"); err != nil {
-			dlCmd := exec.Command("sh", "-c", "tmpd=$(mktemp -d) && curl -fsSL https://github.com/rosenpass/rosenpass/releases/download/v0.2.3/rosenpass-x86_64-linux-0.2.3.tar | tar -xf - -C \"$tmpd\" && find \"$tmpd\" -type f \\( -name rosenpass -o -name rp \\) -exec cp -f {} /usr/local/bin/ \\; && chmod 755 /usr/local/bin/rosenpass /usr/local/bin/rp 2>/dev/null; rm -rf \"$tmpd\"")
-			if out, err := dlCmd.CombinedOutput(); err != nil {
-				log.Printf("[PluginManager] Warning downloading rosenpass release binary: %v (%s)", err, string(out))
-			}
-		}
+		// The rosenpass binary now arrives via the generic
+		// bundled-binaries flow above (verified archive extract
+		// into <plugindir>/bin/) — the old unverified
+		// `curl | tar` into /usr/local/bin is deleted. Only the
+		// keypair/unit provisioning remains here.
 		if err := ProvisionRosenpassEnvironment(DefaultRosenpassDir); err != nil {
 			log.Printf("[PluginManager] Warning provisioning Rosenpass PQ keys: %v", err)
 		}
@@ -1075,6 +3396,12 @@ func (pm *PluginManager) InstallPlugin(pluginID string) PluginActionResponse {
 	// Ensure LDAP integration is provisioned if declared by the plugin
 	go pm.ensurePluginLDAP(pluginID)
 
+	// Shell PATH (soft-fail): the bundled dirs exist now and the plugin
+	// is recorded installed, so interactive shells can use its binaries.
+	if err := SyncPluginShellPaths(pm, pluginID); err != nil {
+		log.Printf("[PluginManager] Warning: failed to sync shell PATH for plugin %s: %v", pluginID, err)
+	}
+
 	return PluginActionResponse{
 		Success: true,
 		Message: fmt.Sprintf("Successfully installed plugin %s (%s)", target.Name, pluginID),
@@ -1083,6 +3410,15 @@ func (pm *PluginManager) InstallPlugin(pluginID string) PluginActionResponse {
 }
 
 func (pm *PluginManager) UninstallPlugin(pluginID string) PluginActionResponse {
+	// Dependency guard: refuse while any other currently-enabled
+	// plugin depends on this one — uninstalling it would break the
+	// dependent. Runs at the top, before the core-role early return.
+	if dependents := pm.enabledDependentsOf(pluginID); len(dependents) > 0 {
+		return PluginActionResponse{
+			Success: false,
+			Message: fmt.Sprintf("Cannot uninstall plugin %s: enabled plugin(s) %s depend on it. Disable %s first.", pluginID, strings.Join(dependents, ", "), strings.Join(dependents, ", ")),
+		}
+	}
 	if strings.HasPrefix(pluginID, "core-") {
 		pm.mu.Lock()
 		pm.disabledMap[pluginID] = true
@@ -1162,7 +3498,46 @@ func (pm *PluginManager) UninstallPlugin(pluginID string) PluginActionResponse {
 		}
 	}
 
+	// Bundled binaries: remove the plugin's own directory, but only
+	// for plugins that declare Binaries — never delete a directory
+	// for a plugin that never had one. The id was validated by
+	// pluginDir, so the joined path cannot escape baseDataDir; a
+	// symlink at that path is removed as a link, never followed
+	// (os.RemoveAll does not follow the root symlink, and the Lstat
+	// check makes that explicit). A removal failure is logged, not
+	// fatal: the packages are already gone and the plugin record is
+	// cleared below either way. Core-role plugins never reach here.
+	if len(target.Binaries) > 0 {
+		if dir, err := pm.pluginDir(pluginID); err == nil {
+			if info, err := os.Lstat(dir); err == nil {
+				var rmErr error
+				if info.Mode()&os.ModeSymlink != 0 {
+					rmErr = os.Remove(dir)
+				} else {
+					rmErr = os.RemoveAll(dir)
+				}
+				if rmErr != nil {
+					log.Printf("[PluginManager] Warning: failed to remove bundled-binary directory %s for plugin %s: %v", dir, pluginID, rmErr)
+				}
+			}
+		}
+	}
+
 	// Post-removal cleanup hooks
+	if pluginID == "rosenpass" {
+		// Legacy cleanup: before the bundled-binaries migration
+		// the rosenpass binary (and `rp`) lived in /usr/local/bin.
+		// Remove them on uninstall so a stale copy cannot shadow
+		// — or be mistaken for — the plugin-dir binary. Only
+		// regular files/symlinks are removed, never directories.
+		for _, legacy := range []string{"/usr/local/bin/rosenpass", "/usr/local/bin/rp"} {
+			if info, err := os.Lstat(legacy); err == nil && !info.IsDir() {
+				if err := os.Remove(legacy); err != nil {
+					log.Printf("[PluginManager] Warning: failed to remove legacy rosenpass binary %s: %v", legacy, err)
+				}
+			}
+		}
+	}
 	if pluginID == "cli-workstation" {
 		pm.mu.Lock()
 		pm.disabledMap[pluginID] = true
@@ -1186,6 +3561,12 @@ func (pm *PluginManager) UninstallPlugin(pluginID string) PluginActionResponse {
 	pm.saveState()
 	pm.mu.Unlock()
 
+	// Shell PATH (soft-fail): remove the snippet — the plugin dir is
+	// already gone, so the snippet must not outlive it.
+	if err := RemovePluginShellPath(pm, pluginID); err != nil {
+		log.Printf("[PluginManager] Warning: failed to remove shell PATH for plugin %s: %v", pluginID, err)
+	}
+
 	return PluginActionResponse{
 		Success: true,
 		Message: fmt.Sprintf("Successfully uninstalled plugin %s (%s)", target.Name, pluginID),
@@ -1196,17 +3577,78 @@ func (pm *PluginManager) UninstallPlugin(pluginID string) PluginActionResponse {
 func (pm *PluginManager) ReconfigurePlugin(pluginID string) PluginActionResponse {
 	pm.actionMu.Lock()
 	defer pm.actionMu.Unlock()
+	if pluginID == "core-k3s" {
+		// Core-k3s install/ensure flow. InstallPlugin's core-*
+		// branch funnels here, and so does EnablePlugin (via
+		// ReconfigurePlugin), so this is the one place the
+		// bundled k3s + k9s tree is ensured: the image builders
+		// pre-stage it with bundled.json, and
+		// ensureBundledBinaries verifies that tree first and
+		// downloads only when a file is missing or mismatched —
+		// a first boot never re-downloads ~110 MB. The k3s
+		// multicall symlinks are (re)created in the plugin bin
+		// dir, soft-fail: the units and the daemon resolve k3s
+		// directly, and kubectl also resolves via `k3s kubectl`.
+		def, ok := findPluginDefinition(pluginID)
+		if !ok {
+			return PluginActionResponse{
+				Success: false,
+				Message: "core-k3s plugin definition is missing; cannot ensure bundled binaries",
+			}
+		}
+		if err := pm.ensureBundledBinaries(def); err != nil {
+			return PluginActionResponse{
+				Success: false,
+				Message: fmt.Sprintf("Failed to ensure core-k3s bundled binaries: %v", err),
+			}
+		}
+		if err := pm.ensureCoreK3sBinSymlinks(); err != nil {
+			log.Printf("[PluginManager] Warning: failed to create core-k3s multicall symlinks: %v", err)
+		}
+		pm.mu.Lock()
+		delete(pm.disabledMap, pluginID)
+		if pm.installedMap[pluginID] == "" {
+			pm.installedMap[pluginID] = time.Now().UTC().Format(time.RFC3339)
+		}
+		pm.saveState()
+		pm.mu.Unlock()
+		// Shell PATH (soft-fail): interactive shells get the core-k3s
+		// bin dir too — the shell helpers know core definitions.
+		if err := SyncPluginShellPaths(pm, pluginID); err != nil {
+			log.Printf("[PluginManager] Warning: failed to sync shell PATH for plugin %s: %v", pluginID, err)
+		}
+		return PluginActionResponse{
+			Success: true,
+			Message: "Kubernetes (K3s) & OpenEBS Distributed Storage enabled; bundled k3s and k9s verified in the core-k3s plugin directory.",
+		}
+	}
 	if pluginID == "cli-workstation" {
 		_ = os.Remove("/etc/axonwall/workstation.disabled")
 		pm.mu.Lock()
 		delete(pm.disabledMap, pluginID)
 		pm.saveState()
 		pm.mu.Unlock()
+		// Re-create the bin/vi + bin/vim symlinks if they were
+		// deleted (soft-fail, like the core-k3s multicall
+		// symlinks in the core-k3s branch above): reconfigure
+		// repairs, only a reinstall restores a missing nvim
+		// tree. Debian only — on Alpine/Arch there is no bundled
+		// nvim and the helper would fail closed.
+		if pm.osFamily == "debian" {
+			if err := pm.ensureWorkstationNvimSymlinks(); err != nil {
+				log.Printf("[PluginManager] Warning: failed to create cli-workstation vi/vim symlinks: %v", err)
+			}
+		}
 		if err := pm.provisionWorkstationConfigs(); err != nil {
 			return PluginActionResponse{
 				Success: false,
 				Message: fmt.Sprintf("Failed to reconfigure workstation: %v", err),
 			}
+		}
+		// Shell PATH: provisioning rewrote /etc/zsh/zshenv, which wipes
+		// the plugin PATH loader block — rebuild it (soft-fail).
+		if err := RebuildPluginShellPaths(pm); err != nil {
+			log.Printf("[PluginManager] Warning: failed to rebuild plugin shell PATHs: %v", err)
 		}
 		return PluginActionResponse{
 			Success: true,
@@ -1554,7 +3996,17 @@ export _AXONWALL_ZSH_LOADED=1
 export EDITOR="vim"
 export VISUAL="vim"
 export PAGER="less -FRX"
-export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+# Preserve any PATH entries added earlier (e.g. plugin bin dirs from
+# /etc/zsh/zshenv): add each system dir only if missing, instead of
+# resetting PATH outright. The old hard reset wiped plugin PATH
+# entries in non-login interactive zsh (tmux panes, 'zsh' started
+# from another shell), which zlogin never heals — only login shells
+# were restored. This loop is idempotent and preserves order.
+for _d in /bin /sbin /usr/bin /usr/sbin /usr/local/bin /usr/local/sbin; do
+  case ":$PATH:" in *":$_d:"*) ;; *) PATH="$_d:$PATH";; esac
+done
+export PATH
+unset _d
 
 if [[ -z "${KUBECONFIG:-}" ]] && [[ -r /etc/rancher/k3s/k3s.yaml ]]; then
   export KUBECONFIG="/etc/rancher/k3s/k3s.yaml"

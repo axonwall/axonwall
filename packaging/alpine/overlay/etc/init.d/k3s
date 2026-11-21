@@ -3,7 +3,7 @@
 name="k3s"
 description="Lightweight Kubernetes Server (Axonwall K3s + OpenZFS Storage Host)"
 supervisor="supervise-daemon"
-command="/usr/local/bin/k3s"
+command="/var/lib/axonwall/core-k3s/bin/k3s"
 command_args="server --config /etc/rancher/k3s/config.yaml"
 pidfile="/run/k3s.pid"
 output_log="/var/log/k3s.log"

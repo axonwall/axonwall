@@ -133,6 +133,48 @@ var (
 	}
 )
 
+// coreK3sBinDir is the core-k3s plugin's bin directory, derived
+// from k3sStateDir — the same state root the PluginManager uses as
+// baseDataDir (/var/lib/axonwall in production, redirectable in
+// tests via SetK3sPathsForTest). No second constant: the plugin
+// path is always <stateDir>/core-k3s/bin, so a test that redirects
+// the state dir redirects the plugin lookup with it.
+func coreK3sBinDir() string {
+	return filepath.Join(k3sStateDir, "core-k3s", "bin")
+}
+
+// coreK3sBinaryPath is the bundled k3s binary:
+// /var/lib/axonwall/core-k3s/bin/k3s in production.
+func coreK3sBinaryPath() string {
+	return filepath.Join(coreK3sBinDir(), "k3s")
+}
+
+// resolveK3sBinary returns the bundled core-k3s binary when it is
+// staged and executable, else falls back to a PATH lookup (a
+// pre-migration /usr/local/bin install, or a dev machine). The
+// daemon's own PATH never contains the plugin bin dir, so a plain
+// LookPath would miss the bundled binary entirely after the move.
+func resolveK3sBinary() (string, error) {
+	if p := coreK3sBinaryPath(); isExecutableFile(p) {
+		return p, nil
+	}
+	return exec.LookPath("k3s")
+}
+
+// resolveCoreK3sKubectl returns the bundled core-k3s kubectl
+// (the <plugindir>/bin/kubectl symlink onto k3s) when staged, else
+// falls back to a PATH lookup. Same plugin-first order as
+// resolveK3sBinary: the bundled binary shadows a same-named system
+// one, matching CommandForPlugin. (Named core-K3s-... because the
+// K9s explorer already owns resolveKubectlBinary in
+// k3s_explorer.go, with a different signature.)
+func resolveCoreK3sKubectl() (string, error) {
+	if p := filepath.Join(coreK3sBinDir(), "kubectl"); isExecutableFile(p) {
+		return p, nil
+	}
+	return exec.LookPath("kubectl")
+}
+
 // k3sJoinedMarkerPath is the durable proof that a secondary node
 // completed a join. It is written only after k3s restarts
 // successfully with a peer token in place (A-H2, round 3), so a
@@ -796,7 +838,7 @@ func (m *K3sManager) SaveEtcdSnapshot(name string) (string, error) {
 	if strings.HasPrefix(safeName, "-") || strings.HasPrefix(safeName, ".") {
 		return "", fmt.Errorf("invalid etcd snapshot name %q", name)
 	}
-	k3sBin, err := exec.LookPath("k3s")
+	k3sBin, err := resolveK3sBinary()
 	if err != nil {
 		return "", fmt.Errorf("k3s binary not found on system")
 	}
@@ -820,7 +862,7 @@ func (m *K3sManager) RestoreEtcdSnapshot(snapshotName string) error {
 	if err != nil || info.IsDir() || (info.Mode()&os.ModeSymlink) != 0 {
 		return fmt.Errorf("etcd snapshot %q not found or invalid", base)
 	}
-	k3sBin, err := exec.LookPath("k3s")
+	k3sBin, err := resolveK3sBinary()
 	if err != nil {
 		return fmt.Errorf("k3s binary not found on system")
 	}
@@ -850,7 +892,13 @@ func (m *K3sManager) RestoreEtcdSnapshot(snapshotName string) error {
 	return nil
 }
 
-const defaultK3sServiceUnit = `[Unit]
+// defaultK3sServiceUnit is the fallback k3s.service unit written
+// by ensureK3sServiceUnit when no packaged unit exists. ExecStart
+// points at the bundled core-k3s binary, derived from k3sStateDir
+// via coreK3sBinaryPath — the same computation the daemon's binary
+// resolution uses — never a second hardcoded copy of the path.
+func defaultK3sServiceUnit() string {
+	return `[Unit]
 Description=Lightweight Kubernetes (Axonwall In-House K3s Engine)
 Documentation=https://k3s.io
 Wants=network-online.target
@@ -877,8 +925,9 @@ Restart=always
 RestartSec=5s
 ExecStartPre=-/usr/sbin/modprobe br_netfilter
 ExecStartPre=-/usr/sbin/modprobe overlay
-ExecStart=/usr/local/bin/k3s server --prefer-bundled-bin
+ExecStart=` + coreK3sBinaryPath() + ` server --prefer-bundled-bin
 `
+}
 
 func ensureK3sServiceUnit() {
 	if _, err := os.Stat("/etc/systemd/system/k3s.service"); err == nil {
@@ -887,7 +936,7 @@ func ensureK3sServiceUnit() {
 	if _, err := os.Stat("/lib/systemd/system/k3s.service"); err == nil {
 		return
 	}
-	if err := os.WriteFile("/etc/systemd/system/k3s.service", []byte(defaultK3sServiceUnit), 0644); err != nil {
+	if err := os.WriteFile("/etc/systemd/system/k3s.service", []byte(defaultK3sServiceUnit()), 0644); err != nil {
 		slog.Warn("Could not write /etc/systemd/system/k3s.service", "error", err)
 		return
 	}
@@ -1326,14 +1375,21 @@ func buildNodeSchedulingMergePatch(existingLabels map[string]string, existingTai
 }
 
 func runKubectlPatch(ctx context.Context, nodeName, patchJSON string) ([]byte, error) {
-	if _, err := exec.LookPath("kubectl"); err == nil {
-		cmd := exec.CommandContext(ctx, "kubectl", "patch", "node", nodeName, "--type=merge", "-p", patchJSON)
+	// Bundled plugin kubectl first, then a system kubectl, then
+	// `k3s kubectl` via the bundled k3s — the same fallback order
+	// as before, with the plugin paths added ahead of PATH because
+	// the daemon's PATH never contains the plugin bin dir.
+	if kubectlBin, err := resolveCoreK3sKubectl(); err == nil {
+		cmd := exec.CommandContext(ctx, kubectlBin, "patch", "node", nodeName, "--type=merge", "-p", patchJSON)
 		if _, statErr := os.Stat("/etc/rancher/k3s/k3s.yaml"); statErr == nil {
 			cmd.Env = append(os.Environ(), "KUBECONFIG=/etc/rancher/k3s/k3s.yaml")
 		}
 		if out, runErr := cmd.CombinedOutput(); runErr == nil {
 			return out, nil
 		}
+	}
+	if k3sBin, err := resolveK3sBinary(); err == nil {
+		return exec.CommandContext(ctx, k3sBin, "kubectl", "patch", "node", nodeName, "--type=merge", "-p", patchJSON).CombinedOutput()
 	}
 	return exec.CommandContext(ctx, "k3s", "kubectl", "patch", "node", nodeName, "--type=merge", "-p", patchJSON).CombinedOutput()
 }
