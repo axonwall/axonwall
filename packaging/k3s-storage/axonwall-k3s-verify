@@ -11,7 +11,14 @@ set -u
 MARKER="/etc/axonwall/.k3s-firstboot"
 AGENT_FLAG="/etc/rancher/k3s/agent-mode"
 KUBELET_KUBECONFIG="/var/lib/rancher/k3s/agent/kubelet.kubeconfig"
-K3S_BIN="/usr/local/bin/k3s"
+# k3s lives in the core-k3s plugin dir now. Fall back to PATH (a
+# pre-migration /usr/local/bin install) when the plugin binary is
+# not staged, so this check still works on boxes upgraded before
+# the plugin tree was ensured.
+K3S_BIN="/var/lib/axonwall/core-k3s/bin/k3s"
+if [ ! -x "$K3S_BIN" ]; then
+    K3S_BIN="$(command -v k3s 2>/dev/null || echo /var/lib/axonwall/core-k3s/bin/k3s)"
+fi
 
 log() { echo "[axonwall-k3s-verify] $*"; }
 
@@ -92,9 +99,9 @@ fi
 log "verifying k3s server API readiness (timeout: 60s)..."
 _elapsed=0
 while [ "$_elapsed" -lt 60 ]; do
-    if /usr/local/bin/k3s kubectl get nodes >/dev/null 2>&1; then
+    if "$K3S_BIN" kubectl get nodes >/dev/null 2>&1; then
         log "K3s API server is responsive:"
-        /usr/local/bin/k3s kubectl get nodes -o wide 2>/dev/null || true
+        "$K3S_BIN" kubectl get nodes -o wide 2>/dev/null || true
         rm -f "$MARKER"
         exit 0
     fi

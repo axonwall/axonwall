@@ -279,16 +279,58 @@ fi
 
 # D-M9: K3s ships in the axonwall and k3s-storage editions (the
 # k3s-storage edition IS the K3s host); it is absent for vault.
+#
+# Plugin-bundled binaries (core-k3s): k3s + k9s are staged into the
+# plugin dir <root>/var/lib/axonwall/core-k3s/bin/ instead of
+# /usr/local/bin. Same versions, URLs and pins as before the move.
+# write_core_k3s_bundled_json writes the bundled.json verification
+# record next to the staged binaries, in exactly the format
+# axonwalld's installBundledBinaries writes (relative path + sha256
+# of the bytes on disk + manifest entry + kind), so the daemon's
+# verifyBundledBinaries passes on the staged tree without a
+# re-download. $1 = plugin dir. It records whichever of bin/k3s and
+# bin/k9s are staged and executable, and fails the build when
+# neither is — a plugin dir with no binaries must never ship a
+# record blessing an empty tree.
+write_core_k3s_bundled_json() {
+  local _dir="$1" _k3s_sum="" _k9s_sum="" _n=0
+  if [[ -x "${_dir}/bin/k3s" ]]; then
+    _k3s_sum="$(sha256sum "${_dir}/bin/k3s" | awk '{print $1}')"
+    _n=$((_n + 1))
+  fi
+  if [[ -x "${_dir}/bin/k9s" ]]; then
+    _k9s_sum="$(sha256sum "${_dir}/bin/k9s" | awk '{print $1}')"
+    _n=$((_n + 1))
+  fi
+  if [[ "${_n}" -eq 0 ]]; then
+    echo "[!] ERROR: core-k3s plugin dir ${_dir} has no staged binaries; cannot write bundled.json." >&2
+    return 1
+  fi
+  {
+    printf '{\n  "pluginId": "core-k3s",\n  "files": [\n'
+    if [[ -n "${_k3s_sum}" ]]; then
+      printf '    {\n      "path": "bin/k3s",\n      "sha256": "%s",\n      "entry": "k3s",\n      "kind": "binary"\n    }' "${_k3s_sum}"
+      if [[ -n "${_k9s_sum}" ]]; then printf ',\n'; fi
+    fi
+    if [[ -n "${_k9s_sum}" ]]; then
+      printf '    {\n      "path": "bin/k9s",\n      "sha256": "%s",\n      "entry": "k9s",\n      "kind": "archive"\n    }' "${_k9s_sum}"
+    fi
+    printf '\n  ]\n}\n'
+  } > "${_dir}/bundled.json"
+  chmod 0644 "${_dir}/bundled.json"
+}
+
 if [[ "${EDITION}" == "axonwall" || "${EDITION}" == "k3s-storage" ]]; then
+mkdir -p "${WORK_DIR}/var/lib/axonwall/core-k3s/bin"
 # Fetch K3s binary if absent (ensures .deb updates via axonwall-update include k3s)
 K3S_VERSION="v1.32.3+k3s1"
 K3S_URL_VERSION="v1.32.3%2Bk3s1"
 K3S_SHA256="b19216803650b567bf980888dec39035edaf664339c55bc4462f7a003edbef83"
-if [[ ! -f "${WORK_DIR}/usr/local/bin/k3s" ]]; then
+if [[ ! -f "${WORK_DIR}/var/lib/axonwall/core-k3s/bin/k3s" ]]; then
   echo "[+] Downloading K3s ${K3S_VERSION} binary..."
-  curl -fsSL -o "${WORK_DIR}/usr/local/bin/k3s" "https://github.com/k3s-io/k3s/releases/download/${K3S_URL_VERSION}/k3s"
-  echo "${K3S_SHA256}  ${WORK_DIR}/usr/local/bin/k3s" | sha256sum -c -
-  chmod 755 "${WORK_DIR}/usr/local/bin/k3s"
+  curl -fsSL -o "${WORK_DIR}/var/lib/axonwall/core-k3s/bin/k3s" "https://github.com/k3s-io/k3s/releases/download/${K3S_URL_VERSION}/k3s"
+  echo "${K3S_SHA256}  ${WORK_DIR}/var/lib/axonwall/core-k3s/bin/k3s" | sha256sum -c -
+  chmod 755 "${WORK_DIR}/var/lib/axonwall/core-k3s/bin/k3s"
 fi
 fi
 
@@ -315,17 +357,31 @@ if [[ ! -f "${WORK_DIR}/usr/sbin/weed" ]]; then
 fi
 fi
 
+# D-M9: k9s ships only where k3s ships (axonwall + k3s-storage).
+# The vault edition has no k3s cluster, so it gets no k9s either:
+# before this move the k9s block was not edition-gated and the vault
+# .deb shipped a 126 MiB k9s for a cluster that does not exist.
+if [[ "${EDITION}" == "axonwall" || "${EDITION}" == "k3s-storage" ]]; then
 # Fetch K9s v0.51.0 binary if absent (ensures .deb installs & axonwall-update include k9s CLI)
 K9S_VERSION="0.51.0"
 K9S_SHA256="c3752ad51a5a4015a113819c4eeb6e55a4d0e4b8e652494797532f6fc8161dd7"
-if [[ ! -f "${WORK_DIR}/usr/local/bin/k9s" ]]; then
+if [[ ! -f "${WORK_DIR}/var/lib/axonwall/core-k3s/bin/k9s" ]]; then
   echo "[+] Downloading K9s v${K9S_VERSION} binary..."
   K9S_TAR="$(mktemp -t k9s-XXXXXX.tar.gz)"
   curl -fsSL -o "${K9S_TAR}" "https://github.com/derailed/k9s/releases/download/v${K9S_VERSION}/k9s_Linux_amd64.tar.gz"
   echo "${K9S_SHA256}  ${K9S_TAR}" | sha256sum -c -
-  tar -xzf "${K9S_TAR}" -C "${WORK_DIR}/usr/local/bin/" k9s
-  chmod 755 "${WORK_DIR}/usr/local/bin/k9s"
+  tar -xzf "${K9S_TAR}" -C "${WORK_DIR}/var/lib/axonwall/core-k3s/bin/" k9s
+  chmod 755 "${WORK_DIR}/var/lib/axonwall/core-k3s/bin/k9s"
   rm -f "${K9S_TAR}"
+fi
+# k3s multicall symlinks in the plugin bin dir (kubectl, crictl,
+# ctr -> k3s). The daemon recreates them on core-k3s reconfigure if
+# they are ever deleted; nothing is linked into /usr/local/bin.
+for _klink in kubectl crictl ctr; do
+  ln -sf k3s "${WORK_DIR}/var/lib/axonwall/core-k3s/bin/${_klink}"
+done
+# Verification record for the staged tree (see the helper above).
+write_core_k3s_bundled_json "${WORK_DIR}/var/lib/axonwall/core-k3s"
 fi
 
 # 5. Copy System Scripts & Terminal Configs
@@ -704,7 +760,9 @@ if [[ "${EDITION}" != "axonwall" ]]; then
     [[ -f "${WORK_DIR}/lib/systemd/system/axonwall-vault-provision.service" ]] || { echo "[!] ERROR: vault package is missing axonwall-vault-provision.service." >&2; exit 1; }
   elif [[ "${EDITION}" == "k3s-storage" ]]; then
     [[ -f "${WORK_DIR}/etc/axonwall/.k3s-edition" ]] || { echo "[!] ERROR: k3s-storage package is missing its .k3s-edition marker." >&2; exit 1; }
-    [[ -x "${WORK_DIR}/usr/local/bin/k3s" ]] || { echo "[!] ERROR: k3s-storage package is missing the k3s binary." >&2; exit 1; }
+    [[ -x "${WORK_DIR}/var/lib/axonwall/core-k3s/bin/k3s" ]] || { echo "[!] ERROR: k3s-storage package is missing the k3s binary." >&2; exit 1; }
+    [[ -x "${WORK_DIR}/var/lib/axonwall/core-k3s/bin/k9s" ]] || { echo "[!] ERROR: k3s-storage package is missing the k9s binary." >&2; exit 1; }
+    [[ -f "${WORK_DIR}/var/lib/axonwall/core-k3s/bundled.json" ]] || { echo "[!] ERROR: k3s-storage package is missing the core-k3s bundled.json verification record." >&2; exit 1; }
     [[ -f "${WORK_DIR}/lib/systemd/system/k3s.service" ]] || { echo "[!] ERROR: k3s-storage package is missing k3s.service." >&2; exit 1; }
     [[ -f "${WORK_DIR}/lib/systemd/system/k3s-agent.service" ]] || { echo "[!] ERROR: k3s-storage package is missing k3s-agent.service." >&2; exit 1; }
     [[ -f "${WORK_DIR}/usr/share/axonwall/k3s/zfs-operator.yaml" ]] || { echo "[!] ERROR: k3s-storage package is missing zfs-operator.yaml." >&2; exit 1; }

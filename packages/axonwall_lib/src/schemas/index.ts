@@ -1051,13 +1051,17 @@ export type PluginLdapIntegrationSpec = z.infer<typeof PluginLdapIntegrationSpec
 //
 // `name` is the artifact identifier: for `kind: 'archive'` it is the
 // binary the archive provides (e.g. 'rosenpass'); for
-// `kind: 'distroPackage'` it is the distro package name (e.g.
-// 'emacs-nox') — the binaries it contributes are found via `binDirs`
-// after extraction, not via `name`.
-// The `kind` discriminator is what lets the daemon tell the two source
+// `kind: 'binary'` it is the binary the raw file provides (e.g.
+// 'k3s'); for `kind: 'distroPackage'` it is the distro package name
+// (e.g. 'emacs-nox') — the binaries it contributes are found via
+// `binDirs` after extraction, not via `name`.
+// The `kind` discriminator is what lets the daemon tell the source
 // kinds apart unambiguously: an archive entry MUST carry `url` and
-// MUST NOT carry distro fields; a distro-package entry MUST carry
-// `distro`/`package`/`version`/`arch` and MUST NOT carry `url`.
+// MUST NOT carry distro fields; a raw-binary entry MUST carry `url`
+// and MUST NOT carry distro fields, `format`, or `pathInArchive` (a
+// single file has no container and no member path); a
+// distro-package entry MUST carry `distro`/`package`/`version`/`arch`
+// and MUST NOT carry `url`.
 //
 // sha256 is REQUIRED on every entry (never optional). It must be a
 // 64-char lowercase/uppercase hex digest, except for the temporary
@@ -1091,6 +1095,29 @@ export const PluginBundledArchiveBinarySchema = z.object({
 });
 export type PluginBundledArchiveBinary = z.infer<typeof PluginBundledArchiveBinarySchema>;
 
+// Raw single-file binary: a direct download (no archive container),
+// sha256-verified and placed at <plugindir>/bin/<name> with mode
+// 0755 (e.g. k3s, which upstream ships as a bare static binary).
+// Strict: `format`, `pathInArchive` and every distro field are
+// rejected outright — they are meaningless for a single file — so a
+// manifest that confuses this kind with 'archive' or
+// 'distroPackage' fails validation instead of silently dropping
+// fields (zod objects strip unknown keys by default; the older
+// archive/distroPackage schemas rely on the daemon's validation for
+// that check).
+export const PluginBundledRawBinarySchema = z
+  .object({
+    kind: z.literal('binary'),
+    name: z.string().min(1),
+    url: z
+      .string()
+      .min(1)
+      .regex(/^https?:\/\//, 'binary url must be an http(s) URL'),
+    sha256: PluginBundledBinarySha256Schema,
+  })
+  .strict();
+export type PluginBundledRawBinary = z.infer<typeof PluginBundledRawBinarySchema>;
+
 export const PluginBundledDistroPackageBinarySchema = z.object({
   kind: z.literal('distroPackage'),
   name: z.string().min(1),
@@ -1123,6 +1150,7 @@ export type PluginBundledDistroPackageBinary = z.infer<typeof PluginBundledDistr
 
 export const PluginBundledBinarySchema = z.discriminatedUnion('kind', [
   PluginBundledArchiveBinarySchema,
+  PluginBundledRawBinarySchema,
   PluginBundledDistroPackageBinarySchema,
 ]);
 export type PluginBundledBinary = z.infer<typeof PluginBundledBinarySchema>;

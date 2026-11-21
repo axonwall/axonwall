@@ -30,4 +30,4 @@ Restart=always
 RestartSec=5s
 ExecStartPre=-/usr/sbin/modprobe br_netfilter
 ExecStartPre=-/usr/sbin/modprobe overlay
-ExecStart=/usr/local/bin/k3s server --prefer-bundled-bin
+ExecStart=/var/lib/axonwall/core-k3s/bin/k3s server --prefer-bundled-bin

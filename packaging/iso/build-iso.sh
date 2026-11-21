@@ -181,6 +181,11 @@ if [[ "${FLAVOR}" == "vault" ]]; then
         config/includes.chroot/usr/local/bin/axonwall-cloud-init \
         config/includes.chroot/usr/local/bin/axonwall-import \
         config/includes.chroot/etc/headscale/config.yaml
+  # No k3s on a vault image, in either location: the chroot tree
+  # persists across builds, so a staged core-k3s plugin dir left by
+  # an earlier axonwall-flavor build must go, not just the binaries
+  # the vault branch never downloads.
+  rm -rf config/includes.chroot/var/lib/axonwall/core-k3s
   rm -rf config/includes.chroot/etc/systemd/system/suricata.service.d
   rmdir config/includes.chroot/etc/headscale 2>/dev/null || true
   # Vault markers: .vault-edition tells shared hooks (e.g. the
@@ -391,6 +396,51 @@ if [[ -f "${SCRIPT_DIR}/branding/theme-zbm-uki.py" ]]; then
   chmod +x config/includes.chroot/usr/lib/axonwall/theme-zbm-uki.py
 fi
 
+# Plugin-bundled binaries (core-k3s): k3s + k9s live in the plugin
+# dir <root>/var/lib/axonwall/core-k3s/bin/ now, not /usr/local/bin.
+# This chroot tree persists in the repo across builds, so drop any
+# pre-migration copies at the old location: a stale /usr/local/bin
+# binary would otherwise ship alongside the plugin dir, unreferenced
+# by every unit/script but still shadowing it on PATH.
+rm -f config/includes.chroot/usr/local/bin/k3s config/includes.chroot/usr/local/bin/k9s
+
+# write_core_k3s_bundled_json writes the bundled.json verification
+# record next to the pre-staged plugin binaries, in exactly the
+# format axonwalld's installBundledBinaries writes (relative path +
+# sha256 of the bytes on disk + manifest entry + kind), so the
+# daemon's verifyBundledBinaries passes on the staged tree without
+# a re-download. $1 = plugin dir. It records whichever of bin/k3s
+# and bin/k9s are staged and executable, and fails the build when
+# neither is — a plugin dir with no binaries must never ship a
+# record blessing an empty tree.
+write_core_k3s_bundled_json() {
+  local _dir="$1" _k3s_sum="" _k9s_sum="" _n=0
+  if [[ -x "${_dir}/bin/k3s" ]]; then
+    _k3s_sum="$(sha256sum "${_dir}/bin/k3s" | awk '{print $1}')"
+    _n=$((_n + 1))
+  fi
+  if [[ -x "${_dir}/bin/k9s" ]]; then
+    _k9s_sum="$(sha256sum "${_dir}/bin/k9s" | awk '{print $1}')"
+    _n=$((_n + 1))
+  fi
+  if [[ "${_n}" -eq 0 ]]; then
+    echo "[!] ERROR: core-k3s plugin dir ${_dir} has no staged binaries; cannot write bundled.json." >&2
+    return 1
+  fi
+  {
+    printf '{\n  "pluginId": "core-k3s",\n  "files": [\n'
+    if [[ -n "${_k3s_sum}" ]]; then
+      printf '    {\n      "path": "bin/k3s",\n      "sha256": "%s",\n      "entry": "k3s",\n      "kind": "binary"\n    }' "${_k3s_sum}"
+      if [[ -n "${_k9s_sum}" ]]; then printf ',\n'; fi
+    fi
+    if [[ -n "${_k9s_sum}" ]]; then
+      printf '    {\n      "path": "bin/k9s",\n      "sha256": "%s",\n      "entry": "k9s",\n      "kind": "archive"\n    }' "${_k9s_sum}"
+    fi
+    printf '\n  ]\n}\n'
+  } > "${_dir}/bundled.json"
+  chmod 0644 "${_dir}/bundled.json"
+}
+
 if [[ "${FLAVOR}" == "axonwall" ]]; then
 # Fetch Headscale binary
 HEADSCALE_VERSION="0.29.4"
@@ -447,28 +497,46 @@ if [[ ! -f config/includes.chroot/usr/local/bin/kubectl ]]; then
 fi
 
 # Fetch K3s binary for in-house Kubernetes control plane & worker engine (core-k3s plugin)
+# Staged into the plugin dir config/includes.chroot/var/lib/axonwall/core-k3s/bin/,
+# not /usr/local/bin. A pre-existing staged binary is kept only if
+# its sha256 still matches the pin — a stale file from an earlier
+# build is re-downloaded, never packaged unverified.
 K3S_VERSION="v1.32.3+k3s1"
 K3S_URL_VERSION="v1.32.3%2Bk3s1"
 K3S_SHA256="b19216803650b567bf980888dec39035edaf664339c55bc4462f7a003edbef83"
-if [[ ! -f config/includes.chroot/usr/local/bin/k3s ]]; then
+mkdir -p config/includes.chroot/var/lib/axonwall/core-k3s/bin
+if [[ -f config/includes.chroot/var/lib/axonwall/core-k3s/bin/k3s ]] && echo "${K3S_SHA256}  config/includes.chroot/var/lib/axonwall/core-k3s/bin/k3s" | sha256sum -c - >/dev/null 2>&1; then
+  echo "[+] K3s ${K3S_VERSION} already staged and verified; keeping."
+else
   echo "[+] Fetching K3s ${K3S_VERSION}..."
-  curl -fsSL -o config/includes.chroot/usr/local/bin/k3s "https://github.com/k3s-io/k3s/releases/download/${K3S_URL_VERSION}/k3s"
-  echo "${K3S_SHA256}  config/includes.chroot/usr/local/bin/k3s" | sha256sum -c -
-  chmod 0755 config/includes.chroot/usr/local/bin/k3s
+  curl -fsSL -o config/includes.chroot/var/lib/axonwall/core-k3s/bin/k3s "https://github.com/k3s-io/k3s/releases/download/${K3S_URL_VERSION}/k3s"
+  echo "${K3S_SHA256}  config/includes.chroot/var/lib/axonwall/core-k3s/bin/k3s" | sha256sum -c -
+  chmod 0755 config/includes.chroot/var/lib/axonwall/core-k3s/bin/k3s
 fi
 
 # Fetch K9s v0.51.0 interactive Kubernetes terminal UI
+# A pre-existing staged k9s is always re-downloaded and re-extracted:
+# the pinned sha256 covers the tarball, not the extracted binary, so
+# there is no digest a staged binary could be verified against.
 K9S_VERSION="0.51.0"
 K9S_SHA256="c3752ad51a5a4015a113819c4eeb6e55a4d0e4b8e652494797532f6fc8161dd7"
-if [[ ! -f config/includes.chroot/usr/local/bin/k9s ]]; then
-  echo "[+] Fetching K9s v${K9S_VERSION}..."
-  K9S_TAR="$(mktemp -t k9s-XXXXXX.tar.gz)"
-  curl -fsSL -o "${K9S_TAR}" "https://github.com/derailed/k9s/releases/download/v${K9S_VERSION}/k9s_Linux_amd64.tar.gz"
-  echo "${K9S_SHA256}  ${K9S_TAR}" | sha256sum -c -
-  tar -xzf "${K9S_TAR}" -C config/includes.chroot/usr/local/bin/ k9s
-  chmod 0755 config/includes.chroot/usr/local/bin/k9s
-  rm -f "${K9S_TAR}"
-fi
+rm -f config/includes.chroot/var/lib/axonwall/core-k3s/bin/k9s
+echo "[+] Fetching K9s v${K9S_VERSION}..."
+K9S_TAR="$(mktemp -t k9s-XXXXXX.tar.gz)"
+curl -fsSL -o "${K9S_TAR}" "https://github.com/derailed/k9s/releases/download/v${K9S_VERSION}/k9s_Linux_amd64.tar.gz"
+echo "${K9S_SHA256}  ${K9S_TAR}" | sha256sum -c -
+tar -xzf "${K9S_TAR}" -C config/includes.chroot/var/lib/axonwall/core-k3s/bin/ k9s
+chmod 0755 config/includes.chroot/var/lib/axonwall/core-k3s/bin/k9s
+rm -f "${K9S_TAR}"
+
+# k3s multicall symlinks in the plugin bin dir (kubectl, crictl,
+# ctr -> k3s). The daemon recreates them on core-k3s reconfigure if
+# they are ever deleted; nothing is linked into /usr/local/bin.
+for _klink in kubectl crictl ctr; do
+  ln -sf k3s "config/includes.chroot/var/lib/axonwall/core-k3s/bin/${_klink}"
+done
+# Verification record for the staged tree (see the helper above).
+write_core_k3s_bundled_json config/includes.chroot/var/lib/axonwall/core-k3s
 
 # Stage Vault Edition payload into /usr/share/axonwall/vault/ so the unified
 # main ISO can install EITHER Axonwall NGFW OR Axonwall Vault Edition.
@@ -524,6 +592,10 @@ chmod +x config/includes.chroot/usr/share/axonwall/vault/axonwall-vault-provisio
   cp "${SCRIPT_DIR}/../k3s-storage/zfs-operator.yaml" config/includes.chroot/usr/share/axonwall/k3s/zfs-operator.yaml
 elif [[ "${FLAVOR}" == "k3s-storage" ]]; then
   # Fetch K3s binary for Barebones K3s + OpenZFS Storage Host
+  # Staged into the plugin dir, not /usr/local/bin (see the
+  # axonwall-flavor block above for the layout). A pre-existing
+  # staged binary is kept only if its sha256 still matches the
+  # resolved pin.
   K3S_VERSION="${K3S_VERSION:-v1.32.3+k3s1}"
   K3S_URL_VERSION="${K3S_VERSION//+/%2B}"
   case "${K3S_VERSION}" in
@@ -531,10 +603,12 @@ elif [[ "${FLAVOR}" == "k3s-storage" ]]; then
     v1.32.3+k3s1) K3S_SHA256="${K3S_SHA256:-b19216803650b567bf980888dec39035edaf664339c55bc4462f7a003edbef83}" ;;
     *) K3S_SHA256="${K3S_SHA256:-}" ;;
   esac
-  mkdir -p config/includes.chroot/usr/local/bin
-  if [[ ! -f config/includes.chroot/usr/local/bin/k3s ]]; then
+  mkdir -p config/includes.chroot/var/lib/axonwall/core-k3s/bin
+  if [[ -f config/includes.chroot/var/lib/axonwall/core-k3s/bin/k3s ]] && [[ -n "${K3S_SHA256}" ]] && echo "${K3S_SHA256}  config/includes.chroot/var/lib/axonwall/core-k3s/bin/k3s" | sha256sum -c - >/dev/null 2>&1; then
+    echo "[+] K3s ${K3S_VERSION} already staged and verified; keeping."
+  else
     echo "[+] Fetching K3s ${K3S_VERSION}..."
-    curl -fsSL -o config/includes.chroot/usr/local/bin/k3s "https://github.com/k3s-io/k3s/releases/download/${K3S_URL_VERSION}/k3s"
+    curl -fsSL -o config/includes.chroot/var/lib/axonwall/core-k3s/bin/k3s "https://github.com/k3s-io/k3s/releases/download/${K3S_URL_VERSION}/k3s"
     if [[ -z "${K3S_SHA256}" ]]; then
       K3S_SHA256="$(curl -fsSL "https://github.com/k3s-io/k3s/releases/download/${K3S_URL_VERSION}/sha256sum-amd64.txt" | awk '$2 == "k3s" {print $1; exit}')"
     fi
@@ -542,22 +616,31 @@ elif [[ "${FLAVOR}" == "k3s-storage" ]]; then
       echo "[!] ERROR: Unable to determine SHA-256 checksum for K3s ${K3S_VERSION}" >&2
       exit 1
     fi
-    echo "${K3S_SHA256}  config/includes.chroot/usr/local/bin/k3s" | sha256sum -c -
-    chmod 0755 config/includes.chroot/usr/local/bin/k3s
+    echo "${K3S_SHA256}  config/includes.chroot/var/lib/axonwall/core-k3s/bin/k3s" | sha256sum -c -
+    chmod 0755 config/includes.chroot/var/lib/axonwall/core-k3s/bin/k3s
   fi
-  ln -sf k3s config/includes.chroot/usr/local/bin/crictl
-  ln -sf k3s config/includes.chroot/usr/local/bin/ctr
+  # A pre-existing staged k9s is always re-downloaded and
+  # re-extracted: the pinned sha256 covers the tarball, not the
+  # extracted binary, so there is no digest a staged binary could
+  # be verified against.
   K9S_VERSION="0.51.0"
   K9S_SHA256="c3752ad51a5a4015a113819c4eeb6e55a4d0e4b8e652494797532f6fc8161dd7"
-  if [[ ! -f config/includes.chroot/usr/local/bin/k9s ]]; then
-    echo "[+] Fetching K9s v${K9S_VERSION}..."
-    K9S_TAR="$(mktemp -t k9s-XXXXXX.tar.gz)"
-    curl -fsSL -o "${K9S_TAR}" "https://github.com/derailed/k9s/releases/download/v${K9S_VERSION}/k9s_Linux_amd64.tar.gz"
-    echo "${K9S_SHA256}  ${K9S_TAR}" | sha256sum -c -
-    tar -xzf "${K9S_TAR}" -C config/includes.chroot/usr/local/bin/ k9s
-    chmod 0755 config/includes.chroot/usr/local/bin/k9s
-    rm -f "${K9S_TAR}"
-  fi
+  rm -f config/includes.chroot/var/lib/axonwall/core-k3s/bin/k9s
+  echo "[+] Fetching K9s v${K9S_VERSION}..."
+  K9S_TAR="$(mktemp -t k9s-XXXXXX.tar.gz)"
+  curl -fsSL -o "${K9S_TAR}" "https://github.com/derailed/k9s/releases/download/v${K9S_VERSION}/k9s_Linux_amd64.tar.gz"
+  echo "${K9S_SHA256}  ${K9S_TAR}" | sha256sum -c -
+  tar -xzf "${K9S_TAR}" -C config/includes.chroot/var/lib/axonwall/core-k3s/bin/ k9s
+  chmod 0755 config/includes.chroot/var/lib/axonwall/core-k3s/bin/k9s
+  rm -f "${K9S_TAR}"
+  # k3s multicall symlinks in the plugin bin dir (kubectl, crictl,
+  # ctr -> k3s). The daemon recreates them on core-k3s reconfigure
+  # if they are ever deleted; nothing is linked into /usr/local/bin.
+  for _klink in kubectl crictl ctr; do
+    ln -sf k3s "config/includes.chroot/var/lib/axonwall/core-k3s/bin/${_klink}"
+  done
+  # Verification record for the staged tree (see the helper above).
+  write_core_k3s_bundled_json config/includes.chroot/var/lib/axonwall/core-k3s
 else
 # Fetch SeaweedFS binary (Vault Edition storage engine)
 WEED_VERSION="4.48"

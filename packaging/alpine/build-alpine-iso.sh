@@ -622,6 +622,48 @@ elif [[ "${EDITION}" == "axonwall" ]]; then
   exit 1
 fi
 
+# write_core_k3s_bundled_json writes the bundled.json verification
+# record next to the pre-staged plugin binaries, in exactly the
+# format axonwalld's installBundledBinaries writes (relative path +
+# sha256 of the bytes on disk + manifest entry + kind), so the
+# daemon's verifyBundledBinaries passes on the staged tree without
+# a re-download. $1 = plugin dir. It records whichever of bin/k3s
+# and bin/k9s are staged and executable, and fails the build when
+# neither is — a plugin dir with no binaries must never ship a
+# record blessing an empty tree. Defined here, outside the
+# edition branches, because the k9s block below calls it for both
+# editions. Note the axonwall edition stages k9s only (k3s is
+# k3s-storage-only here, as before this move), so its record lists
+# just bin/k9s and the daemon downloads k3s on first core-k3s
+# install/reconfigure.
+write_core_k3s_bundled_json() {
+  local _dir="$1" _k3s_sum="" _k9s_sum="" _n=0
+  if [[ -x "${_dir}/bin/k3s" ]]; then
+    _k3s_sum="$(sha256sum "${_dir}/bin/k3s" | awk '{print $1}')"
+    _n=$((_n + 1))
+  fi
+  if [[ -x "${_dir}/bin/k9s" ]]; then
+    _k9s_sum="$(sha256sum "${_dir}/bin/k9s" | awk '{print $1}')"
+    _n=$((_n + 1))
+  fi
+  if [[ "${_n}" -eq 0 ]]; then
+    echo "[!] ERROR: core-k3s plugin dir ${_dir} has no staged binaries; cannot write bundled.json." >&2
+    return 1
+  fi
+  {
+    printf '{\n  "pluginId": "core-k3s",\n  "files": [\n'
+    if [[ -n "${_k3s_sum}" ]]; then
+      printf '    {\n      "path": "bin/k3s",\n      "sha256": "%s",\n      "entry": "k3s",\n      "kind": "binary"\n    }' "${_k3s_sum}"
+      if [[ -n "${_k9s_sum}" ]]; then printf ',\n'; fi
+    fi
+    if [[ -n "${_k9s_sum}" ]]; then
+      printf '    {\n      "path": "bin/k9s",\n      "sha256": "%s",\n      "entry": "k9s",\n      "kind": "archive"\n    }' "${_k9s_sum}"
+    fi
+    printf '\n  ]\n}\n'
+  } > "${_dir}/bundled.json"
+  chmod 0644 "${_dir}/bundled.json"
+}
+
 if [[ "${EDITION}" == "k3s-storage" ]]; then
   K3S_VERSION="${K3S_VERSION:-v1.32.3+k3s1}"
   K3S_URL_VERSION="${K3S_VERSION//+/%2B}"
@@ -631,7 +673,8 @@ if [[ "${EDITION}" == "k3s-storage" ]]; then
     *) K3S_SHA256="${K3S_SHA256:-}" ;;
   esac
   echo "[+] Fetching K3s ${K3S_VERSION} for Alpine k3s-storage overlay..."
-  curl -fsSL -o "${OVL}/usr/local/bin/k3s" "https://github.com/k3s-io/k3s/releases/download/${K3S_URL_VERSION}/k3s"
+  mkdir -p "${OVL}/var/lib/axonwall/core-k3s/bin"
+  curl -fsSL -o "${OVL}/var/lib/axonwall/core-k3s/bin/k3s" "https://github.com/k3s-io/k3s/releases/download/${K3S_URL_VERSION}/k3s"
   if [[ -z "${K3S_SHA256}" ]]; then
     K3S_SHA256="$(curl -fsSL "https://github.com/k3s-io/k3s/releases/download/${K3S_URL_VERSION}/sha256sum-amd64.txt" | awk '$2 == "k3s" {print $1; exit}')"
   fi
@@ -639,11 +682,14 @@ if [[ "${EDITION}" == "k3s-storage" ]]; then
     echo "[!] ERROR: Unable to determine SHA-256 checksum for K3s ${K3S_VERSION}" >&2
     exit 1
   fi
-  echo "${K3S_SHA256}  ${OVL}/usr/local/bin/k3s" | sha256sum -c -
-  chmod 0755 "${OVL}/usr/local/bin/k3s"
-  ln -sf k3s "${OVL}/usr/local/bin/kubectl"
-  ln -sf k3s "${OVL}/usr/local/bin/crictl"
-  ln -sf k3s "${OVL}/usr/local/bin/ctr"
+  echo "${K3S_SHA256}  ${OVL}/var/lib/axonwall/core-k3s/bin/k3s" | sha256sum -c -
+  chmod 0755 "${OVL}/var/lib/axonwall/core-k3s/bin/k3s"
+  # k3s multicall symlinks in the plugin bin dir (kubectl, crictl,
+  # ctr -> k3s). The daemon recreates them on core-k3s reconfigure
+  # if they are ever deleted; nothing is linked into /usr/local/bin.
+  ln -sf k3s "${OVL}/var/lib/axonwall/core-k3s/bin/kubectl"
+  ln -sf k3s "${OVL}/var/lib/axonwall/core-k3s/bin/crictl"
+  ln -sf k3s "${OVL}/var/lib/axonwall/core-k3s/bin/ctr"
 else
   HEADSCALE_VERSION="0.29.4"
   HEADSCALE_SHA256="212ed0a884c0d3541e094c4bebbe94397df6f4e01bd3d7f059c520cb55e0d757"
@@ -665,21 +711,30 @@ else
 fi
 
 # Bundle statically-linked K9s v0.51.0 binary across axonwall and k3s-storage Alpine editions
+# Staged into the plugin dir, not /usr/local/bin. The old
+# prebuilt-copy branch (copy an already-present k9s from the Debian
+# chroot tree with NO checksum verification) is deleted, not fixed
+# in place: the pinned sha256 covers the tarball, not the extracted
+# binary, so a copied binary cannot be verified against it — the
+# only verified path is download + verify + extract, every build.
+# (The overlay is rebuilt from scratch each run, so there is no
+# cache to preserve here.)
 if [[ "${EDITION}" == "axonwall" || "${EDITION}" == "k3s-storage" ]]; then
   K9S_VERSION="0.51.0"
   K9S_SHA256="c3752ad51a5a4015a113819c4eeb6e55a4d0e4b8e652494797532f6fc8161dd7"
-  if [[ -f "${REPO_ROOT}/packaging/iso/config/includes.chroot/usr/local/bin/k9s" ]]; then
-    cp "${REPO_ROOT}/packaging/iso/config/includes.chroot/usr/local/bin/k9s" "${OVL}/usr/local/bin/k9s"
-    chmod 0755 "${OVL}/usr/local/bin/k9s"
-  elif [[ ! -f "${OVL}/usr/local/bin/k9s" ]]; then
-    echo "[+] Fetching K9s v${K9S_VERSION} for Alpine overlay..."
-    K9S_TAR="$(mktemp -t k9s-XXXXXX.tar.gz)"
-    curl -fsSL -o "${K9S_TAR}" "https://github.com/derailed/k9s/releases/download/v${K9S_VERSION}/k9s_Linux_amd64.tar.gz"
-    echo "${K9S_SHA256}  ${K9S_TAR}" | sha256sum -c -
-    tar -xzf "${K9S_TAR}" -C "${OVL}/usr/local/bin/" k9s
-    chmod 0755 "${OVL}/usr/local/bin/k9s"
-    rm -f "${K9S_TAR}"
-  fi
+  mkdir -p "${OVL}/var/lib/axonwall/core-k3s/bin"
+  echo "[+] Fetching K9s v${K9S_VERSION} for Alpine overlay..."
+  K9S_TAR="$(mktemp -t k9s-XXXXXX.tar.gz)"
+  curl -fsSL -o "${K9S_TAR}" "https://github.com/derailed/k9s/releases/download/v${K9S_VERSION}/k9s_Linux_amd64.tar.gz"
+  echo "${K9S_SHA256}  ${K9S_TAR}" | sha256sum -c -
+  tar -xzf "${K9S_TAR}" -C "${OVL}/var/lib/axonwall/core-k3s/bin/" k9s
+  chmod 0755 "${OVL}/var/lib/axonwall/core-k3s/bin/k9s"
+  rm -f "${K9S_TAR}"
+  # Verification record for the staged tree (see the helper above;
+  # on the axonwall edition this lists bin/k9s only — k3s is not
+  # staged there and the daemon downloads it on first core-k3s
+  # install/reconfigure).
+  write_core_k3s_bundled_json "${OVL}/var/lib/axonwall/core-k3s"
 fi
 
 # Fetch ZFSBootMenu v3.1.0 Unified Kernel Image (UKI) for Root-on-ZFS installations

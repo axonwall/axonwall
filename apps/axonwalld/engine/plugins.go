@@ -63,7 +63,7 @@ type PluginDefinition struct {
 }
 
 // PluginBundledBinary declares one binary artifact bundled with a
-// plugin. Kind discriminates the two source kinds unambiguously:
+// plugin. Kind discriminates the three source kinds unambiguously:
 //
 //   - "archive": a downloadable archive. URL is required; Distro /
 //     Package / Version / Arch must be empty. Name is the binary the
@@ -72,6 +72,12 @@ type PluginDefinition struct {
 //     Format is the container ("tar", "tar.gz"/"tgz", "zip"; default
 //     "tar"). PathInArchive is the binary's path inside the archive,
 //     relative with no ".."; it defaults to Name.
+//   - "binary": a downloadable raw single file (no archive
+//     container). URL is required; Distro / Package / Version /
+//     Arch / Format / PathInArchive must be empty. The verified
+//     bytes are placed directly at <plugindir>/bin/<name> with
+//     mode 0755 (e.g. "k3s", fetched as a bare static binary from
+//     its GitHub release).
 //   - "distroPackage": a distro package to download and extract
 //     (never install). URL must be empty; Distro / Package / Version /
 //     Arch are required. Name is the package name (e.g. "emacs-nox");
@@ -100,7 +106,8 @@ type PluginDefinition struct {
 // struct itself cannot enforce this; the TS PluginManifestSchema
 // enforces the shape and the daemon must validate before use.
 // Kind is "archive" (URL, Format, PathInArchive set; distro fields
-// empty) or "distroPackage" (Distro, Package, Version, Arch set; URL
+// empty), "binary" (URL set; Format, PathInArchive and distro fields
+// empty), or "distroPackage" (Distro, Package, Version, Arch set; URL
 // empty).
 type PluginBundledBinary struct {
 	Kind          string `json:"kind"`
@@ -262,6 +269,102 @@ func (pm *PluginManager) ensurePluginLDAP(pluginID string) {
 			break
 		}
 	}
+}
+
+// GetCorePluginDefinitions returns the Go-side definitions for the
+// core-role plugins that declare bundled binaries. Today that is
+// only core-k3s.
+//
+// WHY A SEPARATE LIST, AND WHY ListPlugins DOES NOT CONSULT IT:
+// core roles are NOT extension plugins in the daemon API.
+// /v1/system/plugins (main.go) returns ListPlugins(), which iterates
+// GetExtensionPluginDefinitions() only, and the console renders the
+// core roles from the TS BUILTIN_PLUGINS table plus the capabilities
+// (k3sEnabled, ...) — the plugins page even special-cases core-k3s
+// by id. Adding core-k3s to ListPlugins would duplicate that card
+// and change the API shape for a migration whose scope is where the
+// binaries live, so ListPlugins stays extension-only and this list
+// is consulted ONLY by the bundled-binary machinery, through
+// findPluginDefinition: ensureBundledBinaries /
+// verifyBundledBinaries, PluginEnv / CommandForPlugin, and the
+// core-k3s Reconfigure branch. That is the whole Go-side home of
+// the core-k3s definition: one function, mirroring the TS entry in
+// packages/axonwall_lib/src/plugins/index.ts (same version, URLs
+// and sha256s — the two must stay in sync).
+//
+// The entry declares NO distroPackage binaries: k3s and k9s are
+// upstream release artifacts (a raw binary and a tarball). The
+// DebianPackages/AlpinePackages/ArchPackages lists are the OS
+// packages the role needs (curl, iptables, open-iscsi), unchanged
+// from the TS entry — they are not bundled binaries.
+func GetCorePluginDefinitions() []PluginDefinition {
+	return []PluginDefinition{
+		{
+			// Kubernetes (K3s) & OpenEBS Distributed Storage.
+			// Version 1.31.2 is the *plugin's* version (TS
+			// BUILTIN_PLUGINS), not the k3s binary version
+			// (v1.32.3+k3s1) — do not confuse the two.
+			//
+			// k3s v1.32.3+k3s1 (kind "binary"): upstream ships it
+			// as a bare statically-linked binary; the sha256 is
+			// the upstream-published digest from
+			// https://github.com/k3s-io/k3s/releases/download/v1.32.3%2Bk3s1/sha256sum-amd64.txt
+			// and matches the pin the builders carried before
+			// this move. k9s v0.51.0 (kind "archive", tar.gz):
+			// sha256 is the upstream-published digest for
+			// k9s_Linux_amd64.tar.gz from
+			// https://github.com/derailed/k9s/releases/download/v0.51.0/checksums.sha256.
+			// The tarball's members sit at the top level
+			// (LICENSE, README.md, k9s — no wrapping directory,
+			// verified 2026-11-20), so PathInArchive defaults
+			// to the binary name "k9s".
+			ID:               "core-k3s",
+			Name:             "Kubernetes (K3s) & OpenEBS Distributed Storage",
+			Version:          "1.31.2",
+			Category:         "core_role",
+			Description:      "Lightweight multi-node Kubernetes control plane with automatic HA second-node cluster join, OpenEBS ZFS-LocalPV, and synchronous 2-node Replicated Persistent Volumes.",
+			Author:           "CNCF / OpenEBS / Axonwall Core",
+			DefaultEnabled:   true,
+			SystemdUnits:     []string{"k3s.service"},
+			Privileges:       []string{"k3s.cluster", "storage.openebs"},
+			DebianPackages:   []string{"curl", "iptables", "open-iscsi"},
+			AlpinePackages:   []string{"curl", "iptables", "open-iscsi"},
+			ArchPackages:     []string{"curl", "iptables-nft", "open-iscsi"},
+			RequiredBinaries: []string{"k3s", "k9s"},
+			Binaries: []PluginBundledBinary{
+				{
+					Kind:   "binary",
+					Name:   "k3s",
+					SHA256: "b19216803650b567bf980888dec39035edaf664339c55bc4462f7a003edbef83",
+					URL:    "https://github.com/k3s-io/k3s/releases/download/v1.32.3%2Bk3s1/k3s",
+				},
+				{
+					Kind:   "archive",
+					Name:   "k9s",
+					SHA256: "c3752ad51a5a4015a113819c4eeb6e55a4d0e4b8e652494797532f6fc8161dd7",
+					URL:    "https://github.com/derailed/k9s/releases/download/v0.51.0/k9s_Linux_amd64.tar.gz",
+					Format: "tar.gz",
+				},
+			},
+			BinDirs: []string{"bin"},
+		},
+	}
+}
+
+// findPluginDefinition returns the definition for any known plugin
+// id — core first, then extension — or false when the id is unknown
+// to both lists. The bundled-binary machinery (PluginEnv,
+// CommandForPlugin, ensureBundledBinaries) uses this so core-k3s
+// resolves through the same path as extension plugins; callers
+// that are extension-only by design (ListPlugins, the LDAP loops)
+// keep using GetExtensionPluginDefinitions() directly.
+func findPluginDefinition(pluginID string) (PluginDefinition, bool) {
+	for _, d := range GetCorePluginDefinitions() {
+		if d.ID == pluginID {
+			return d, true
+		}
+	}
+	return findExtensionPluginDefinition(pluginID)
 }
 
 func GetExtensionPluginDefinitions() []PluginDefinition {
@@ -1098,7 +1201,8 @@ func hasPluginBinary(osFamily, bin string) bool {
 // extracted merged into it with `dpkg-deb -x`, so a .deb's usr/bin,
 // usr/share/... land directly under the plugin dir. Archive entries
 // extract into <plugindir>/bin/, their declared binary landing at
-// <plugindir>/bin/<name> unless PathInArchive says otherwise.
+// <plugindir>/bin/<name> unless PathInArchive says otherwise, and
+// binary entries are placed there directly.
 // BinDirs are relative to the plugin dir (e.g. "usr/bin") and are
 // prepended to PATH for daemon invocations of that plugin's commands.
 //
@@ -1201,6 +1305,23 @@ func (pm *PluginManager) validateBundledBinaries(def PluginDefinition) error {
 					}
 				}
 			}
+		case "binary":
+			if b.URL == "" {
+				return fmt.Errorf("bundled binary %q (binary): url is required", b.Name)
+			}
+			u, err := url.Parse(b.URL)
+			if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+				return fmt.Errorf("bundled binary %q (binary): url %q must be an http(s) URL", b.Name, b.URL)
+			}
+			if b.Distro != "" || b.Package != "" || b.Source != "" || b.Version != "" || b.Arch != "" {
+				return fmt.Errorf("bundled binary %q (binary): distro/package/source/version/arch must be empty for kind binary", b.Name)
+			}
+			if b.Format != "" {
+				return fmt.Errorf("bundled binary %q (binary): format must be empty for kind binary (a raw file has no container)", b.Name)
+			}
+			if b.PathInArchive != "" {
+				return fmt.Errorf("bundled binary %q (binary): pathInArchive must be empty for kind binary (a raw file has no member path)", b.Name)
+			}
 		case "distroPackage":
 			if b.URL != "" {
 				return fmt.Errorf("bundled binary %q (distroPackage): url must be empty for kind distroPackage", b.Name)
@@ -1231,7 +1352,7 @@ func (pm *PluginManager) validateBundledBinaries(def PluginDefinition) error {
 				return fmt.Errorf("bundled binary %q (distroPackage): arch %q is not valid", b.Name, b.Arch)
 			}
 		default:
-			return fmt.Errorf("bundled binary %q: unknown kind %q (want archive or distroPackage)", b.Name, b.Kind)
+			return fmt.Errorf("bundled binary %q: unknown kind %q (want archive, binary or distroPackage)", b.Name, b.Kind)
 		}
 	}
 	for _, dir := range def.BinDirs {
@@ -1543,14 +1664,49 @@ func recordInstalledFiles(pluginDir string, entry PluginBundledBinary, seen map[
 	})
 }
 
+// installRawBinary places a verified raw download at
+// <pluginDir>/bin/<name> with mode 0755 and returns its relative
+// path. The temp file's bytes were already sha256-verified by
+// downloadVerified; the on-disk hash is recorded by the caller.
+func installRawBinary(tmpPath, name, pluginDir string) (string, error) {
+	binDir := filepath.Join(pluginDir, "bin")
+	if err := os.MkdirAll(binDir, 0755); err != nil {
+		return "", err
+	}
+	dest := filepath.Join(binDir, name)
+	src, err := os.Open(tmpPath)
+	if err != nil {
+		return "", err
+	}
+	defer src.Close()
+	f, err := os.OpenFile(dest, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0755)
+	if err != nil {
+		return "", err
+	}
+	if _, err := io.Copy(f, src); err != nil {
+		f.Close()
+		os.Remove(dest)
+		return "", err
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(dest)
+		return "", err
+	}
+	if err := os.Chmod(dest, 0755); err != nil {
+		return "", err
+	}
+	return filepath.Join("bin", name), nil
+}
+
 // installBundledBinaries downloads, sha256-verifies and extracts
 // every Binaries entry of def into the plugin dir. Archive entries
-// land in <plugindir>/bin/; distroPackage entries are extracted
-// merged into the plugin dir with `dpkg-deb -x` (the one shell-out
-// allowed here — dpkg-deb itself is the format's extractor, and a
-// missing dpkg-deb fails closed). On any error the install aborts
-// and bundled.json is NOT written, so a half-extracted tree can
-// never pass verifyBundledBinaries. Callers must validate first.
+// land in <plugindir>/bin/; binary entries are placed there
+// directly; distroPackage entries are extracted merged into the
+// plugin dir with `dpkg-deb -x` (the one shell-out allowed here —
+// dpkg-deb itself is the format's extractor, and a missing dpkg-deb
+// fails closed). On any error the install aborts and bundled.json
+// is NOT written, so a half-extracted tree can never pass
+// verifyBundledBinaries. Callers must validate first.
 func (pm *PluginManager) installBundledBinaries(def PluginDefinition) error {
 	pluginDir, err := pm.pluginDir(def.ID)
 	if err != nil {
@@ -1586,6 +1742,22 @@ func (pm *PluginManager) installBundledBinaries(def PluginDefinition) error {
 				return fmt.Errorf("bundled binary %q: %w", b.Name, err)
 			}
 			rel, err := extractArchiveBinary(tmpPath, b.Format, want, b.Name, pluginDir)
+			os.Remove(tmpPath)
+			if err != nil {
+				return fmt.Errorf("bundled binary %q: %w", b.Name, err)
+			}
+			sum, err := sha256File(filepath.Join(pluginDir, rel))
+			if err != nil {
+				return fmt.Errorf("bundled binary %q: %w", b.Name, err)
+			}
+			seen[filepath.ToSlash(rel)] = true
+			records = append(records, bundledBinaryRecord{Path: filepath.ToSlash(rel), SHA256: sum, Entry: b.Name, Kind: b.Kind})
+		case "binary":
+			tmpPath, err := downloadVerified(b.URL, b.SHA256, tmpDir)
+			if err != nil {
+				return fmt.Errorf("bundled binary %q: %w", b.Name, err)
+			}
+			rel, err := installRawBinary(tmpPath, b.Name, pluginDir)
 			os.Remove(tmpPath)
 			if err != nil {
 				return fmt.Errorf("bundled binary %q: %w", b.Name, err)
@@ -1657,9 +1829,86 @@ func (pm *PluginManager) installBundledBinaries(def PluginDefinition) error {
 	return nil
 }
 
+// ensureBundledBinaries is the install/ensure path for a plugin
+// that declares Binaries: it verifies the tree that is already on
+// disk first (the image builders pre-stage core-k3s, so a first
+// boot must NOT re-download ~110 MB) and downloads ONLY when a
+// file is missing, mismatched, or the verification record is
+// absent/corrupt. A verify failure therefore costs a full
+// re-download of every entry (installBundledBinaries starts from a
+// clean tree — it cannot know which entry went bad), but a healthy
+// staged tree costs no network at all. Callers must validate
+// first; validation runs here too so a direct caller cannot skip
+// it. A plugin with no Binaries is a no-op.
+func (pm *PluginManager) ensureBundledBinaries(def PluginDefinition) error {
+	if len(def.Binaries) == 0 {
+		return nil
+	}
+	if err := pm.validateBundledBinaries(def); err != nil {
+		return err
+	}
+	if err := pm.verifyBundledBinaries(def); err == nil {
+		return nil
+	}
+	return pm.installBundledBinaries(def)
+}
+
+// ensureCoreK3sBinSymlinks creates the k3s multicall symlinks
+// (kubectl, crictl, ctr) in the core-k3s plugin bin dir, pointing
+// at the staged k3s binary, and removes a dangling legacy
+// /usr/local/bin/kubectl symlink left by the pre-migration
+// workstation hook (only when it no longer resolves — a symlink
+// that still points at a working k3s is left alone, and a real
+// standalone kubectl binary there is never touched). The plugin
+// bin dir is the only place these symlinks are created now; the
+// builders stage the same three at image build time and this is
+// the repair path if they are deleted. An existing real file under
+// one of the three names is left alone, never overwritten.
+func (pm *PluginManager) ensureCoreK3sBinSymlinks() error {
+	pluginDir, err := pm.pluginDir("core-k3s")
+	if err != nil {
+		return err
+	}
+	k3sBin := filepath.Join(pluginDir, "bin", "k3s")
+	if !isExecutableFile(k3sBin) {
+		return fmt.Errorf("core-k3s k3s binary %q is missing or not executable; cannot create multicall symlinks", filepath.ToSlash(filepath.Join("core-k3s", "bin", "k3s")))
+	}
+	for _, link := range []string{"kubectl", "crictl", "ctr"} {
+		p := filepath.Join(pluginDir, "bin", link)
+		if info, err := os.Lstat(p); err == nil {
+			if info.Mode()&os.ModeSymlink != 0 {
+				if target, rerr := os.Readlink(p); rerr == nil && target == "k3s" {
+					continue
+				}
+				_ = os.Remove(p)
+			} else {
+				continue
+			}
+		}
+		if err := os.Symlink("k3s", p); err != nil {
+			return fmt.Errorf("core-k3s: failed to create symlink %q: %w", link, err)
+		}
+	}
+	// Legacy cleanup: the old workstation/VOW install hook created
+	// /usr/local/bin/kubectl -> k3s. Uninstall/disable never removed
+	// it, so upgraded boxes keep a symlink at the old location that
+	// dangles once /usr/local/bin/k3s is gone. Remove it only when
+	// it dangles (Stat follows the link and fails); a working
+	// symlink and any real file are left alone.
+	if info, err := os.Lstat("/usr/local/bin/kubectl"); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		if target, rerr := os.Readlink("/usr/local/bin/kubectl"); rerr == nil && (target == "k3s" || strings.HasSuffix(target, "/k3s")) {
+			if _, serr := os.Stat("/usr/local/bin/kubectl"); serr != nil {
+				_ = os.Remove("/usr/local/bin/kubectl")
+			}
+		}
+	}
+	return nil
+}
+
 // expectedBundledBinary returns the on-disk location of the binary a
 // manifest entry provides, and whether that location is meaningful
-// to check. Archive entries provide <plugindir>/bin/<name> directly.
+// to check. Archive and binary entries provide
+// <plugindir>/bin/<name> directly.
 // A distroPackage entry provides no single binary by name — its
 // package name (e.g. "emacs-nox") is not a file — so its expected
 // binaries are the plugin's RequiredBinaries under its BinDirs
@@ -1679,7 +1928,7 @@ func (pm *PluginManager) expectedBundledBinaries(def PluginDefinition) []string 
 	var out []string
 	for _, b := range def.Binaries {
 		switch b.Kind {
-		case "archive":
+		case "archive", "binary":
 			out = append(out, filepath.Join(pluginDir, "bin", b.Name))
 		case "distroPackage":
 			for _, bin := range def.RequiredBinaries {
@@ -1706,8 +1955,8 @@ func (pm *PluginManager) expectedBundledBinaries(def PluginDefinition) []string 
 
 // bundledBinariesVerifiedNames lists the bundled binaries that are
 // present and executable, for PluginStatus.BundledBinaries: archive
-// entry names, plus required binaries found under a BinDir for
-// distroPackage entries.
+// and binary entry names, plus required binaries found under a
+// BinDir for distroPackage entries.
 func (pm *PluginManager) bundledBinariesVerifiedNames(def PluginDefinition) []string {
 	pluginDir, err := pm.pluginDir(def.ID)
 	if err != nil {
@@ -1723,7 +1972,7 @@ func (pm *PluginManager) bundledBinariesVerifiedNames(def PluginDefinition) []st
 	}
 	for _, b := range def.Binaries {
 		switch b.Kind {
-		case "archive":
+		case "archive", "binary":
 			if isExecutableFile(filepath.Join(pluginDir, "bin", b.Name)) {
 				add(b.Name)
 			}
@@ -1839,7 +2088,7 @@ func (pm *PluginManager) hasPluginBinaryForPlugin(def PluginDefinition, bin stri
 // bundled binary shadows any same-named system binary — which is
 // the point of bundling it.
 func (pm *PluginManager) PluginEnv(pluginID string) ([]string, error) {
-	def, ok := findExtensionPluginDefinition(pluginID)
+	def, ok := findPluginDefinition(pluginID)
 	if !ok {
 		return nil, fmt.Errorf("unknown plugin ID %q", pluginID)
 	}
@@ -1912,7 +2161,7 @@ func failingPluginCommand(msg string) *exec.Cmd {
 // re-verified before exec and any failure yields a command that
 // fails descriptively rather than running an unverified binary.
 func (pm *PluginManager) CommandForPlugin(pluginID, name string, args ...string) *exec.Cmd {
-	def, ok := findExtensionPluginDefinition(pluginID)
+	def, ok := findPluginDefinition(pluginID)
 	if !ok {
 		return failingPluginCommand(fmt.Sprintf("axonwall: unknown plugin %q", pluginID))
 	}
@@ -2534,11 +2783,19 @@ func (pm *PluginManager) InstallPlugin(pluginID string) PluginActionResponse {
 
 	// Post-install configuration hooks
 	if pluginID == "cli-workstation" || pluginID == "vigilant-octo-waffle" {
+		// kubectl now comes from the core-k3s plugin's bin dir,
+		// not /usr/local/bin: if no kubectl resolves on the
+		// system PATH and the staged k3s binary exists, link
+		// <plugindir>/bin/kubectl -> k3s (plus crictl/ctr) there.
+		// Never writes /usr/local/bin — the old hook created
+		// /usr/local/bin/kubectl -> k3s and uninstall/disable
+		// never removed it; a dangling copy is now cleaned up
+		// by ensureCoreK3sBinSymlinks. A standalone kubectl
+		// binary (Debian builders still ship one in
+		// /usr/local/bin) satisfies the LookPath check and this
+		// stays a no-op, as before.
 		if _, err := exec.LookPath("kubectl"); err != nil {
-			if k3sPath, kerr := exec.LookPath("k3s"); kerr == nil && k3sPath != "" {
-				_ = os.MkdirAll("/usr/local/bin", 0755)
-				_ = os.Symlink(k3sPath, "/usr/local/bin/kubectl")
-			}
+			_ = pm.ensureCoreK3sBinSymlinks()
 		}
 	}
 	if pluginID == "cli-workstation" {
@@ -2784,6 +3041,51 @@ func (pm *PluginManager) UninstallPlugin(pluginID string) PluginActionResponse {
 func (pm *PluginManager) ReconfigurePlugin(pluginID string) PluginActionResponse {
 	pm.actionMu.Lock()
 	defer pm.actionMu.Unlock()
+	if pluginID == "core-k3s" {
+		// Core-k3s install/ensure flow. InstallPlugin's core-*
+		// branch funnels here, and so does EnablePlugin (via
+		// ReconfigurePlugin), so this is the one place the
+		// bundled k3s + k9s tree is ensured: the image builders
+		// pre-stage it with bundled.json, and
+		// ensureBundledBinaries verifies that tree first and
+		// downloads only when a file is missing or mismatched —
+		// a first boot never re-downloads ~110 MB. The k3s
+		// multicall symlinks are (re)created in the plugin bin
+		// dir, soft-fail: the units and the daemon resolve k3s
+		// directly, and kubectl also resolves via `k3s kubectl`.
+		def, ok := findPluginDefinition(pluginID)
+		if !ok {
+			return PluginActionResponse{
+				Success: false,
+				Message: "core-k3s plugin definition is missing; cannot ensure bundled binaries",
+			}
+		}
+		if err := pm.ensureBundledBinaries(def); err != nil {
+			return PluginActionResponse{
+				Success: false,
+				Message: fmt.Sprintf("Failed to ensure core-k3s bundled binaries: %v", err),
+			}
+		}
+		if err := pm.ensureCoreK3sBinSymlinks(); err != nil {
+			log.Printf("[PluginManager] Warning: failed to create core-k3s multicall symlinks: %v", err)
+		}
+		pm.mu.Lock()
+		delete(pm.disabledMap, pluginID)
+		if pm.installedMap[pluginID] == "" {
+			pm.installedMap[pluginID] = time.Now().UTC().Format(time.RFC3339)
+		}
+		pm.saveState()
+		pm.mu.Unlock()
+		// Shell PATH (soft-fail): interactive shells get the core-k3s
+		// bin dir too — the shell helpers know core definitions.
+		if err := SyncPluginShellPaths(pm, pluginID); err != nil {
+			log.Printf("[PluginManager] Warning: failed to sync shell PATH for plugin %s: %v", pluginID, err)
+		}
+		return PluginActionResponse{
+			Success: true,
+			Message: "Kubernetes (K3s) & OpenEBS Distributed Storage enabled; bundled k3s and k9s verified in the core-k3s plugin directory.",
+		}
+	}
 	if pluginID == "cli-workstation" {
 		_ = os.Remove("/etc/axonwall/workstation.disabled")
 		pm.mu.Lock()

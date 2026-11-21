@@ -71,6 +71,41 @@ export const BUILTIN_PLUGINS: PluginManifest[] = [
       alpine: ['curl', 'iptables', 'open-iscsi'],
       arch: ['curl', 'iptables-nft', 'open-iscsi'],
     },
+    // Bundled binaries (k3s + k9s), shipped in the plugin's own
+    // directory (<baseDataDir>/core-k3s/bin/) instead of
+    // /usr/local/bin — see the Go-side definition in
+    // GetCorePluginDefinitions (apps/axonwalld/engine/plugins.go),
+    // which is the daemon's copy of this entry. The two must stay in
+    // sync (same versions, URLs and sha256s). No distroPackage
+    // entries: both binaries are upstream release artifacts.
+    //
+    // k3s v1.32.3+k3s1 is a raw single-file download (kind
+    // 'binary'); its sha256 is the upstream-published digest from
+    // https://github.com/k3s-io/k3s/releases/download/v1.32.3%2Bk3s1/sha256sum-amd64.txt
+    // and matches the pin the builders carried before this move.
+    // k9s v0.51.0 is a tarball (kind 'archive', format 'tar.gz');
+    // its sha256 is the upstream-published digest for
+    // k9s_Linux_amd64.tar.gz from
+    // https://github.com/derailed/k9s/releases/download/v0.51.0/checksums.sha256.
+    // The tarball's members sit at the top level (LICENSE,
+    // README.md, k9s — no wrapping directory), so pathInArchive
+    // defaults to the binary name 'k9s'.
+    binaries: [
+      {
+        kind: 'binary',
+        name: 'k3s',
+        url: 'https://github.com/k3s-io/k3s/releases/download/v1.32.3%2Bk3s1/k3s',
+        sha256: 'b19216803650b567bf980888dec39035edaf664339c55bc4462f7a003edbef83',
+      },
+      {
+        kind: 'archive',
+        name: 'k9s',
+        url: 'https://github.com/derailed/k9s/releases/download/v0.51.0/k9s_Linux_amd64.tar.gz',
+        sha256: 'c3752ad51a5a4015a113819c4eeb6e55a4d0e4b8e652494797532f6fc8161dd7',
+        format: 'tar.gz',
+      },
+    ],
+    binDirs: ['bin'],
     nftHooks: [
       { table: 'inet axonwall', chain: 'input', priority: 0 },
     ],
