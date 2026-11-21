@@ -36,7 +36,7 @@ while [ $# -gt 0 ]; do
       shift
       ;;
     --help|-h)
-      echo "Usage: build-deb.sh [--edition axonwall|vault|k3s-storage]"
+      echo "Usage: build-deb.sh [--edition axonwall|minimal|vault|k3s-storage]"
       echo "  Edition may also come from AXONWALL_EDITION or AXONWALL_FLAVOR."
       exit 0
       ;;
@@ -47,9 +47,9 @@ while [ $# -gt 0 ]; do
   esac
 done
 case "${EDITION}" in
-  axonwall|vault|k3s-storage) ;;
+  axonwall|minimal|vault|k3s-storage) ;;
   *)
-    echo "[!] ERROR: unknown edition '${EDITION}' (expected axonwall, vault, or k3s-storage)." >&2
+    echo "[!] ERROR: unknown edition '${EDITION}' (expected axonwall, minimal, vault, or k3s-storage)." >&2
     exit 1
     ;;
 esac
@@ -86,21 +86,28 @@ case "${EDITION}" in
   vault)
     PKG_DEPENDS="nftables (>= 1.1.0), iproute2, openssh-server, openssh-client, libpam-modules, chrony, openssl, curl, wget, jq, ca-certificates, rsync, python3, ethtool, pciutils, tcpdump, kmod, procps, iputils-ping, nano, less, binutils, zstd, xz-utils, bzip2, unzip, zsh, zsh-autosuggestions, zsh-syntax-highlighting, vim, neovim, tmux, fzf, ripgrep, fd-find, bat, mtr-tiny, btop, htop, sysstat, iotop, iftop, slurm, net-tools, dnsutils, bind9-host, nmap, kubectl, mkcert, zfsutils-linux, zfs-initramfs, mdadm, gdisk, parted, smartmontools, xfsprogs, cryptsetup, tpm2-tools, etckeeper, git, rkhunter, chkrootkit, yara, unhide, lynis, debsums, bpftool, python3-drgn, linux-perf"
     PKG_RECOMMENDS="starship, zoxide, plymouth, plymouth-label"
-    PKG_CONFLICTS="axonwall, axonwall-k3s-storage"
+    PKG_CONFLICTS="axonwall, axonwall-minimal, axonwall-k3s-storage"
     PKG_DESC="Axonwall Vault Edition — Immutable S3 Backup Vault"
     PKG_DESC_LONG=$' SeaweedFS-backed immutable backup vault with S3 Object Lock.\n No firewall daemon, web console, or controller — the NGFW payload\n is absent, not disabled.'
     ;;
   k3s-storage)
     PKG_DEPENDS="nftables (>= 1.1.0), iproute2, wireguard-tools, iptables, bridge-utils, openssh-server, openssh-client, libpam-modules, chrony, openssl, curl, wget, jq, ca-certificates, rsync, python3, ethtool, pciutils, tcpdump, kmod, procps, iputils-ping, nano, less, binutils, zstd, xz-utils, bzip2, unzip, zsh, zsh-autosuggestions, zsh-syntax-highlighting, vim, neovim, tmux, fzf, ripgrep, fd-find, bat, mtr-tiny, btop, htop, sysstat, iotop, iftop, slurm, net-tools, dnsutils, bind9-host, nmap, kubectl, mkcert, zfsutils-linux, zfs-initramfs, mdadm, gdisk, parted, smartmontools, xfsprogs, cryptsetup, tpm2-tools, etckeeper, git, rkhunter, chkrootkit, yara, unhide, lynis, debsums, bpftool, python3-drgn, linux-perf"
     PKG_RECOMMENDS="starship, zoxide, plymouth, plymouth-label"
-    PKG_CONFLICTS="axonwall, axonwall-vault"
+    PKG_CONFLICTS="axonwall, axonwall-minimal, axonwall-vault"
     PKG_DESC="Axonwall K3s-Storage Edition — Barebones K3s + OpenZFS Storage Host"
     PKG_DESC_LONG=$' Lean K3s + OpenZFS + OpenEBS storage host.\n No firewall daemon, web console, or controller — the NGFW payload\n is absent, not disabled.'
+    ;;
+  minimal)
+    PKG_DEPENDS="nftables (>= 1.1.0), iproute2, conntrack, nodejs (>= 22.0.0), openssh-server, openssh-client, slapd, ldap-utils, sssd-ldap, sssd-tools, libnss-sss, libpam-sss, libpam-modules, chrony, openssl, curl, wget, jq, ca-certificates, rsync, python3, sqlite3, ethtool, pciutils, kmod, procps, iputils-ping, nano, less, binutils, zstd, xz-utils, bzip2, unzip"
+    PKG_RECOMMENDS="zfsutils-linux, zfs-initramfs, mdadm, gdisk, parted, smartmontools, xfsprogs, cryptsetup, tpm2-tools, cloud-init, cloud-guest-utils, plymouth, plymouth-label"
+    PKG_CONFLICTS="axonwall, axonwall-vault, axonwall-k3s-storage"
+    PKG_DESC="Axonwall Minimal Edition — Reduced Attack Surface Core Appliance"
+    PKG_DESC_LONG=$' Hardened minimal bootable Axonwall host containing only the core\n control plane, Web UI, OpenLDAP/SSSD directory stack, and base OS tooling.\n Roles and plugins can be installed on demand after deployment.'
     ;;
   *)
     PKG_DEPENDS="nftables (>= 1.1.0), iproute2, wireguard-tools, keepalived, conntrack, conntrackd, nodejs (>= 22.0.0), openssh-server, openssh-client, slapd, ldap-utils, sssd-ldap, sssd-tools, libnss-sss, libpam-sss, libpam-modules, chrony, openssl, curl, wget, jq, ca-certificates, rsync, python3, sqlite3, ethtool, pciutils, tcpdump, kmod, procps, iputils-ping, nano, less, binutils, zstd, xz-utils, bzip2, unzip, zsh, zsh-autosuggestions, zsh-syntax-highlighting, vim, neovim, tmux, fzf, ripgrep, fd-find, bat, mtr-tiny, btop, htop, sysstat, iotop, iftop, slurm, net-tools, dnsutils, bind9-host, nmap, kubectl, mkcert"
     PKG_RECOMMENDS="starship, zoxide, unbound, kea-dhcp4-server, frr, suricata, strongswan, openvpn, etckeeper, git, qemu-system-x86, qemu-utils, ovmf, xorriso, bridge-utils, libvirt-clients, lxc, zfsutils-linux, zfs-initramfs, mdadm, gdisk, parted, smartmontools, xfsprogs, cryptsetup, tpm2-tools, samba, nfs-kernel-server, open-iscsi, tgt, cloud-init, cloud-guest-utils, rkhunter, chkrootkit, yara, unhide, lynis, debsums, bpftool, python3-drgn, linux-perf, plymouth, plymouth-label"
-    PKG_CONFLICTS="axonwall-vault, axonwall-k3s-storage"
+    PKG_CONFLICTS="axonwall-minimal, axonwall-vault, axonwall-k3s-storage"
     PKG_DESC="Modern Linux Router & Next-Gen Firewall"
     PKG_DESC_LONG=$' Axonwall replaces legacy BSD/PHP firewalls with a\n modern reactive architecture built on Linux nftables, Next.js, OpenLDAP,\n and a privileged Go daemon with commit-confirm transaction safety.'
     ;;
@@ -131,19 +138,23 @@ mkdir -p "${WORK_DIR}/usr/sbin"
 mkdir -p "${WORK_DIR}/usr/local/bin"
 mkdir -p "${WORK_DIR}/lib/systemd/system"
 mkdir -p "${WORK_DIR}/etc/axonwall"
-mkdir -p "${WORK_DIR}/etc/headscale"
 mkdir -p "${WORK_DIR}/etc/sudoers.d"
 mkdir -p "${WORK_DIR}/etc/ssh/sshd_config.d"
-mkdir -p "${WORK_DIR}/etc/zsh"
-mkdir -p "${WORK_DIR}/etc/skel"
-mkdir -p "${WORK_DIR}/etc/vim"
 mkdir -p "${WORK_DIR}/usr/share/axonwall"
-mkdir -p "${WORK_DIR}/usr/share/axonwall/satellites"
 mkdir -p "${WORK_DIR}/usr/lib/sysusers.d"
 mkdir -p "${WORK_DIR}/usr/lib/tmpfiles.d"
-# D-M9: the /opt/axonwall tree (web console + controller) is created
-# for the axonwall edition only; flavor packages never ship it.
 if [[ "${EDITION}" == "axonwall" ]]; then
+  mkdir -p "${WORK_DIR}/etc/headscale"
+  mkdir -p "${WORK_DIR}/usr/share/axonwall/satellites"
+fi
+if [[ "${EDITION}" != "minimal" ]]; then
+  mkdir -p "${WORK_DIR}/etc/zsh"
+  mkdir -p "${WORK_DIR}/etc/skel"
+  mkdir -p "${WORK_DIR}/etc/vim"
+fi
+# D-M9: the /opt/axonwall tree (web console + controller) ships in
+# axonwall and minimal only; vault and k3s-storage never ship it.
+if [[ "${EDITION}" == "axonwall" || "${EDITION}" == "minimal" ]]; then
   mkdir -p "${WORK_DIR}/opt/axonwall/apps/axonwall"
   mkdir -p "${WORK_DIR}/opt/axonwall/apps/axonwall-controller/dist"
 fi
@@ -154,9 +165,8 @@ fi
 # installs "successfully" and is only discovered broken at service
 # start on the target. Optional payloads (satellite bin dir, edge EFI)
 # stay conditional below.
-# D-M9: the daemon is NGFW-only — the flavor images deliberately strip
-# it (build-iso.sh copies axonwalld for the axonwall flavor only).
-if [[ "${EDITION}" == "axonwall" ]]; then
+# D-M9: the daemon ships in axonwall and minimal (vault and k3s-storage strip it).
+if [[ "${EDITION}" == "axonwall" || "${EDITION}" == "minimal" ]]; then
   if [[ -f "${ROOT_DIR}/apps/axonwalld/bin/axonwalld" ]]; then
     cp "${ROOT_DIR}/apps/axonwalld/bin/axonwalld" "${WORK_DIR}/usr/sbin/axonwalld"
     chmod 755 "${WORK_DIR}/usr/sbin/axonwalld"
@@ -401,19 +411,27 @@ BIN_SCRIPTS=(
   axonwall-install
   axonwall-kubeconfig
   axonwall-zbm-theme
-  axonwall-hunt-rootkits
-  hunt-io-uring-implants.sh
-  hunt-ebpf-rootkits.sh
-  audit_hidden_bpf_prog_idr.py
 )
-if [[ "${EDITION}" == "axonwall" ]]; then
+if [[ "${EDITION}" != "minimal" ]]; then
+  BIN_SCRIPTS+=(
+    axonwall-hunt-rootkits
+    hunt-io-uring-implants.sh
+    hunt-ebpf-rootkits.sh
+    audit_hidden_bpf_prog_idr.py
+  )
+fi
+if [[ "${EDITION}" == "axonwall" || "${EDITION}" == "minimal" ]]; then
   BIN_SCRIPTS+=(
     axonwall-firstboot
-    axonwall-import
-    axonwall-ha-notify
     axonwallctl
     axonwall-tui
     axonwall-cloud-init
+  )
+fi
+if [[ "${EDITION}" == "axonwall" ]]; then
+  BIN_SCRIPTS+=(
+    axonwall-import
+    axonwall-ha-notify
   )
 fi
 for bin_script in "${BIN_SCRIPTS[@]}"; do
@@ -467,7 +485,7 @@ elif [[ -f "${CHROOT_SRC}/usr/lib/axonwall/theme-zbm-uki.py" ]]; then
   chmod 755 "${WORK_DIR}/usr/lib/axonwall/theme-zbm-uki.py"
 fi
 
-if [[ -d "${CHROOT_SRC}/etc/axonwall/yara" ]]; then
+if [[ "${EDITION}" != "minimal" ]] && [[ -d "${CHROOT_SRC}/etc/axonwall/yara" ]]; then
   mkdir -p "${WORK_DIR}/etc/axonwall/yara"
   cp -a "${CHROOT_SRC}/etc/axonwall/yara/." "${WORK_DIR}/etc/axonwall/yara/"
   chmod -R a+rX "${WORK_DIR}/etc/axonwall/yara"
@@ -482,7 +500,7 @@ if [[ -d "${CHROOT_SRC}/etc/zfsbootmenu" ]]; then
   cp -a "${CHROOT_SRC}/etc/zfsbootmenu/." "${WORK_DIR}/etc/zfsbootmenu/"
   chmod -R a+rX "${WORK_DIR}/etc/zfsbootmenu"
 fi
-if [[ -f "${CHROOT_SRC}/etc/rkhunter.conf.local" ]]; then
+if [[ "${EDITION}" != "minimal" ]] && [[ -f "${CHROOT_SRC}/etc/rkhunter.conf.local" ]]; then
   cp "${CHROOT_SRC}/etc/rkhunter.conf.local" "${WORK_DIR}/etc/rkhunter.conf.local"
   chmod 0644 "${WORK_DIR}/etc/rkhunter.conf.local"
 fi
@@ -501,7 +519,7 @@ if [[ -d "${CHROOT_SRC}/etc/axonwall/nvim" ]]; then
   cp -a "${CHROOT_SRC}/etc/axonwall/nvim/." "${WORK_DIR}/etc/axonwall/nvim/"
   chmod -R a+rX "${WORK_DIR}/etc/axonwall/nvim"
 fi
-if [[ -f "${CHROOT_SRC}/etc/axonwall/starship.toml" ]]; then
+if [[ "${EDITION}" != "minimal" ]] && [[ -f "${CHROOT_SRC}/etc/axonwall/starship.toml" ]]; then
   cp "${CHROOT_SRC}/etc/axonwall/starship.toml" "${WORK_DIR}/etc/axonwall/starship.toml"
   chmod 0644 "${WORK_DIR}/etc/axonwall/starship.toml"
 fi
@@ -525,30 +543,32 @@ if [[ -d "${CHROOT_SRC}/etc/axonwall/release-signing.d" ]]; then
     chmod 0644 "${WORK_DIR}/etc/axonwall/release-signing.d/$(basename "$_keyring_pub")"
   done
 fi
-if [[ -f "${CHROOT_SRC}/etc/zsh/axonwall.zsh" ]]; then
-  cp "${CHROOT_SRC}/etc/zsh/axonwall.zsh" "${WORK_DIR}/etc/zsh/axonwall.zsh"
-  chmod 0644 "${WORK_DIR}/etc/zsh/axonwall.zsh"
-fi
-if [[ -f "${CHROOT_SRC}/etc/zsh/zshenv" ]]; then
-  cp "${CHROOT_SRC}/etc/zsh/zshenv" "${WORK_DIR}/usr/share/axonwall/zshenv"
-  chmod 0644 "${WORK_DIR}/usr/share/axonwall/zshenv"
-fi
-if [[ -f "${CHROOT_SRC}/etc/skel/.zshrc" ]]; then
-  cp "${CHROOT_SRC}/etc/skel/.zshrc" "${WORK_DIR}/etc/skel/.zshrc"
-  chmod 0644 "${WORK_DIR}/etc/skel/.zshrc"
-fi
-if [[ -d "${CHROOT_SRC}/usr/share/oh-my-zsh" ]]; then
-  mkdir -p "${WORK_DIR}/usr/share/oh-my-zsh"
-  cp -a "${CHROOT_SRC}/usr/share/oh-my-zsh/." "${WORK_DIR}/usr/share/oh-my-zsh/"
-  chmod -R a+rX "${WORK_DIR}/usr/share/oh-my-zsh"
-fi
-if [[ -f "${CHROOT_SRC}/etc/vim/vimrc.local" ]]; then
-  cp "${CHROOT_SRC}/etc/vim/vimrc.local" "${WORK_DIR}/etc/vim/vimrc.local"
-  chmod 0644 "${WORK_DIR}/etc/vim/vimrc.local"
-fi
-if [[ -f "${CHROOT_SRC}/etc/tmux.conf" ]]; then
-  cp "${CHROOT_SRC}/etc/tmux.conf" "${WORK_DIR}/etc/tmux.conf"
-  chmod 0644 "${WORK_DIR}/etc/tmux.conf"
+if [[ "${EDITION}" != "minimal" ]]; then
+  if [[ -f "${CHROOT_SRC}/etc/zsh/axonwall.zsh" ]]; then
+    cp "${CHROOT_SRC}/etc/zsh/axonwall.zsh" "${WORK_DIR}/etc/zsh/axonwall.zsh"
+    chmod 0644 "${WORK_DIR}/etc/zsh/axonwall.zsh"
+  fi
+  if [[ -f "${CHROOT_SRC}/etc/zsh/zshenv" ]]; then
+    cp "${CHROOT_SRC}/etc/zsh/zshenv" "${WORK_DIR}/usr/share/axonwall/zshenv"
+    chmod 0644 "${WORK_DIR}/usr/share/axonwall/zshenv"
+  fi
+  if [[ -f "${CHROOT_SRC}/etc/skel/.zshrc" ]]; then
+    cp "${CHROOT_SRC}/etc/skel/.zshrc" "${WORK_DIR}/etc/skel/.zshrc"
+    chmod 0644 "${WORK_DIR}/etc/skel/.zshrc"
+  fi
+  if [[ -d "${CHROOT_SRC}/usr/share/oh-my-zsh" ]]; then
+    mkdir -p "${WORK_DIR}/usr/share/oh-my-zsh"
+    cp -a "${CHROOT_SRC}/usr/share/oh-my-zsh/." "${WORK_DIR}/usr/share/oh-my-zsh/"
+    chmod -R a+rX "${WORK_DIR}/usr/share/oh-my-zsh"
+  fi
+  if [[ -f "${CHROOT_SRC}/etc/vim/vimrc.local" ]]; then
+    cp "${CHROOT_SRC}/etc/vim/vimrc.local" "${WORK_DIR}/etc/vim/vimrc.local"
+    chmod 0644 "${WORK_DIR}/etc/vim/vimrc.local"
+  fi
+  if [[ -f "${CHROOT_SRC}/etc/tmux.conf" ]]; then
+    cp "${CHROOT_SRC}/etc/tmux.conf" "${WORK_DIR}/etc/tmux.conf"
+    chmod 0644 "${WORK_DIR}/etc/tmux.conf"
+  fi
 fi
 if [[ -f "${CHROOT_SRC}/etc/sudoers.d/axonwall" ]]; then
   cp "${CHROOT_SRC}/etc/sudoers.d/axonwall" "${WORK_DIR}/etc/sudoers.d/axonwall"
@@ -573,13 +593,19 @@ if [[ "${EDITION}" == "vault" ]]; then
   touch "${WORK_DIR}/etc/axonwall/.vault-edition"
 elif [[ "${EDITION}" == "k3s-storage" ]]; then
   touch "${WORK_DIR}/etc/axonwall/.k3s-edition"
+elif [[ "${EDITION}" == "minimal" ]]; then
+  touch "${WORK_DIR}/etc/axonwall/.minimal-edition"
+  printf 'disabled=true\n' > "${WORK_DIR}/etc/axonwall/workstation.disabled"
+  chmod 0644 "${WORK_DIR}/etc/axonwall/workstation.disabled"
 fi
 
 # 6. Copy Configurations, Rulesets, Systemd, Sysusers
-# D-M9: the NGFW baseline ruleset and the Headscale config are
-# axonwall-only (build-iso.sh copies them for the axonwall flavor only).
-if [[ "${EDITION}" == "axonwall" ]]; then
+# D-M9: the NGFW baseline ruleset ships in axonwall and minimal; the
+# Headscale config is axonwall-only.
+if [[ "${EDITION}" == "axonwall" || "${EDITION}" == "minimal" ]]; then
   cp "${SCRIPT_DIR}/lockdown.nft" "${WORK_DIR}/usr/share/axonwall/lockdown.nft"
+fi
+if [[ "${EDITION}" == "axonwall" ]]; then
   cp "${SCRIPT_DIR}/headscale-config.yaml" "${WORK_DIR}/etc/headscale/config.yaml"
   # The config can carry the OIDC client secret; postinst assigns it to
   # root:axonwall-api on install (all of its readers are group members).
@@ -587,16 +613,17 @@ if [[ "${EDITION}" == "axonwall" ]]; then
 fi
 # D-M9: units are edition-gated against build-iso.sh's flavor units
 # section. The console unit and the hub-cert-renew pair ship in all
-# editions; the NGFW service units only in axonwall. The k3s-storage
-# units come from packaging/k3s-storage/ (the flavor's units, with
-# --config /etc/rancher/k3s/config.yaml), not packaging/debian/.
+# editions; axonwalld/ui/controller ship in axonwall and minimal;
+# headscale/k3s units ship in axonwall only (and k3s-storage uses its own).
 cp "${SCRIPT_DIR}/axonwall-console.service" "${WORK_DIR}/lib/systemd/system/"
 cp "${SCRIPT_DIR}/axonwall-hub-cert-renew.service" "${WORK_DIR}/lib/systemd/system/"
 cp "${SCRIPT_DIR}/axonwall-hub-cert-renew.timer" "${WORK_DIR}/lib/systemd/system/"
-if [[ "${EDITION}" == "axonwall" ]]; then
+if [[ "${EDITION}" == "axonwall" || "${EDITION}" == "minimal" ]]; then
   cp "${SCRIPT_DIR}/axonwalld.service" "${WORK_DIR}/lib/systemd/system/"
   cp "${SCRIPT_DIR}/axonwall-ui.service" "${WORK_DIR}/lib/systemd/system/"
   cp "${SCRIPT_DIR}/axonwall-controller.service" "${WORK_DIR}/lib/systemd/system/"
+fi
+if [[ "${EDITION}" == "axonwall" ]]; then
   cp "${SCRIPT_DIR}/headscale.service" "${WORK_DIR}/lib/systemd/system/"
   cp "${SCRIPT_DIR}/k3s.service" "${WORK_DIR}/lib/systemd/system/"
 elif [[ "${EDITION}" == "vault" ]]; then
@@ -633,10 +660,18 @@ for dropin_dir in plymouth-quit.service.d plymouth-quit-wait.service.d; do
 done
 
 if [[ -f "${CHROOT_SRC}/usr/lib/sysusers.d/axonwall.conf" ]]; then
-  cp "${CHROOT_SRC}/usr/lib/sysusers.d/axonwall.conf" "${WORK_DIR}/usr/lib/sysusers.d/"
+  if [[ "${EDITION}" == "minimal" ]]; then
+    grep -v 'headscale' "${CHROOT_SRC}/usr/lib/sysusers.d/axonwall.conf" > "${WORK_DIR}/usr/lib/sysusers.d/axonwall.conf"
+  else
+    cp "${CHROOT_SRC}/usr/lib/sysusers.d/axonwall.conf" "${WORK_DIR}/usr/lib/sysusers.d/"
+  fi
 fi
 if [[ -f "${CHROOT_SRC}/usr/lib/tmpfiles.d/axonwall.conf" ]]; then
-  cp "${CHROOT_SRC}/usr/lib/tmpfiles.d/axonwall.conf" "${WORK_DIR}/usr/lib/tmpfiles.d/"
+  if [[ "${EDITION}" == "minimal" ]]; then
+    grep -v 'headscale' "${CHROOT_SRC}/usr/lib/tmpfiles.d/axonwall.conf" > "${WORK_DIR}/usr/lib/tmpfiles.d/axonwall.conf"
+  else
+    cp "${CHROOT_SRC}/usr/lib/tmpfiles.d/axonwall.conf" "${WORK_DIR}/usr/lib/tmpfiles.d/"
+  fi
 fi
 # D-M9: the vault ships its own sysusers/tmpfiles (the axonwall-vault
 # user + /var/lib/axonwall/vault), mirroring build-iso.sh.
@@ -673,10 +708,9 @@ if [[ "${EDITION}" == "k3s-storage" ]]; then
 fi
 
 # 7. Bundle Next.js Web Console & Controller
-# D-M9: the web console and the controller are NGFW-only — the flavor
-# images deliberately strip /opt/axonwall entirely. A flavor build must
-# not fail here for a missing .next/standalone it will never ship.
-if [[ "${EDITION}" == "axonwall" ]]; then
+# D-M9: the web console and controller ship in axonwall and minimal;
+# vault and k3s-storage deliberately omit /opt/axonwall entirely.
+if [[ "${EDITION}" == "axonwall" || "${EDITION}" == "minimal" ]]; then
 echo "[+] Bundling Next.js Web Console and Controller..."
 if [[ -d "${ROOT_DIR}/apps/axonwall/.next/standalone" ]]; then
   cp -r "${ROOT_DIR}/apps/axonwall/.next/standalone/"* "${WORK_DIR}/opt/axonwall/"
@@ -708,7 +742,7 @@ fi
 if [[ -f "${ROOT_DIR}/apps/axonwall-controller/dist/axonwall-tui.js" ]]; then
   cp "${ROOT_DIR}/apps/axonwall-controller/dist/axonwall-tui.js" "${WORK_DIR}/opt/axonwall/apps/axonwall-controller/dist/"
 fi
-fi # EDITION == axonwall: end of Next.js + controller bundle
+fi # EDITION == axonwall|minimal: end of Next.js + controller bundle
 
 # 7b. Declare all packaged /etc files in DEBIAN/conffiles so dpkg preserves operator edits
 # D-L7: exclude generated state -- /etc/axonwall/version and
@@ -726,9 +760,9 @@ fi
 # D-M9: build-side guard — a flavor package must never silently be an
 # NGFW-equivalent package. The copy sections above are edition-gated;
 # this is defense in depth against a future edit re-adding a payload
-# unconditionally. Fail the build on any NGFW-only file in a flavor
+# unconditionally. Fail the build on any forbidden file in a flavor
 # package, and on a flavor package missing its own required payload.
-if [[ "${EDITION}" != "axonwall" ]]; then
+if [[ "${EDITION}" == "vault" || "${EDITION}" == "k3s-storage" ]]; then
   for _ngfw_file in \
     usr/sbin/axonwalld usr/sbin/headscale usr/sbin/litestream \
     usr/local/bin/helm usr/local/bin/kubectl \
@@ -746,8 +780,8 @@ if [[ "${EDITION}" != "axonwall" ]]; then
     fi
   done
   # Content, not mere existence: the skeleton dirs above are created
-  # for the axonwall edition only, but a future unconditional mkdir
-  # must not trip this — only an actual payload file does.
+  # for the axonwall/minimal editions only, but a future unconditional
+  # mkdir must not trip this — only an actual payload file does.
   if [[ -d "${WORK_DIR}/opt/axonwall" ]] && [[ -n "$(find "${WORK_DIR}/opt/axonwall" -mindepth 1 -print -quit 2>/dev/null)" ]]; then
     echo "[!] ERROR: flavor package '${PKG_NAME}' contains /opt/axonwall (web console + controller); refusing to build." >&2
     exit 1
@@ -767,6 +801,44 @@ if [[ "${EDITION}" != "axonwall" ]]; then
     [[ -f "${WORK_DIR}/lib/systemd/system/k3s-agent.service" ]] || { echo "[!] ERROR: k3s-storage package is missing k3s-agent.service." >&2; exit 1; }
     [[ -f "${WORK_DIR}/usr/share/axonwall/k3s/zfs-operator.yaml" ]] || { echo "[!] ERROR: k3s-storage package is missing zfs-operator.yaml." >&2; exit 1; }
   fi
+elif [[ "${EDITION}" == "minimal" ]]; then
+  for _min_forbidden in \
+    usr/sbin/headscale usr/sbin/litestream usr/sbin/axonwall-satellite \
+    usr/local/bin/helm usr/local/bin/kubectl \
+    usr/local/bin/axonwall-import usr/local/bin/axonwall-ha-notify \
+    usr/local/bin/axonwall-hunt-rootkits usr/local/bin/hunt-io-uring-implants.sh \
+    usr/local/bin/hunt-ebpf-rootkits.sh usr/local/bin/audit_hidden_bpf_prog_idr.py \
+    lib/systemd/system/headscale.service lib/systemd/system/k3s.service \
+    etc/headscale/config.yaml etc/rkhunter.conf.local etc/axonwall/starship.toml \
+    etc/zsh/axonwall.zsh usr/share/axonwall/zshenv etc/skel/.zshrc \
+    etc/vim/vimrc.local etc/tmux.conf \
+    var/lib/axonwall/core-k3s/bin/k3s var/lib/axonwall/core-k3s/bin/k9s \
+    usr/share/oh-my-zsh/oh-my-zsh.sh etc/axonwall/yara/ghost_in_the_ring.yar; do
+    if [[ -e "${WORK_DIR}/${_min_forbidden}" ]]; then
+      echo "[!] ERROR: minimal package '${PKG_NAME}' contains stripped payload '${_min_forbidden}'; refusing to build." >&2
+      exit 1
+    fi
+  done
+  for _min_dir in usr/share/axonwall/satellites usr/lib/axonwall/edge; do
+    if [[ -d "${WORK_DIR}/${_min_dir}" ]] && [[ -n "$(find "${WORK_DIR}/${_min_dir}" -mindepth 1 -print -quit 2>/dev/null)" ]]; then
+      echo "[!] ERROR: minimal package '${PKG_NAME}' contains stripped directory '${_min_dir}'; refusing to build." >&2
+      exit 1
+    fi
+  done
+  for _min_req in \
+    etc/axonwall/.minimal-edition etc/axonwall/workstation.disabled \
+    usr/sbin/axonwalld usr/sbin/axonwall-console \
+    opt/axonwall/apps/axonwall-controller/dist/index.js \
+    lib/systemd/system/axonwalld.service \
+    lib/systemd/system/axonwall-ui.service \
+    lib/systemd/system/axonwall-controller.service \
+    lib/systemd/system/axonwall-console.service \
+    usr/share/axonwall/lockdown.nft; do
+    if [[ ! -e "${WORK_DIR}/${_min_req}" ]]; then
+      echo "[!] ERROR: minimal package '${PKG_NAME}' is missing required payload '${_min_req}'." >&2
+      exit 1
+    fi
+  done
 fi
 
 # D-M9 (marker): every package must ship its canonical edition file

@@ -49,9 +49,9 @@ while [[ $# -gt 0 ]]; do
 done
 
 case "${EDITION}" in
-  axonwall|k3s-storage) ;;
+  axonwall|minimal|k3s-storage) ;;
   *)
-    echo "[!] Unknown --edition '${EDITION}' (expected axonwall or k3s-storage)" >&2
+    echo "[!] Unknown --edition '${EDITION}' (expected axonwall, minimal, or k3s-storage)" >&2
     exit 1
     ;;
 esac
@@ -72,6 +72,8 @@ WORK_DIR="/tmp/axonwall-alpine-build"
 OUTPUT_DIR="${REPO_ROOT}/packaging/alpine/output"
 if [[ "${EDITION}" == "k3s-storage" ]]; then
   ISO_NAME="axonwall-k3s-storage-alpine-${PROFILE}-amd64.iso"
+elif [[ "${EDITION}" == "minimal" ]]; then
+  ISO_NAME="axonwall-minimal-alpine-${PROFILE}-amd64.iso"
 elif [[ "$MINIMAL" -eq 1 ]]; then
   ISO_NAME="axonwall-alpine-${PROFILE}-minimal-amd64.iso"
 else
@@ -200,6 +202,57 @@ if [[ "${EDITION}" == "k3s-storage" ]]; then
     grub-bios
     grub-efi
     openssh
+    sudo
+    shadow
+    chrony
+    chrony-openrc
+  )
+elif [[ "${EDITION}" == "minimal" ]]; then
+  # Reduced attack surface Minimal edition (core control plane + Web UI + OpenLDAP + OpenZFS base)
+  CORE_PKGS=(
+    alpine-base
+    alpine-conf
+    openrc
+    busybox
+    busybox-openrc
+    busybox-mdev-openrc
+    kmod
+    nftables
+    iproute2
+    ifupdown-ng
+    dhcpcd
+    ethtool
+    nodejs
+    sqlite
+    curl
+    jq
+    openssl
+    ca-certificates
+    zfs
+    "zfs-${ALPINE_KERNEL_FLAVOR}"
+    zfs-openrc
+    parted
+    mdadm
+    sgdisk
+    e2fsprogs
+    dosfstools
+    cryptsetup
+    rsync
+    bash
+    syslinux
+    efibootmgr
+    grub
+    grub-bios
+    grub-efi
+    openssh
+    openldap
+    openldap-openrc
+    openldap-back-mdb
+    openldap-overlay-syncprov
+    openldap-overlay-ppolicy
+    openldap-overlay-unique
+    openldap-overlay-accesslog
+    openldap-clients
     sudo
     shadow
     chrony
@@ -452,12 +505,18 @@ ln -sf /usr/lib/openldap "${OVL}/usr/lib/ldap"
 if [[ "${EDITION}" == "k3s-storage" ]]; then
   echo "axonwall-storage" > "${OVL}/etc/hostname"
   touch "${OVL}/etc/axonwall/.k3s-edition" "${OVL}/etc/axonwall/.k3s-firstboot"
+elif [[ "${EDITION}" == "minimal" ]]; then
+  echo "axonwall-minimal" > "${OVL}/etc/hostname"
+  touch "${OVL}/etc/axonwall/.minimal-edition" "${OVL}/etc/axonwall/.firstboot"
+  printf 'disabled=true\n' > "${OVL}/etc/axonwall/workstation.disabled"
+  printf '{\n  "core-firewall": true,\n  "core-nas": true,\n  "core-k3s": true,\n  "core-virt": true,\n  "core-vigilante": true,\n  "cli-workstation": true,\n  "host-malware-rootkit": true,\n  "coroot-ebpf-apm": true\n}\n' > "${OVL}/var/lib/axonwall/plugins-disabled.json"
+  chmod 0644 "${OVL}/etc/axonwall/workstation.disabled" "${OVL}/var/lib/axonwall/plugins-disabled.json"
 else
   echo "axonwall" > "${OVL}/etc/hostname"
   touch "${OVL}/etc/axonwall/.firstboot"
 fi
 # D-M9 (marker): the canonical edition file for the live installer
-# environment. EDITION is validated to axonwall|k3s-storage above.
+# environment. EDITION is validated to axonwall|minimal|k3s-storage above.
 printf '%s\n' "${EDITION}" > "${OVL}/etc/axonwall/edition"
 
 printf "%s\n" "${CORE_PKGS[@]}" > "${OVL}/etc/apk/world"
@@ -493,6 +552,21 @@ if [[ "${EDITION}" == "k3s-storage" ]]; then
     chmod 0755 "${OVL}/usr/local/bin/${_kbin}"
   done
   ln -sf /bin/ash "${OVL}/usr/bin/zsh"
+elif [[ "${EDITION}" == "minimal" ]]; then
+  # Reduced attack surface: strip headscale and k3s-storage payload; keep core control plane + Web UI + OpenLDAP
+  rm -f "${OVL}/etc/init.d/headscale" "${OVL}/etc/init.d/k3s" "${OVL}/etc/init.d/k3s-agent" \
+        "${OVL}/etc/init.d/axonwall-k3s-verify"
+  rmdir "${OVL}/etc/headscale" 2>/dev/null || true
+  cp "${REPO_ROOT}/packaging/iso/config/includes.chroot/etc/sysctl.d/99-axonwall.conf" "${OVL}/etc/sysctl.d/"
+  cp "${REPO_ROOT}/packaging/debian/lockdown.nft" "${OVL}/usr/share/axonwall/lockdown.nft"
+  if [[ -d "${REPO_ROOT}/packaging/iso/config/includes.chroot/etc/axonwall/nvim" ]]; then
+    mkdir -p "${OVL}/etc/axonwall/nvim"
+    cp -a "${REPO_ROOT}/packaging/iso/config/includes.chroot/etc/axonwall/nvim/." "${OVL}/etc/axonwall/nvim/"
+  fi
+  cp "${REPO_ROOT}/packaging/iso/config/includes.chroot/usr/local/bin/axonwallctl" "${OVL}/usr/local/bin/"
+  if [[ -f "${REPO_ROOT}/packaging/iso/config/includes.chroot/usr/local/bin/axonwall-tui" ]]; then
+    cp "${REPO_ROOT}/packaging/iso/config/includes.chroot/usr/local/bin/axonwall-tui" "${OVL}/usr/local/bin/"
+  fi
 else
   # Copy shared scripts and configs from Debian/ISO packaging
   cp "${REPO_ROOT}/packaging/iso/config/includes.chroot/etc/sysctl.d/99-axonwall.conf" "${OVL}/etc/sysctl.d/"
@@ -588,7 +662,7 @@ echo "${VERSION}" > "${OVL}/etc/axonwall/version"
 # Core payloads are fail-closed, mirroring the console-binary guard in
 # build-iso.sh: an image built without its daemon, UI, or controller
 # boots "successfully" and is only discovered broken at service start.
-if [[ "${EDITION}" == "axonwall" ]]; then
+if [[ "${EDITION}" == "axonwall" || "${EDITION}" == "minimal" ]]; then
   if [[ -f "${REPO_ROOT}/apps/axonwalld/bin/axonwalld" ]]; then
     cp "${REPO_ROOT}/apps/axonwalld/bin/axonwalld" "${OVL}/usr/sbin/axonwalld"
     strip "${OVL}/usr/sbin/axonwalld" 2>/dev/null || true
@@ -608,7 +682,7 @@ else
   exit 1
 fi
 
-if [[ -f "${REPO_ROOT}/apps/axonwall-satellite/bin/axonwall-satellite-amd64" ]]; then
+if [[ "${EDITION}" != "minimal" ]] && [[ -f "${REPO_ROOT}/apps/axonwall-satellite/bin/axonwall-satellite-amd64" ]]; then
   cp "${REPO_ROOT}/apps/axonwall-satellite/bin/axonwall-satellite-amd64" "${OVL}/usr/sbin/axonwall-satellite"
   strip "${OVL}/usr/sbin/axonwall-satellite" 2>/dev/null || true
   chmod +x "${OVL}/usr/sbin/axonwall-satellite"
@@ -620,6 +694,8 @@ if [[ -f "${REPO_ROOT}/apps/axonwall-satellite/bin/axonwall-satellite-amd64" ]];
 elif [[ "${EDITION}" == "axonwall" ]]; then
   echo "[!] ERROR: apps/axonwall-satellite/bin/axonwall-satellite-amd64 is missing; cannot build Alpine ISO without the satellite binary." >&2
   exit 1
+else
+  rmdir "${OVL}/usr/share/axonwall/satellites" 2>/dev/null || true
 fi
 
 # write_core_k3s_bundled_json writes the bundled.json verification
@@ -690,7 +766,7 @@ if [[ "${EDITION}" == "k3s-storage" ]]; then
   ln -sf k3s "${OVL}/var/lib/axonwall/core-k3s/bin/kubectl"
   ln -sf k3s "${OVL}/var/lib/axonwall/core-k3s/bin/crictl"
   ln -sf k3s "${OVL}/var/lib/axonwall/core-k3s/bin/ctr"
-else
+elif [[ "${EDITION}" == "axonwall" ]]; then
   HEADSCALE_VERSION="0.29.4"
   HEADSCALE_SHA256="212ed0a884c0d3541e094c4bebbe94397df6f4e01bd3d7f059c520cb55e0d757"
   if [[ -f "${REPO_ROOT}/packaging/iso/config/includes.chroot/usr/sbin/headscale" ]]; then
@@ -799,8 +875,8 @@ if [[ -f "${REPO_ROOT}/packaging/iso/config/includes.chroot/etc/zfsbootmenu/hook
   chmod 0755 "${OVL}/etc/zfsbootmenu/hooks/setup.d/20-axonwall-watchdog.sh"
 fi
 
-# Copy Next.js standalone UI & Controller (axonwall NGFW edition only)
-if [[ "${EDITION}" == "axonwall" ]]; then
+# Copy Next.js standalone UI & Controller (axonwall & minimal editions)
+if [[ "${EDITION}" == "axonwall" || "${EDITION}" == "minimal" ]]; then
   if [[ -d "${REPO_ROOT}/apps/axonwall/.next/standalone" ]]; then
     cp -a "${REPO_ROOT}/apps/axonwall/.next/standalone/"* "${OVL}/opt/axonwall/"
     # Strip build-only dependencies and unused glibc native binaries from standalone bundle
@@ -875,6 +951,16 @@ if [[ "${EDITION}" == "k3s-storage" ]]; then
   for svc in chronyd crond sshd nftables axonwall-firstboot k3s k3s-agent axonwall-k3s-verify local; do
     ln -sf "/etc/init.d/${svc}" "${OVL}/etc/runlevels/default/${svc}"
   done
+elif [[ "${EDITION}" == "minimal" ]]; then
+  for svc in devfs dmesg mdev hwdrivers modloop; do
+    ln -sf "/etc/init.d/${svc}" "${OVL}/etc/runlevels/sysinit/${svc}"
+  done
+  for svc in axonwall-network-setup modules sysctl hostname bootmisc syslog networking zfs-import zfs-mount; do
+    ln -sf "/etc/init.d/${svc}" "${OVL}/etc/runlevels/boot/${svc}"
+  done
+  for svc in chronyd crond sshd axonwall-firstboot axonwalld axonwall-controller axonwall-ui local; do
+    ln -sf "/etc/init.d/${svc}" "${OVL}/etc/runlevels/default/${svc}"
+  done
 else
   for svc in devfs dmesg mdev hwdrivers modloop; do
     ln -sf "/etc/init.d/${svc}" "${OVL}/etc/runlevels/sysinit/${svc}"
@@ -928,6 +1014,15 @@ if [[ "${EDITION}" == "k3s-storage" ]]; then
   EDITION_KARG="axonwall.edition=k3s-storage "
   ISO_VOL_ID="AXONWALL_K3S_ALP"
   ISO_APP_ID="Axonwall Alpine K3s + ZFS Storage Host"
+elif [[ "${EDITION}" == "minimal" ]]; then
+  BOOT_MENU_TITLE="Axonwall Minimal Edition Boot Menu (Alpine Linux)"
+  BOOT_INSTALL_LABEL="^Install Axonwall Minimal Edition (Reduced Attack Surface)"
+  BOOT_GRUB_INSTALL_LABEL="Install Axonwall Minimal Edition (Reduced Attack Surface)"
+  BOOT_LIVE_LABEL="^Live Minimal Mode (Web UI on 192.168.1.1:2966)"
+  BOOT_GRUB_LIVE_LABEL="Axonwall Minimal Live Mode (Reduced Attack Surface)"
+  EDITION_KARG="axonwall.edition=minimal "
+  ISO_VOL_ID="AXONWALL_MIN_ALP"
+  ISO_APP_ID="Axonwall Alpine Minimal Appliance (Reduced Attack Surface)"
 else
   BOOT_MENU_TITLE="Axonwall Next-Gen Appliance Boot Menu (Alpine Linux)"
   BOOT_INSTALL_LABEL="^Install Axonwall OS — Next-Gen Branded TUI Installer (Recommended)"
@@ -984,6 +1079,12 @@ SYSLINUX_EOF
 
 if [[ "${EDITION}" == "axonwall" ]]; then
 cat << 'SYSLINUX_EDITIONS_EOF' >> "${WORK_DIR}/iso/boot/syslinux/syslinux.cfg"
+
+LABEL install-minimal
+  MENU LABEL Install Axonwall ^Minimal Edition (Reduced Attack Surface)
+  KERNEL /boot/vmlinuz-virt
+  INITRD /boot/initramfs-virt
+  APPEND modules=loop,squashfs,sd-mod,usb-storage,sr_mod,cdrom,isofs,virtio_blk,virtio_scsi,virtio_pci,nvme,ata_piix,ahci axonwall_edition=minimal axonwall_install=1 quiet console=tty0 console=ttyS0,9600
 
 LABEL install-vault
   MENU LABEL Install Axonwall ^Vault Edition (Immutable S3 Storage)
@@ -1050,6 +1151,11 @@ GRUB_EOF
 
 if [[ "${EDITION}" == "axonwall" ]]; then
 cat << GRUB_EDITIONS_EOF >> "${WORK_DIR}/iso/boot/grub/grub.cfg"
+
+menuentry "Install Axonwall Minimal Edition (Reduced Attack Surface)" {
+  linux /boot/vmlinuz-${ALPINE_KERNEL_FLAVOR} modules=${STORAGE_MODULES} axonwall_edition=minimal axonwall_install=1 quiet console=tty0 console=ttyS0,9600
+  initrd /boot/initramfs-${ALPINE_KERNEL_FLAVOR}
+}
 
 menuentry "Install Axonwall Vault Edition (Immutable S3 Storage)" {
   linux /boot/vmlinuz-${ALPINE_KERNEL_FLAVOR} modules=${STORAGE_MODULES} axonwall_edition=vault axonwall_install=1 quiet console=tty0 console=ttyS0,9600

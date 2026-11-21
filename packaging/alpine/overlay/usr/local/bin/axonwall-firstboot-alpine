@@ -375,6 +375,11 @@ fi
 
 echo "[Axonwall Firstboot] Initializing Alpine Linux network appliance..."
 
+MINIMAL_MODE=0
+if [ -f /etc/axonwall/.minimal-edition ] || [ "$(tr -d ' \t\r\n' < /etc/axonwall/edition 2>/dev/null || true)" = "minimal" ]; then
+  MINIMAL_MODE=1
+fi
+
 # 1. Load kernel modules and apply sysctl performance tuning
 modprobe nf_conntrack 2>/dev/null || true
 modprobe nf_tables 2>/dev/null || true
@@ -385,7 +390,10 @@ modprobe tcp_bbr 2>/dev/null || true
 sysctl -p /etc/sysctl.d/99-axonwall.conf 2>/dev/null || true
 
 # 2. Identify Primary WAN, LAN, OPT1 & OPT2 NICs
-mkdir -p /etc/axonwall /var/lib/axonwall /var/log/axonwall /run/axonwall /run/headscale
+mkdir -p /etc/axonwall /var/lib/axonwall /var/log/axonwall /run/axonwall
+if [ "$MINIMAL_MODE" != "1" ] || [ -x /usr/sbin/headscale ]; then
+  mkdir -p /run/headscale
+fi
 PRECONFIGURED_IFACES=0
 if [ -f /var/lib/axonwall/etc-axonwall/.interfaces_configured ] && [ -s /var/lib/axonwall/etc-axonwall/interfaces.conf ]; then
   cp -a /var/lib/axonwall/etc-axonwall/interfaces.conf /etc/axonwall/interfaces.conf 2>/dev/null || true
@@ -429,6 +437,16 @@ else
 
   echo "[Axonwall Firstboot] Detected WAN: ${WAN_IF}, LAN: ${LAN_IF:-<none>}, OPT1: ${OPT1_IF:-<none>}, OPT2: ${OPT2_IF:-<none>}"
 
+  if [ "$MINIMAL_MODE" = "1" ]; then
+    LAN_DEF_MODE="dhcp"
+    LAN_DEF_IPV4=""
+    LAN_DEF_DHCP="false"
+  else
+    LAN_DEF_MODE="static"
+    LAN_DEF_IPV4="192.168.1.1/24"
+    LAN_DEF_DHCP="true"
+  fi
+
   cat << CONF_EOF > /etc/axonwall/interfaces.conf
 WAN_INTERFACE=${WAN_IF}
 WAN_MODE=dhcp
@@ -437,9 +455,9 @@ WAN_IPV4_GATEWAY=
 WAN_DNS1=1.1.1.1
 WAN_DNS2=8.8.8.8
 LAN_INTERFACE=${LAN_IF}
-LAN_MODE=static
-LAN_IPV4_ADDRESS=192.168.1.1/24
-LAN_DHCP_ENABLED=true
+LAN_MODE=${LAN_DEF_MODE}
+LAN_IPV4_ADDRESS=${LAN_DEF_IPV4}
+LAN_DHCP_ENABLED=${LAN_DEF_DHCP}
 OPT1_INTERFACE=${OPT1_IF}
 OPT1_MODE=dhcp
 OPT1_IPV4_ADDRESS=
@@ -462,6 +480,14 @@ iface ${WAN_IF} inet dhcp
 IFACES_EOF
 
   if [ -n "$LAN_IF" ]; then
+    if [ "$MINIMAL_MODE" = "1" ]; then
+cat << IFACES_LAN_EOF >> /etc/network/interfaces
+# LAN Interface (Minimal Host Mode DHCP)
+auto ${LAN_IF}
+iface ${LAN_IF} inet dhcp
+
+IFACES_LAN_EOF
+    else
 cat << IFACES_LAN_EOF >> /etc/network/interfaces
 # LAN Interface
 auto ${LAN_IF}
@@ -470,6 +496,7 @@ iface ${LAN_IF} inet static
     netmask 255.255.255.0
 
 IFACES_LAN_EOF
+    fi
   fi
 
   if [ -n "$OPT1_IF" ]; then
@@ -554,10 +581,14 @@ else
   # Bring up WAN with DHCP (fallback; networking normally configured it first)
   dhcp_if_missing "$WAN_IF"
 
-  # 3. Configure default LAN static IP (192.168.1.1/24) on second NIC
+  # 3. Configure default LAN interface
   if [ -n "$LAN_IF" ] && ip link show "$LAN_IF" >/dev/null 2>&1; then
-    ip addr add 192.168.1.1/24 dev "$LAN_IF" 2>/dev/null || true
-    ip link set up dev "$LAN_IF" 2>/dev/null || true
+    if [ "$MINIMAL_MODE" = "1" ]; then
+      dhcp_if_missing "$LAN_IF"
+    else
+      ip addr add 192.168.1.1/24 dev "$LAN_IF" 2>/dev/null || true
+      ip link set up dev "$LAN_IF" 2>/dev/null || true
+    fi
   fi
 
   dhcp_if_missing "$OPT1_IF"
@@ -568,13 +599,15 @@ fi
 # 4. Bootstrap baseline lockdown nftables ruleset
 if [ -f /usr/share/axonwall/lockdown.nft ]; then
   INTERNAL_HAS_LINK=0
-  for _int_if in "$LAN_IF" "$OPT1_IF" "$OPT2_IF"; do
-    if [ -n "$_int_if" ] && [ "$(cat "/sys/class/net/${_int_if}/carrier" 2>/dev/null || echo 0)" = "1" ]; then
-      INTERNAL_HAS_LINK=1
-      break
-    fi
-  done
-  if [ "$INTERNAL_HAS_LINK" = "1" ] && [ -n "$WAN_IF" ] && [ "$WAN_IF" != "wan0" ]; then
+  if [ "$MINIMAL_MODE" != "1" ]; then
+    for _int_if in "$LAN_IF" "$OPT1_IF" "$OPT2_IF"; do
+      if [ -n "$_int_if" ] && [ "$(cat "/sys/class/net/${_int_if}/carrier" 2>/dev/null || echo 0)" = "1" ]; then
+        INTERNAL_HAS_LINK=1
+        break
+      fi
+    done
+  fi
+  if [ "$MINIMAL_MODE" != "1" ] && [ "$INTERNAL_HAS_LINK" = "1" ] && [ -n "$WAN_IF" ] && [ "$WAN_IF" != "wan0" ]; then
     if ! grep -q "\"${WAN_IF}\"" /usr/share/axonwall/lockdown.nft; then
       sed -i "s/elements = { [^}]* }/elements = { \"wan0\", \"${WAN_IF}\" }/" /usr/share/axonwall/lockdown.nft || true
     fi
@@ -599,10 +632,12 @@ fi
 adduser axonwall axonwall-api 2>/dev/null || true
 adduser axonwall-controller axonwall-api 2>/dev/null || true
 
-# Headscale identity split (B-12 follow-up): headscale runs as its own user
-addgroup -S axonwall-headscale 2>/dev/null || true
-if ! id -u axonwall-headscale >/dev/null 2>&1; then
-  adduser -S -D -H -h /var/lib/axonwall -s /sbin/nologin -G axonwall-headscale axonwall-headscale 2>/dev/null || true
+# Headscale identity split (B-12 follow-up): headscale runs as its own user when installed
+if [ "$MINIMAL_MODE" != "1" ] || [ -x /usr/sbin/headscale ]; then
+  addgroup -S axonwall-headscale 2>/dev/null || true
+  if ! id -u axonwall-headscale >/dev/null 2>&1; then
+    adduser -S -D -H -h /var/lib/axonwall -s /sbin/nologin -G axonwall-headscale axonwall-headscale 2>/dev/null || true
+  fi
 fi
 
 # Provision the hub TLS PKI (audit B-14): an on-box appliance CA plus a
@@ -647,20 +682,24 @@ chmod 0750 /etc/axonwall/certs 2>/dev/null || true
 chmod 0600 /etc/axonwall/certs/hub.key 2>/dev/null || true
 chmod 0644 /etc/axonwall/certs/hub.crt 2>/dev/null || true
 
-mkdir -p /var/lib/axonwall/headscale /var/lib/axonwall/etc-axonwall /var/lib/axonwall/bundles /var/lib/axonwall/gitops /var/lib/axonwall/home /run/headscale
+mkdir -p /var/lib/axonwall/etc-axonwall /var/lib/axonwall/bundles /var/lib/axonwall/gitops /var/lib/axonwall/home
 mkdir -p /var/lib/axonwall/ldap/config /var/lib/axonwall/ldap/data /var/lib/axonwall/ldap/accesslog /var/lib/axonwall/ldap/backups
 mkdir -p /var/lib/axonwall/secrets/ldap /var/lib/axonwall/secrets/ha-pki /var/lib/openldap/run /run/openldap
-chown -R axonwall:axonwall-api /var/lib/axonwall /run/headscale /run/axonwall 2>/dev/null || true
+chown -R axonwall:axonwall-api /var/lib/axonwall /run/axonwall 2>/dev/null || true
 chown root:axonwall-api /var/log/axonwall 2>/dev/null || true
 chmod 1770 /var/log/axonwall 2>/dev/null || true
 chmod 3775 /var/lib/axonwall /var/lib/axonwall/etc-axonwall 2>/dev/null || true
 chmod 0755 /var/lib/axonwall/home /var/lib/axonwall/ldap 2>/dev/null || true
 chmod 0750 /var/lib/axonwall/secrets /var/lib/axonwall/secrets/ldap /var/lib/axonwall/secrets/ha-pki 2>/dev/null || true
-chmod 0770 /var/lib/axonwall/headscale /run/headscale /run/axonwall 2>/dev/null || true
-chown -R axonwall-headscale:axonwall-headscale /var/lib/axonwall/headscale 2>/dev/null || true
-chown axonwall-headscale:axonwall-api /run/headscale 2>/dev/null || true
-chown root:axonwall-api /etc/headscale/config.yaml 2>/dev/null || true
-chmod 0640 /etc/headscale/config.yaml 2>/dev/null || true
+chmod 0770 /run/axonwall 2>/dev/null || true
+if [ "$MINIMAL_MODE" != "1" ] || [ -x /usr/sbin/headscale ]; then
+  mkdir -p /var/lib/axonwall/headscale /run/headscale
+  chown -R axonwall-headscale:axonwall-headscale /var/lib/axonwall/headscale 2>/dev/null || true
+  chown axonwall-headscale:axonwall-api /run/headscale 2>/dev/null || true
+  chmod 0770 /var/lib/axonwall/headscale /run/headscale 2>/dev/null || true
+  chown root:axonwall-api /etc/headscale/config.yaml 2>/dev/null || true
+  chmod 0640 /etc/headscale/config.yaml 2>/dev/null || true
+fi
 
 if id -u ldap >/dev/null 2>&1; then
   chown -R ldap:ldap /var/lib/axonwall/ldap /var/lib/openldap/run /run/openldap 2>/dev/null || true
@@ -687,7 +726,7 @@ if [ -x /bin/zsh ]; then
   if [ -L /usr/bin/zsh ] || [ ! -x /usr/bin/zsh ]; then
     ln -sf /bin/zsh /usr/bin/zsh 2>/dev/null || true
   fi
-elif [ ! -x /usr/bin/zsh ] && [ -x /bin/ash ]; then
+elif [ "$MINIMAL_MODE" != "1" ] && [ ! -x /usr/bin/zsh ] && [ -x /bin/ash ]; then
   ln -sf /bin/ash /usr/bin/zsh 2>/dev/null || true
 fi
 
@@ -769,10 +808,15 @@ for _cand_if in "$LAN_IF" "$OPT1_IF" "$OPT2_IF" "$WAN_IF"; do
 done
 [ -z "$PRIMARY_IP" ] && PRIMARY_IP="192.168.1.1"
 
+_ISSUE_TITLE="Axonwall Appliance (Alpine Linux Edition)"
+if [ "$MINIMAL_MODE" = "1" ]; then
+  _ISSUE_TITLE="Axonwall Minimal Edition (Alpine Linux — Reduced Attack Surface)"
+fi
+
 if [ ! -f /etc/axonwall/install-mode ] && [ ! -f /var/lib/axonwall/install-mode ] && ! grep -qE 'slot=A|slot=B|root=LABEL=axon_root|root=ZFS=' /proc/cmdline 2>/dev/null; then
   cat << ISSUE_EOF > /etc/issue
 ================================================================================
-Axonwall Appliance (Alpine Linux Edition)
+${_ISSUE_TITLE}
 Web Console (LAN): https://${PRIMARY_IP}:2966
 WAN Inbound      : Blocked by default (Anti-Lockout enabled on LAN only)
 Appliance Console: Login with administrator credentials
@@ -784,7 +828,7 @@ ISSUE_EOF
 else
   cat << ISSUE_EOF > /etc/issue
 ================================================================================
-Axonwall Appliance (Alpine Linux Edition)
+${_ISSUE_TITLE}
 Web Console (LAN): https://${PRIMARY_IP}:2966
 WAN Inbound      : Blocked by default (Anti-Lockout enabled on LAN only)
 Appliance Console: Login with administrator credentials

@@ -1,10 +1,10 @@
 #!/bin/sh
 set -e
 
-# D-M9: this postinst serves all three editions (axonwall, vault,
-# k3s-storage). The NGFW-only blocks (service users, LDAP/headscale
-# state, NGFW secrets, NGFW units) are gated on the installed edition
-# so installing a flavor package never creates NGFW identity/state.
+# D-M9: this postinst serves all four editions (axonwall, minimal, vault,
+# k3s-storage). The optional blocks (headscale, zshell/vim, NGFW-only
+# units) are gated on the installed edition so installing a flavor
+# package never creates unwanted identity/state.
 # Detection mirrors axonwall-update, in the same order: (1) the
 # canonical /etc/axonwall/edition file, (2) the legacy markers,
 # (3) the kernel cmdline, (4) the NGFW daemon binary as positive
@@ -18,20 +18,20 @@ if [ -f /etc/axonwall/edition ]; then
   _file_edition="$(tr -d ' \t\r\n' < /etc/axonwall/edition 2>/dev/null || true)"
   if [ -n "$_file_edition" ]; then
     case "$_file_edition" in
-      axonwall|vault|k3s-storage)
+      axonwall|minimal|vault|k3s-storage)
         AXONWALL_EDITION="$_file_edition"
         _EDITION_FROM_FILE=1
         ;;
       *)
-        echo "Error: /etc/axonwall/edition contains '${_file_edition}' (expected axonwall, vault, or k3s-storage); fix the file and re-run dpkg --configure." >&2
+        echo "Error: /etc/axonwall/edition contains '${_file_edition}' (expected axonwall, minimal, vault, or k3s-storage); fix the file and re-run dpkg --configure." >&2
         exit 1
         ;;
     esac
     _contradiction=0
-    if [ "$AXONWALL_EDITION" = "vault" ] && [ -f /etc/axonwall/.k3s-edition ]; then _contradiction=1; fi
-    if [ "$AXONWALL_EDITION" = "k3s-storage" ] && [ -f /etc/axonwall/.vault-edition ]; then _contradiction=1; fi
-    if [ "$AXONWALL_EDITION" = "axonwall" ] && [ -f /etc/axonwall/.vault-edition ]; then _contradiction=1; fi
-    if [ "$AXONWALL_EDITION" = "axonwall" ] && [ -f /etc/axonwall/.k3s-edition ]; then _contradiction=1; fi
+    if [ "$AXONWALL_EDITION" = "vault" ] && { [ -f /etc/axonwall/.k3s-edition ] || [ -f /etc/axonwall/.minimal-edition ]; }; then _contradiction=1; fi
+    if [ "$AXONWALL_EDITION" = "k3s-storage" ] && { [ -f /etc/axonwall/.vault-edition ] || [ -f /etc/axonwall/.minimal-edition ]; }; then _contradiction=1; fi
+    if [ "$AXONWALL_EDITION" = "minimal" ] && { [ -f /etc/axonwall/.vault-edition ] || [ -f /etc/axonwall/.k3s-edition ]; }; then _contradiction=1; fi
+    if [ "$AXONWALL_EDITION" = "axonwall" ] && { [ -f /etc/axonwall/.vault-edition ] || [ -f /etc/axonwall/.k3s-edition ] || [ -f /etc/axonwall/.minimal-edition ]; }; then _contradiction=1; fi
     if [ "$_contradiction" = "1" ]; then
       echo "Error: /etc/axonwall/edition says '${AXONWALL_EDITION}' but a legacy edition marker disagrees; the installed edition is ambiguous. Remove the wrong marker and re-run dpkg --configure." >&2
       exit 1
@@ -43,28 +43,38 @@ fi
 # as no signal and reaches this chain (the flag above stays 0) — it
 # must NOT silently default to axonwall.
 if [ "$_EDITION_FROM_FILE" = "0" ]; then
-  if [ -f /etc/axonwall/.vault-edition ] && [ -f /etc/axonwall/.k3s-edition ]; then
-    echo "Error: both /etc/axonwall/.vault-edition and /etc/axonwall/.k3s-edition exist; the installed edition is ambiguous. Remove the wrong marker and re-run dpkg --configure." >&2
+  _vault_marker=0
+  _k3s_marker=0
+  _minimal_marker=0
+  [ -f /etc/axonwall/.vault-edition ] && _vault_marker=1
+  [ -f /etc/axonwall/.k3s-edition ] && _k3s_marker=1
+  [ -f /etc/axonwall/.minimal-edition ] && _minimal_marker=1
+  if [ "$((_vault_marker + _k3s_marker + _minimal_marker))" -gt 1 ]; then
+    echo "Error: multiple conflicting edition markers exist under /etc/axonwall/; the installed edition is ambiguous. Remove the wrong marker(s) and re-run dpkg --configure." >&2
     exit 1
-  elif [ -f /etc/axonwall/.vault-edition ]; then
+  elif [ "$_vault_marker" = "1" ]; then
     AXONWALL_EDITION="vault"
-  elif [ -f /etc/axonwall/.k3s-edition ]; then
+  elif [ "$_k3s_marker" = "1" ]; then
     AXONWALL_EDITION="k3s-storage"
+  elif [ "$_minimal_marker" = "1" ]; then
+    AXONWALL_EDITION="minimal"
   elif grep -qsE '(^|[[:space:]])(axonwall_edition=vault|axonwall\.edition=vault)($|[[:space:]])' /proc/cmdline 2>/dev/null; then
     AXONWALL_EDITION="vault"
   elif grep -qsE '(^|[[:space:]])(axonwall_edition=k3s-storage|axonwall\.edition=k3s-storage)($|[[:space:]])' /proc/cmdline 2>/dev/null; then
     AXONWALL_EDITION="k3s-storage"
+  elif grep -qsE '(^|[[:space:]])(axonwall_edition=minimal|axonwall\.edition=minimal)($|[[:space:]])' /proc/cmdline 2>/dev/null; then
+    AXONWALL_EDITION="minimal"
   elif grep -qsE '(^|[[:space:]])(axonwall_edition=axonwall|axonwall\.edition=axonwall)($|[[:space:]])' /proc/cmdline 2>/dev/null; then
     AXONWALL_EDITION="axonwall"
   elif grep -qsE '(^|[[:space:]])(axonwall_edition|axonwall\.edition)=[^[:space:]]+' /proc/cmdline 2>/dev/null; then
     _cmdline_edition="$(grep -oE '(axonwall_edition|axonwall\.edition)=[^[:space:]]+' /proc/cmdline 2>/dev/null | tail -n 1 | sed -E 's/^[^=]+=//')"
-    echo "Error: unknown edition '${_cmdline_edition}' in kernel cmdline (expected axonwall, vault, or k3s-storage); refusing to guess. Fix the cmdline/markers and re-run dpkg --configure." >&2
+    echo "Error: unknown edition '${_cmdline_edition}' in kernel cmdline (expected axonwall, minimal, vault, or k3s-storage); refusing to guess. Fix the cmdline/markers and re-run dpkg --configure." >&2
     exit 1
   elif [ -x /usr/sbin/axonwalld ]; then
     echo "Warning: no edition signal found (no /etc/axonwall/edition, no legacy marker, no axonwall.edition kernel cmdline), but the NGFW daemon is present, so assuming axonwall. Create /etc/axonwall/edition containing the edition name to record it explicitly." >&2
     AXONWALL_EDITION="axonwall"
   else
-    echo "Error: cannot determine the installed edition: no /etc/axonwall/edition, no legacy marker (.vault-edition/.k3s-edition), no axonwall.edition kernel cmdline, and no NGFW payload (/usr/sbin/axonwalld absent). Create /etc/axonwall/edition containing one of axonwall, vault, k3s-storage and re-run dpkg --configure." >&2
+    echo "Error: cannot determine the installed edition: no /etc/axonwall/edition, no legacy marker (.minimal-edition/.vault-edition/.k3s-edition), no axonwall.edition kernel cmdline, and no NGFW payload (/usr/sbin/axonwalld absent). Create /etc/axonwall/edition containing one of axonwall, minimal, vault, k3s-storage and re-run dpkg --configure." >&2
     exit 1
   fi
 fi
@@ -85,7 +95,7 @@ case "$1" in
         if ! getent group axonwall-api >/dev/null 2>&1; then
             groupadd --system axonwall-api
         fi
-        if [ "${AXONWALL_EDITION}" = "axonwall" ]; then
+        if [ "${AXONWALL_EDITION}" = "axonwall" ] || [ "${AXONWALL_EDITION}" = "minimal" ]; then
         # Create axonwall system user and group if not already present
         if ! getent group axonwall >/dev/null 2>&1; then
             groupadd --system axonwall
@@ -112,17 +122,16 @@ case "$1" in
         usermod -a -G axonwall-api axonwall-controller 2>/dev/null || true
 
         # Headscale identity split (B-12 follow-up): headscale runs as
-        # its own user so the web UI's identity no longer shares the
-        # tailnet's database and config. The unit keeps
-        # Group=axonwall-api, which is what the UI/controller CLI
-        # callers use to reach the headscale socket in /run/headscale.
-        if ! getent group axonwall-headscale >/dev/null 2>&1; then
-            groupadd --system axonwall-headscale
-        fi
-        if ! getent passwd axonwall-headscale >/dev/null 2>&1; then
-            useradd --system --gid axonwall-headscale --home-dir /var/lib/axonwall \
-                --no-create-home --shell /usr/sbin/nologin \
-                --comment "Axonwall Headscale Service User" axonwall-headscale
+        # its own user on standard axonwall only (minimal installs it on demand).
+        if [ "${AXONWALL_EDITION}" = "axonwall" ]; then
+            if ! getent group axonwall-headscale >/dev/null 2>&1; then
+                groupadd --system axonwall-headscale
+            fi
+            if ! getent passwd axonwall-headscale >/dev/null 2>&1; then
+                useradd --system --gid axonwall-headscale --home-dir /var/lib/axonwall \
+                    --no-create-home --shell /usr/sbin/nologin \
+                    --comment "Axonwall Headscale Service User" axonwall-headscale
+            fi
         fi
         elif [ "${AXONWALL_EDITION}" = "vault" ]; then
         # Vault service identity (packaging/vault/axonwall-vault.sysusers):
@@ -150,9 +159,9 @@ case "$1" in
         chmod 1770 /etc/axonwall 2>/dev/null || true
         chown root:axonwall-api /var/log/axonwall
         chmod 1770 /var/log/axonwall
-        if [ "${AXONWALL_EDITION}" = "axonwall" ]; then
+        if [ "${AXONWALL_EDITION}" = "axonwall" ] || [ "${AXONWALL_EDITION}" = "minimal" ]; then
         mkdir -p /var/cache/axonwall-ui /opt/axonwall
-        mkdir -p /var/lib/axonwall/headscale /var/lib/axonwall/bundles /var/lib/axonwall/etc-axonwall /var/lib/axonwall/gitops /var/lib/axonwall/captures /var/lib/axonwall/backups /run/headscale
+        mkdir -p /var/lib/axonwall/bundles /var/lib/axonwall/etc-axonwall /var/lib/axonwall/gitops /var/lib/axonwall/captures /var/lib/axonwall/backups
         mkdir -p /var/lib/axonwall/home /var/lib/axonwall/ldap/config /var/lib/axonwall/ldap/data /var/lib/axonwall/ldap/accesslog /var/lib/axonwall/ldap/backups
         mkdir -p /var/lib/axonwall/secrets/ldap /var/lib/axonwall/secrets/ha-pki
 
@@ -168,20 +177,23 @@ case "$1" in
                 chmod 0660 "$f" 2>/dev/null || true
             fi
         done
-        chown -R axonwall-headscale:axonwall-headscale /var/lib/axonwall/headscale
-        chown axonwall-headscale:axonwall-api /run/headscale
-        # Headscale's config can carry the OIDC client secret: group
-        # axonwall-api only (the service runs with that group, and the
-        # UI/controller CLI callers are members) instead of the
-        # UI-shared axonwall identity.
-        if [ -f /etc/headscale/config.yaml ]; then
-            chown root:axonwall-api /etc/headscale/config.yaml 2>/dev/null || true
-            chmod 0640 /etc/headscale/config.yaml 2>/dev/null || true
+        if [ "${AXONWALL_EDITION}" = "axonwall" ]; then
+            mkdir -p /var/lib/axonwall/headscale /run/headscale
+            chown -R axonwall-headscale:axonwall-headscale /var/lib/axonwall/headscale
+            chown axonwall-headscale:axonwall-api /run/headscale
+            chmod 770 /var/lib/axonwall/headscale /run/headscale
+            # Headscale's config can carry the OIDC client secret: group
+            # axonwall-api only (the service runs with that group, and the
+            # UI/controller CLI callers are members) instead of the
+            # UI-shared axonwall identity.
+            if [ -f /etc/headscale/config.yaml ]; then
+                chown root:axonwall-api /etc/headscale/config.yaml 2>/dev/null || true
+                chmod 0640 /etc/headscale/config.yaml 2>/dev/null || true
+            fi
         fi
         chown root:root /var/lib/axonwall/home
         chmod 0755 /var/lib/axonwall/home
         chmod 0755 /opt/axonwall
-        chmod 770 /var/lib/axonwall/headscale /run/headscale
         chmod 0700 /var/lib/axonwall/secrets /var/lib/axonwall/secrets/ldap /var/lib/axonwall/secrets/ha-pki
         chown -R root:root /var/lib/axonwall/secrets
 
@@ -300,7 +312,7 @@ case "$1" in
             # source and covers k3s-storage explicitly instead of
             # relying on a chown to a nonexistent user failing
             # silently.)
-            if [ "${AXONWALL_EDITION}" = "axonwall" ]; then
+            if [ "${AXONWALL_EDITION}" = "axonwall" ] || [ "${AXONWALL_EDITION}" = "minimal" ]; then
                 chown axonwall-controller:axonwall-controller /etc/axonwall/certs/hub.key /etc/axonwall/certs/hub.crt 2>/dev/null || true
                 chmod 0600 /etc/axonwall/certs/hub.key 2>/dev/null || true
             elif [ "${AXONWALL_EDITION}" = "vault" ]; then
@@ -313,11 +325,9 @@ case "$1" in
             chmod 0644 /etc/axonwall/certs/hub.crt 2>/dev/null || true
         fi
 
-        # D-M9: NGFW secrets (axonwall.env JWT/ZTP/admin password,
-        # controller.env, agent.token) are axonwall-only. A flavor
-        # install never generates them; the vault's S3 credentials are
-        # provisioned by axonwall-vault-provision at first boot.
-        if [ "${AXONWALL_EDITION}" = "axonwall" ]; then
+        # D-M9: control-plane secrets (axonwall.env JWT/ZTP/admin password,
+        # controller.env, agent.token) are for axonwall & minimal only.
+        if [ "${AXONWALL_EDITION}" = "axonwall" ] || [ "${AXONWALL_EDITION}" = "minimal" ]; then
         # 4. Generate default environment secrets if absent
         if [ ! -s /etc/axonwall/axonwall.env ]; then
             JWT_SECRET="$(openssl rand -hex 32 2>/dev/null || od -An -tx1 -N32 /dev/urandom | tr -d ' \n')"
@@ -404,7 +414,7 @@ ENV_EOF
             fi
         done
 
-        if [ -x /usr/bin/zsh ]; then
+        if [ "${AXONWALL_EDITION}" != "minimal" ] && [ -x /usr/bin/zsh ]; then
             if [ -f /etc/shells ] && ! grep -qxF '/usr/bin/zsh' /etc/shells; then
                 echo '/usr/bin/zsh' >> /etc/shells
             fi
@@ -472,6 +482,7 @@ ENV_EOF
         # from the vault list, and on k3s-storage it is the flavor's
         # own unit, which must be synced, not skipped.)
         case "${AXONWALL_EDITION}" in
+            minimal) UNITS="axonwalld.service axonwall-controller.service axonwall-ui.service axonwall-console.service" ;;
             vault) UNITS="axonwall-console.service seaweedfs.service axonwall-vault-firstboot.service axonwall-vault-provision.service" ;;
             k3s-storage) UNITS="axonwall-console.service k3s.service k3s-agent.service axonwall-k3s-firstboot.service axonwall-k3s-verify.service" ;;
             *) UNITS="axonwalld.service axonwall-controller.service axonwall-ui.service axonwall-console.service headscale.service k3s.service" ;;
@@ -511,6 +522,16 @@ ENV_EOF
         if [ -d /run/systemd/system ]; then
             systemctl daemon-reload || true
             case "${AXONWALL_EDITION}" in
+                minimal)
+                    if ! systemctl enable axonwalld.service axonwall-controller.service axonwall-ui.service axonwall-console.service axonwall-hub-cert-renew.timer ssh.service chrony.service; then
+                        echo "Error: failed to enable Minimal Edition services; dpkg configure failed. Fix systemd and re-run dpkg --configure." >&2
+                        exit 1
+                    fi
+                    if ! systemctl restart --no-block axonwalld.service axonwall-controller.service axonwall-ui.service ssh.service chrony.service; then
+                        echo "Error: failed to restart Minimal Edition services; dpkg configure failed. Fix systemd and re-run dpkg --configure." >&2
+                        exit 1
+                    fi
+                    ;;
                 vault)
                     if ! systemctl enable seaweedfs.service axonwall-vault-firstboot.service axonwall-vault-provision.service axonwall-console.service axonwall-hub-cert-renew.timer ssh.service chrony.service sysstat.service; then
                         echo "Error: failed to enable Vault Edition services; dpkg configure failed. Fix systemd and re-run dpkg --configure." >&2

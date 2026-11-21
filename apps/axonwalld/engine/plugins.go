@@ -537,7 +537,7 @@ func GetExtensionPluginDefinitions() []PluginDefinition {
 				"kubectl",
 				"helm",
 			},
-			RequiredBinaries: []string{"zsh", "vim", "nvim", "starship", "tmux", "kubectl", "helm"},
+			RequiredBinaries: []string{"zsh", "vim", "nvim", "starship", "tmux"},
 			Binaries: []PluginBundledBinary{
 				{
 					Kind:            "archive",
@@ -3074,8 +3074,472 @@ func verifyRosenpassUnit() error {
 	return fmt.Errorf("rosenpass unit has no ExecStart line")
 }
 
+const (
+	headscalePinnedVersion = "0.29.4"
+	headscalePinnedURL     = "https://github.com/juanfont/headscale/releases/download/v0.29.4/headscale_0.29.4_linux_amd64"
+	headscalePinnedSHA256  = "212ed0a884c0d3541e094c4bebbe94397df6f4e01bd3d7f059c520cb55e0d757"
+)
+
+func aptListsNeedUpdate(aptListsDir string) bool {
+	entries, err := os.ReadDir(aptListsDir)
+	if err != nil {
+		return true
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if strings.Contains(name, "_Packages") {
+			return false
+		}
+	}
+	return true
+}
+
+func runAptGetUpdate(output *strings.Builder) error {
+	cmd := exec.Command("apt-get", "update")
+	cmd.Env = append(os.Environ(), "DEBIAN_FRONTEND=noninteractive")
+	out, err := cmd.CombinedOutput()
+	if output != nil {
+		output.WriteString(string(out))
+	}
+	return err
+}
+
+func isPackageInstalledForOS(osFamily, pkg string) bool {
+	switch osFamily {
+	case "alpine":
+		return exec.Command("apk", "info", "-e", pkg).Run() == nil
+	case "arch":
+		return exec.Command("pacman", "-Q", pkg).Run() == nil
+	default:
+		out, err := exec.Command("dpkg-query", "-W", "-f=${Status}\n", pkg).Output()
+		return err == nil && strings.Contains(string(out), "install ok installed")
+	}
+}
+
+func missingPackagesForOS(osFamily string, pkgs []string) []string {
+	var missing []string
+	for _, pkg := range pkgs {
+		if !isPackageInstalledForOS(osFamily, pkg) {
+			missing = append(missing, pkg)
+		}
+	}
+	return missing
+}
+
+func coreRoleOSPackages(osFamily, pluginID string) []string {
+	switch pluginID {
+	case "core-firewall":
+		switch osFamily {
+		case "alpine":
+			return []string{"nftables", "suricata", "frr", "kea-dhcp4", "conntrack-tools", "unbound", "wireguard-tools", "strongswan", "openvpn", "keepalived"}
+		case "arch":
+			return []string{"nftables", "suricata", "frr", "kea", "conntrack-tools", "unbound", "wireguard-tools", "strongswan", "openvpn", "keepalived"}
+		default:
+			return []string{"nftables", "suricata", "frr", "kea-dhcp4-server", "conntrackd", "unbound", "wireguard-tools", "strongswan", "openvpn", "keepalived"}
+		}
+	case "core-nas":
+		switch osFamily {
+		case "alpine":
+			return []string{"zfs", "samba", "nfs-utils", "open-iscsi"}
+		case "arch":
+			return []string{"zfs-utils", "samba", "nfs-utils", "open-iscsi"}
+		default:
+			return []string{"zfsutils-linux", "samba", "nfs-kernel-server", "open-iscsi"}
+		}
+	case "core-k3s":
+		switch osFamily {
+		case "alpine":
+			return []string{"curl", "iptables", "open-iscsi"}
+		case "arch":
+			return []string{"curl", "iptables-nft", "open-iscsi"}
+		default:
+			return []string{"curl", "iptables", "open-iscsi"}
+		}
+	case "core-virt":
+		switch osFamily {
+		case "alpine":
+			return []string{"qemu-system-x86_64", "qemu-img", "ovmf", "swtpm", "lxc", "dnsmasq", "xorriso"}
+		case "arch":
+			return []string{"qemu-full", "edk2-ovmf", "swtpm", "lxc", "dnsmasq", "libisoburn"}
+		default:
+			return []string{"qemu-system-x86", "qemu-utils", "ovmf", "swtpm", "lxc", "dnsmasq-base", "xorriso", "bridge-utils"}
+		}
+	default:
+		return nil
+	}
+}
+
+var pluginOptionalPackages = map[string]bool{
+	"python3-drgn": true,
+	"bpftrace":     true,
+	"linux-perf":   true,
+	"bpftool":      true,
+	"perf":         true,
+	"kubectl":      true,
+	"starship":     true,
+}
+
+func (pm *PluginManager) installOSPackages(pkgs []string, output *strings.Builder) error {
+	if len(pkgs) == 0 {
+		return nil
+	}
+	if pm.osFamily == "arch" {
+		if _, err := os.Stat("/var/lib/pacman/db.lck"); err == nil {
+			return fmt.Errorf("pacman database is locked (/var/lib/pacman/db.lck); another package operation is in progress")
+		}
+	}
+
+	var corePkgs, optionalPkgs []string
+	for _, p := range pkgs {
+		if pluginOptionalPackages[p] {
+			optionalPkgs = append(optionalPkgs, p)
+		} else {
+			corePkgs = append(corePkgs, p)
+		}
+	}
+
+	ranAptUpdate := false
+	if pm.osFamily == "debian" && aptListsNeedUpdate("/var/lib/apt/lists") {
+		if err := runAptGetUpdate(output); err != nil {
+			log.Printf("[PluginManager] Warning: initial apt-get update failed: %v", err)
+		}
+		ranAptUpdate = true
+	}
+
+	runInstall := func(pkgList []string) ([]byte, error) {
+		var cmd *exec.Cmd
+		switch pm.osFamily {
+		case "alpine":
+			args := append([]string{"add", "--no-cache"}, pkgList...)
+			cmd = exec.Command("apk", args...)
+		case "arch":
+			args := append([]string{"-Sy", "--needed", "--noconfirm"}, pkgList...)
+			cmd = exec.Command("pacman", args...)
+		default:
+			args := append([]string{"install", "-y", "--no-install-recommends", "-o", "Dpkg::Options::=--force-unsafe-io"}, pkgList...)
+			cmd = exec.Command("apt-get", args...)
+			cmd.Env = append(os.Environ(), "DEBIAN_FRONTEND=noninteractive")
+		}
+		return cmd.CombinedOutput()
+	}
+
+	if len(corePkgs) > 0 {
+		out, err := runInstall(corePkgs)
+		if output != nil {
+			output.WriteString(string(out))
+		}
+		if err != nil && pm.osFamily == "debian" && !ranAptUpdate {
+			if uerr := runAptGetUpdate(output); uerr == nil {
+				out, err = runInstall(corePkgs)
+				if output != nil {
+					output.WriteString(string(out))
+				}
+			}
+		}
+		if err != nil {
+			return fmt.Errorf("package installation failed: %w", err)
+		}
+	}
+
+	for _, optPkg := range optionalPkgs {
+		if out, err := runInstall([]string{optPkg}); err != nil {
+			log.Printf("[PluginManager] Note: optional package %s not installed via repo: %v (%s)", optPkg, err, string(out))
+		} else if output != nil {
+			output.WriteString(string(out))
+		}
+	}
+	return nil
+}
+
+func systemdUnitInstalledAny(unit string) bool {
+	for _, dir := range []string{"/etc/systemd/system", "/lib/systemd/system", "/usr/lib/systemd/system"} {
+		if _, err := os.Stat(filepath.Join(dir, unit)); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+func ensureCoreK3sSystemdUnit() error {
+	if !systemctlAvailable() || systemdUnitInstalledAny("k3s.service") {
+		return nil
+	}
+	unit := `[Unit]
+Description=Lightweight Kubernetes (Axonwall In-House K3s Engine)
+Documentation=https://k3s.io
+Wants=network-online.target
+After=network-online.target
+ConditionPathExists=/etc/rancher/k3s/config.yaml
+ConditionPathExists=!/etc/rancher/k3s/agent-mode
+ConditionPathExists=!/etc/axonwall/.vault-edition
+ConditionKernelCommandLine=!axonwall_install=1
+ConditionKernelCommandLine=!axonwall.install=1
+ConditionKernelCommandLine=!axonwall.unattended=1
+
+[Install]
+WantedBy=multi-user.target
+
+[Service]
+Type=exec
+EnvironmentFile=-/etc/default/%N
+EnvironmentFile=-/etc/sysconfig/%N
+EnvironmentFile=-/etc/systemd/system/k3s.service.env
+KillMode=process
+Delegate=yes
+User=root
+LimitNOFILE=1048576
+LimitNPROC=infinity
+LimitCORE=infinity
+TasksMax=infinity
+TimeoutStartSec=0
+Restart=always
+RestartSec=5s
+ExecStartPre=-/usr/sbin/modprobe br_netfilter
+ExecStartPre=-/usr/sbin/modprobe overlay
+ExecStart=/var/lib/axonwall/core-k3s/bin/k3s server --prefer-bundled-bin
+`
+	if err := os.MkdirAll("/etc/systemd/system", 0755); err != nil {
+		return err
+	}
+	if err := os.WriteFile("/etc/systemd/system/k3s.service", []byte(unit), 0644); err != nil {
+		return err
+	}
+	_ = exec.Command("systemctl", "--no-ask-password", "daemon-reload").Run()
+	return nil
+}
+
+func ensureHeadscaleInstalled(osFamily string, output *strings.Builder) error {
+	if _, err := exec.LookPath("headscale"); err != nil {
+		tmpDir, err := os.MkdirTemp("", "axonwall-headscale-*")
+		if err != nil {
+			return err
+		}
+		defer os.RemoveAll(tmpDir)
+		tmpPath, err := downloadVerified(headscalePinnedURL, headscalePinnedSHA256, tmpDir)
+		if err != nil {
+			return err
+		}
+		if err := os.MkdirAll("/usr/sbin", 0755); err != nil {
+			return err
+		}
+		src, err := os.Open(tmpPath)
+		if err != nil {
+			return err
+		}
+		stagePath := "/usr/sbin/.headscale.new"
+		dst, err := os.OpenFile(stagePath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0755)
+		if err != nil {
+			src.Close()
+			return err
+		}
+		_, copyErr := io.Copy(dst, src)
+		closeErr := dst.Close()
+		src.Close()
+		if copyErr != nil || closeErr != nil {
+			_ = os.Remove(stagePath)
+			if copyErr != nil {
+				return copyErr
+			}
+			return closeErr
+		}
+		if err := os.Rename(stagePath, "/usr/sbin/headscale"); err != nil {
+			_ = os.Remove(stagePath)
+			return err
+		}
+		if output != nil {
+			output.WriteString("[+] Installed verified headscale v" + headscalePinnedVersion + " to /usr/sbin/headscale\n")
+		}
+	}
+
+	if osFamily == "debian" {
+		if exec.Command("getent", "group", "axonwall-headscale").Run() != nil {
+			_ = exec.Command("groupadd", "--system", "axonwall-headscale").Run()
+		}
+		if exec.Command("getent", "passwd", "axonwall-headscale").Run() != nil {
+			_ = exec.Command("useradd", "--system", "--gid", "axonwall-headscale", "--home-dir", "/var/lib/axonwall",
+				"--no-create-home", "--shell", "/usr/sbin/nologin", "--comment", "Axonwall Headscale Service User", "axonwall-headscale").Run()
+		}
+	} else if osFamily == "alpine" {
+		if exec.Command("getent", "group", "axonwall-headscale").Run() != nil {
+			_ = exec.Command("addgroup", "-S", "axonwall-headscale").Run()
+		}
+		if exec.Command("getent", "passwd", "axonwall-headscale").Run() != nil {
+			_ = exec.Command("adduser", "-S", "-D", "-H", "-h", "/var/lib/axonwall", "-s", "/sbin/nologin", "-G", "axonwall-headscale", "axonwall-headscale").Run()
+		}
+	}
+
+	_ = os.MkdirAll("/var/lib/axonwall/headscale", 0770)
+	_ = os.MkdirAll("/run/headscale", 0770)
+	_ = os.MkdirAll("/etc/headscale", 0755)
+	_ = exec.Command("chown", "-R", "axonwall-headscale:axonwall-headscale", "/var/lib/axonwall/headscale").Run()
+	_ = exec.Command("chown", "axonwall-headscale:axonwall-api", "/run/headscale").Run()
+
+	if _, err := os.Stat("/etc/headscale/config.yaml"); os.IsNotExist(err) {
+		defaultCfg := `---
+server_url: http://127.0.0.1:8080
+listen_addr: 127.0.0.1:8080
+metrics_listen_addr: 127.0.0.1:9090
+grpc_listen_addr: 127.0.0.1:50443
+grpc_allow_insecure: false
+noise:
+  private_key_path: /var/lib/axonwall/headscale/noise_private.key
+prefixes:
+  v4: 100.64.0.0/10
+  v6: fd7a:115c:a1e0::/48
+derp:
+  server:
+    enabled: true
+    region_id: 999
+    region_code: "headscale"
+    region_name: "Headscale Embedded DERP"
+    stun_listen_addr: "127.0.0.1:3478"
+    private_key_path: /var/lib/axonwall/headscale/derp_server_private.key
+  urls: []
+  paths: []
+  auto_update_enabled: false
+  update_frequency: 24h
+disable_check_updates: true
+node:
+  expiry: 0
+  ephemeral:
+    inactivity_timeout: 30m
+database:
+  type: sqlite
+  sqlite:
+    path: /var/lib/axonwall/headscale/db.sqlite
+acme_url: https://acme-v02.api.letsencrypt.org/directory
+acme_email: ""
+tls_letsencrypt_hostname: ""
+tls_client_auth_mode: relaxed
+tls_letsencrypt_cache_dir: /var/lib/axonwall/headscale/cache
+tls_letsencrypt_challenge_type: HTTP-01
+tls_letsencrypt_listen: ":http"
+tls_cert_path: ""
+tls_key_path: ""
+log:
+  format: text
+  level: info
+policy:
+  mode: file
+  path: ""
+dns:
+  magic_dns: true
+  base_domain: tailnet.axonwall.local
+  nameservers:
+    global:
+      - 1.1.1.1
+      - 1.0.0.1
+  search_domains: []
+  extra_records: []
+unix_socket: /run/headscale/headscale.sock
+unix_socket_permission: "0770"
+logtail:
+  enabled: false
+`
+		if err := os.WriteFile("/etc/headscale/config.yaml", []byte(defaultCfg), 0640); err != nil {
+			return err
+		}
+		_ = exec.Command("chown", "root:axonwall-api", "/etc/headscale/config.yaml").Run()
+	}
+
+	if systemctlAvailable() && !systemdUnitInstalledAny("headscale.service") {
+		unit := `[Unit]
+Description=headscale coordination server for Tailscale clients
+After=network-online.target axonwall-firstboot.service
+Wants=network-online.target
+ConditionPathExists=!/etc/axonwall/.vault-edition
+ConditionPathExists=!/etc/axonwall/.k3s-edition
+ConditionKernelCommandLine=!axonwall_install=1
+ConditionKernelCommandLine=!axonwall.install=1
+ConditionKernelCommandLine=!axonwall.unattended=1
+
+[Service]
+Type=simple
+User=axonwall-headscale
+Group=axonwall-api
+Environment="HEADSCALE_CONFIG=/etc/headscale/config.yaml"
+ExecStart=/usr/sbin/headscale serve
+Restart=always
+RestartSec=5
+LimitNOFILE=65536
+LimitNPROC=65536
+
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+PrivateTmp=yes
+RuntimeDirectory=headscale
+RuntimeDirectoryMode=0770
+ReadWritePaths=-/var/lib/axonwall/headscale -/run/headscale
+
+[Install]
+WantedBy=multi-user.target
+`
+		if err := os.WriteFile("/etc/systemd/system/headscale.service", []byte(unit), 0644); err != nil {
+			return err
+		}
+		_ = exec.Command("systemctl", "--no-ask-password", "daemon-reload").Run()
+	}
+	return nil
+}
+
+func resetMissingZshUsersToBash() {
+	if _, err := os.Stat("/usr/bin/zsh"); err == nil {
+		return
+	}
+	if _, err := os.Stat("/bin/bash"); err != nil {
+		return
+	}
+	if pwBytes, err := os.ReadFile("/etc/passwd"); err == nil {
+		for _, line := range strings.Split(string(pwBytes), "\n") {
+			parts := strings.Split(line, ":")
+			if len(parts) < 7 || parts[6] != "/usr/bin/zsh" {
+				continue
+			}
+			uid, err := strconv.Atoi(parts[2])
+			if err != nil || (uid != 0 && (uid < 1000 || uid >= 60000)) {
+				continue
+			}
+			_ = exec.Command("usermod", "-s", "/bin/bash", parts[0]).Run()
+		}
+	}
+	if uaBytes, err := os.ReadFile("/etc/default/useradd"); err == nil {
+		updated := regexp.MustCompile(`(?m)^SHELL=.*$`).ReplaceAllString(string(uaBytes), "SHELL=/bin/bash")
+		if updated != string(uaBytes) {
+			_ = os.WriteFile("/etc/default/useradd", []byte(updated), 0644)
+		}
+	}
+	if acBytes, err := os.ReadFile("/etc/adduser.conf"); err == nil {
+		updated := regexp.MustCompile(`(?m)^DSHELL=.*$`).ReplaceAllString(string(acBytes), "DSHELL=/bin/bash")
+		if updated != string(acBytes) {
+			_ = os.WriteFile("/etc/adduser.conf", []byte(updated), 0644)
+		}
+	}
+}
+
 func (pm *PluginManager) InstallPlugin(pluginID string) PluginActionResponse {
 	if strings.HasPrefix(pluginID, "core-") {
+		var pkgOut strings.Builder
+		if os.Geteuid() == 0 {
+			missing := missingPackagesForOS(pm.osFamily, coreRoleOSPackages(pm.osFamily, pluginID))
+			if len(missing) > 0 {
+				pm.actionMu.Lock()
+				err := pm.installOSPackages(missing, &pkgOut)
+				pm.actionMu.Unlock()
+				if err != nil {
+					return PluginActionResponse{
+						Success: false,
+						Message: fmt.Sprintf("Failed to install core role %s packages: %v", pluginID, err),
+						Output:  pkgOut.String(),
+					}
+				}
+			}
+		}
 		pm.mu.Lock()
 		delete(pm.disabledMap, pluginID)
 		if pm.installedMap[pluginID] == "" {
@@ -3083,7 +3547,15 @@ func (pm *PluginManager) InstallPlugin(pluginID string) PluginActionResponse {
 		}
 		pm.saveState()
 		pm.mu.Unlock()
-		return pm.ReconfigurePlugin(pluginID)
+		resp := pm.ReconfigurePlugin(pluginID)
+		if pkgOut.Len() > 0 {
+			if resp.Output != "" {
+				resp.Output = pkgOut.String() + "\n" + resp.Output
+			} else {
+				resp.Output = pkgOut.String()
+			}
+		}
+		return resp
 	}
 
 	pm.actionMu.Lock()
@@ -3108,15 +3580,6 @@ func (pm *PluginManager) InstallPlugin(pluginID string) PluginActionResponse {
 
 	var output strings.Builder
 
-	if pm.osFamily == "arch" && len(pkgs) > 0 {
-		if _, err := os.Stat("/var/lib/pacman/db.lck"); err == nil {
-			return PluginActionResponse{
-				Success: false,
-				Message: "Pacman database is locked (/var/lib/pacman/db.lck); another package operation is in progress",
-			}
-		}
-	}
-
 	// Upstream repository preparation hooks for plugins not hosted in base Debian repos
 	if pm.osFamily == "debian" {
 		if pluginID == "tailscale" {
@@ -3138,67 +3601,11 @@ func (pm *PluginManager) InstallPlugin(pluginID string) PluginActionResponse {
 		}
 	}
 
-	if len(pkgs) > 0 {
-		var corePkgs, optionalPkgs []string
-		optionalSet := map[string]bool{
-			"python3-drgn": true,
-			"bpftrace":     true,
-			"linux-perf":   true,
-			"bpftool":      true,
-			"perf":         true,
-			"kubectl":      true,
-			"starship":     true,
-		}
-		for _, p := range pkgs {
-			if optionalSet[p] {
-				optionalPkgs = append(optionalPkgs, p)
-			} else {
-				corePkgs = append(corePkgs, p)
-			}
-		}
-
-		if len(corePkgs) > 0 {
-			var cmd *exec.Cmd
-			switch pm.osFamily {
-			case "alpine":
-				args := append([]string{"add", "--no-cache"}, corePkgs...)
-				cmd = exec.Command("apk", args...)
-			case "arch":
-				args := append([]string{"-Sy", "--needed", "--noconfirm"}, corePkgs...)
-				cmd = exec.Command("pacman", args...)
-			default:
-				args := append([]string{"install", "-y", "--no-install-recommends", "-o", "Dpkg::Options::=--force-unsafe-io"}, corePkgs...)
-				cmd = exec.Command("apt-get", args...)
-				cmd.Env = append(os.Environ(), "DEBIAN_FRONTEND=noninteractive")
-			}
-
-			out, err := cmd.CombinedOutput()
-			output.WriteString(string(out))
-			if err != nil {
-				return PluginActionResponse{
-					Success: false,
-					Message: fmt.Sprintf("Package installation failed: %v", err),
-					Output:  output.String(),
-				}
-			}
-		}
-
-		for _, optPkg := range optionalPkgs {
-			var optCmd *exec.Cmd
-			switch pm.osFamily {
-			case "alpine":
-				optCmd = exec.Command("apk", "add", "--no-cache", optPkg)
-			case "arch":
-				optCmd = exec.Command("pacman", "-S", "--needed", "--noconfirm", optPkg)
-			default:
-				optCmd = exec.Command("apt-get", "install", "-y", "--no-install-recommends", "-o", "Dpkg::Options::=--force-unsafe-io", optPkg)
-				optCmd.Env = append(os.Environ(), "DEBIAN_FRONTEND=noninteractive")
-			}
-			if out, err := optCmd.CombinedOutput(); err != nil {
-				log.Printf("[PluginManager] Note: optional package %s not installed via repo: %v (%s)", optPkg, err, string(out))
-			} else {
-				output.WriteString(string(out))
-			}
+	if err := pm.installOSPackages(pkgs, &output); err != nil {
+		return PluginActionResponse{
+			Success: false,
+			Message: err.Error(),
+			Output:  output.String(),
 		}
 	}
 
@@ -3342,11 +3749,24 @@ func (pm *PluginManager) InstallPlugin(pluginID string) PluginActionResponse {
 		if err := pm.provisionWorkstationConfigs(); err != nil {
 			log.Printf("[PluginManager] Warning provisioning workstation configs: %v", err)
 		}
-		// On Alpine, if real zsh exists, replace any /usr/bin/zsh -> /bin/ash fallback
+		// On Debian/Alpine, keep /etc/shells and SSSD cache in sync with real zsh presence
 		if pm.osFamily == "alpine" {
 			if zshPath, err := exec.LookPath("zsh"); err == nil && zshPath != "" {
 				_ = os.Remove("/usr/bin/zsh")
 				_ = os.Symlink(zshPath, "/usr/bin/zsh")
+			}
+		}
+		if os.Geteuid() == 0 {
+			SyncZshInEtcShells(true)
+			InvalidateSSSDCache("")
+		}
+	}
+	if pluginID == "headscale" && os.Geteuid() == 0 {
+		if err := ensureHeadscaleInstalled(pm.osFamily, &output); err != nil {
+			return PluginActionResponse{
+				Success: false,
+				Message: fmt.Sprintf("Failed to install Headscale binary/service: %v", err),
+				Output:  output.String(),
 			}
 		}
 	}
@@ -3544,12 +3964,16 @@ func (pm *PluginManager) UninstallPlugin(pluginID string) PluginActionResponse {
 		pm.mu.Unlock()
 		_ = os.MkdirAll("/etc/axonwall", 0755)
 		_ = os.WriteFile("/etc/axonwall/workstation.disabled", []byte("disabled=true\n"), 0644)
-		if pm.osFamily == "alpine" {
+		if pm.osFamily == "alpine" && !isMinimalEditionRoot("/") {
 			// Restore /usr/bin/zsh -> /bin/ash fallback so OpenLDAP SSO users with loginShell=/usr/bin/zsh can always SSH in!
 			_ = os.Remove("/usr/bin/zsh")
 			if _, err := os.Stat("/bin/ash"); err == nil {
 				_ = os.Symlink("/bin/ash", "/usr/bin/zsh")
 			}
+		} else if os.Geteuid() == 0 {
+			resetMissingZshUsersToBash()
+			SyncZshInEtcShells(false)
+			InvalidateSSSDCache("")
 		}
 	}
 
@@ -3604,6 +4028,11 @@ func (pm *PluginManager) ReconfigurePlugin(pluginID string) PluginActionResponse
 		}
 		if err := pm.ensureCoreK3sBinSymlinks(); err != nil {
 			log.Printf("[PluginManager] Warning: failed to create core-k3s multicall symlinks: %v", err)
+		}
+		if os.Geteuid() == 0 {
+			if err := ensureCoreK3sSystemdUnit(); err != nil {
+				log.Printf("[PluginManager] Warning: failed to provision core-k3s systemd unit: %v", err)
+			}
 		}
 		pm.mu.Lock()
 		delete(pm.disabledMap, pluginID)

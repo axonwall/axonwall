@@ -428,7 +428,7 @@ ${_sg_names}"
   PROBE_SUMMARY="Empty Disk"
 }
 
-# Detect OS Family (debian vs alpine) and Edition (axonwall vs vault vs k3s-storage)
+# Detect OS Family (debian vs alpine) and Edition (axonwall vs minimal vs vault vs k3s-storage)
 OS_FAMILY="debian"
 if [ -f /etc/alpine-release ]; then
   OS_FAMILY="alpine"
@@ -458,20 +458,26 @@ case "$_edition_file" in
     EDITION_LABEL="Axonwall K3s + ZFS Storage Host"
     INSTALL_EDITION="k3s-storage"
     ;;
-  axonwall)
-    INSTALL_EDITION="axonwall"
+  minimal)
+    EDITION_LABEL="Axonwall Minimal Edition"
+    INSTALL_EDITION="minimal"
     ;;
-  "")
+  axonwall|"")
     if [ -f /etc/axonwall/.vault-edition ] || grep -qE '(^|[[:space:]])(axonwall_edition=vault|axonwall\.edition=vault)($|[[:space:]])' /proc/cmdline 2>/dev/null; then
       EDITION_LABEL="Axonwall Vault Edition"
       INSTALL_EDITION="vault"
     elif [ -f /etc/axonwall/.k3s-edition ] || grep -qE '(^|[[:space:]])(axonwall_edition=k3s-storage|axonwall\.edition=k3s-storage)($|[[:space:]])' /proc/cmdline 2>/dev/null; then
       EDITION_LABEL="Axonwall K3s + ZFS Storage Host"
       INSTALL_EDITION="k3s-storage"
+    elif [ -f /etc/axonwall/.minimal-edition ] || grep -qE '(^|[[:space:]])(axonwall_edition=minimal|axonwall\.edition=minimal)($|[[:space:]])' /proc/cmdline 2>/dev/null; then
+      EDITION_LABEL="Axonwall Minimal Edition"
+      INSTALL_EDITION="minimal"
+    else
+      INSTALL_EDITION="axonwall"
     fi
     ;;
   *)
-    echo "[!] ERROR: /etc/axonwall/edition contains '${_edition_file}' (expected axonwall, vault, or k3s-storage); refusing to install with a corrupt edition record." >&2
+    echo "[!] ERROR: /etc/axonwall/edition contains '${_edition_file}' (expected axonwall, minimal, vault, or k3s-storage); refusing to install with a corrupt edition record." >&2
     exit 1
     ;;
 esac
@@ -647,6 +653,10 @@ elif [ "$MODE" = "unattended" ]; then
         INSTALL_EDITION="k3s-storage"
         EDITION_LABEL="Axonwall K3s + ZFS Storage Host"
         ;;
+      minimal|hardened|bare)
+        INSTALL_EDITION="minimal"
+        EDITION_LABEL="Axonwall Minimal Edition"
+        ;;
       axonwall|ngfw|firewall)
         INSTALL_EDITION="axonwall"
         EDITION_LABEL="Axonwall NGFW Appliance"
@@ -818,16 +828,21 @@ else
     echo ""
     echo "Select Appliance Edition:"
     echo "  [1] Axonwall NGFW & Router Appliance [Default]"
-    echo "  [2] Axonwall Vault Edition (Immutable S3 Object-Lock Backup Appliance)"
-    echo "  [3] Axonwall K3s + ZFS Storage Host (Barebones)"
-    printf "Choice [1-3] (default 1): "
+    echo "  [2] Axonwall Minimal Edition (Reduced Attack Surface Host)"
+    echo "  [3] Axonwall Vault Edition (Immutable S3 Object-Lock Backup Appliance)"
+    echo "  [4] Axonwall K3s + ZFS Storage Host (Barebones)"
+    printf "Choice [1-4] (default 1): "
     read -r EDITION_CHOICE
     case "${EDITION_CHOICE:-1}" in
-      2|vault|VAULT)
+      2|minimal|MINIMAL|hardened|bare)
+        INSTALL_EDITION="minimal"
+        EDITION_LABEL="Axonwall Minimal Edition"
+        ;;
+      3|vault|VAULT)
         INSTALL_EDITION="vault"
         EDITION_LABEL="Axonwall Vault Edition"
         ;;
-      3|k3s-storage|k3s|K3S)
+      4|k3s-storage|k3s|K3S)
         INSTALL_EDITION="k3s-storage"
         EDITION_LABEL="Axonwall K3s + ZFS Storage Host"
         echo ""
@@ -2104,6 +2119,141 @@ if [ "${INSTALL_EDITION:-axonwall}" = "vault" ] || [ -f /mnt/slot_a/etc/axonwall
   if [ -z "${HOSTNAME_OVERRIDE:-}" ] || [ "${HOSTNAME_OVERRIDE:-}" = "axonwall" ]; then
     HOSTNAME_OVERRIDE="axonwall-storage"
   fi
+elif [ "${INSTALL_EDITION:-axonwall}" = "minimal" ] || [ -f /mnt/slot_a/etc/axonwall/.minimal-edition ]; then
+  ui_echo "[+] Configuring target as Axonwall Minimal Edition (reduced attack surface host)..."
+  mkdir -p /mnt/slot_a/etc/axonwall /mnt/data/etc-axonwall /mnt/slot_a/var/lib/axonwall /mnt/data
+  printf 'minimal\n' > /mnt/slot_a/etc/axonwall/edition
+  touch /mnt/slot_a/etc/axonwall/.minimal-edition /mnt/slot_a/etc/axonwall/.firstboot
+  printf 'disabled=true\n' > /mnt/slot_a/etc/axonwall/workstation.disabled
+  printf 'disabled=true\n' > /mnt/data/etc-axonwall/workstation.disabled
+  rm -f /mnt/slot_a/etc/axonwall/.vault-edition \
+        /mnt/slot_a/etc/axonwall/.vault-firstboot \
+        /mnt/slot_a/etc/axonwall/.k3s-edition \
+        /mnt/slot_a/etc/axonwall/.k3s-firstboot \
+        /mnt/slot_a/etc/axonwall/k3s-storage.env \
+        /mnt/slot_a/etc/axonwall/*.yaml \
+        /mnt/slot_a/etc/axonwall/state.json \
+        /mnt/data/state.json \
+        /mnt/data/etc-axonwall/*.yaml \
+        /mnt/data/etc-axonwall/state.json
+  rm -rf /mnt/slot_a/etc/axonwall/conf.d /mnt/data/etc-axonwall/conf.d
+  printf '{"core-firewall":true,"core-nas":true,"core-k3s":true,"core-virt":true,"core-vigilante":true,"cli-workstation":true,"host-malware-rootkit":true,"coroot-ebpf-apm":true}\n' > /mnt/slot_a/var/lib/axonwall/plugins-disabled.json
+  cp -f /mnt/slot_a/var/lib/axonwall/plugins-disabled.json /mnt/data/plugins-disabled.json 2>/dev/null || true
+
+  for min_unit in headscale.service axonwall-satellite.service k3s.service k3s-agent.service suricata.service kea-dhcp4-server.service kea-dhcp6-server.service kea-ctrl-agent.service unbound.service frr.service strongswan.service strongswan-starter.service openvpn.service conntrackd.service keepalived.service smbd.service nmbd.service winbind.service nfs-kernel-server.service nfs-server.service open-iscsi.service tgt.service libvirtd.service virtlogd.service lxc.service lxc-net.service sysstat.service rkhunter.timer; do
+    rm -f "/mnt/slot_a/etc/systemd/system/${min_unit}" \
+          "/mnt/slot_a/etc/systemd/system/multi-user.target.wants/${min_unit}" \
+          "/mnt/slot_a/etc/systemd/system/timers.target.wants/${min_unit}" \
+          "/mnt/slot_a/lib/systemd/system/${min_unit}" \
+          "/mnt/slot_a/usr/lib/systemd/system/${min_unit}"
+  done
+  if [ "$OS_FAMILY" = "alpine" ]; then
+    for min_rc in headscale k3s k3s-agent axonwall-satellite suricata kea-dhcp4 unbound frr bgpd ospfd openvpn keepalived samba nfs tgt; do
+      rm -f "/mnt/slot_a/etc/runlevels/default/${min_rc}" \
+            "/mnt/slot_a/etc/runlevels/boot/${min_rc}" \
+            "/mnt/slot_a/etc/runlevels/sysinit/${min_rc}" \
+            "/mnt/slot_a/etc/init.d/${min_rc}"
+    done
+  fi
+
+  rm -rf /mnt/slot_a/usr/sbin/headscale \
+         /mnt/slot_a/usr/sbin/litestream \
+         /mnt/slot_a/usr/sbin/axonwall-satellite \
+         /mnt/slot_a/usr/share/axonwall/satellites \
+         /mnt/slot_a/usr/share/axonwall/k3s \
+         /mnt/slot_a/usr/lib/axonwall/edge \
+         /mnt/slot_a/usr/share/axonwall/kernel-builder \
+         /mnt/slot_a/usr/local/bin/axonwall-ha-notify \
+         /mnt/slot_a/usr/local/bin/axonwall-import \
+         /mnt/slot_a/usr/local/bin/axonwall-hunt-rootkits \
+         /mnt/slot_a/usr/local/bin/hunt-io-uring-implants.sh \
+         /mnt/slot_a/usr/local/bin/hunt-ebpf-rootkits.sh \
+         /mnt/slot_a/usr/local/bin/audit_hidden_bpf_prog_idr.py \
+         /mnt/slot_a/usr/local/bin/helm \
+         /mnt/slot_a/usr/local/bin/kubectl \
+         /mnt/slot_a/usr/local/bin/mkcert \
+         /mnt/slot_a/usr/local/bin/k9s \
+         /mnt/slot_a/usr/local/bin/starship \
+         /mnt/slot_a/usr/local/bin/zoxide \
+         /mnt/slot_a/usr/local/bin/bat \
+         /mnt/slot_a/usr/local/bin/fd \
+         /mnt/slot_a/usr/bin/k3s \
+         /mnt/slot_a/usr/bin/helm \
+         /mnt/slot_a/usr/bin/kubectl \
+         /mnt/slot_a/usr/bin/k9s \
+         /mnt/slot_a/usr/bin/zsh \
+         /mnt/slot_a/bin/zsh \
+         /mnt/slot_a/usr/share/oh-my-zsh \
+         /mnt/slot_a/etc/zsh \
+         /mnt/slot_a/usr/share/axonwall/zshenv \
+         /mnt/slot_a/etc/skel/.zshrc \
+         /mnt/slot_a/root/.zshrc \
+         /mnt/slot_a/root/.oh-my-zsh \
+         /mnt/slot_a/etc/vim/vimrc.local \
+         /mnt/slot_a/etc/tmux.conf \
+         /mnt/slot_a/etc/axonwall/starship.toml \
+         /mnt/slot_a/etc/axonwall/yara \
+         /mnt/slot_a/etc/rkhunter.conf.local \
+         /mnt/slot_a/etc/headscale \
+         /mnt/slot_a/etc/systemd/system/suricata.service.d \
+         /mnt/slot_a/var/lib/axonwall/core-k3s \
+         /mnt/slot_a/var/lib/axonwall/cli-workstation \
+         /mnt/slot_a/var/lib/axonwall/headscale \
+         /mnt/data/cli-workstation \
+         /mnt/data/core-k3s
+
+  if [ "$OS_FAMILY" = "debian" ] && [ -x /mnt/slot_a/usr/bin/dpkg ]; then
+    ui_echo "[+] Purging optional workstation, NGFW, virtualization, NAS, diagnostics, and security scanner packages from Minimal target..."
+    chroot /mnt/slot_a /usr/bin/dpkg --purge --force-all \
+      suricata kea-dhcp4-server kea-common unbound dns-root-data frr strongswan strongswan-charon strongswan-starter \
+      openvpn conntrackd keepalived wireguard-tools \
+      samba samba-common-bin nfs-kernel-server open-iscsi tgt \
+      qemu-system-x86 qemu-utils ovmf xorriso bridge-utils libvirt-clients lxc \
+      zsh zsh-autosuggestions zsh-syntax-highlighting vim neovim tmux fzf ripgrep fd-find bat git etckeeper \
+      nmap dnsutils bind9-host net-tools btop htop sysstat iotop iftop slurm mtr-tiny tcpdump \
+      rkhunter chkrootkit yara unhide lynis debsums bpftool python3-drgn linux-perf >/dev/null 2>&1 || true
+  elif [ "$OS_FAMILY" = "alpine" ] && [ -x /mnt/slot_a/sbin/apk ]; then
+    ui_echo "[+] Purging optional workstation, NGFW, virtualization, NAS, diagnostics, and security scanner packages from Minimal target..."
+    _apk_rm=""
+    for _apkg in suricata kea kea-dhcp4 unbound frr strongswan openvpn keepalived wireguard-tools \
+      samba nfs-utils open-iscsi tgt qemu-system-x86_64 qemu-img ovmf bridge-utils libvirt-client lxc \
+      zsh zsh-autosuggestions zsh-syntax-highlighting vim neovim starship tmux fzf ripgrep fd bat git \
+      nmap bind-tools net-tools btop htop sysstat iotop iftop mtr tcpdump \
+      rkhunter chkrootkit yara lynis bpftool k9s kubectl helm; do
+      if chroot /mnt/slot_a /sbin/apk info -e "$_apkg" >/dev/null 2>&1; then
+        _apk_rm="${_apk_rm} ${_apkg}"
+      fi
+    done
+    [ -n "$_apk_rm" ] && chroot /mnt/slot_a /sbin/apk del --no-network $_apk_rm >/dev/null 2>&1 || true
+  fi
+
+  _fallback_shell="/bin/bash"
+  [ ! -e /mnt/slot_a/bin/bash ] && [ -e /mnt/slot_a/bin/ash ] && _fallback_shell="/bin/ash"
+  [ ! -e /mnt/slot_a/bin/bash ] && [ ! -e /mnt/slot_a/bin/ash ] && _fallback_shell="/bin/sh"
+  if [ -f /mnt/slot_a/etc/passwd ]; then
+    sed -i "s|:/usr/bin/zsh\$|:${_fallback_shell}|g; s|:/bin/zsh\$|:${_fallback_shell}|g" /mnt/slot_a/etc/passwd 2>/dev/null || true
+  fi
+  if [ -f /mnt/slot_a/etc/default/useradd ]; then
+    if grep -q '^SHELL=' /mnt/slot_a/etc/default/useradd 2>/dev/null; then
+      sed -i "s|^SHELL=.*|SHELL=${_fallback_shell}|" /mnt/slot_a/etc/default/useradd 2>/dev/null || true
+    else
+      echo "SHELL=${_fallback_shell}" >> /mnt/slot_a/etc/default/useradd
+    fi
+  fi
+  if [ -f /mnt/slot_a/etc/adduser.conf ]; then
+    if grep -q '^DSHELL=' /mnt/slot_a/etc/adduser.conf 2>/dev/null; then
+      sed -i "s|^DSHELL=.*|DSHELL=${_fallback_shell}|" /mnt/slot_a/etc/adduser.conf 2>/dev/null || true
+    else
+      echo "DSHELL=${_fallback_shell}" >> /mnt/slot_a/etc/adduser.conf
+    fi
+  fi
+  if [ -f /mnt/slot_a/etc/shells ]; then
+    sed -i '\|^/usr/bin/zsh$|d; \|^/bin/zsh$|d' /mnt/slot_a/etc/shells 2>/dev/null || true
+  fi
+
+  if [ -z "${HOSTNAME_OVERRIDE:-}" ] || [ "${HOSTNAME_OVERRIDE:-}" = "axonwall" ]; then
+    HOSTNAME_OVERRIDE="axonwall-minimal"
+  fi
 else
   touch /mnt/slot_a/etc/axonwall/.firstboot
 fi
@@ -2130,25 +2280,27 @@ if [ -f /etc/axonwall/.interfaces_configured ] || [ -f /var/lib/axonwall/etc-axo
     rm -f /mnt/slot_a/etc/resolv.conf 2>/dev/null || true
     cp -L /etc/resolv.conf /mnt/slot_a/etc/resolv.conf 2>/dev/null || true
   fi
-  for _yfile in /etc/axonwall/*.yaml; do
-    if [ -s "$_yfile" ]; then
-      cp -a "$_yfile" "/mnt/slot_a/etc/axonwall/$(basename "$_yfile")" 2>/dev/null || true
-      cp -a "$_yfile" "/mnt/data/etc-axonwall/$(basename "$_yfile")" 2>/dev/null || true
+  if [ "${INSTALL_EDITION:-axonwall}" != "minimal" ]; then
+    for _yfile in /etc/axonwall/*.yaml; do
+      if [ -s "$_yfile" ]; then
+        cp -a "$_yfile" "/mnt/slot_a/etc/axonwall/$(basename "$_yfile")" 2>/dev/null || true
+        cp -a "$_yfile" "/mnt/data/etc-axonwall/$(basename "$_yfile")" 2>/dev/null || true
+      fi
+    done
+    if [ -d /etc/axonwall/conf.d ]; then
+      mkdir -p /mnt/slot_a/etc/axonwall/conf.d /mnt/data/etc-axonwall/conf.d
+      cp -a /etc/axonwall/conf.d/. /mnt/slot_a/etc/axonwall/conf.d/ 2>/dev/null || true
+      cp -a /etc/axonwall/conf.d/. /mnt/data/etc-axonwall/conf.d/ 2>/dev/null || true
     fi
-  done
-  if [ -d /etc/axonwall/conf.d ]; then
-    mkdir -p /mnt/slot_a/etc/axonwall/conf.d /mnt/data/etc-axonwall/conf.d
-    cp -a /etc/axonwall/conf.d/. /mnt/slot_a/etc/axonwall/conf.d/ 2>/dev/null || true
-    cp -a /etc/axonwall/conf.d/. /mnt/data/etc-axonwall/conf.d/ 2>/dev/null || true
+    for _sfile in /var/lib/axonwall/state.json /etc/axonwall/state.json; do
+      if [ -s "$_sfile" ]; then
+        cp -a "$_sfile" /mnt/slot_a/etc/axonwall/state.json 2>/dev/null || true
+        cp -a "$_sfile" /mnt/data/state.json 2>/dev/null || true
+        cp -a "$_sfile" /mnt/data/etc-axonwall/state.json 2>/dev/null || true
+        break
+      fi
+    done
   fi
-  for _sfile in /var/lib/axonwall/state.json /etc/axonwall/state.json; do
-    if [ -s "$_sfile" ]; then
-      cp -a "$_sfile" /mnt/slot_a/etc/axonwall/state.json 2>/dev/null || true
-      cp -a "$_sfile" /mnt/data/state.json 2>/dev/null || true
-      cp -a "$_sfile" /mnt/data/etc-axonwall/state.json 2>/dev/null || true
-      break
-    fi
-  done
   if [ -s /usr/share/axonwall/lockdown.nft ] && [ -d /mnt/slot_a/usr/share/axonwall ]; then
     cp -a /usr/share/axonwall/lockdown.nft /mnt/slot_a/usr/share/axonwall/lockdown.nft 2>/dev/null || true
   fi

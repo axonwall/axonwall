@@ -1583,9 +1583,29 @@ func (s *AgentServer) restartNgfwDaemonsIfEnabled() error {
 	if err := json.Unmarshal(data, &fwCfg); err != nil || !fwCfg.Enabled {
 		return nil
 	}
+	if !hasSystemdOrFakeSystemctl() {
+		return nil
+	}
+	sysPath, _ := exec.LookPath("systemctl")
+	cleanSysPath := filepath.Clean(sysPath)
+	isFakeSystemctl := cleanSysPath != "" && cleanSysPath != "/usr/bin/systemctl" && cleanSysPath != "/bin/systemctl"
+
+	var unitsToStart []string
+	for _, u := range []string{"kea-dhcp4-server", "suricata", "frr", "conntrackd", "crowdsec-firewall-bouncer"} {
+		resolved := resolveDistroServiceUnit(u)
+		if !isFakeSystemctl && !systemdUnitFileExists(resolved) {
+			continue
+		}
+		unitsToStart = append(unitsToStart, resolved)
+	}
+	if len(unitsToStart) == 0 {
+		return nil
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), serviceCommandTimeout)
 	defer cancel()
-	if err := exec.CommandContext(ctx, "systemctl", "--no-ask-password", "start", "kea-dhcp4-server", "suricata", "frr", "conntrackd", "crowdsec-firewall-bouncer").Run(); err != nil {
+	args := append([]string{"--no-ask-password", "start"}, unitsToStart...)
+	if err := exec.CommandContext(ctx, "systemctl", args...).Run(); err != nil {
 		return fmt.Errorf("restarting NGFW daemons after rollback: %w", err)
 	}
 	log.Printf("[Agent] Rollback: restarted NGFW daemons (restored firewall config is enabled)")

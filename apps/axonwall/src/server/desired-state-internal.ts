@@ -111,6 +111,30 @@ export function computeSubnetAndDefaultPool(ipv4Cidr?: string): {
   };
 }
 
+function isMinimalEditionHost(): boolean {
+  try {
+    const etcDir = getEtcConfigDir();
+    if (fs.existsSync(path.join(etcDir, '.minimal-edition'))) {
+      return true;
+    }
+    const edPath = path.join(etcDir, 'edition');
+    if (fs.existsSync(edPath)) {
+      return fs.readFileSync(edPath, 'utf8').trim() === 'minimal';
+    }
+  } catch {}
+  return false;
+}
+
+function readSystemHostname(fallback: string): string {
+  try {
+    if (fs.existsSync('/etc/hostname')) {
+      const hn = fs.readFileSync('/etc/hostname', 'utf8').trim();
+      if (hn) return hn;
+    }
+  } catch {}
+  return fallback;
+}
+
 function buildBaselineState(): DesiredState {
   const hostDevices = !isApplianceRuntime() ? discoverHostPrimaryDevices() : [];
   let wanDev = hostDevices[0] || 'eth0';
@@ -158,10 +182,34 @@ function buildBaselineState(): DesiredState {
   if (opt1Dev) antiLockoutIfaces.push('opt1');
   if (opt2Dev) antiLockoutIfaces.push('opt2');
 
+  const isMinimal = isMinimalEditionHost();
+  const hostname = isMinimal ? readSystemHostname('axonwall-minimal') : 'axonwall-core';
+
   return DesiredStateSchema.parse({
     version: 1,
+    ...(isMinimal
+      ? {
+          capabilities: {
+            firewallEnabled: false,
+            nasEnabled: false,
+            k3sEnabled: false,
+            virtEnabled: false,
+            vigilanteEnabled: false,
+          },
+          plugins: [
+            { id: 'core-firewall', enabled: false },
+            { id: 'core-nas', enabled: false },
+            { id: 'core-k3s', enabled: false },
+            { id: 'core-virt', enabled: false },
+            { id: 'core-vigilante', enabled: false },
+            { id: 'cli-workstation', enabled: false },
+            { id: 'host-malware-rootkit', enabled: false },
+            { id: 'coroot-ebpf-apm', enabled: false },
+          ],
+        }
+      : {}),
     system: {
-      hostname: 'axonwall-core',
+      hostname,
       domain: 'axonwall.local',
       dnsServers: ['1.1.1.1', '8.8.8.8'],
       timezone: 'UTC',
@@ -192,7 +240,7 @@ function buildBaselineState(): DesiredState {
         device: lanDev || 'none',
         type: lanMode,
         enabled: Boolean(lanDev),
-        dhcpServer: lanMode === 'static',
+        dhcpServer: !isMinimal && lanMode === 'static',
         ...(lanMode === 'static' && lanIp ? { ipv4Address: lanIp } : {}),
         mtu: 1500,
         description: 'LAN Network',
@@ -238,8 +286,15 @@ function buildBaselineState(): DesiredState {
     bonds: [],
     virtualIps: [],
     vrfs: [],
-    dhcp: { enabled: true, subnets: [] },
-    dns: { enabled: true, listenPort: 53, dnssec: true, dotEnabled: true, dotUpstreams: [], hostOverrides: [] },
+    dhcp: { enabled: !isMinimal, subnets: [] },
+    dns: {
+      enabled: !isMinimal,
+      listenPort: 53,
+      dnssec: true,
+      dotEnabled: !isMinimal,
+      dotUpstreams: [],
+      hostOverrides: [],
+    },
     routes: [],
   });
 }
@@ -745,8 +800,9 @@ export async function getDesiredStateInternal(): Promise<DesiredState> {
     } catch {}
   }
 
-  persistDesiredStateToDisk(BASELINE_STATE);
-  return structuredClone(BASELINE_STATE);
+  const baseline = buildBaselineState();
+  persistDesiredStateToDisk(baseline);
+  return structuredClone(baseline);
 }
 
 export function snapshotDesiredStateOnDisk(): OnDiskConfigSnapshotEntry[] {

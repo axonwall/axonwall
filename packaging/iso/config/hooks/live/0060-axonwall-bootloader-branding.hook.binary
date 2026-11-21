@@ -25,6 +25,9 @@ if [ -f "${CHROOT_DIR}/etc/axonwall/.vault-edition" ] || grep -qi "Vault" "${BIN
 elif [ -f "${CHROOT_DIR}/etc/axonwall/.k3s-edition" ] || grep -qi "K3s" "${BIN_DIR}/.disk/info" 2>/dev/null; then
   FLAVOR_TITLE="Axonwall K3s Storage Host"
   LIVE_HOST="axonwall-storage"
+elif [ -f "${CHROOT_DIR}/etc/axonwall/.minimal-edition" ] || grep -qi "Minimal" "${BIN_DIR}/.disk/info" 2>/dev/null; then
+  FLAVOR_TITLE="Axonwall Minimal"
+  LIVE_HOST="axonwall-minimal"
 fi
 
 for cand in \
@@ -183,6 +186,10 @@ menuentry "Install ${FLAVOR_TITLE} (Next-Gen TUI Installer)" --hotkey=i {
 	linux	${LIVE_KERN} ${COMMON_LIVE_ARGS} axonwall_install=1 findiso=\${iso_path}
 	initrd	${LIVE_INITRD}
 }
+menuentry "Install Axonwall Minimal Edition (Reduced Attack Surface)" --hotkey=n {
+	linux	${LIVE_KERN} ${COMMON_LIVE_ARGS} axonwall_install=1 axonwall_edition=minimal findiso=\${iso_path}
+	initrd	${LIVE_INITRD}
+}
 menuentry "Install Axonwall Vault Edition (Immutable S3 Storage)" --hotkey=m {
 	linux	${LIVE_KERN} ${COMMON_LIVE_ARGS} axonwall_install=1 axonwall_edition=vault findiso=\${iso_path}
 	initrd	${LIVE_INITRD}
@@ -281,6 +288,12 @@ label install-tui
 	linux ${LIVE_KERN}
 	initrd ${LIVE_INITRD}
 	append ${COMMON_LIVE_ARGS} axonwall_install=1
+
+label install-minimal
+	menu label Install Axonwall ^Minimal Edition (Reduced Attack Surface)
+	linux ${LIVE_KERN}
+	initrd ${LIVE_INITRD}
+	append ${COMMON_LIVE_ARGS} axonwall_install=1 axonwall_edition=minimal
 
 label install-vault
 	menu label Install Axonwall ^Vault Edition (Immutable S3 Storage)

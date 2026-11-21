@@ -371,16 +371,20 @@ func TestFormatInstallerConfigK3sFieldsAndCycleEdition(t *testing.T) {
 	cfg.Hostname = "axonwall"
 
 	cycleEdition(&cfg)
-	if cfg.Edition != "vault" || cfg.Hostname != "axonwall-vault" {
+	if cfg.Edition != "minimal" || cfg.Hostname != "axonwall-minimal" {
 		t.Fatalf("after 1st cycleEdition: got edition=%q hostname=%q", cfg.Edition, cfg.Hostname)
 	}
 	cycleEdition(&cfg)
-	if cfg.Edition != "k3s-storage" || cfg.Hostname != "axonwall-storage" {
+	if cfg.Edition != "vault" || cfg.Hostname != "axonwall-vault" {
 		t.Fatalf("after 2nd cycleEdition: got edition=%q hostname=%q", cfg.Edition, cfg.Hostname)
 	}
 	cycleEdition(&cfg)
-	if cfg.Edition != "axonwall" || cfg.Hostname != "axonwall" {
+	if cfg.Edition != "k3s-storage" || cfg.Hostname != "axonwall-storage" {
 		t.Fatalf("after 3rd cycleEdition: got edition=%q hostname=%q", cfg.Edition, cfg.Hostname)
+	}
+	cycleEdition(&cfg)
+	if cfg.Edition != "axonwall" || cfg.Hostname != "axonwall" {
+		t.Fatalf("after 4th cycleEdition: got edition=%q hostname=%q", cfg.Edition, cfg.Hostname)
 	}
 
 	// Custom hostname should be preserved across edition cycling
@@ -388,6 +392,16 @@ func TestFormatInstallerConfigK3sFieldsAndCycleEdition(t *testing.T) {
 	cycleEdition(&cfg)
 	if cfg.Hostname != "edge-node-01" {
 		t.Errorf("expected custom hostname to be preserved, got %q", cfg.Hostname)
+	}
+
+	cfg.Edition = "minimal"
+	cfg.Hostname = "axonwall-minimal"
+	minSerialized := FormatInstallerConfig(cfg)
+	if !strings.Contains(minSerialized, "INSTALL_EDITION='minimal'") {
+		t.Errorf("expected INSTALL_EDITION='minimal' in:\n%s", minSerialized)
+	}
+	if !strings.Contains(minSerialized, "HOSTNAME_OVERRIDE='axonwall-minimal'") {
+		t.Errorf("expected HOSTNAME_OVERRIDE='axonwall-minimal' in:\n%s", minSerialized)
 	}
 
 	// Default empty K3sRole should serialize as 'server'

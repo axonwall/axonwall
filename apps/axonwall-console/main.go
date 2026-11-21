@@ -1614,11 +1614,15 @@ func detectInstalledEdition() string {
 	if _, err := os.Stat("/etc/axonwall/.vault-edition"); err == nil {
 		return "vault"
 	}
+	if _, err := os.Stat("/etc/axonwall/.minimal-edition"); err == nil {
+		return "minimal"
+	}
 	return "axonwall"
 }
 
 func isAxonwallFirewallMenuAvailable() bool {
-	return detectInstalledEdition() == "axonwall" || isLiveMode()
+	ed := detectInstalledEdition()
+	return ed == "axonwall" || ed == "minimal" || isLiveMode()
 }
 
 func isK3sAgentHost() bool {
@@ -1645,6 +1649,8 @@ func authenticateConsole(reader *bufio.Reader) (string, bool) {
 
 	loginTitle := "                       Axonwall Appliance Console Login                         "
 	switch edition {
+	case "minimal":
+		loginTitle = "                   Axonwall Minimal Appliance Console Login                     "
 	case "k3s-storage":
 		loginTitle = "               Axonwall K3s + ZFS Storage Host Console Login                    "
 	case "vault":
@@ -1813,6 +1819,8 @@ func printHeader() {
 	fmt.Println(" ╚═╝  ╚═╝╚═╝  ╚═╝ ╚═════╝ ╚═╝  ╚═══╝ ╚══╝╚══╝ ╚═╝  ╚═╝╚══════╝╚══════╝")
 	fmt.Printf("%s", colorReset)
 	switch edition {
+	case "minimal":
+		fmt.Printf("         %sHardened Minimal Axonwall Appliance (Reduced Attack Surface)%s\n\n", colorBold, colorReset)
 	case "k3s-storage":
 		fmt.Printf("       %sBarebones K3s + OpenZFS + OpenEBS ZFS-LocalPV Storage Host%s\n\n", colorBold, colorReset)
 	case "vault":
@@ -1909,11 +1917,11 @@ func printHeader() {
 	fmt.Println("  2) Assign Network Interfaces (WAN, LAN, OPT1, OPT2)")
 	fmt.Println("  3) Configure Interface IP & DHCP (WAN, LAN, OPT1, OPT2)")
 	fmt.Println("  4) Reset the Admin Password")
-	if edition == "axonwall" || isLiveMode() {
+	if isAxonwallFirewallMenuAvailable() {
 		fmt.Println("  5) Break-Glass Disable / Reset TOTP MFA")
 	}
 	fmt.Println("  6) Network Diagnostics (Ping, DNS Lookup)")
-	if edition == "axonwall" || isLiveMode() {
+	if isAxonwallFirewallMenuAvailable() {
 		fmt.Println("  7) Display Web Console Scannable QR Code")
 	}
 	switch edition {
@@ -1942,9 +1950,13 @@ func printHeader() {
 	case "vault":
 		fmt.Printf("  %sS) Vault S3 Object-Lock & Storage Status (axonwall-vault-status)%s\n", colorGreen+colorBold, colorReset)
 	}
-	if edition == "axonwall" || isLiveMode() {
+	_, nmapErr := exec.LookPath("nmap")
+	showNastyMap := edition != "minimal" || nmapErr == nil
+	if isAxonwallFirewallMenuAvailable() {
 		fmt.Printf("  %sT) Launch Interactive Ink Web-Console & NastyMap TUI (axonwall-tui)%s\n", colorGreen+colorBold, colorReset)
-		fmt.Printf("  %sN) Launch NastyMap Interactive Nmap Scanner & Topology TUI%s\n", colorCyan+colorBold, colorReset)
+		if showNastyMap {
+			fmt.Printf("  %sN) Launch NastyMap Interactive Nmap Scanner & Topology TUI%s\n", colorCyan+colorBold, colorReset)
+		}
 		fmt.Printf("  %sA) Manage Anti-Lockout / Allowed Management Interfaces (LAN, OPT1, OPT2)%s\n", colorYellow, colorReset)
 	}
 	fmt.Printf("  %sE) Edit / Validate / Apply /etc/axonwall/*.yaml Configuration Files%s\n", colorCyan, colorReset)
@@ -1954,8 +1966,10 @@ func printHeader() {
 		fmt.Print(" Enter option [0-12, T, N, A, E, or I]: ")
 	} else if edition == "k3s-storage" || edition == "vault" {
 		fmt.Print(" Enter option [0-12, S, or E]: ")
-	} else {
+	} else if showNastyMap {
 		fmt.Print(" Enter option [0-12, T, N, A, or E]: ")
+	} else {
+		fmt.Print(" Enter option [0-12, T, A, or E]: ")
 	}
 }
 

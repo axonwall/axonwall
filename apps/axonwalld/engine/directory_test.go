@@ -414,6 +414,7 @@ func TestBuildSSSDConfigWithBind(t *testing.T) {
 		t.Fatalf("loopback-only BuildSSSDConfigWithBind should not fail: %v", err)
 	}
 	for _, want := range []string{
+		"shell_fallback = /bin/bash",
 		"ldap_default_bind_dn = cn=svc-sssd,ou=services,dc=axonwall,dc=local",
 		"ldap_default_authtok_type = password",
 		"ldap_default_authtok = secret123",

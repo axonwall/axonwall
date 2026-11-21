@@ -257,10 +257,43 @@ function loadFallbackState(): DesiredState {
     .map((i) => i.name);
   if (antiLockoutIfaces.length === 0) antiLockoutIfaces.push('lan');
 
+  let isMinimal = fs.existsSync(path.join(ETC_DIR, '.minimal-edition'));
+  if (!isMinimal) {
+    try {
+      const edPath = path.join(ETC_DIR, 'edition');
+      if (fs.existsSync(edPath)) {
+        isMinimal = fs.readFileSync(edPath, 'utf-8').trim() === 'minimal';
+      }
+    } catch {}
+  }
+
   return DesiredStateSchema.parse({
     version: 1,
+    ...(isMinimal
+      ? {
+          capabilities: {
+            firewallEnabled: false,
+            nasEnabled: false,
+            k3sEnabled: false,
+            virtEnabled: false,
+            vigilanteEnabled: false,
+          },
+          plugins: [
+            { id: 'core-firewall', enabled: false },
+            { id: 'core-nas', enabled: false },
+            { id: 'core-k3s', enabled: false },
+            { id: 'core-virt', enabled: false },
+            { id: 'core-vigilante', enabled: false },
+            { id: 'cli-workstation', enabled: false },
+            { id: 'host-malware-rootkit', enabled: false },
+            { id: 'coroot-ebpf-apm', enabled: false },
+          ],
+          dhcp: { enabled: false, subnets: [] },
+          dns: { enabled: false, listenPort: 53, dnssec: true, dotEnabled: false, dotUpstreams: [], hostOverrides: [] },
+        }
+      : {}),
     system: {
-      hostname: 'axonwall',
+      hostname: isMinimal ? 'axonwall-minimal' : 'axonwall',
       domain: 'home.arpa',
       timezone: 'UTC',
       dnsServers: ['1.1.1.1', '9.9.9.9'],

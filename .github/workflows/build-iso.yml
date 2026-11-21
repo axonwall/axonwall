@@ -210,6 +210,7 @@ jobs:
           # payload. The sign/upload/size-guard/release steps below
           # are glob-based and pick up all three automatically.
           ./packaging/debian/build-deb.sh --edition axonwall
+          ./packaging/debian/build-deb.sh --edition minimal
           ./packaging/debian/build-deb.sh --edition vault
           ./packaging/debian/build-deb.sh --edition k3s-storage
 
@@ -580,14 +581,15 @@ jobs:
             - **Commit**: ${{ github.sha }}
             - **Branch**: `main`
             - **Distribution**:
-              - Debian 13 (Trixie) amd64 (Unified Hybrid ISO for NGFW, Vault & K3s Storage Editions + Cloud QCOW2 + .deb Package)
+              - Debian 13 (Trixie) amd64 (Unified Hybrid ISO for NGFW, Minimal, Vault & K3s Storage Editions + Cloud QCOW2 + .deb Package)
               - Super-Slim Edge NGFW UEFI Unified Kernel Image (`sku-vm-virtio` default virtual appliance)
             - **Artifacts**:
-              - `axonwall-debian13-amd64.iso` (Unified Next-Gen Installer: Axonwall NGFW + Vault S3 + K3s Storage Editions)
+              - `axonwall-debian13-amd64.iso` (Unified Next-Gen Installer: Axonwall NGFW + Minimal + Vault S3 + K3s Storage Editions)
               - `axonwall-debian13-amd64-cloud.qcow2`
               - `axonwall-edge-sku-vm-virtio.efi` (Single-File EFI UKI with embedded Go PID 1)
               - `axonwall-edge-sku-vm-virtio-initramfs.cpio.gz`
               - `axonwall_*.deb` (NGFW edition)
+              - `axonwall-minimal_*.deb` (Minimal reduced-attack-surface edition)
               - `axonwall-vault_*.deb` (Vault S3 Storage edition)
               - `axonwall-k3s-storage_*.deb` (K3s-Storage edition)
           prerelease: true

@@ -163,7 +163,7 @@ export type CloudInitAuth = z.infer<typeof CloudInitAuthSchema>;
 // 3. Top-Level Axonwall Cloud-Config Namespace
 // ==============================================================================
 
-export const ApplianceEditionSchema = z.enum(['axonwall', 'vault', 'k3s-storage']).default('axonwall');
+export const ApplianceEditionSchema = z.enum(['axonwall', 'minimal', 'vault', 'k3s-storage']).default('axonwall');
 export type ApplianceEdition = z.infer<typeof ApplianceEditionSchema>;
 
 export const CloudInitK3sStorageBootstrapSchema = z.object({
@@ -278,7 +278,7 @@ export interface InstallerChoices {
   ZFS_EXTRA_DISKS: string;
   ZFS_RAID_TOPOLOGY: string;
   CUSTOM_MOUNTS_JSON: string;
-  INSTALL_EDITION?: 'axonwall' | 'vault' | 'k3s-storage';
+  INSTALL_EDITION?: 'axonwall' | 'minimal' | 'vault' | 'k3s-storage';
   K3S_ROLE?: 'server' | 'agent';
   K3S_SERVER_URL?: string;
   K3S_JOIN_TOKEN?: string;

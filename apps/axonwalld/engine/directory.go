@@ -1807,6 +1807,14 @@ func (d *DirectoryManager) applyLocalNSSMirror(deletedUser string, ldapUsers []L
 				if sh == "" {
 					sh = DefaultShellForRole(lu.ApplianceRole)
 				}
+				if _, serr := os.Stat(sh); serr != nil {
+					for _, fb := range []string{"/bin/bash", "/bin/ash", "/bin/sh"} {
+						if _, ferr := os.Stat(fb); ferr == nil {
+							sh = fb
+							break
+						}
+					}
+				}
 				newPasswdLines = append(newPasswdLines, fmt.Sprintf("%s:x:%d:%d:%s:%s:%s", cleanNSSField(lu.Username), lu.UID, lu.GID, gecos, home, sh))
 			} else if uUID >= 10000 && uUID < 60000 && isTrackedMirror {
 				// Stale LDAP-mirrored user removed from directory (local UIDs in 10000-59999 are preserved)
@@ -1830,6 +1838,14 @@ func (d *DirectoryManager) applyLocalNSSMirror(deletedUser string, ldapUsers []L
 			sh := cleanNSSField(lu.Shell)
 			if sh == "" {
 				sh = DefaultShellForRole(lu.ApplianceRole)
+			}
+			if _, serr := os.Stat(sh); serr != nil {
+				for _, fb := range []string{"/bin/bash", "/bin/ash", "/bin/sh"} {
+					if _, ferr := os.Stat(fb); ferr == nil {
+						sh = fb
+						break
+					}
+				}
 			}
 			newPasswdLines = append(newPasswdLines, fmt.Sprintf("%s:x:%d:%d:%s:%s:%s", cleanU, lu.UID, lu.GID, gecos, home, sh))
 		}

@@ -59,23 +59,29 @@ fi
 # written here so every d-i install carries it.
 _target_edition="$(tr -d ' \t\r\n' < /target/etc/axonwall/edition 2>/dev/null || true)"
 case "$_target_edition" in
-  axonwall|vault|k3s-storage)
-    INSTALL_EDITION="$_target_edition"
+  axonwall|minimal|vault|k3s-storage)
+    if [ -z "${INSTALL_EDITION:-}" ] || [ "${INSTALL_EDITION:-axonwall}" = "axonwall" ]; then
+      INSTALL_EDITION="$_target_edition"
+    fi
     ;;
   "")
-    if [ -f /target/etc/axonwall/.k3s-edition ]; then
-      INSTALL_EDITION="k3s-storage"
-    elif [ -f /target/etc/axonwall/.vault-edition ]; then
-      INSTALL_EDITION="vault"
+    if [ -z "${INSTALL_EDITION:-}" ] || [ "${INSTALL_EDITION:-axonwall}" = "axonwall" ]; then
+      if [ -f /target/etc/axonwall/.k3s-edition ]; then
+        INSTALL_EDITION="k3s-storage"
+      elif [ -f /target/etc/axonwall/.vault-edition ]; then
+        INSTALL_EDITION="vault"
+      elif [ -f /target/etc/axonwall/.minimal-edition ]; then
+        INSTALL_EDITION="minimal"
+      fi
     fi
     ;;
   *)
-    echo "[!] ERROR: /target/etc/axonwall/edition contains '${_target_edition}' (expected axonwall, vault, or k3s-storage); refusing to install with a corrupt edition record." >&2
+    echo "[!] ERROR: /target/etc/axonwall/edition contains '${_target_edition}' (expected axonwall, minimal, vault, or k3s-storage); refusing to install with a corrupt edition record." >&2
     exit 1
     ;;
 esac
 mkdir -p /target/etc/axonwall
-printf '%s\n' "${INSTALL_EDITION}" > /target/etc/axonwall/edition
+printf '%s\n' "${INSTALL_EDITION:-axonwall}" > /target/etc/axonwall/edition
 
 if [ "$PARTITION_MODE" = "rolling" ]; then
   INSTALL_MODE="rolling"
@@ -671,6 +677,113 @@ if [ "${INSTALL_EDITION:-axonwall}" = "k3s-storage" ] || [ -f /target/etc/axonwa
   # the replicated Slot B / ZBM BE with a stale initramfs. It now aborts
   # the install instead of replicating a stale initramfs.
   in-target update-initramfs -u -k all >/dev/null 2>&1 || { echo "[-] ERROR: update-initramfs failed during K3s Storage staging; aborting the install rather than replicating a stale initramfs."; exit 1; }
+elif [ "${INSTALL_EDITION:-axonwall}" = "minimal" ] || [ -f /target/etc/axonwall/.minimal-edition ]; then
+  echo "[+] Configuring /target as Axonwall Minimal Edition (reduced attack surface host)..."
+  mkdir -p /target/etc/axonwall /target/var/lib/axonwall /target/var/lib/axonwall/etc-axonwall
+  printf 'minimal\n' > /target/etc/axonwall/edition
+  touch /target/etc/axonwall/.minimal-edition /target/etc/axonwall/.firstboot
+  printf 'disabled=true\n' > /target/etc/axonwall/workstation.disabled
+  printf 'disabled=true\n' > /target/var/lib/axonwall/etc-axonwall/workstation.disabled
+  rm -f /target/etc/axonwall/.vault-edition \
+        /target/etc/axonwall/.vault-firstboot \
+        /target/etc/axonwall/.k3s-edition \
+        /target/etc/axonwall/.k3s-firstboot \
+        /target/etc/axonwall/k3s-storage.env \
+        /target/etc/axonwall/*.yaml \
+        /target/etc/axonwall/state.json \
+        /target/var/lib/axonwall/state.json
+  rm -rf /target/etc/axonwall/conf.d
+  printf '{"core-firewall":true,"core-nas":true,"core-k3s":true,"core-virt":true,"core-vigilante":true,"cli-workstation":true,"host-malware-rootkit":true,"coroot-ebpf-apm":true}\n' > /target/var/lib/axonwall/plugins-disabled.json
+
+  for min_unit in headscale.service axonwall-satellite.service k3s.service k3s-agent.service suricata.service kea-dhcp4-server.service kea-dhcp6-server.service kea-ctrl-agent.service unbound.service frr.service strongswan.service strongswan-starter.service openvpn.service conntrackd.service keepalived.service smbd.service nmbd.service winbind.service nfs-kernel-server.service nfs-server.service open-iscsi.service tgt.service libvirtd.service virtlogd.service lxc.service lxc-net.service sysstat.service rkhunter.timer; do
+    rm -f "/target/etc/systemd/system/${min_unit}" \
+          "/target/etc/systemd/system/multi-user.target.wants/${min_unit}" \
+          "/target/etc/systemd/system/timers.target.wants/${min_unit}" \
+          "/target/lib/systemd/system/${min_unit}" \
+          "/target/usr/lib/systemd/system/${min_unit}"
+  done
+
+  rm -rf /target/usr/sbin/headscale \
+         /target/usr/sbin/litestream \
+         /target/usr/sbin/axonwall-satellite \
+         /target/usr/share/axonwall/satellites \
+         /target/usr/share/axonwall/k3s \
+         /target/usr/lib/axonwall/edge \
+         /target/usr/share/axonwall/kernel-builder \
+         /target/usr/local/bin/axonwall-ha-notify \
+         /target/usr/local/bin/axonwall-import \
+         /target/usr/local/bin/axonwall-hunt-rootkits \
+         /target/usr/local/bin/hunt-io-uring-implants.sh \
+         /target/usr/local/bin/hunt-ebpf-rootkits.sh \
+         /target/usr/local/bin/audit_hidden_bpf_prog_idr.py \
+         /target/usr/local/bin/helm \
+         /target/usr/local/bin/kubectl \
+         /target/usr/local/bin/mkcert \
+         /target/usr/local/bin/k9s \
+         /target/usr/local/bin/starship \
+         /target/usr/local/bin/zoxide \
+         /target/usr/local/bin/bat \
+         /target/usr/local/bin/fd \
+         /target/usr/bin/k3s \
+         /target/usr/bin/helm \
+         /target/usr/bin/kubectl \
+         /target/usr/bin/k9s \
+         /target/usr/bin/zsh \
+         /target/bin/zsh \
+         /target/usr/share/oh-my-zsh \
+         /target/etc/zsh \
+         /target/usr/share/axonwall/zshenv \
+         /target/etc/skel/.zshrc \
+         /target/root/.zshrc \
+         /target/root/.oh-my-zsh \
+         /target/etc/vim/vimrc.local \
+         /target/etc/tmux.conf \
+         /target/etc/axonwall/starship.toml \
+         /target/etc/axonwall/yara \
+         /target/etc/rkhunter.conf.local \
+         /target/etc/headscale \
+         /target/etc/systemd/system/suricata.service.d \
+         /target/var/lib/axonwall/core-k3s \
+         /target/var/lib/axonwall/cli-workstation \
+         /target/var/lib/axonwall/headscale
+
+  if [ -x /target/usr/bin/dpkg ]; then
+    echo "[+] Purging optional workstation, NGFW, virtualization, NAS, diagnostics, and security scanner packages from Minimal /target..."
+    chroot /target /usr/bin/dpkg --purge --force-all \
+      suricata kea-dhcp4-server kea-common unbound dns-root-data frr strongswan strongswan-charon strongswan-starter \
+      openvpn conntrackd keepalived wireguard-tools \
+      samba samba-common-bin nfs-kernel-server open-iscsi tgt \
+      qemu-system-x86 qemu-utils ovmf xorriso bridge-utils libvirt-clients lxc \
+      zsh zsh-autosuggestions zsh-syntax-highlighting vim neovim tmux fzf ripgrep fd-find bat git etckeeper \
+      nmap dnsutils bind9-host net-tools btop htop sysstat iotop iftop slurm mtr-tiny tcpdump \
+      rkhunter chkrootkit yara unhide lynis debsums bpftool python3-drgn linux-perf >/dev/null 2>&1 || true
+  fi
+
+  if [ -f /target/etc/passwd ]; then
+    sed -i 's|:/usr/bin/zsh$|:/bin/bash|g; s|:/bin/zsh$|:/bin/bash|g' /target/etc/passwd 2>/dev/null || true
+  fi
+  if [ -f /target/etc/default/useradd ]; then
+    if grep -q '^SHELL=' /target/etc/default/useradd 2>/dev/null; then
+      sed -i 's|^SHELL=.*|SHELL=/bin/bash|' /target/etc/default/useradd 2>/dev/null || true
+    else
+      echo 'SHELL=/bin/bash' >> /target/etc/default/useradd
+    fi
+  fi
+  if [ -f /target/etc/adduser.conf ]; then
+    if grep -q '^DSHELL=' /target/etc/adduser.conf 2>/dev/null; then
+      sed -i 's|^DSHELL=.*|DSHELL=/bin/bash|' /target/etc/adduser.conf 2>/dev/null || true
+    else
+      echo 'DSHELL=/bin/bash' >> /target/etc/adduser.conf
+    fi
+  fi
+  if [ -f /target/etc/shells ]; then
+    sed -i '\|^/usr/bin/zsh$|d; \|^/bin/zsh$|d' /target/etc/shells 2>/dev/null || true
+  fi
+
+  _cur_hn="$(cat /target/etc/hostname 2>/dev/null | tr -d '\r\n ' || true)"
+  if [ -z "$_cur_hn" ] || [ "$_cur_hn" = "axonwall" ]; then
+    echo "axonwall-minimal" > /target/etc/hostname
+  fi
 fi
 rm -rf /target/usr/share/axonwall/vault /target/usr/share/axonwall/k3s-storage
 if [ "${INSTALL_EDITION:-axonwall}" = "vault" ]; then

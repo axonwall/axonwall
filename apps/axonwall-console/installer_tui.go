@@ -81,7 +81,7 @@ type DiskProbeInput struct {
 
 // InstallerConfig holds all user choices for the Next-Gen Appliance Installer.
 type InstallerConfig struct {
-	Edition        string   // "axonwall", "vault", or "k3s-storage"
+	Edition        string   // "axonwall", "minimal", "vault", or "k3s-storage"
 	OSFamily       string   // "debian" or "alpine"
 	InstallMode    string   // "ab", "zbm", "rolling"
 	SlotMB         int      // 2048, 4096, 8192, 16384
@@ -149,7 +149,7 @@ func readEditionFile() string {
 		return ""
 	}
 	switch strings.TrimSpace(string(data)) {
-	case "axonwall", "vault", "k3s-storage":
+	case "axonwall", "minimal", "vault", "k3s-storage":
 		return strings.TrimSpace(string(data))
 	default:
 		return ""
@@ -168,6 +168,8 @@ func DefaultInstallerConfig() InstallerConfig {
 	if fileEdition := readEditionFile(); fileEdition != "" {
 		edition = fileEdition
 		switch edition {
+		case "minimal":
+			hostname = "axonwall-minimal"
 		case "k3s-storage":
 			hostname = "axonwall-storage"
 		case "vault":
@@ -179,6 +181,9 @@ func DefaultInstallerConfig() InstallerConfig {
 	} else if _, err := os.Stat("/etc/axonwall/.vault-edition"); err == nil {
 		edition = "vault"
 		hostname = "axonwall-vault"
+	} else if _, err := os.Stat("/etc/axonwall/.minimal-edition"); err == nil {
+		edition = "minimal"
+		hostname = "axonwall-minimal"
 	}
 	if data, err := os.ReadFile("/proc/cmdline"); err == nil {
 		cmd := string(data)
@@ -189,6 +194,9 @@ func DefaultInstallerConfig() InstallerConfig {
 			} else if strings.Contains(cmd, "axonwall_edition=vault") || strings.Contains(cmd, "axonwall.edition=vault") {
 				edition = "vault"
 				hostname = "axonwall-vault"
+			} else if strings.Contains(cmd, "axonwall_edition=minimal") || strings.Contains(cmd, "axonwall.edition=minimal") {
+				edition = "minimal"
+				hostname = "axonwall-minimal"
 			}
 		}
 		if strings.Contains(cmd, "axonwall.k3s_role=agent") || strings.Contains(cmd, "axonwall_k3s_role=agent") {
@@ -232,7 +240,7 @@ func DefaultInstallerConfig() InstallerConfig {
 	}
 }
 
-// cycleEdition cycles cfg.Edition through "axonwall" -> "vault" -> "k3s-storage" -> "axonwall",
+// cycleEdition cycles cfg.Edition through "axonwall" -> "minimal" -> "vault" -> "k3s-storage" -> "axonwall",
 // updating cfg.Hostname when empty or matching one of the factory default hostnames.
 func cycleEdition(cfg *InstallerConfig) {
 	if cfg == nil {
@@ -240,9 +248,15 @@ func cycleEdition(cfg *InstallerConfig) {
 	}
 	isDefaultHostname := cfg.Hostname == "" ||
 		cfg.Hostname == "axonwall" ||
+		cfg.Hostname == "axonwall-minimal" ||
 		cfg.Hostname == "axonwall-vault" ||
 		cfg.Hostname == "axonwall-storage"
 	switch cfg.Edition {
+	case "minimal":
+		cfg.Edition = "vault"
+		if isDefaultHostname {
+			cfg.Hostname = "axonwall-vault"
+		}
 	case "vault":
 		cfg.Edition = "k3s-storage"
 		if isDefaultHostname {
@@ -257,9 +271,9 @@ func cycleEdition(cfg *InstallerConfig) {
 			cfg.Hostname = "axonwall"
 		}
 	default:
-		cfg.Edition = "vault"
+		cfg.Edition = "minimal"
 		if isDefaultHostname {
-			cfg.Hostname = "axonwall-vault"
+			cfg.Hostname = "axonwall-minimal"
 		}
 	}
 }
@@ -2743,6 +2757,10 @@ func renderInstallerBanner(cfg InstallerConfig, step int) {
 	subtitle := "Enterprise Linux Next-Generation Firewall & SD-WAN Platform"
 	accent := colorEmerald
 	switch cfg.Edition {
+	case "minimal":
+		title = "AXONWALL MINIMAL EDITION INSTALLER"
+		subtitle = "Hardened Minimal Appliance (Reduced Attack Surface — Plugins on Demand)"
+		accent = colorEmerald
 	case "vault":
 		title = "AXONWALL VAULT EDITION INSTALLER"
 		subtitle = "Hardened Immutable S3 Object-Lock Backup Appliance (SeaweedFS)"
@@ -2922,6 +2940,32 @@ func confirmTargetDiskOverwrite(disks []DiskDevice, cfg InstallerConfig, reader 
 	return strings.EqualFold(strings.TrimSpace(line), "yes")
 }
 
+// printInstallerEditionSelector renders the 4-edition radio row for Step 0 and Step 1.
+func printInstallerEditionSelector(edition string, withDescription bool) {
+	ngfwBadge := colorDim + "( ) Axonwall NGFW" + colorReset
+	minimalBadge := colorDim + "( ) Minimal" + colorReset
+	vaultBadge := colorDim + "( ) Vault S3" + colorReset
+	k3sBadge := colorDim + "( ) K3s+ZFS" + colorReset
+	editionDesc := "Full NGFW, Neovim/ZSH workstation shell, SD-WAN, IDS/IPS, Web UI & Controller"
+	switch edition {
+	case "minimal":
+		minimalBadge = colorEmerald + colorBold + "(●) Minimal" + colorReset
+		editionDesc = "Minimal attack surface: Core Control Plane, Web UI & OpenLDAP/SSSD — plugins on demand"
+	case "vault":
+		vaultBadge = colorBrightCya + colorBold + "(●) Vault S3" + colorReset
+		editionDesc = "Immutable S3 Object-Lock Backup Appliance (SeaweedFS; firewall stack stripped)"
+	case "k3s-storage":
+		k3sBadge = colorCyan + colorBold + "(●) K3s+ZFS" + colorReset
+		editionDesc = "Barebones K3s + OpenZFS + OpenEBS ZFS-LocalPV Host (NGFW/UI bloat stripped)"
+	default:
+		ngfwBadge = colorEmerald + colorBold + "(●) Axonwall NGFW" + colorReset
+	}
+	fmt.Printf(" %s[E] Edition:%s %s  %s  %s  %s\n", colorBold, colorReset, ngfwBadge, minimalBadge, vaultBadge, k3sBadge)
+	if withDescription {
+		fmt.Printf("     %s%s%s\n", colorDim, editionDesc, colorReset)
+	}
+}
+
 // RunNextGenInstallerTUI launches the interactive multi-step Axonwall Next-Gen Installer TUI.
 func RunNextGenInstallerTUI(reader *bufio.Reader) {
 	suppressConsoleNoise()
@@ -2959,18 +3003,8 @@ func RunNextGenInstallerTUI(reader *bufio.Reader) {
 			eval = RefreshHardwareEval(disks, &cfg)
 			layout := ComputePartitionLayout(primaryMB, cfg)
 
-			ngfwBadge := colorDim + "( ) Axonwall NGFW & Router" + colorReset
-			vaultBadge := colorDim + "( ) Axonwall Vault S3" + colorReset
-			k3sBadge := colorDim + "( ) K3s + ZFS Storage Host" + colorReset
-			switch cfg.Edition {
-			case "vault":
-				vaultBadge = colorBrightCya + colorBold + "(●) Axonwall Vault S3" + colorReset
-			case "k3s-storage":
-				k3sBadge = colorCyan + colorBold + "(●) K3s + ZFS Storage Host" + colorReset
-			default:
-				ngfwBadge = colorEmerald + colorBold + "(●) Axonwall NGFW & Router" + colorReset
-			}
-			fmt.Printf(" %s[E] Edition:%s %s  %s  %s\n\n", colorBold, colorReset, ngfwBadge, vaultBadge, k3sBadge)
+			printInstallerEditionSelector(cfg.Edition, true)
+			fmt.Println()
 
 			fmt.Printf(" %sSelect Installation Architecture (Hardware-Evaluated):%s\n", colorBold, colorReset)
 			archOptions := []struct {
@@ -3189,22 +3223,7 @@ func RunNextGenInstallerTUI(reader *bufio.Reader) {
 			renderInstallerBanner(cfg, 1)
 			primaryMB := syncDiskRolesAndConfig(disks, &cfg)
 			normalizeSlotMBForMode(&cfg, recommendedSlotGBForDiskMB(primaryMB), primaryMB)
-			ngfwBadge := colorDim + "( ) Axonwall NGFW & Router" + colorReset
-			vaultBadge := colorDim + "( ) Axonwall Vault S3" + colorReset
-			k3sBadge := colorDim + "( ) K3s + ZFS Storage Host" + colorReset
-			editionDesc := "Full NGFW, SD-WAN, WireGuard/Headscale, IDS/IPS, BGP/OSPF, Web UI & Controller"
-			switch cfg.Edition {
-			case "vault":
-				vaultBadge = colorBrightCya + colorBold + "(●) Axonwall Vault S3" + colorReset
-				editionDesc = "Immutable S3 Object-Lock Backup Appliance (SeaweedFS; firewall stack stripped)"
-			case "k3s-storage":
-				k3sBadge = colorCyan + colorBold + "(●) K3s + ZFS Storage Host" + colorReset
-				editionDesc = "Barebones K3s + OpenZFS + OpenEBS ZFS-LocalPV Host (NGFW/UI bloat stripped)"
-			default:
-				ngfwBadge = colorEmerald + colorBold + "(●) Axonwall NGFW & Router" + colorReset
-			}
-			fmt.Printf(" %s[E] Edition:%s %s  %s  %s\n", colorBold, colorReset, ngfwBadge, vaultBadge, k3sBadge)
-			fmt.Printf("     %s%s%s\n", colorDim, editionDesc, colorReset)
+			printInstallerEditionSelector(cfg.Edition, true)
 			fmt.Println("────────────────────────────────────────────────────────────────────────────────")
 			fmt.Printf(" %sSelect Appliance Storage & Boot Architecture:%s\n\n", colorBold, colorReset)
 

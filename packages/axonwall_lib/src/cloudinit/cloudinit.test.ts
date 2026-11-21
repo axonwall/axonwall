@@ -413,4 +413,25 @@ axonwall:
     };
     expect(() => parseCloudInitYaml(JSON.stringify(badNullYaml))).toThrow(/Token cannot contain newlines or null bytes/);
   });
+
+  it('parses edition: minimal and formats INSTALL_EDITION=minimal', () => {
+    const yamlText = `#cloud-config
+hostname: minimal-gw-01
+axonwall:
+  edition: minimal
+  storage:
+    layout_mode: standard_ab
+    target_disks:
+      - /dev/sda
+`;
+    const parsed = parseCloudInitYaml(yamlText);
+    expect(parsed.axonwall?.edition).toBe('minimal');
+
+    const storage = parsed.axonwall!.storage ?? CloudInitStorageSchema.parse({});
+    const choices = cloudInitStorageToInstallerChoices(storage, parsed.axonwall);
+    expect(choices.INSTALL_EDITION).toBe('minimal');
+
+    const envStr = formatInstallerChoicesEnv(choices);
+    expect(envStr).toContain("INSTALL_EDITION='minimal'");
+  });
 });

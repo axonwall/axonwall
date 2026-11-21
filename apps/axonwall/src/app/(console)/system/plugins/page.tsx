@@ -188,8 +188,39 @@ export default function PluginManagerPage() {
         }
       }
 
+      const isEnablingRole =
+        (id === 'core-firewall' && !currentFw && nextCaps.firewallEnabled) ||
+        (id === 'core-nas' && !currentNas && nextCaps.nasEnabled) ||
+        (id === 'core-k3s' && !currentK3s && nextCaps.k3sEnabled) ||
+        (id === 'core-virt' && !currentVirt && nextCaps.virtEnabled) ||
+        (id === 'core-vigilante' && !currentVigilante && nextCaps.vigilanteEnabled);
+
+      if (isEnablingRole) {
+        if (id === 'core-vigilante' && !currentK3s) {
+          const k3sInstallRes = await executePluginAction('core-k3s', 'install');
+          if (!k3sInstallRes.success) {
+            setStatusBanner({
+              type: 'error',
+              text: `Failed to install required core-k3s dependency: ${k3sInstallRes.message}`,
+              output: k3sInstallRes.output,
+            });
+            return;
+          }
+        }
+        const installRes = await executePluginAction(id, 'install');
+        if (!installRes.success) {
+          setStatusBanner({
+            type: 'error',
+            text: `Failed to install/enable ${id}: ${installRes.message}`,
+            output: installRes.output,
+          });
+          return;
+        }
+      }
+
       const res = await applyState(next);
       setState(next);
+      refreshLivePlugins();
       window.dispatchEvent(new Event('axonwall-capabilities-updated'));
       setStatusBanner({
         type: 'success',

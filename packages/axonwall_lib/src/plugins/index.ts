@@ -405,7 +405,7 @@ export const BUILTIN_PLUGINS: PluginManifest[] = [
         'kubectl',
       ],
     },
-    cliBinaries: ['zsh', 'vim', 'nvim', 'starship', 'tmux', 'kubectl', 'helm'],
+    cliBinaries: ['zsh', 'vim', 'nvim', 'starship', 'tmux'],
     // VIM + NEOVIM ARE BUNDLED, NOT SYSTEM-INSTALLED — Debian only.
     // vim is DROPPED entirely: vi/vim become symlinks to the bundled
     // nvim in the plugin's bin/ dir, so the vim .deb set is not

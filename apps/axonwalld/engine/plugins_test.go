@@ -194,3 +194,61 @@ func TestPluginManager_HarvesterToggleWired(t *testing.T) {
 		t.Fatalf("plugin must be disabled after DisablePlugin")
 	}
 }
+
+func TestPluginManager_MinimalOnDemandHelpers(t *testing.T) {
+	def, ok := findExtensionPluginDefinition("cli-workstation")
+	if !ok {
+		t.Fatalf("cli-workstation definition missing")
+	}
+	for _, unexpected := range []string{"kubectl", "helm"} {
+		for _, rb := range def.RequiredBinaries {
+			if rb == unexpected {
+				t.Fatalf("cli-workstation RequiredBinaries should not include %q (minimal installs work without K3s): %v", unexpected, def.RequiredBinaries)
+			}
+		}
+	}
+
+	if pkgs := coreRoleOSPackages("debian", "core-firewall"); len(pkgs) == 0 {
+		t.Fatalf("coreRoleOSPackages(debian, core-firewall) should return OS packages")
+	}
+	if pkgs := coreRoleOSPackages("debian", "core-k3s"); len(pkgs) == 0 {
+		t.Fatalf("coreRoleOSPackages(debian, core-k3s) should return OS packages")
+	}
+	if pkgs := coreRoleOSPackages("alpine", "core-nas"); len(pkgs) == 0 {
+		t.Fatalf("coreRoleOSPackages(alpine, core-nas) should return OS packages")
+	}
+	if pkgs := coreRoleOSPackages("arch", "core-virt"); len(pkgs) == 0 {
+		t.Fatalf("coreRoleOSPackages(arch, core-virt) should return OS packages")
+	}
+
+	emptyAptDir := t.TempDir()
+	if !aptListsNeedUpdate(emptyAptDir) {
+		t.Fatalf("empty apt lists dir should report update needed")
+	}
+	if !aptListsNeedUpdate(filepath.Join(emptyAptDir, "nonexistent")) {
+		t.Fatalf("missing apt lists dir should report update needed")
+	}
+	_ = os.WriteFile(filepath.Join(emptyAptDir, "lock"), nil, 0644)
+	if !aptListsNeedUpdate(emptyAptDir) {
+		t.Fatalf("apt lists dir without *_Packages should report update needed")
+	}
+	_ = os.WriteFile(filepath.Join(emptyAptDir, "deb.debian.org_debian_dists_trixie_main_binary-amd64_Packages"), []byte("Package: nftables\n"), 0644)
+	if aptListsNeedUpdate(emptyAptDir) {
+		t.Fatalf("apt lists dir with *_Packages should not require update")
+	}
+
+	rootMinimalMarker := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(rootMinimalMarker, "etc/axonwall"), 0755)
+	if isMinimalEditionRoot(rootMinimalMarker) {
+		t.Fatalf("root without edition file or .minimal-edition must not report minimal")
+	}
+	_ = os.WriteFile(filepath.Join(rootMinimalMarker, "etc/axonwall/edition"), []byte("minimal\n"), 0644)
+	if !isMinimalEditionRoot(rootMinimalMarker) {
+		t.Fatalf("root with edition=minimal must report minimal")
+	}
+	_ = os.WriteFile(filepath.Join(rootMinimalMarker, "etc/axonwall/edition"), []byte("axonwall\n"), 0644)
+	_ = os.WriteFile(filepath.Join(rootMinimalMarker, "etc/axonwall/.minimal-edition"), nil, 0644)
+	if !isMinimalEditionRoot(rootMinimalMarker) {
+		t.Fatalf("root with .minimal-edition marker must report minimal")
+	}
+}

@@ -15,13 +15,16 @@ if command -v plymouth >/dev/null 2>&1 && plymouth --ping 2>/dev/null; then
   plymouth display-message --text="Provisioning Axonwall Security Appliance..." 2>/dev/null || true
 fi
 
-# D-M9 (marker): this IS the axonwall firstboot, so its edition is known
-# by construction. Stamp the canonical edition file (creating it if the
-# installer/builder didn't, correcting it if it disagrees) and log it.
+# D-M9 (marker): preserve minimal edition if installed as Minimal, otherwise
+# stamp 'axonwall' on the standard edition firstboot.
+TARGET_EDITION="axonwall"
 _edition_now="$(tr -d ' \t\r\n' < /etc/axonwall/edition 2>/dev/null || true)"
-if [[ "$_edition_now" != "axonwall" ]]; then
-  printf '%s\n' "axonwall" > /etc/axonwall/edition
-  echo "[Axonwall Firstboot] edition file set to 'axonwall' (was '${_edition_now:-<missing>}')"
+if [[ "$_edition_now" == "minimal" || -f /etc/axonwall/.minimal-edition ]]; then
+  TARGET_EDITION="minimal"
+fi
+if [[ "$_edition_now" != "$TARGET_EDITION" ]]; then
+  printf '%s\n' "$TARGET_EDITION" > /etc/axonwall/edition
+  echo "[Axonwall Firstboot] edition file set to '${TARGET_EDITION}' (was '${_edition_now:-<missing>}')"
 fi
 
 # Suppress kernel printk and systemd console status broadcasts so background
@@ -220,8 +223,11 @@ if [[ -x /usr/local/bin/axonwall-cloud-init ]]; then
   /usr/local/bin/axonwall-cloud-init --no-apply 2>&1 || true
 fi
 
-# Detect Host Mode (core-firewall disabled via cloud-init or system.yaml)
+# Detect Host Mode (Minimal edition or core-firewall disabled via cloud-init or system.yaml)
 HOST_MODE=0
+if [[ "$TARGET_EDITION" == "minimal" ]]; then
+  HOST_MODE=1
+fi
 for _cfg_file in /etc/axonwall/conf.d/99-cloudinit.yaml /etc/axonwall/system.yaml /var/lib/cloud/seed/nocloud-net/user-data /var/lib/cloud/seed/nocloud/user-data /etc/axonwall/cloud-config.yaml; do
   if [[ -f "$_cfg_file" ]] && grep -qE 'firewallEnabled:[[:space:]]*false' "$_cfg_file" 2>/dev/null; then
     HOST_MODE=1
@@ -531,10 +537,12 @@ for _sudo_user in $(getent group sudo wheel 2>/dev/null | awk -F: '{print $4}' |
   [[ -n "$_sudo_user" ]] && usermod -a -G axonwall-api "$_sudo_user" 2>/dev/null || true
 done
 
-# Headscale identity split (B-12 follow-up): headscale runs as its own user
-groupadd -r axonwall-headscale 2>/dev/null || true
-if ! id -u axonwall-headscale &>/dev/null; then
-  useradd -r -g axonwall-headscale -s /usr/sbin/nologin -d /var/lib/axonwall axonwall-headscale 2>/dev/null || true
+# Headscale identity split (B-12 follow-up): headscale runs as its own user when installed
+if [[ "$TARGET_EDITION" != "minimal" || -x /usr/sbin/headscale ]]; then
+  groupadd -r axonwall-headscale 2>/dev/null || true
+  if ! id -u axonwall-headscale &>/dev/null; then
+    useradd -r -g axonwall-headscale -s /usr/sbin/nologin -d /var/lib/axonwall axonwall-headscale 2>/dev/null || true
+  fi
 fi
 
 # Provision the hub TLS PKI (audit B-14): an on-box appliance CA plus a
@@ -581,8 +589,11 @@ chmod 750 /etc/axonwall/certs 2>/dev/null || true
 chmod 0600 /etc/axonwall/certs/hub.key 2>/dev/null || true
 chmod 0644 /etc/axonwall/certs/hub.crt 2>/dev/null || true
 
-# Initialize persistent directories on /var/lib/axonwall (Headscale, OpenLDAP, HA PKI, shared /home)
-mkdir -p /var/lib/axonwall/headscale /var/lib/axonwall/bundles /var/lib/axonwall/etc-axonwall /var/lib/axonwall/gitops /var/lib/axonwall/captures /var/lib/axonwall/backups /var/log/axonwall /var/cache/axonwall-ui /run/headscale
+# Initialize persistent directories on /var/lib/axonwall (OpenLDAP, HA PKI, shared /home, optional Headscale)
+mkdir -p /var/lib/axonwall/bundles /var/lib/axonwall/etc-axonwall /var/lib/axonwall/gitops /var/lib/axonwall/captures /var/lib/axonwall/backups /var/log/axonwall /var/cache/axonwall-ui
+if [[ "$TARGET_EDITION" != "minimal" || -x /usr/sbin/headscale ]]; then
+  mkdir -p /var/lib/axonwall/headscale /run/headscale
+fi
 mkdir -p /var/lib/axonwall/home /var/lib/axonwall/ldap/config /var/lib/axonwall/ldap/data /var/lib/axonwall/ldap/accesslog /var/lib/axonwall/ldap/backups
 mkdir -p /var/lib/axonwall/secrets/ldap /var/lib/axonwall/secrets/ha-pki
 chown root:axonwall-api /var/lib/axonwall /var/log/axonwall 2>/dev/null || true
@@ -597,7 +608,6 @@ for f in /var/lib/axonwall/state.json /var/lib/axonwall/slot_versions.json /var/
     chmod 0660 "$f" 2>/dev/null || true
   fi
 done
-chown -R axonwall-headscale:axonwall-headscale /var/lib/axonwall/headscale 2>/dev/null || true
 chmod 1775 /var/lib/axonwall 2>/dev/null || true
 chmod 0755 /var/lib/axonwall/home 2>/dev/null || true
 chown root:root /var/lib/axonwall/home 2>/dev/null || true
@@ -607,10 +617,13 @@ if id -u openldap &>/dev/null; then
   chown -R openldap:openldap /var/lib/axonwall/ldap 2>/dev/null || true
   chmod 0750 /var/lib/axonwall/ldap /var/lib/axonwall/ldap/config /var/lib/axonwall/ldap/data /var/lib/axonwall/ldap/accesslog /var/lib/axonwall/ldap/backups 2>/dev/null || true
 fi
-chown axonwall-headscale:axonwall-api /run/headscale 2>/dev/null || true
-chown root:axonwall-api /etc/headscale/config.yaml 2>/dev/null || true
-chmod 0640 /etc/headscale/config.yaml 2>/dev/null || true
-chmod 770 /var/lib/axonwall/headscale /run/headscale 2>/dev/null || true
+if [[ "$TARGET_EDITION" != "minimal" || -x /usr/sbin/headscale ]]; then
+  chown -R axonwall-headscale:axonwall-headscale /var/lib/axonwall/headscale 2>/dev/null || true
+  chown axonwall-headscale:axonwall-api /run/headscale 2>/dev/null || true
+  chown root:axonwall-api /etc/headscale/config.yaml 2>/dev/null || true
+  chmod 0640 /etc/headscale/config.yaml 2>/dev/null || true
+  chmod 770 /var/lib/axonwall/headscale /run/headscale 2>/dev/null || true
+fi
 
 # Register /usr/local/bin/axonwall-opshell in /etc/shells
 if [[ -f /etc/shells ]] && ! grep -qxF '/usr/local/bin/axonwall-opshell' /etc/shells; then
@@ -798,7 +811,7 @@ for vim_bin in /usr/bin/vim.basic /usr/bin/vim.nox /usr/bin/vim.tiny /usr/bin/vi
   fi
 done
 
-if [[ -x /usr/bin/zsh ]]; then
+if [[ "$TARGET_EDITION" != "minimal" && -x /usr/bin/zsh ]]; then
   if [[ -f /etc/shells ]] && ! grep -qxF '/usr/bin/zsh' /etc/shells; then
     echo '/usr/bin/zsh' >> /etc/shells
   fi
@@ -870,10 +883,17 @@ ROOTKEY_EOF
   rm -f /etc/unbound/unbound.conf.d/root-auto-trust-anchor-file.conf 2>/dev/null || true
 fi
 
-systemctl enable axonwalld axonwall-controller axonwall-ui headscale ssh chrony sysstat || true
-# Start/restart axonwalld synchronously before axonwallctl apply so the agent socket stays live during apply
-systemctl try-restart axonwalld || true
-systemctl restart --no-block axonwall-ui axonwall-controller headscale ssh chrony || true
+if [[ "$TARGET_EDITION" == "minimal" ]]; then
+  systemctl enable axonwalld axonwall-controller axonwall-ui ssh chrony || true
+  # Start/restart axonwalld synchronously before axonwallctl apply so the agent socket stays live during apply
+  systemctl try-restart axonwalld || true
+  systemctl restart --no-block axonwall-ui axonwall-controller ssh chrony || true
+else
+  systemctl enable axonwalld axonwall-controller axonwall-ui headscale ssh chrony sysstat || true
+  # Start/restart axonwalld synchronously before axonwallctl apply so the agent socket stays live during apply
+  systemctl try-restart axonwalld || true
+  systemctl restart --no-block axonwall-ui axonwall-controller headscale ssh chrony || true
+fi
 
 if [[ -x /usr/local/bin/axonwallctl ]]; then
   echo "[Axonwall Firstboot] Compiling declarative YAML configuration..."
@@ -892,7 +912,19 @@ for _cand_if in "$LAN_IF" "$OPT1_IF" "$OPT2_IF" "$WAN_IF"; do
 done
 PRIMARY_IP="${PRIMARY_IP:-192.168.1.1}"
 
-cat << ISSUE_EOF > /etc/issue
+if [[ "$TARGET_EDITION" == "minimal" ]]; then
+  cat << ISSUE_EOF > /etc/issue
+================================================================================
+Axonwall Minimal Edition (Debian 13) — Reduced Attack Surface Host
+Web Console       : https://${PRIMARY_IP}:2966
+Roles & Plugins   : Install on demand from Web Console -> System -> Plugins or axonwallctl
+Appliance Console : Login with administrator credentials
+================================================================================
+\n \l
+
+ISSUE_EOF
+else
+  cat << ISSUE_EOF > /etc/issue
 ================================================================================
 Axonwall Appliance (Debian 13)
 Web Console (LAN): https://${PRIMARY_IP}:2966
@@ -902,13 +934,18 @@ Appliance Console: Login with administrator credentials
 \n \l
 
 ISSUE_EOF
+fi
 
 echo "================================================================================"
 echo "[Axonwall Firstboot] Provisioning complete."
-echo "  Web Management Console (LAN): https://${PRIMARY_IP}:2966"
-echo "  WAN Inbound Access          : BLOCKED by default"
-echo "  Default Administrator       : admin"
-echo "  Appliance Console           : Login authentication enabled"
+echo "  Web Management Console: https://${PRIMARY_IP}:2966"
+if [[ "$TARGET_EDITION" == "minimal" ]]; then
+  echo "  Edition               : Minimal (Reduced Attack Surface Host)"
+else
+  echo "  WAN Inbound Access    : BLOCKED by default"
+fi
+echo "  Default Administrator : admin"
+echo "  Appliance Console     : Login authentication enabled"
 echo "================================================================================"
 
 # Marker removed only now, after every tail step (daemon-reload, service

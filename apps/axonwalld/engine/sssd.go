@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 )
 
@@ -98,6 +99,7 @@ domains = axonwall
 filter_users = root,axonwall,axonwall-controller,openldap,ldap,sshd,nobody
 filter_groups = root,axonwall,axonwall-api,axonwall-controller,openldap,ldap,sshd,nobody,nogroup
 default_shell = /usr/bin/zsh
+shell_fallback = /bin/bash
 entry_negative_timeout = 5
 
 [pam]
@@ -172,11 +174,61 @@ func EnsureSSSDConfigured(baseDN string) error {
 	return EnsureSSSDConfiguredWithPeer(baseDN, "")
 }
 
+func isMinimalEditionRoot(root string) bool {
+	if _, err := os.Stat(filepath.Join(root, "etc/axonwall/.minimal-edition")); err == nil {
+		return true
+	}
+	if raw, err := os.ReadFile(filepath.Join(root, "etc/axonwall/edition")); err == nil {
+		return strings.TrimSpace(string(raw)) == "minimal"
+	}
+	return false
+}
+
+// SyncZshInEtcShells adds or removes /usr/bin/zsh and /bin/zsh from /etc/shells
+// based on whether zsh actually exists on disk (or when removing cli-workstation).
+func SyncZshInEtcShells(present bool) {
+	data, err := os.ReadFile("/etc/shells")
+	if err != nil {
+		return
+	}
+	lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+	if present {
+		changed := false
+		joined := strings.Join(lines, "\n") + "\n"
+		for _, sh := range []string{"/usr/bin/zsh", "/bin/zsh"} {
+			if _, serr := os.Stat(sh); serr == nil && !strings.Contains(joined, sh+"\n") {
+				lines = append(lines, sh)
+				joined += sh + "\n"
+				changed = true
+			}
+		}
+		if changed {
+			_ = os.WriteFile("/etc/shells", []byte(strings.Join(lines, "\n")+"\n"), 0644)
+		}
+		return
+	}
+	filtered := make([]string, 0, len(lines))
+	changed := false
+	for _, line := range lines {
+		tr := strings.TrimSpace(line)
+		if tr == "/usr/bin/zsh" || tr == "/bin/zsh" {
+			changed = true
+			continue
+		}
+		filtered = append(filtered, line)
+	}
+	if changed {
+		_ = os.WriteFile("/etc/shells", []byte(strings.Join(filtered, "\n")+"\n"), 0644)
+	}
+}
+
 // EnsureSSSDConfiguredWithPeer configures SSSD with optional HA peer LDAPS failover.
 func EnsureSSSDConfiguredWithPeer(baseDN string, peerLDAPURI string) error {
-	// 0. On minimal Alpine appliances (where /usr/bin/zsh is absent), symlink
+	// 0. On full Alpine appliances (where /usr/bin/zsh is absent), symlink
 	// /usr/bin/zsh -> /bin/ash or /bin/sh so LDAP users can log in over SSH cleanly.
-	if DetectOSFamily() == "alpine" {
+	// On Minimal edition, do NOT create a fake /usr/bin/zsh symlink so cli-workstation
+	// stays genuinely uninstalled (applyLocalNSSMirror resolves fallback to /bin/ash).
+	if DetectOSFamily() == "alpine" && !isMinimalEditionRoot("/") {
 		if _, err := os.Stat("/usr/bin/zsh"); os.IsNotExist(err) {
 			if _, err := os.Stat("/bin/zsh"); err == nil {
 				_ = os.Symlink("/bin/zsh", "/usr/bin/zsh")
@@ -190,15 +242,19 @@ func EnsureSSSDConfiguredWithPeer(baseDN string, peerLDAPURI string) error {
 
 	EnsureAuthorizedKeysHelperInstalled()
 
-	// 1. Register /usr/local/bin/axonwall-opshell and /usr/bin/zsh in /etc/shells
+	// 1. Register /usr/local/bin/axonwall-opshell and existing zsh binaries in /etc/shells
 	if shellsData, err := os.ReadFile("/etc/shells"); err == nil {
 		updated := strings.TrimRight(string(shellsData), "\n")
 		changed := false
-		for _, sh := range []string{"/usr/bin/zsh", "/bin/zsh", "/usr/local/bin/axonwall-opshell"} {
-			if !strings.Contains(updated+"\n", sh+"\n") {
+		for _, sh := range []string{"/usr/bin/zsh", "/bin/zsh"} {
+			if _, serr := os.Stat(sh); serr == nil && !strings.Contains(updated+"\n", sh+"\n") {
 				updated += "\n" + sh
 				changed = true
 			}
+		}
+		if _, serr := os.Stat("/usr/local/bin/axonwall-opshell"); serr == nil && !strings.Contains(updated+"\n", "/usr/local/bin/axonwall-opshell\n") {
+			updated += "\n/usr/local/bin/axonwall-opshell"
+			changed = true
 		}
 		if changed {
 			_ = os.WriteFile("/etc/shells", []byte(updated+"\n"), 0644)

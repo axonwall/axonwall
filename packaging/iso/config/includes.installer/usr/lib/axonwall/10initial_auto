@@ -182,13 +182,15 @@ if [ "$method" ] && [ -z "$disks" ]; then
 	# Detect preseeded / kernel cmdline / Cloud-Init appliance edition & K3s role
 	if db_get axonwall/appliance_edition 2>/dev/null && [ -n "$RET" ]; then
 		case "$RET" in
-			vault|k3s-storage|axonwall) install_edition="$RET" ;;
+			vault|k3s-storage|minimal|axonwall) install_edition="$RET" ;;
 		esac
 	fi
 	if grep -qE '(^|[[:space:]])(axonwall_edition=vault|axonwall\.edition=vault)($|[[:space:]])' /proc/cmdline 2>/dev/null; then
 		install_edition="vault"
 	elif grep -qE '(^|[[:space:]])(axonwall_edition=k3s-storage|axonwall\.edition=k3s-storage)($|[[:space:]])' /proc/cmdline 2>/dev/null; then
 		install_edition="k3s-storage"
+	elif grep -qE '(^|[[:space:]])(axonwall_edition=minimal|axonwall\.edition=minimal)($|[[:space:]])' /proc/cmdline 2>/dev/null; then
+		install_edition="minimal"
 	fi
 	if db_get axonwall/k3s_role 2>/dev/null && [ -n "$RET" ]; then
 		case "$RET" in
@@ -203,6 +205,7 @@ if [ "$method" ] && [ -z "$disks" ]; then
 		case "$_ci_ed" in
 			vault|s3) install_edition="vault" ;;
 			k3s-storage|k3s_storage|k3s) install_edition="k3s-storage" ;;
+			minimal|hardened|bare) install_edition="minimal" ;;
 			axonwall|ngfw|firewall) install_edition="axonwall" ;;
 		esac
 		if grep -qE '^[[:space:]]*k3s_storage:' /var/lib/partman/cloud-config.yaml 2>/dev/null; then
@@ -424,7 +427,7 @@ if [ "$method" ] && [ -z "$disks" ]; then
 			ask_critical axonwall/appliance_edition
 			db_get axonwall/appliance_edition || true
 			case "$RET" in
-				vault|k3s-storage|axonwall) install_edition="$RET" ;;
+				vault|k3s-storage|minimal|axonwall) install_edition="$RET" ;;
 			esac
 		fi
 		if [ "$install_edition" = "k3s-storage" ] && { [ "$partition_mode" = "guided" ] || [ "$partition_mode" = "wizard" ]; }; then

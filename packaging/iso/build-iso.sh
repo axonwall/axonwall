@@ -8,9 +8,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORK_DIR="${WORK_DIR:-${SCRIPT_DIR}/build}"
 OUTPUT_DIR="${OUTPUT_DIR:-${SCRIPT_DIR}/output}"
 
-# Appliance flavor: "axonwall" (the firewall, default), "vault"
-# (Vault Edition: SeaweedFS immutable-backup appliance), or "k3s-storage"
-# (Barebones K3s + OpenZFS + OpenEBS Storage Host; firewall/UI stack absent).
+# Appliance flavor: "axonwall" (the firewall, default), "minimal"
+# (Reduced Attack Surface Host), "vault" (Vault Edition: SeaweedFS
+# immutable-backup appliance), or "k3s-storage" (Barebones K3s + OpenZFS
+# + OpenEBS Storage Host; firewall/UI stack absent).
 FLAVOR="${AXONWALL_FLAVOR:-axonwall}"
 case "${FLAVOR}" in
   axonwall)
@@ -18,6 +19,12 @@ case "${FLAVOR}" in
     ISO_APPLICATION="Axonwall Firewall & Router Appliance"
     ISO_VOLUME="AXONWALL_D13"
     LIVE_HOSTNAME="axonwall"
+    ;;
+  minimal)
+    ISO_NAME="axonwall-minimal-debian13-amd64.iso"
+    ISO_APPLICATION="Axonwall Minimal Appliance"
+    ISO_VOLUME="AXONWALL_MIN"
+    LIVE_HOSTNAME="axonwall-minimal"
     ;;
   vault)
     ISO_NAME="axonwall-vault-debian13-amd64.iso"
@@ -32,7 +39,7 @@ case "${FLAVOR}" in
     LIVE_HOSTNAME="axonwall-storage"
     ;;
   *)
-    echo "[!] Unknown AXONWALL_FLAVOR '${FLAVOR}' (expected axonwall, vault, or k3s-storage)" >&2
+    echo "[!] Unknown AXONWALL_FLAVOR '${FLAVOR}' (expected axonwall, minimal, vault, or k3s-storage)" >&2
     exit 1
     ;;
 esac
@@ -222,17 +229,50 @@ elif [[ "${FLAVOR}" == "k3s-storage" ]]; then
   cp "${SCRIPT_DIR}/../k3s-storage/zfs-operator.yaml" config/includes.chroot/usr/share/axonwall/k3s/zfs-operator.yaml
   cp "${SCRIPT_DIR}/../k3s-storage/preseed-k3s-storage.cfg" config/includes.installer/preseed.cfg
   cp "${SCRIPT_DIR}/../k3s-storage/preseed-k3s-storage-binary.cfg" config/includes.binary/preseed.cfg
+elif [[ "${FLAVOR}" == "minimal" ]]; then
+  echo "[+] Applying Minimal Edition overlay (stripping optional payloads)..."
+  rm -rf config/includes.chroot/usr/local/bin/axonwall-ha-notify \
+         config/includes.chroot/usr/local/bin/axonwall-import \
+         config/includes.chroot/usr/local/bin/axonwall-hunt-rootkits \
+         config/includes.chroot/usr/local/bin/hunt-io-uring-implants.sh \
+         config/includes.chroot/usr/local/bin/hunt-ebpf-rootkits.sh \
+         config/includes.chroot/usr/local/bin/audit_hidden_bpf_prog_idr.py \
+         config/includes.chroot/etc/headscale \
+         config/includes.chroot/etc/systemd/system/suricata.service.d \
+         config/includes.chroot/etc/rkhunter.conf.local \
+         config/includes.chroot/etc/axonwall/starship.toml \
+         config/includes.chroot/etc/axonwall/yara \
+         config/includes.chroot/etc/zsh \
+         config/includes.chroot/etc/skel/.zshrc \
+         config/includes.chroot/etc/vim/vimrc.local \
+         config/includes.chroot/etc/tmux.conf \
+         config/includes.chroot/usr/share/oh-my-zsh \
+         config/includes.chroot/usr/share/dns/root.key \
+         config/includes.chroot/var/lib/unbound \
+         config/includes.chroot/var/lib/axonwall/core-k3s \
+         config/includes.chroot/var/lib/axonwall/cli-workstation
+  if [[ -f config/includes.chroot/usr/lib/sysusers.d/axonwall.conf ]]; then
+    sed -i '/headscale/d' config/includes.chroot/usr/lib/sysusers.d/axonwall.conf
+  fi
+  if [[ -f config/includes.chroot/usr/lib/tmpfiles.d/axonwall.conf ]]; then
+    sed -i '/headscale/d' config/includes.chroot/usr/lib/tmpfiles.d/axonwall.conf
+  fi
+  mkdir -p config/includes.chroot/etc/axonwall config/includes.chroot/var/lib/axonwall
+  touch config/includes.chroot/etc/axonwall/.minimal-edition
+  touch config/includes.chroot/etc/axonwall/.firstboot
+  printf 'disabled=true\n' > config/includes.chroot/etc/axonwall/workstation.disabled
+  printf '{"core-firewall":true,"core-nas":true,"core-k3s":true,"core-virt":true,"core-vigilante":true,"cli-workstation":true,"host-malware-rootkit":true,"coroot-ebpf-apm":true}\n' > config/includes.chroot/var/lib/axonwall/plugins-disabled.json
 fi
 
 # D-M9 (marker): the canonical edition file for the live installer
 # environment (and, via this chroot, for the cloud image and every
 # install the TUI/d-i paths perform from this ISO). FLAVOR is the
-# builder's edition axis, validated to axonwall|vault|k3s-storage.
+# builder's edition axis, validated to axonwall|minimal|vault|k3s-storage.
+mkdir -p config/includes.chroot/etc/axonwall/
 printf '%s\n' "${FLAVOR}" > config/includes.chroot/etc/axonwall/edition
 
 # Ensure firstboot marker directory and service enable symlink exist
-mkdir -p config/includes.chroot/etc/axonwall/
-if [[ "${FLAVOR}" == "axonwall" ]]; then
+if [[ "${FLAVOR}" == "axonwall" || "${FLAVOR}" == "minimal" ]]; then
   touch config/includes.chroot/etc/axonwall/.firstboot
 fi
 mkdir -p config/includes.chroot/etc/systemd/system/multi-user.target.wants/
@@ -263,6 +303,17 @@ if [[ "${FLAVOR}" == "axonwall" ]]; then
 
   mkdir -p config/includes.chroot/etc/headscale
   cp "${SCRIPT_DIR}/../debian/headscale-config.yaml" config/includes.chroot/etc/headscale/config.yaml
+
+  # Copy default baseline lockdown ruleset
+  mkdir -p config/includes.chroot/usr/share/axonwall/
+  cp "${SCRIPT_DIR}/../debian/lockdown.nft" config/includes.chroot/usr/share/axonwall/
+elif [[ "${FLAVOR}" == "minimal" ]]; then
+  cp "${SCRIPT_DIR}/../debian/axonwalld.service" config/includes.chroot/etc/systemd/system/
+  ln -sf /etc/systemd/system/axonwalld.service config/includes.chroot/etc/systemd/system/multi-user.target.wants/axonwalld.service
+  cp "${SCRIPT_DIR}/../debian/axonwall-controller.service" config/includes.chroot/etc/systemd/system/
+  ln -sf /etc/systemd/system/axonwall-controller.service config/includes.chroot/etc/systemd/system/multi-user.target.wants/axonwall-controller.service
+  cp "${SCRIPT_DIR}/../debian/axonwall-ui.service" config/includes.chroot/etc/systemd/system/
+  ln -sf /etc/systemd/system/axonwall-ui.service config/includes.chroot/etc/systemd/system/multi-user.target.wants/axonwall-ui.service
 
   # Copy default baseline lockdown ruleset
   mkdir -p config/includes.chroot/usr/share/axonwall/
@@ -641,7 +692,7 @@ elif [[ "${FLAVOR}" == "k3s-storage" ]]; then
   done
   # Verification record for the staged tree (see the helper above).
   write_core_k3s_bundled_json config/includes.chroot/var/lib/axonwall/core-k3s
-else
+elif [[ "${FLAVOR}" == "vault" ]]; then
 # Fetch SeaweedFS binary (Vault Edition storage engine)
 WEED_VERSION="4.48"
 # Pinned SHA-256 of the upstream release tarball (verified from the
@@ -662,7 +713,7 @@ if [[ ! -f config/includes.chroot/usr/sbin/weed ]]; then
 fi
 fi
 
-if [[ "${FLAVOR}" == "axonwall" ]]; then
+if [[ "${FLAVOR}" == "axonwall" || "${FLAVOR}" == "minimal" ]]; then
   if [[ -f "${SCRIPT_DIR}/../../apps/axonwalld/bin/axonwalld" ]]; then
     cp "${SCRIPT_DIR}/../../apps/axonwalld/bin/axonwalld" config/includes.chroot/usr/sbin/
     chmod +x config/includes.chroot/usr/sbin/axonwalld
@@ -712,7 +763,7 @@ if [[ -f "${SCRIPT_DIR}/../edge-uki/output/axonwall-edge-sku-vm-virtio.efi" ]]; 
 fi
 fi
 
-if [[ "${FLAVOR}" == "axonwall" ]]; then
+if [[ "${FLAVOR}" == "axonwall" || "${FLAVOR}" == "minimal" ]]; then
 # Bundle Axonwall Web Console (Next.js standalone) and Controller into /opt/axonwall/
 echo "[+] Bundling Axonwall Web Console & Controller into /opt/axonwall..."
 mkdir -p config/includes.chroot/opt/axonwall/apps/axonwall
@@ -797,7 +848,7 @@ for _req_boot_deb in "grub-pc_" "grub-efi-amd64_"; do
   fi
 done
 
-if [[ "${FLAVOR}" == "axonwall" ]]; then
+if [[ "${FLAVOR}" == "axonwall" || "${FLAVOR}" == "minimal" ]]; then
 # Preseed slapd in live-build chroot so package installation does not prompt or create unconfigured DB
 mkdir -p config/preseed
 cat << 'PRESEED_EOF' > config/preseed/slapd.cfg.chroot
@@ -1045,6 +1096,96 @@ debsums
 bpftool
 python3-drgn
 linux-perf
+EOF
+elif [[ "${FLAVOR}" == "minimal" ]]; then
+# Minimal Edition package set: reduced attack surface core OS + OpenZFS +
+# Axonwall control plane, Web UI, OpenLDAP/SSSD, and base system tooling.
+cat << 'EOF' > config/package-lists/axonwall.list.chroot
+linux-image-amd64
+live-boot
+live-boot-initramfs-tools
+live-config
+live-config-systemd
+user-setup
+sudo
+firmware-linux-free
+firmware-realtek
+firmware-atheros
+firmware-bnx2
+firmware-bnx2x
+firmware-iwlwifi
+intel-microcode
+amd64-microcode
+systemd
+systemd-sysv
+plymouth
+plymouth-label
+fontconfig
+fontconfig-config
+fonts-dejavu-core
+grub-pc
+grub-pc-bin
+grub-efi-amd64-bin
+efibootmgr
+dosfstools
+mtools
+e2fsprogs
+squashfs-tools
+ucf
+os-prober
+isolinux
+syslinux
+syslinux-common
+extlinux
+nftables
+iproute2
+sqlite3
+conntrack
+ethtool
+pciutils
+curl
+wget
+jq
+ca-certificates
+nodejs
+less
+binutils
+zstd
+xz-utils
+bzip2
+unzip
+openssl
+kmod
+procps
+iputils-ping
+nano
+locales
+rsync
+python3
+mdadm
+gdisk
+parted
+smartmontools
+linux-headers-amd64
+zfs-dkms
+zfsutils-linux
+zfs-initramfs
+cloud-init
+cloud-guest-utils
+cryptsetup
+systemd-cryptsetup
+tpm2-tools
+xfsprogs
+openssh-server
+openssh-client
+slapd
+ldap-utils
+sssd-ldap
+sssd-tools
+libnss-sss
+libpam-sss
+libpam-modules
+chrony
 EOF
 else
 cat << 'EOF' > config/package-lists/axonwall.list.chroot
