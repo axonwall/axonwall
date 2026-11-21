@@ -1508,6 +1508,10 @@ export type ZeroTrustConfig = z.infer<typeof ZeroTrustConfigSchema>;
 export const HeadscaleConfigSchema = z.object({
   enabled: z.boolean().default(false),
   magicDnsDomain: z.string().default('tailnet.axonwall.local'),
+  serverUrl: z.string().optional(),
+  portalUrl: z.string().optional(),
+  allowSelfRegistration: z.boolean().optional(),
+  defaultKeyExpiryHours: z.number().int().min(1).max(720).optional(),
 });
 export type HeadscaleConfig = z.infer<typeof HeadscaleConfigSchema>;
 
@@ -1529,7 +1533,7 @@ export const SsoProviderSchema = z.enum(['oidc', 'entra', 'okta', 'google']);
 
 export const SsoRoleMappingSchema = z.object({
   idpGroup: z.string().min(1),
-  role: z.enum(['admin', 'operator', 'readonly']),
+  role: z.enum(['admin', 'operator', 'readonly', 'vpn_user']),
 });
 export type SsoRoleMapping = z.infer<typeof SsoRoleMappingSchema>;
 
@@ -2474,7 +2478,7 @@ export const VigilanteConfigSchema = z.object({
 });
 export type VigilanteConfig = z.infer<typeof VigilanteConfigSchema>;
 
-export const ApplianceRoleSchema = z.enum(['admin', 'operator', 'readonly', 'os_only']);
+export const ApplianceRoleSchema = z.enum(['admin', 'operator', 'readonly', 'vpn_user', 'os_only']);
 export type ApplianceRole = z.infer<typeof ApplianceRoleSchema>;
 
 export const LocalUserSchema = z.object({

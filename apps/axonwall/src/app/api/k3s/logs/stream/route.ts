@@ -4,7 +4,7 @@ import http from 'node:http';
 import { clearCachedAgentToken, getAgentToken } from '@/server/agent-client';
 import { getAgentApiSocketPath } from '@/server/dev-paths';
 import { getSession } from '@/server/auth';
-import { isPasswordChangeEnforced } from '@/server/auth-guard';
+import { isConsoleUser, isPasswordChangeEnforced } from '@/server/auth-guard';
 
 export const dynamic = 'force-dynamic';
 
@@ -16,6 +16,9 @@ export async function GET(req: NextRequest) {
       mustChangePassword ? 'Forbidden: Password change required' : 'Unauthorized',
       { status: mustChangePassword ? 403 : 401 }
     );
+  }
+  if (!isConsoleUser(session)) {
+    return new Response('Forbidden: Console role required', { status: 403 });
   }
 
   const { searchParams } = new URL(req.url);

@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { cookies } from 'next/headers';
 import { performAuthentication } from '../../../../server/auth-internal';
 import { getJwtSecret, SESSION_COOKIE } from '../../../../server/auth-constants';
+import { isVpnPortalOnlyUser } from '../../../../server/auth-guard';
 import { mintSupabaseToken } from '@axonwall/lib/ldap';
 
 export async function POST(req: Request) {
@@ -36,6 +37,7 @@ export async function POST(req: Request) {
 
     return NextResponse.json({
       success: true,
+      redirectTo: isVpnPortalOnlyUser(authRes.session) ? '/vpn' : '/lobby',
       // The session token travels only in the httpOnly cookie above;
       // it is not returned in the body (audit B-09).
       user: {

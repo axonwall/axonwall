@@ -4,10 +4,44 @@ import type { UserSession } from '@axonwall/lib/rbac';
 import { getEtcConfigDir, getStateDir } from './dev-paths';
 
 const ROLE_HIERARCHY: Record<string, number> = {
+  vpn_user: 0,
   readonly: 1,
   operator: 2,
   admin: 3,
 };
+
+export function isConsoleUser(session: UserSession | null): boolean {
+  if (!session) return false;
+  if (session.privileges?.includes('*')) return true;
+  const roles = session.roles || [];
+  return roles.some((r) => r === 'admin' || r === 'operator' || r === 'readonly');
+}
+
+export function isVpnPortalOnlyUser(session: UserSession | null): boolean {
+  if (!session || isConsoleUser(session)) return false;
+  return Boolean(
+    session.roles?.includes('vpn_user') || session.privileges?.includes('vpn.mesh.self')
+  );
+}
+
+/**
+ * Asserts that a session is authorized to access Mesh VPN self-service APIs.
+ * Permits vpn_user as well as console roles (readonly/operator/admin).
+ */
+export function assertMeshSelfServicePermitted(
+  session: UserSession | null
+): asserts session is UserSession {
+  if (!session) {
+    throw new Error('Unauthorized');
+  }
+  if (isPasswordChangeEnforced(session)) {
+    throw new Error('Forbidden: Password change required before performing this action');
+  }
+  if (isConsoleUser(session) || session.roles?.includes('vpn_user') || session.privileges?.includes('vpn.mesh.self')) {
+    return;
+  }
+  throw new Error('Forbidden: Mesh VPN self-service access required');
+}
 
 /**
  * The single source of truth for whether the local break-glass admin password
@@ -59,18 +93,17 @@ export function assertActionPermitted(
   if (mustChangePassword && requiredRole && requiredRole !== 'readonly') {
     throw new Error('Forbidden: Password change required before performing this action');
   }
-  if (requiredRole) {
-    if (session.privileges?.includes('*')) {
-      return;
-    }
-    const roles = session.roles || [];
-    const requiredRank = ROLE_HIERARCHY[requiredRole];
-    const isPermitted =
-      requiredRank !== undefined
-        ? roles.some((r) => (ROLE_HIERARCHY[r] ?? 0) >= requiredRank)
-        : roles.includes(requiredRole);
-    if (!isPermitted) {
-      throw new Error(`Forbidden: ${requiredRole} role required`);
-    }
+  if (session.privileges?.includes('*')) {
+    return;
+  }
+  const effectiveRole = requiredRole ?? 'readonly';
+  const roles = session.roles || [];
+  const requiredRank = ROLE_HIERARCHY[effectiveRole];
+  const isPermitted =
+    requiredRank !== undefined
+      ? roles.some((r) => (ROLE_HIERARCHY[r] ?? -1) >= requiredRank)
+      : roles.includes(effectiveRole);
+  if (!isPermitted) {
+    throw new Error(`Forbidden: ${effectiveRole} role required`);
   }
 }

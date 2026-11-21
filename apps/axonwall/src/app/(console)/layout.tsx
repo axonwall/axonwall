@@ -1,5 +1,6 @@
 import { redirect } from 'next/navigation';
 import { getSession, isPasswordChangeRequired } from '../../server/auth';
+import { isVpnPortalOnlyUser } from '../../server/auth-guard';
 import { ConsoleSidebar } from '../../components/ConsoleSidebar';
 import { ConsoleHeader } from '../../components/ConsoleHeader';
 import { ForcePasswordChangeModal } from '../../components/ForcePasswordChangeModal';
@@ -13,6 +14,9 @@ export default async function ConsoleLayout({
   const session = await getSession();
   if (!session) {
     redirect('/login');
+  }
+  if (isVpnPortalOnlyUser(session)) {
+    redirect('/vpn');
   }
 
   const passwordChangeRequired = await isPasswordChangeRequired();

@@ -8,11 +8,17 @@ import { Logo } from '../../../components/Logo';
 export default function LoginPage() {
   const [state, formAction, isPending] = useActionState(loginAction, null);
   const [queryError, setQueryError] = useState<string | null>(null);
+  const [username, setUsername] = useState('admin');
 
   useEffect(() => {
-    const err = new URLSearchParams(window.location.search).get('error');
+    const params = new URLSearchParams(window.location.search);
+    const err = params.get('error');
     if (err) {
       setQueryError(err);
+    }
+    const u = params.get('username');
+    if (u && u.trim()) {
+      setUsername(u.trim());
     }
   }, []);
 
@@ -56,9 +62,10 @@ export default function LoginPage() {
                 type="text"
                 name="username"
                 required
-                defaultValue="admin"
+                value={username}
+                onChange={(e) => setUsername(e.target.value)}
                 className="w-full bg-slate-950 border border-slate-800 rounded-lg pl-10 pr-4 py-2.5 text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/50 focus:border-emerald-500"
-                placeholder="LDAP or local admin"
+                placeholder="Username (admin, operator, or VPN member)"
               />
             </div>
           </div>

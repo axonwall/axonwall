@@ -1,5 +1,11 @@
 import { NextResponse } from 'next/server';
-import { listMachines, deleteMachine, renameMachine, expireMachine } from '../../../../../../server/headscale';
+import {
+  listMachines,
+  deleteMachine,
+  renameMachine,
+  expireMachine,
+  registerMachine,
+} from '../../../../../../server/headscale';
 import { getSession } from '../../../../../../server/auth';
 import { isPasswordChangeEnforced } from '../../../../../../server/auth-guard';
 
@@ -33,8 +39,16 @@ export async function POST(req: Request) {
       );
     }
     const body = await req.json();
-    const { action, machineId, newName } = body;
-    
+    const { action, machineId, newName, user, key } = body;
+
+    if (action === 'register') {
+      if (!user || !key) {
+        return NextResponse.json({ error: 'user and key are required' }, { status: 400 });
+      }
+      const m = await registerMachine(user, key);
+      return NextResponse.json({ status: 'ok', data: m });
+    }
+
     if (!machineId) return NextResponse.json({ error: 'machineId is required' }, { status: 400 });
 
     if (action === 'rename') {

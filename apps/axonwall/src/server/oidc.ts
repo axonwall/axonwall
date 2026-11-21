@@ -17,7 +17,7 @@ export const OIDC_STATE_COOKIE = 'axonwall_oidc_state';
 
 export interface OidcRoleMapping {
   idpGroup: string;
-  role: 'admin' | 'operator' | 'readonly';
+  role: 'admin' | 'operator' | 'readonly' | 'vpn_user';
 }
 
 export interface OidcConfig {
@@ -215,7 +215,7 @@ export async function exchangeCodeForIdentity(
 export function roleFromGroups(
   groups: unknown,
   roleMappings?: OidcRoleMapping[]
-): 'admin' | 'operator' | 'readonly' {
+): 'admin' | 'operator' | 'readonly' | 'vpn_user' {
   const list = Array.isArray(groups)
     ? groups.filter((g): g is string => typeof g === 'string')
     : [];
@@ -225,6 +225,10 @@ export function roleFromGroups(
     .map((s) => s.trim().toLowerCase())
     .filter(Boolean);
   const envOperatorGroups = (process.env.OIDC_OPERATOR_GROUPS || '')
+    .split(',')
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean);
+  const envVpnGroups = (process.env.OIDC_VPN_GROUPS || '')
     .split(',')
     .map((s) => s.trim().toLowerCase())
     .filter(Boolean);
@@ -239,12 +243,21 @@ export function roleFromGroups(
       ? new Set(envOperatorGroups)
       : new Set(['axonwall-operator', 'axonwall-operators']);
 
+  const vpnSet =
+    envVpnGroups.length > 0
+      ? new Set(envVpnGroups)
+      : new Set(['axonwall-vpn']);
+
+  const readonlyExplicitSet = new Set(['axonwall-readonly', 'axonwall-auditors']);
+
   if (Array.isArray(roleMappings)) {
     for (const m of roleMappings) {
       const g = m?.idpGroup?.trim().toLowerCase();
       if (!g) continue;
       if (m.role === 'admin') adminSet.add(g);
       else if (m.role === 'operator') operatorSet.add(g);
+      else if (m.role === 'vpn_user') vpnSet.add(g);
+      else if (m.role === 'readonly') readonlyExplicitSet.add(g);
     }
   }
 
@@ -256,6 +269,14 @@ export function roleFromGroups(
 
   for (const group of normalizedList) {
     if (operatorSet.has(group)) return 'operator';
+  }
+
+  for (const group of normalizedList) {
+    if (readonlyExplicitSet.has(group)) return 'readonly';
+  }
+
+  for (const group of normalizedList) {
+    if (vpnSet.has(group)) return 'vpn_user';
   }
 
   return 'readonly';

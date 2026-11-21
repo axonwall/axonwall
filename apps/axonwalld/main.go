@@ -5010,6 +5010,36 @@ func main() {
 			_ = json.NewEncoder(w).Encode(resp)
 		})
 
+		mux.HandleFunc("/v1/system/users/change-password", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				writeDirError(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			var req struct {
+				Username        string `json:"username"`
+				CurrentPassword string `json:"currentPassword"`
+				NewPassword     string `json:"newPassword"`
+			}
+			if err := json.NewDecoder(io.LimitReader(r.Body, 1024*1024)).Decode(&req); err != nil {
+				writeDirError(w, fmt.Sprintf("invalid json payload: %v", err), http.StatusBadRequest)
+				return
+			}
+			if err := directoryManager.ChangeOwnPassword(req.Username, req.CurrentPassword, req.NewPassword); err != nil {
+				status := http.StatusBadRequest
+				msg := strings.ToLower(err.Error())
+				if strings.Contains(msg, "invalid credentials") || strings.Contains(msg, "verification failed") || strings.Contains(msg, "locked") {
+					status = http.StatusUnauthorized
+				}
+				writeDirError(w, err.Error(), status)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"success": true,
+				"message": "Password updated successfully",
+			})
+		})
+
 		mux.HandleFunc("/v1/system/users/", func(w http.ResponseWriter, r *http.Request) {
 			username := strings.TrimPrefix(r.URL.Path, "/v1/system/users/")
 			username = strings.TrimSpace(username)
@@ -5549,6 +5579,59 @@ func main() {
 				"path":      savedPath,
 				"sha256":    shaHex,
 				"sizeBytes": sizeBytes,
+			})
+		})
+
+		mux.HandleFunc("/v1/vpn/headscale/sync-config", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			var req struct {
+				ServerURL      string `json:"serverUrl"`
+				MagicDNSDomain string `json:"magicDnsDomain"`
+			}
+			if err := json.NewDecoder(io.LimitReader(r.Body, 1024*1024)).Decode(&req); err != nil {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				_ = json.NewEncoder(w).Encode(map[string]any{"success": false, "error": fmt.Sprintf("invalid json: %v", err)})
+				return
+			}
+			changed, err := engine.SyncHeadscaleConfig("/etc/headscale/config.yaml", req.ServerURL, req.MagicDNSDomain)
+			if err != nil {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				_ = json.NewEncoder(w).Encode(map[string]any{"success": false, "error": err.Error()})
+				return
+			}
+			reloaded := false
+			if changed {
+				headscaleActive := false
+				if hasSystemdOrFakeSystemctl() {
+					headscaleActive = exec.Command("systemctl", "is-active", "--quiet", "headscale").Run() == nil
+				} else if _, statErr := os.Stat("/run/headscale/headscale.sock"); statErr == nil {
+					headscaleActive = true
+				}
+				if headscaleActive {
+					if out, relErr := reloadOrRestartService("headscale"); relErr != nil {
+						w.Header().Set("Content-Type", "application/json")
+						w.WriteHeader(http.StatusInternalServerError)
+						_ = json.NewEncoder(w).Encode(map[string]any{
+							"success": false,
+							"changed": true,
+							"error":   fmt.Sprintf("updated /etc/headscale/config.yaml, but failed to restart headscale: %s (%v)", strings.TrimSpace(string(out)), relErr),
+						})
+						return
+					}
+					reloaded = true
+				}
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"success":  true,
+				"changed":  changed,
+				"reloaded": reloaded,
+				"message":  "Synced /etc/headscale/config.yaml",
 			})
 		})
 

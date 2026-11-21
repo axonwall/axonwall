@@ -30,13 +30,77 @@ import type { UserSession } from '@axonwall/lib/rbac';
 const EPOCH_PATHS = Array.from(
   new Set([path.join(getStateDir(), 'session-epoch'), path.join(getEtcConfigDir(), 'session-epoch')])
 );
+const USER_EPOCH_PATHS = Array.from(
+  new Set([
+    path.join(getStateDir(), 'user-session-epochs.json'),
+    path.join(getEtcConfigDir(), 'user-session-epochs.json'),
+  ])
+);
 const REVOKED_PATHS = Array.from(
   new Set([path.join(getStateDir(), 'revoked-jtis'), path.join(getEtcConfigDir(), 'revoked-jtis')])
 );
 const MAX_REVOKED_ENTRIES = 500;
+const MAX_USER_EPOCHS = 2000;
 
 let memoryEpoch = 0;
+const memoryUserEpochs = new Map<string, number>();
 const memoryRevokedJtis = new Set<string>();
+
+function normalizeEpochUserKey(username: string): string {
+  return username.trim().toLowerCase();
+}
+
+function readUserEpochMap(): Map<string, number> {
+  const combined = new Map<string, number>(memoryUserEpochs);
+  for (const p of USER_EPOCH_PATHS) {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(p, 'utf-8')) as Record<string, unknown>;
+      if (!parsed || typeof parsed !== 'object') continue;
+      for (const [k, v] of Object.entries(parsed)) {
+        const num = Number(v);
+        if (Number.isFinite(num) && num > (combined.get(k) ?? 0)) {
+          combined.set(k, num);
+        }
+      }
+    } catch {}
+  }
+  return combined;
+}
+
+export function currentUserSessionEpoch(username: string): number {
+  const key = normalizeEpochUserKey(username);
+  if (!key) return 0;
+  const epoch = readUserEpochMap().get(key) ?? 0;
+  if (epoch > (memoryUserEpochs.get(key) ?? 0)) {
+    memoryUserEpochs.set(key, epoch);
+  }
+  return epoch;
+}
+
+/** Invalidate outstanding sessions for a single user (e.g. self-service password reset/change). */
+export function bumpUserSessionEpoch(username: string): number {
+  const key = normalizeEpochUserKey(username);
+  if (!key) return 0;
+  const combined = readUserEpochMap();
+  const nextVal = Math.max(Date.now(), (combined.get(key) ?? 0) + 1);
+  combined.delete(key);
+  combined.set(key, nextVal);
+  while (combined.size > MAX_USER_EPOCHS) {
+    const oldest = combined.keys().next().value;
+    if (oldest === undefined) break;
+    combined.delete(oldest);
+  }
+  memoryUserEpochs.delete(key);
+  memoryUserEpochs.set(key, nextVal);
+  const serialized = JSON.stringify(Object.fromEntries(combined)) + '\n';
+  for (const p of USER_EPOCH_PATHS) {
+    try {
+      fs.mkdirSync(path.dirname(p), { recursive: true });
+      fs.writeFileSync(p, serialized, { mode: 0o660 });
+    } catch {}
+  }
+  return nextVal;
+}
 
 export function currentSessionEpoch(): number {
   let maxEpoch = memoryEpoch;
@@ -52,9 +116,10 @@ export function currentSessionEpoch(): number {
   return maxEpoch;
 }
 
-/** Stamp a session with the current epoch before it is minted. */
+/** Stamp a session with the current global and per-user epochs before it is minted. */
 export function stampSessionEpoch(session: UserSession): void {
   session.sessionEpoch = currentSessionEpoch();
+  session.userSessionEpoch = currentUserSessionEpoch(session.username);
 }
 
 /** Invalidate every outstanding session (password change). */
@@ -100,6 +165,7 @@ export function revokeTokenJti(jti: string): void {
 /** True when a decoded session has been revoked or predates the epoch. */
 export function isSessionRevoked(session: UserSession): boolean {
   if ((session.sessionEpoch ?? 0) !== currentSessionEpoch()) return true;
+  if ((session.userSessionEpoch ?? 0) < currentUserSessionEpoch(session.username)) return true;
   if (session.jti && readRevokedJtis().includes(session.jti)) return true;
   return false;
 }

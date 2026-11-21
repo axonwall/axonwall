@@ -20,6 +20,7 @@ export const PRIVILEGES = [
   'services.dns.write',
   'vpn.wireguard.read',
   'vpn.wireguard.write',
+  'vpn.mesh.self',
   'system.status.read',
   'system.config.read',
   'system.config.write',
@@ -65,6 +66,7 @@ export const DEFAULT_ROLES: Record<string, Role> = {
       'services.dns.read',
       'vpn.wireguard.read',
       'vpn.wireguard.write',
+      'vpn.mesh.self',
       'system.status.read',
       'system.config.read',
       'diagnostics.read',
@@ -84,10 +86,17 @@ export const DEFAULT_ROLES: Record<string, Role> = {
       'services.dhcp.read',
       'services.dns.read',
       'vpn.wireguard.read',
+      'vpn.mesh.self',
       'system.status.read',
       'system.config.read',
       'diagnostics.read',
     ],
+  },
+  vpn_user: {
+    id: 'vpn_user',
+    name: 'VPN Self-Service Member',
+    description: 'Can manage only their own Mesh VPN devices, auth keys, and account password in the self-service portal',
+    privileges: ['vpn.mesh.self'],
   },
 };
 
@@ -111,6 +120,9 @@ export interface UserSession {
   /** Session epoch at mint time (session_epoch claim). A password
    *  change bumps the appliance epoch and invalidates older tokens. */
   sessionEpoch?: number;
+  /** Per-user session epoch at mint time (user_session_epoch claim).
+   *  Changing a specific user's password bumps only their epoch. */
+  userSessionEpoch?: number;
   /** The token's jti, when the session was decoded from a JWT. Used
    *  for per-token revocation at logout. */
   jti?: string;

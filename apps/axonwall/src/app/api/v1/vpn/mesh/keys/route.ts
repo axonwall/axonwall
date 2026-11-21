@@ -33,11 +33,14 @@ export async function POST(req: Request) {
       );
     }
     const body = await req.json();
-    const { action, user, reusable, ephemeral, expiration, key } = body;
+    const { action, user, reusable, ephemeral, expiration, key, keyId } = body;
     
     if (action === 'expire') {
-      if (!user || !key) return NextResponse.json({ error: 'user and key required' }, { status: 400 });
-      await expirePreAuthKey(user, key);
+      const keyTarget = key || keyId;
+      if (!keyTarget) {
+        return NextResponse.json({ error: 'key or keyId is required' }, { status: 400 });
+      }
+      await expirePreAuthKey(user || '', keyTarget, keyId);
       return NextResponse.json({ status: 'ok' });
     }
 

@@ -162,6 +162,9 @@ func ResolveApplianceRole(groups []string, username string) string {
 	if groupSet["axonwall-readonly"] {
 		return "readonly"
 	}
+	if groupSet["axonwall-vpn"] {
+		return "vpn_user"
+	}
 	return "os_only"
 }
 
@@ -202,6 +205,8 @@ func roleToGroupsFromFile(role, groupPath string) []string {
 		return []string{"axonwall-operator", "adm"}
 	case "readonly":
 		return []string{"axonwall-readonly"}
+	case "vpn_user":
+		return []string{"axonwall-vpn"}
 	default:
 		return nil
 	}
@@ -689,7 +694,7 @@ func (m *UserManager) UpdateUser(username string, req UpdateUserRequest) error {
 					groups, _ := m.ParseGroups()
 					for _, g := range groups {
 						for _, mem := range g.Members {
-							if mem == username && g.Name != "axonwall-admin" && g.Name != "axonwall-operator" && g.Name != "axonwall-readonly" {
+							if mem == username && g.Name != "axonwall-admin" && g.Name != "axonwall-operator" && g.Name != "axonwall-readonly" && g.Name != "axonwall-vpn" {
 								groupMap[g.Name] = true
 							}
 						}
@@ -701,6 +706,7 @@ func (m *UserManager) UpdateUser(username string, req UpdateUserRequest) error {
 					delete(groupMap, "axonwall-admin")
 					delete(groupMap, "axonwall-operator")
 					delete(groupMap, "axonwall-readonly")
+					delete(groupMap, "axonwall-vpn")
 					for _, g := range RoleToGroups(*req.ApplianceRole) {
 						groupMap[g] = true
 					}

@@ -29,6 +29,11 @@ export const LDAP_CONFIG: LdapConfig = {
     admins: 'admin',
     operators: 'operator',
     auditors: 'readonly',
+    'axonwall-admin': 'admin',
+    'axonwall-operator': 'operator',
+    'axonwall-readonly': 'readonly',
+    'axonwall-vpn': 'vpn_user',
+    vpn: 'vpn_user',
   },
 };
 
@@ -243,7 +248,7 @@ async function performAuthenticationInner(
     const localUserAuth = await callAgentApi<{
       success: boolean;
       username: string;
-      applianceRole: 'admin' | 'operator' | 'readonly' | 'os_only';
+      applianceRole: 'admin' | 'operator' | 'readonly' | 'vpn_user' | 'os_only';
       groups: string[];
       message?: string;
     }>('/v1/system/users/auth', 'POST', { username, password }, 2500);

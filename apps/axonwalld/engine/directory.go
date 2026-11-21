@@ -150,7 +150,7 @@ func DefaultShellForRole(role string) string {
 		return "/usr/bin/zsh"
 	case "operator":
 		return "/usr/local/bin/axonwall-opshell"
-	case "readonly":
+	case "readonly", "vpn_user":
 		return "/usr/sbin/nologin"
 	default:
 		return "/usr/bin/zsh"
@@ -745,7 +745,7 @@ func (d *DirectoryManager) listLDAPGroupsInternal() ([]LocalGroup, map[int]strin
 		for _, m := range members {
 			userGroups[m] = append(userGroups[m], name)
 		}
-		protected := name == "axonwall-admin" || name == "axonwall-operator" || name == "axonwall-readonly" || name == "sudo" || name == "adm" || name == "wheel"
+		protected := name == "axonwall-admin" || name == "axonwall-operator" || name == "axonwall-readonly" || name == "axonwall-vpn" || name == "sudo" || name == "adm" || name == "wheel"
 		groups = append(groups, LocalGroup{
 			Name:      name,
 			GID:       gid,
@@ -1252,7 +1252,7 @@ func (d *DirectoryManager) UpdateUser(username string, req UpdateUserRequest) er
 			}
 		} else {
 			for _, g := range target.Groups {
-				if g != "axonwall-admin" && g != "axonwall-operator" && g != "axonwall-readonly" && g != "sudo" && g != "wheel" {
+				if g != "axonwall-admin" && g != "axonwall-operator" && g != "axonwall-readonly" && g != "axonwall-vpn" && g != "sudo" && g != "wheel" {
 					desired[g] = true
 				}
 			}
@@ -1261,6 +1261,7 @@ func (d *DirectoryManager) UpdateUser(username string, req UpdateUserRequest) er
 			delete(desired, "axonwall-admin")
 			delete(desired, "axonwall-operator")
 			delete(desired, "axonwall-readonly")
+			delete(desired, "axonwall-vpn")
 			for _, g := range RoleToGroups(*req.ApplianceRole) {
 				desired[g] = true
 			}
@@ -1547,6 +1548,90 @@ func (d *DirectoryManager) Authenticate(req AuthUserRequest) AuthUserResponse {
 		ApplianceRole: target.ApplianceRole,
 		Groups:        target.Groups,
 	}
+}
+
+// ChangeOwnPassword allows an authenticated non-root directory user to change
+// only their own password after verifying their current password.
+func (d *DirectoryManager) ChangeOwnPassword(username, currentPassword, newPassword string) error {
+	if err := d.checkWritePermitted(); err != nil {
+		return err
+	}
+
+	username = strings.TrimSpace(username)
+	if username == "root" {
+		return fmt.Errorf("root password cannot be changed via self-service")
+	}
+	if !validUsernameRegex.MatchString(username) {
+		return fmt.Errorf("invalid username '%s'", username)
+	}
+	if currentPassword == "" || newPassword == "" {
+		return fmt.Errorf("current and new passwords are required")
+	}
+	if strings.ContainsAny(currentPassword, "\n\r\x00") || strings.ContainsAny(newPassword, "\n\r\x00") {
+		return fmt.Errorf("invalid control character in password")
+	}
+	if newPassword == currentPassword {
+		return fmt.Errorf("new password must differ from current password")
+	}
+
+	d.mu.RLock()
+	minLen := d.policy.MinLength
+	baseDN := d.baseDN
+	d.mu.RUnlock()
+	if minLen < 8 {
+		minLen = 8
+	}
+	if len(newPassword) < minLen {
+		return fmt.Errorf("password must be at least %d characters long (per appliance password policy)", minLen)
+	}
+
+	authRes := d.Authenticate(AuthUserRequest{
+		Username: username,
+		Password: currentPassword,
+	})
+	if !authRes.Success {
+		msg := strings.TrimSpace(authRes.Message)
+		if msg == "" {
+			msg = "current password verification failed"
+		}
+		return fmt.Errorf("%s", msg)
+	}
+
+	inLDAP := false
+	if ldapUsers, err := d.listLDAPUsersInternal(); err == nil {
+		for _, u := range ldapUsers {
+			if u.Username == username {
+				inLDAP = true
+				break
+			}
+		}
+	}
+
+	if inLDAP {
+		hash, err := HashSSHA(newPassword)
+		if err != nil {
+			return err
+		}
+		mod := fmt.Sprintf("replace: userPassword\nuserPassword: %s", hash)
+		if err := d.runLDAPModify(username, baseDN, mod); err != nil {
+			return err
+		}
+	} else {
+		if d.localUsers == nil {
+			return fmt.Errorf("local user manager is unavailable")
+		}
+		if err := d.localUsers.SetPassword(username, newPassword); err != nil {
+			return err
+		}
+	}
+
+	if username == "admin" {
+		d.syncBreakGlassPasswordFile(newPassword)
+	}
+
+	d.syncLocalNSSMirrorIfNoSSSD("")
+	InvalidateSSSDCache(username)
+	return nil
 }
 
 // UpdatePasswordPolicy updates the OpenLDAP cn=default,ou=policies,<baseDN> entry and persists the policy.

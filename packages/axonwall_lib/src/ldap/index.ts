@@ -226,6 +226,7 @@ export async function mintSupabaseToken(
     app_privs: session.privileges,
     ...(session.passwordChangeRequired ? { pwd_change_required: true } : {}),
     session_epoch: session.sessionEpoch ?? 0,
+    user_session_epoch: session.userSessionEpoch ?? 0,
     user_metadata: {
       displayName: session.displayName,
       email: session.email,
@@ -264,6 +265,7 @@ export async function verifyToken(
       exp: (payload.exp as number) || 0,
       passwordChangeRequired: payload.pwd_change_required === true,
       sessionEpoch: (payload.session_epoch as number) || 0,
+      userSessionEpoch: (payload.user_session_epoch as number) || 0,
       jti: payload.jti as string | undefined,
     };
   } catch {

@@ -127,6 +127,24 @@ export async function middleware(request: NextRequest) {
         { status: 403 }
       );
     }
+
+    const appRoles = Array.isArray(payload.app_roles) ? (payload.app_roles as string[]) : [];
+    const hasConsoleRole = appRoles.some(
+      (r) => r === 'admin' || r === 'operator' || r === 'readonly'
+    );
+    const isVpnSelfEndpoint =
+      pathname === '/api/v1/vpn/mesh/self' ||
+      pathname.startsWith('/api/v1/vpn/mesh/self/') ||
+      pathname === '/api/v1/vpn/mesh/invites/preview' ||
+      pathname === '/api/v1/vpn/mesh/invites/redeem';
+    if (!hasConsoleRole && appRoles.includes('vpn_user') && !isVpnSelfEndpoint) {
+      return NextResponse.json(
+        {
+          error: 'Forbidden: VPN self-service accounts can only access /api/v1/vpn/mesh/self/*',
+        },
+        { status: 403 }
+      );
+    }
   } catch {
     // Invalid/expired token: fall through; the route will 401.
   }

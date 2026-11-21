@@ -128,9 +128,30 @@ export async function createUser(name: string) {
   };
 }
 
-export async function deleteUser(name: string) {
-  const safeName = assertSafeIdentifier(name, 'User name');
-  return runHeadscale(['users', 'destroy', safeName, '--force']);
+export async function deleteUser(nameOrId: string | number) {
+  const raw = String(nameOrId).trim();
+  if (!raw) throw new Error('User name or ID is required');
+  let targetId: string | number | undefined = /^\d+$/.test(raw) ? raw : undefined;
+  let safeName: string | undefined;
+  if (targetId === undefined) {
+    safeName = assertSafeIdentifier(raw, 'User name');
+    const users = await listUsers();
+    const found = users.find((u: any) => u.name === safeName);
+    if (found?.id !== undefined && found?.id !== null) {
+      targetId = found.id;
+    }
+  }
+  if (targetId !== undefined) {
+    try {
+      return await runHeadscale(['users', 'destroy', '-i', String(targetId), '--force']);
+    } catch (err: any) {
+      const msg = String(err?.message || '').toLowerCase();
+      if (!safeName || (!msg.includes('unknown') && !msg.includes('shorthand') && !msg.includes('flag'))) {
+        throw err;
+      }
+    }
+  }
+  return runHeadscale(['users', 'destroy', safeName ?? assertSafeIdentifier(raw, 'User name'), '--force']);
 }
 
 // -----------------------------------------------------------------------------
@@ -203,8 +224,26 @@ export async function listPreAuthKeys(user?: string) {
   return keys;
 }
 
-export async function expirePreAuthKey(user: string, key: string) {
-  const safeKey = assertSafeIdentifier(key, 'Preauth key');
+export async function expirePreAuthKey(user: string, keyOrId: string | number, keyId?: string | number) {
+  const numericId =
+    keyId !== undefined && keyId !== '' && /^\d+$/.test(String(keyId).trim())
+      ? String(keyId).trim()
+      : /^\d+$/.test(String(keyOrId).trim())
+        ? String(keyOrId).trim()
+        : undefined;
+
+  if (numericId) {
+    try {
+      return await runHeadscale(['preauthkeys', 'expire', '--id', numericId]);
+    } catch (err: any) {
+      const msg = String(err?.message || '').toLowerCase();
+      if (!msg.includes('unknown') && !msg.includes('flag')) {
+        throw err;
+      }
+    }
+  }
+
+  const safeKey = assertSafeIdentifier(keyOrId, 'Preauth key');
   const args = ['preauthkeys', 'expire', safeKey];
   if (user && String(user).trim()) {
     const safeUser = assertSafeIdentifier(user, 'User');
@@ -234,6 +273,19 @@ export async function listMachines(user?: string) {
     return nodes.filter((n: any) => n.user?.name === safeUser || String(n.user?.id) === safeUser);
   }
   return nodes;
+}
+
+export async function registerMachine(user: string, rawKeyOrCommand: string) {
+  const safeUser = assertSafeIdentifier(user, 'User name');
+  const trimmed = String(rawKeyOrCommand || '').trim();
+  const authMatch = trimmed.match(/--auth[-_]?id(?:=|\s+)([^\s"']+)/i) || trimmed.match(/\b(hskey-authreq-[a-zA-Z0-9_.:-]{4,})\b/);
+  const legacyMatch = trimmed.match(/(?:--key|-k)(?:=|\s+)([^\s"']+)/i) || trimmed.match(/\b((?:mkey|nodekey):[a-zA-Z0-9_.:-]{6,})\b/);
+  if (authMatch) {
+    const token = assertSafeIdentifier(authMatch[1], 'Auth ID');
+    return runHeadscale(['auth', 'register', '--user', safeUser, '--auth-id', token, '-o', 'json']);
+  }
+  const keyToken = assertSafeIdentifier(legacyMatch ? legacyMatch[1] : trimmed, 'Machine key');
+  return runHeadscale(['nodes', 'register', '--user', safeUser, '--key', keyToken, '-o', 'json']);
 }
 
 export async function deleteMachine(machineId: string | number) {

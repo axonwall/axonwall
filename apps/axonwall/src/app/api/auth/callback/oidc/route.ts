@@ -4,6 +4,7 @@ import { mintSupabaseToken } from '@axonwall/lib/ldap';
 import { DEFAULT_ROLES } from '@axonwall/lib/rbac';
 import type { UserSession } from '@axonwall/lib/rbac';
 import { SESSION_COOKIE, getJwtSecret } from '../../../../../server/auth-constants';
+import { isVpnPortalOnlyUser } from '../../../../../server/auth-guard';
 import { stampSessionEpoch } from '../../../../../server/session-revocation';
 import {
   OIDC_STATE_COOKIE,
@@ -107,7 +108,8 @@ export async function GET(request: NextRequest) {
     stampSessionEpoch(session);
     const token = await mintSupabaseToken(session, getJwtSecret());
 
-    const response = NextResponse.redirect(new URL('/lobby', publicOrigin));
+    const targetPath = isVpnPortalOnlyUser(session) ? '/vpn' : '/lobby';
+    const response = NextResponse.redirect(new URL(targetPath, publicOrigin));
     response.cookies.set(SESSION_COOKIE, token, {
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production' && process.env.AXONWALL_INSECURE_HTTP !== '1',

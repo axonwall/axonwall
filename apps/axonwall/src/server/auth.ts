@@ -19,7 +19,7 @@ import {
 } from './dev-paths';
 
 import { SESSION_COOKIE, getJwtSecret } from './auth-constants';
-import { assertActionPermitted, passwordChangeRequiredNow } from './auth-guard';
+import { assertActionPermitted, isVpnPortalOnlyUser, passwordChangeRequiredNow } from './auth-guard';
 import {
   performAuthentication,
   totpPlugins,
@@ -91,7 +91,7 @@ export async function loginAction(arg1: any, arg2?: any) {
     maxAge: 8 * 3600, // 8 hours
   });
 
-  redirect('/lobby');
+  redirect(isVpnPortalOnlyUser(authRes.session) ? '/vpn' : '/lobby');
 }
 
 export async function logoutAction() {

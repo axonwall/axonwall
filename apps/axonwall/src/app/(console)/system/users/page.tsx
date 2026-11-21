@@ -34,6 +34,7 @@ function defaultShellForRole(role: ApplianceRole): string {
     case 'operator':
       return '/usr/local/bin/axonwall-opshell';
     case 'readonly':
+    case 'vpn_user':
       return '/usr/sbin/nologin';
     default:
       return '/usr/bin/zsh';
@@ -682,6 +683,11 @@ export default function LocalUsersPage() {
                               <Shield className="w-3 h-3" />
                               Read-Only
                             </span>
+                          ) : u.applianceRole === 'vpn_user' ? (
+                            <span className="inline-flex items-center gap-1 text-xs font-semibold px-2.5 py-0.5 rounded-full bg-cyan-500/20 text-cyan-300 border border-cyan-500/30">
+                              <Shield className="w-3 h-3" />
+                              VPN Member
+                            </span>
                           ) : (
                             <span className="inline-flex items-center gap-1 text-xs font-medium px-2.5 py-0.5 rounded-full bg-slate-800 text-slate-400 border border-slate-700">
                               OS Only
@@ -1105,7 +1111,7 @@ export default function LocalUsersPage() {
                 <label className="block text-xs font-semibold uppercase text-slate-300 mb-1.5">
                   Appliance Administrative Role *
                 </label>
-                <div className="grid grid-cols-1 sm:grid-cols-4 gap-2.5">
+                <div className="grid grid-cols-1 sm:grid-cols-5 gap-2.5">
                   <label
                     className={`flex flex-col p-3 rounded-xl border cursor-pointer transition ${
                       formRole === 'admin'
@@ -1175,6 +1181,30 @@ export default function LocalUsersPage() {
                     </div>
                     <p className="text-[11px] text-slate-400 mt-1 leading-snug">
                       Web console auditor (/usr/sbin/nologin).
+                    </p>
+                  </label>
+
+                  <label
+                    className={`flex flex-col p-3 rounded-xl border cursor-pointer transition ${
+                      formRole === 'vpn_user'
+                        ? 'bg-cyan-500/10 border-cyan-500 text-white'
+                        : 'bg-slate-950 border-slate-800 text-slate-400 hover:border-slate-700'
+                    }`}
+                  >
+                    <input
+                      type="radio"
+                      name="applianceRole"
+                      value="vpn_user"
+                      checked={formRole === 'vpn_user'}
+                      onChange={() => handleRoleChange('vpn_user')}
+                      className="sr-only"
+                    />
+                    <div className="flex items-center gap-1.5 font-bold text-xs text-cyan-400">
+                      <Shield className="w-3.5 h-3.5" />
+                      <span>VPN Member</span>
+                    </div>
+                    <p className="text-[11px] text-slate-400 mt-1 leading-snug">
+                      Mesh VPN self-service portal only (/usr/sbin/nologin).
                     </p>
                   </label>
 
