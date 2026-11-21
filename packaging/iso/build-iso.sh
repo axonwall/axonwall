@@ -857,14 +857,19 @@ apt-get install -d -y --no-install-recommends \
   grub-common \
   ucf \
   os-prober || { echo "[!] ERROR: failed to download BIOS bootloader packages (grub-pc set) for the offline pre-cache." >&2; exit 1; }
-apt-get install -d -y --no-install-recommends \
-  grub-efi-amd64 \
-  grub-efi-amd64-bin \
-  grub-efi-amd64-signed \
-  shim-signed \
-  shim-helpers-amd64-signed \
-  shim-unsigned \
-  efibootmgr || { echo "[!] ERROR: failed to download UEFI bootloader packages (grub-efi-amd64 set) for the offline pre-cache." >&2; exit 1; }
+_uefi_pkgs=(
+  grub-efi-amd64
+  grub-efi-amd64-bin
+  grub-efi-amd64-signed
+  shim-signed
+  efibootmgr
+)
+for _opt_uefi_pkg in shim-helpers-amd64-signed shim-unsigned; do
+  if apt-cache show "${_opt_uefi_pkg}" >/dev/null 2>&1; then
+    _uefi_pkgs+=("${_opt_uefi_pkg}")
+  fi
+done
+apt-get install -d -y --no-install-recommends "${_uefi_pkgs[@]}" || { echo "[!] ERROR: failed to download UEFI bootloader packages (grub-efi-amd64 set) for the offline pre-cache." >&2; exit 1; }
 cp /var/cache/apt/archives/*.deb config/includes.chroot/var/cache/apt/archives/ || { echo "[!] ERROR: failed to copy downloaded bootloader .debs into config/includes.chroot/var/cache/apt/archives/." >&2; exit 1; }
 for _req_boot_deb in "grub-pc_" "grub-efi-amd64_"; do
   if ! compgen -G "config/includes.chroot/var/cache/apt/archives/${_req_boot_deb}*.deb" >/dev/null; then
