@@ -1658,6 +1658,21 @@ func debianPoolURL(b PluginBundledBinary) (string, error) {
 // are refused, never followed — a crafted archive must not be able
 // to plant a symlink pointing outside the plugin dir).
 func safeArchiveName(name string) (string, bool) {
+	// Refuse BEFORE cleaning: Clean would silently resolve ".."
+	// against the archive root (pkg/../../escape.txt -> escape.txt)
+	// and strip a leading "/" (/etc/evil.txt -> etc/evil.txt),
+	// landing the file somewhere the archive never declared.
+	// A crafted member must fail the install, not be sanitised
+	// into the tree. Backslashes are refused too: they are never
+	// legitimate in a release-tarball member name on this platform.
+	if strings.HasPrefix(name, "/") || strings.Contains(name, "\\") {
+		return "", false
+	}
+	for _, seg := range strings.Split(strings.TrimPrefix(name, "./"), "/") {
+		if seg == ".." {
+			return "", false
+		}
+	}
 	cleaned := filepath.ToSlash(filepath.Clean("/" + strings.TrimPrefix(name, "./")))
 	cleaned = strings.TrimPrefix(cleaned, "/")
 	if cleaned == "" || cleaned == "." {
