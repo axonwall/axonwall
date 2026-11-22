@@ -6,6 +6,28 @@ Official build artifacts, SHA-256 checksums, and detached Ed25519 signatures (`.
 
 ---
 
+## `v0.13.1` (2026-11-22) — Headscale Turnkey Onboarding & Self-Service Portal, Advanced Ring-0 eBPF Visualizations, and Offline ISO Packaging Hardening
+
+### Highlights
+- **Turnkey Headscale Mesh Onboarding, Magic Invite Links & User Self-Service Portal (`/vpn/mesh`, `/portal/vpn`, `/invite/[token]`)**:
+  - **Magic Invite Links & Turnkey Onboarding**: Administrators can invite users with configurable expiration, device registration quotas, pre-assigned tags, and auto-registration flags. Generates single-use invite tokens with instant QR codes and direct links.
+  - **Self-Service VPN Portal (`/portal/vpn`)**: Dedicated end-user interface (`MeshSelfServicePortal`) for non-root users to view active mesh nodes, generate authentication keys (reusable, ephemeral, pre-authenticated), register devices via interactive auth-key commands or machine registration keys, inspect WireGuard configs, and manage their credentials.
+  - **Headscale Management Engine (`apps/axonwalld` & `apps/axonwall-controller`)**:
+    - Native `headscale` configuration reconciliation engine (`headscale_config.go`), automated SQLite/Postgres DB initialization, and secure server key management.
+    - Endpoints for user lifecycle management (`/v1/vpn/mesh/people`, `/v1/vpn/mesh/invites/preview`, `/v1/vpn/mesh/invites/redeem`, `/v1/vpn/mesh/self/*`), machine tagging, routing advertisements, and session expiration tracking.
+    - Full RBAC integration across OpenLDAP directory users, local accounts, and session revocation tracking.
+- **Advanced Ring-0 eBPF Visualizations, Runtime Profiling & Dependency Topologies (`/reporting/ebpf`)**:
+  - **Interactive XDP Packet Flow Sankey Diagram (`EbpfXdpPipelineVisualizer`)**: Real-time vector-based visualization of ingress packets traversing Ring-0 DMA RX rings, VLAN decapsulation, IPv4/IPv6 layer parsing, and final XDP verdicts (`PASS`, `DROP`, `TX`, `REDIRECT`), switchable between Cumulative Packets and Live PPS deltas.
+  - **Kernel TCP State Machine Funnel & Traffic Heatmap Matrix (`EbpfSocketAndServiceVisualizer`)**: Funnel diagram detailing active TCP connections through kernel states (`LISTEN`, `SYN_SENT`, `ESTABLISHED`, `FIN_WAIT`, `TIME_WAIT`), paired with an interactive Source IP $\times$ Destination Port traffic matrix supporting 1-click fast-drop defensive rules.
+  - **eBPF Execution Profiler & SoftIRQ/NAPI Pressure Heatmap (`EbpfRuntimeProfilerVisualizer`)**: 1-click toggle for `/proc/sys/kernel/bpf_stats_enabled` runtime metric collection, 3-tier execution budget icicle flame-strip, rolling top-program CPU timeline, and per-CPU SoftIRQ/NAPI core pressure heatmap parsing `/proc/net/softnet_stat`.
+  - **BPF Kernel Dependency Graph & Verifier Complexity Scatter Plot (`EbpfKernelGraphVisualizer`)**: Force-directed topology connecting BPF links, programs, and maps with type filters, coupled with a Verifier Complexity vs. JIT execution latency scatter plot for instant kernel performance auditing.
+  - **Raw Link Enumeration & Socket Telemetry (`apps/axonwalld`)**: Enumerates `bpf_link` objects via raw `BPF_LINK_GET_NEXT_ID` syscalls (`unix.SYS_BPF`), maps program-to-map associations, and collects `/proc/net/{tcp,udp,raw}*` socket exposure telemetry.
+- **Appliance ISO Offline Packaging & Bootloader Cache Hardening**:
+  - Fixed offline Debian installer chroot cache validation in `packaging/iso/build-iso.sh` by ensuring both `grub-pc` (BIOS) and `grub-efi-amd64` (UEFI) packages are reliably downloaded and cached into `config/includes.chroot/var/cache/apt/archives/`.
+  - Resolved `shim-unsigned` and `shim-helpers-amd64-signed` package resolution issues on Ubuntu/Debian runner environments.
+
+---
+
 ## `v0.13.0` (2026-11-21) — Btrfs + Snapper Root, Minimal Edition, Bundled-Binary Plugins, Expanded eBPF Visuals, Browser K9s & Deep-Dive Hardening
 
 ### Highlights
