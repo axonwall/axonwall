@@ -850,7 +850,7 @@ chmod +x config/includes.installer/usr/lib/axonwall/* 2>/dev/null || true
 echo "[+] Pre-caching offline bootloader packages for BIOS & UEFI..."
 mkdir -p config/includes.chroot/var/cache/apt/archives/
 apt-get update -qq || { echo "[!] ERROR: apt-get update failed; cannot pre-cache offline bootloader packages." >&2; exit 1; }
-apt-get install -d -y --no-install-recommends \
+apt-get install -d --reinstall -y --no-install-recommends \
   grub-pc \
   grub-pc-bin \
   grub2-common \
@@ -869,7 +869,7 @@ for _opt_uefi_pkg in shim-helpers-amd64-signed shim-unsigned; do
     _uefi_pkgs+=("${_opt_uefi_pkg}")
   fi
 done
-apt-get install -d -y --no-install-recommends "${_uefi_pkgs[@]}" || { echo "[!] ERROR: failed to download UEFI bootloader packages (grub-efi-amd64 set) for the offline pre-cache." >&2; exit 1; }
+apt-get install -d --reinstall -y --no-install-recommends "${_uefi_pkgs[@]}" || { echo "[!] ERROR: failed to download UEFI bootloader packages (grub-efi-amd64 set) for the offline pre-cache." >&2; exit 1; }
 cp /var/cache/apt/archives/*.deb config/includes.chroot/var/cache/apt/archives/ || { echo "[!] ERROR: failed to copy downloaded bootloader .debs into config/includes.chroot/var/cache/apt/archives/." >&2; exit 1; }
 for _req_boot_deb in "grub-pc_" "grub-efi-amd64_"; do
   if ! compgen -G "config/includes.chroot/var/cache/apt/archives/${_req_boot_deb}*.deb" >/dev/null; then
