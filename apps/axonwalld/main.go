@@ -5689,10 +5689,37 @@ func main() {
 				},
 				"bpfInventory":    engine.CollectKernelBpfInventory(),
 				"kernelRca":       engine.CollectKernelRcaTelemetry(),
+				"softnet":         engine.CollectSoftnetTelemetry(),
+				"sockets":         engine.CollectKernelSocketTelemetry(),
 				"virt":            virtManager.GetEbpfTelemetry(),
 				"k3s":             k3sManager.GetEbpfTelemetry(),
 				"nas":             nasManager.GetDeepTelemetry(),
 				"threatHarvester": threatHarvesterManager.GetCompactSummary(),
+			})
+		})
+
+		mux.HandleFunc("/v1/ebpf/bpf-stats", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			var req struct {
+				Enabled bool `json:"enabled"`
+			}
+			if err := json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&req); err != nil {
+				http.Error(w, "Invalid JSON body", http.StatusBadRequest)
+				return
+			}
+			if err := engine.SetKernelBpfStatsEnabled(req.Enabled); err != nil {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusInternalServerError)
+				_ = json.NewEncoder(w).Encode(map[string]any{"success": false, "error": err.Error()})
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"success":      true,
+				"statsEnabled": req.Enabled,
 			})
 		})
 

@@ -1,13 +1,14 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 
-const { mockCallAgentApi } = vi.hoisted(() => ({
+const { mockCallAgentApi, mockCallAgentApiResponse } = vi.hoisted(() => ({
   mockCallAgentApi: vi.fn(),
+  mockCallAgentApiResponse: vi.fn(),
 }));
 
 vi.mock('../agent-client', () => ({
   callAgentApi: (...args: unknown[]) => mockCallAgentApi(...args),
   callAgentApiDetailed: vi.fn(),
-  callAgentApiResponse: vi.fn(),
+  callAgentApiResponse: (...args: unknown[]) => mockCallAgentApiResponse(...args),
 }));
 
 vi.mock('../auth', () => ({
@@ -22,15 +23,26 @@ vi.mock('../auth', () => ({
 }));
 
 import {
+  buildBpfDependencyGraph,
+  buildFlowHeatmapMatrix,
   buildFlowTopologyGraph,
   buildSketchWaveformData,
+  buildXdpPipelineModel,
+  computeBpfProgramRuntimeDeltas,
   computeDataplaneRatePoint,
+  computeSoftnetDeltas,
+  correlateListeningSocketsWithXdp,
   normalizeEbpfOverviewResponse,
+  type BpfProgramInventoryItem,
+  type KernelBpfInventory,
+  type KernelSocketTelemetry,
+  type KernelSoftnetTelemetry,
   type XdpBlockedEntry,
   type XdpFlowEntry,
+  type XdpPortSummary,
   type XdpVerdictStats,
 } from '@/lib/ebpf-telemetry';
-import { getEbpfOverviewTelemetry } from '../agent';
+import { getEbpfOverviewTelemetry, toggleKernelBpfStatsAction } from '../agent';
 
 describe('normalizeEbpfOverviewResponse', () => {
   it('translates raw axonwalld /v1/ebpf/overview payload accurately and idempotently', () => {
@@ -203,13 +215,67 @@ describe('normalizeEbpfOverviewResponse', () => {
         statsEnabled: true,
         totalPrograms: 5,
         totalMaps: 12,
+        totalLinks: 1,
         totalJitedBytes: 16384,
         totalProgMemlockBytes: 32768,
         totalMapMemlockBytes: 1048576,
         programsByType: [{ type: 'XDP', count: 1, totalBytes: 4096, totalRunTimeNs: 9000, totalRunCount: 500 }],
         mapsByType: [{ type: 'LRUHash', count: 2, totalBytes: 524288, totalRunTimeNs: 0, totalRunCount: 0 }],
-        programs: [],
+        programs: [
+          {
+            id: 42,
+            type: 'XDP',
+            name: 'xdp_flow_tracker',
+            tag: 'abc123',
+            jitedBytes: 4096,
+            translatedBytes: 2048,
+            verifiedInsns: 850,
+            memlockBytes: 8192,
+            mapCount: 2,
+            mapIds: [101, 102],
+            hasBtf: true,
+            createdByUid: 0,
+            runCount: 500,
+            runTimeNs: 9000,
+            recursionMisses: 0,
+          },
+        ],
         maps: [],
+        links: [
+          {
+            id: 7,
+            type: 'xdp',
+            programId: 42,
+            attachDetail: 'xdp:eth0',
+          },
+        ],
+      },
+      softnet: {
+        timestamp: futureIso,
+        available: true,
+        cpuCount: 2,
+        totalProcessed: 15000,
+        totalDropped: 1,
+        totalTimeSqueeze: 3,
+        totalCpuCollision: 0,
+        totalReceivedRps: 20,
+        totalFlowLimitCount: 0,
+        perCpu: [
+          { cpu: 1, processed: 5000, dropped: 0, timeSqueeze: 1, cpuCollision: 0, receivedRps: 5, flowLimitCount: 0 },
+          { cpu: 0, processed: 10000, dropped: 1, timeSqueeze: 2, cpuCollision: 0, receivedRps: 15, flowLimitCount: 0 },
+        ],
+      },
+      sockets: {
+        timestamp: futureIso,
+        available: true,
+        totalTcpSockets: 14,
+        ipv4TcpSockets: 10,
+        ipv6TcpSockets: 4,
+        totalUdpSockets: 6,
+        ipv4UdpSockets: 4,
+        ipv6UdpSockets: 2,
+        tcpStates: { LISTEN: 4, ESTABLISHED: 8, SYN_RECV: 2 },
+        listeningPorts: [{ protocol: 'TCP', port: 443, service: 'HTTPS', ipv4Sockets: 1, ipv6Sockets: 1, totalCount: 2 }],
       },
       kernelRca: {
         timestamp: futureIso,
@@ -318,6 +384,15 @@ describe('normalizeEbpfOverviewResponse', () => {
 
     expect(norm.bpfInventory?.available).toBe(true);
     expect(norm.bpfInventory?.totalPrograms).toBe(5);
+    expect(norm.bpfInventory?.totalLinks).toBe(1);
+    expect(norm.bpfInventory?.programs[0].mapIds).toEqual([101, 102]);
+    expect(norm.bpfInventory?.links[0].attachDetail).toBe('xdp:eth0');
+    expect(norm.softnet?.available).toBe(true);
+    expect(norm.softnet?.perCpu[0].cpu).toBe(0);
+    expect(norm.sockets?.available).toBe(true);
+    expect(norm.sockets?.tcpStates.ESTABLISHED).toBe(8);
+    expect(norm.sockets?.tcpStates.TIME_WAIT).toBe(0);
+    expect(norm.sockets?.listeningPorts[0].service).toBe('HTTPS');
     expect(norm.kernelRca?.tcp.retransmitRatioPct).toBe(0.1);
     expect(norm.kernelRca?.cgroupCpu.throttleRatioPct).toBe(2.0);
 
@@ -335,6 +410,9 @@ describe('normalizeEbpfOverviewResponse', () => {
     expect(second.dataplane.xdpStats.xdpPassPackets).toBe(49500);
     expect(second.bpfTokens.activeProfiles[0].mounted).toBe(true);
     expect(second.nas.zil.zilCommitCount).toBe(42);
+    expect(second.bpfInventory?.links).toHaveLength(1);
+    expect(second.softnet?.totalTimeSqueeze).toBe(3);
+    expect(second.sockets?.listeningPorts[0].port).toBe(443);
   });
 });
 
@@ -492,5 +570,307 @@ describe('buildFlowTopologyGraph & buildSketchWaveformData', () => {
     expect(pts[1].direction).toBe('ingress');
     expect(pts[1].absBytes).toBe(512);
     expect(pts[2].iatMs).toBe(1.2);
+  });
+});
+
+describe('Expanded eBPF visualization builders & sysctl toggle', () => {
+  beforeEach(() => {
+    mockCallAgentApiResponse.mockReset();
+  });
+
+  it('computes XDP pipeline stage breakdown in cumulative and delta modes with safe clamping', () => {
+    const stats: XdpVerdictStats = {
+      rxPackets: 1000,
+      rxBytes: 640_000,
+      ipv4Packets: 800,
+      ipv6Packets: 180,
+      vlanTaggedPackets: 250,
+      xdpDropPackets: 100,
+      xdpDropBytes: 6400,
+      xdpPassPackets: 900,
+      tcpSynPackets: 40,
+      lpmCidrDrops: 35,
+      synFloodDrops: 25,
+    };
+
+    const cum = buildXdpPipelineModel(stats, null, 'cumulative');
+    expect(cum.vlanTagged).toBe(250);
+    expect(cum.untagged).toBe(750);
+    expect(cum.otherL3).toBe(20);
+    expect(cum.hostBlocklistDrop).toBe(40);
+
+    const nextStats: XdpVerdictStats = {
+      ...stats,
+      rxPackets: 1400,
+      rxBytes: 1_040_000,
+      ipv4Packets: 1100,
+      ipv6Packets: 280,
+      vlanTaggedPackets: 350,
+      xdpPassPackets: 1260,
+      xdpDropPackets: 140,
+      lpmCidrDrops: 55,
+      synFloodDrops: 35,
+    };
+    const deltaSample = computeDataplaneRatePoint(stats, nextStats, 2, 't1');
+    expect(deltaSample.vlanPps).toBe(50);
+
+    const delta = buildXdpPipelineModel(nextStats, deltaSample, 'delta');
+    expect(delta.mode).toBe('delta');
+    expect(delta.rxTotal).toBe(200);
+    expect(delta.vlanTagged).toBe(50);
+    expect(delta.untagged).toBe(150);
+    expect(delta.ipv4).toBe(150);
+    expect(delta.ipv6).toBe(50);
+    expect(delta.otherL3).toBe(0);
+    expect(delta.lpmCidrDrop).toBe(10);
+    expect(delta.synFloodDrop).toBe(5);
+    expect(delta.hostBlocklistDrop).toBe(5);
+  });
+
+  it('computes per-program runtime deltas, share %, and guards counter wraps', () => {
+    const p1Prev: BpfProgramInventoryItem[] = [
+      {
+        id: 1,
+        type: 'XDP',
+        name: 'xdp_main',
+        tag: 't1',
+        jitedBytes: 4096,
+        translatedBytes: 2048,
+        verifiedInsns: 500,
+        memlockBytes: 8192,
+        mapCount: 1,
+        mapIds: [10],
+        hasBtf: true,
+        createdByUid: 0,
+        runCount: 1000,
+        runTimeNs: 500_000,
+        recursionMisses: 0,
+      },
+      {
+        id: 2,
+        type: 'LSM',
+        name: 'lsm_guard',
+        tag: 't2',
+        jitedBytes: 2048,
+        translatedBytes: 1024,
+        verifiedInsns: 200,
+        memlockBytes: 4096,
+        mapCount: 1,
+        mapIds: [11],
+        hasBtf: true,
+        createdByUid: 0,
+        runCount: 200,
+        runTimeNs: 100_000,
+        recursionMisses: 1,
+      },
+    ];
+    const p1Next: BpfProgramInventoryItem[] = [
+      { ...p1Prev[0], runCount: 5000, runTimeNs: 2_500_000 },
+      { ...p1Prev[1], runCount: 400, runTimeNs: 300_000 },
+    ];
+
+    const deltas = computeBpfProgramRuntimeDeltas(p1Prev, p1Next, 2);
+    expect(deltas[0].id).toBe(1);
+    expect(deltas[0].runsPerSec).toBe(2000);
+    expect(deltas[0].cpuUsPerSec).toBe(1000);
+    expect(deltas[0].avgNsPerRun).toBe(500);
+    expect(deltas[1].cpuUsPerSec).toBe(100);
+    expect(deltas[0].sharePct).toBeCloseTo(90.9, 1);
+
+    const wrapped = computeBpfProgramRuntimeDeltas(p1Next, p1Prev, 2);
+    expect(wrapped[0].runsPerSec).toBe(0);
+    expect(wrapped[0].cpuUsPerSec).toBe(0);
+  });
+
+  it('computes per-CPU softnet delta rates safely', () => {
+    const prev: KernelSoftnetTelemetry = {
+      timestamp: '2026-11-22T00:00:00Z',
+      available: true,
+      cpuCount: 2,
+      totalProcessed: 1100,
+      totalDropped: 1,
+      totalTimeSqueeze: 2,
+      totalCpuCollision: 0,
+      totalReceivedRps: 0,
+      totalFlowLimitCount: 0,
+      perCpu: [
+        { cpu: 0, processed: 1000, dropped: 1, timeSqueeze: 2, cpuCollision: 0, receivedRps: 0, flowLimitCount: 0 },
+        { cpu: 1, processed: 100, dropped: 0, timeSqueeze: 0, cpuCollision: 0, receivedRps: 0, flowLimitCount: 0 },
+      ],
+    };
+    const next: KernelSoftnetTelemetry = {
+      ...prev,
+      totalProcessed: 1700,
+      totalDropped: 3,
+      totalTimeSqueeze: 4,
+      perCpu: [
+        { cpu: 0, processed: 1400, dropped: 3, timeSqueeze: 4, cpuCollision: 0, receivedRps: 4, flowLimitCount: 0 },
+        { cpu: 1, processed: 300, dropped: 0, timeSqueeze: 0, cpuCollision: 0, receivedRps: 0, flowLimitCount: 0 },
+      ],
+    };
+    const deltas = computeSoftnetDeltas(prev, next, 2);
+    expect(deltas).toHaveLength(2);
+    expect(deltas[0].processedPerSec).toBe(200);
+    expect(deltas[0].droppedPerSec).toBe(1);
+    expect(deltas[0].timeSqueezePerSec).toBe(1);
+    expect(deltas[0].receivedRpsPerSec).toBe(2);
+    expect(deltas[1].processedPerSec).toBe(100);
+  });
+
+  it('builds Link <-> Program <-> Map dependency graph and deduplicates shared maps', () => {
+    const inv: KernelBpfInventory = {
+      timestamp: '2026-11-22T00:00:00Z',
+      available: true,
+      statsEnabled: true,
+      totalPrograms: 2,
+      totalMaps: 3,
+      totalLinks: 1,
+      totalJitedBytes: 6144,
+      totalProgMemlockBytes: 12288,
+      totalMapMemlockBytes: 30000,
+      programsByType: [],
+      mapsByType: [],
+      programs: [
+        {
+          id: 10,
+          type: 'XDP',
+          name: 'xdp_main',
+          tag: 'aa',
+          jitedBytes: 4096,
+          translatedBytes: 2048,
+          verifiedInsns: 900,
+          memlockBytes: 8192,
+          mapCount: 2,
+          mapIds: [100, 200, 999],
+          hasBtf: true,
+          createdByUid: 0,
+          runCount: 100,
+          runTimeNs: 50000,
+          recursionMisses: 0,
+        },
+        {
+          id: 11,
+          type: 'LSM',
+          name: 'lsm_main',
+          tag: 'bb',
+          jitedBytes: 2048,
+          translatedBytes: 1024,
+          verifiedInsns: 300,
+          memlockBytes: 4096,
+          mapCount: 1,
+          mapIds: [200],
+          hasBtf: true,
+          createdByUid: 0,
+          runCount: 50,
+          runTimeNs: 10000,
+          recursionMisses: 0,
+        },
+      ],
+      maps: [
+        { id: 100, type: 'PerCPUArray', name: 'xdp_stats_map', keySize: 4, valueSize: 64, maxEntries: 1, memlockBytes: 10000, frozen: false, hasBtf: true },
+        { id: 200, type: 'RingBuf', name: 'shared_events', keySize: 0, valueSize: 0, maxEntries: 4096, memlockBytes: 20000, frozen: false, hasBtf: true },
+      ],
+      links: [{ id: 1, type: 'xdp', programId: 10, attachDetail: 'xdp:eth0' }],
+    };
+
+    const g = buildBpfDependencyGraph(inv);
+    expect(g.programs).toHaveLength(2);
+    expect(g.maps).toHaveLength(2);
+    expect(g.linkToProgEdges).toHaveLength(1);
+    // Map 999 doesn't exist in inv.maps so orphan edges are omitted cleanly
+    expect(g.progToMapEdges).toHaveLength(3);
+
+    const searchFiltered = buildBpfDependencyGraph(inv, { search: 'xdp_stats_map' });
+    expect(searchFiltered.programs).toHaveLength(1);
+    expect(searchFiltered.programs[0].id).toBe(10);
+  });
+
+  it('builds flow heatmap matrix and correlates listening ports with XDP traffic', () => {
+    const flows: XdpFlowEntry[] = [
+      {
+        family: 4,
+        srcIp: '198.51.100.20',
+        dstIp: '10.0.0.1',
+        srcPort: 50001,
+        dstPort: 443,
+        vlanId: 0,
+        protocol: 6,
+        protoName: 'TCP',
+        packets: 100,
+        bytes: 60000,
+        synPackets: 10,
+        rstPackets: 0,
+        ageMs: 10,
+      },
+      {
+        family: 4,
+        srcIp: '203.0.113.9',
+        dstIp: '10.0.0.1',
+        srcPort: 50002,
+        dstPort: 22,
+        vlanId: 0,
+        protocol: 6,
+        protoName: 'TCP',
+        packets: 50,
+        bytes: 3200,
+        synPackets: 45,
+        rstPackets: 1,
+        ageMs: 20,
+      },
+    ];
+    const blocked: XdpBlockedEntry[] = [
+      { ip: '203.0.113.9', family: 'ipv4', expiresInSeconds: 120, droppedPackets: 50, droppedBytes: 3200 },
+    ];
+
+    const matrix = buildFlowHeatmapMatrix(flows, blocked);
+    expect(matrix.rows).toHaveLength(2);
+    expect(matrix.cols).toHaveLength(2);
+    const sshCell = matrix.cells['203.0.113.9|TCP:22'];
+    expect(sshCell.isBlocked).toBe(true);
+    expect(sshCell.synRatioPct).toBe(90);
+
+    const sockets: KernelSocketTelemetry = {
+      timestamp: '2026-11-22T00:00:00Z',
+      available: true,
+      totalTcpSockets: 4,
+      ipv4TcpSockets: 3,
+      ipv6TcpSockets: 1,
+      totalUdpSockets: 1,
+      ipv4UdpSockets: 1,
+      ipv6UdpSockets: 0,
+      tcpStates: { LISTEN: 2, ESTABLISHED: 2 },
+      listeningPorts: [
+        { protocol: 'TCP', port: 22, service: 'SSH', ipv4Sockets: 1, ipv6Sockets: 0, totalCount: 1 },
+        { protocol: 'TCP', port: 443, service: 'HTTPS', ipv4Sockets: 1, ipv6Sockets: 1, totalCount: 2 },
+      ],
+    };
+    const topPorts: XdpPortSummary[] = [
+      { port: 443, service: 'HTTPS', protocol: 6, protoName: 'TCP', flows: 5, packets: 100, bytes: 60000, synPackets: 4, rstPackets: 0 },
+    ];
+
+    const corr = correlateListeningSocketsWithXdp(sockets, topPorts);
+    expect(corr).toHaveLength(2);
+    expect(corr[0].port).toBe(443);
+    expect(corr[0].activeInXdp).toBe(true);
+    expect(corr[0].xdpBytes).toBe(60000);
+    expect(corr[1].port).toBe(22);
+    expect(corr[1].activeInXdp).toBe(false);
+  });
+
+  it('toggles kernel.bpf_stats_enabled through toggleKernelBpfStatsAction', async () => {
+    mockCallAgentApiResponse.mockResolvedValue({ success: true, statsEnabled: true });
+    const ok = await toggleKernelBpfStatsAction(true);
+    expect(ok).toEqual({ success: true, statsEnabled: true });
+    expect(mockCallAgentApiResponse).toHaveBeenCalledWith(
+      '/v1/ebpf/bpf-stats',
+      'POST',
+      { enabled: true },
+      8000
+    );
+
+    mockCallAgentApiResponse.mockResolvedValue(null);
+    const down = await toggleKernelBpfStatsAction(false);
+    expect(down.success).toBe(false);
+    expect(down.error).toContain('Daemon unavailable');
   });
 });

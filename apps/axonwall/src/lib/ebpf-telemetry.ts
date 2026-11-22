@@ -174,11 +174,19 @@ export interface BpfProgramInventoryItem {
   verifiedInsns: number;
   memlockBytes: number;
   mapCount: number;
+  mapIds: number[];
   hasBtf: boolean;
   createdByUid: number;
   runCount: number;
   runTimeNs: number;
   recursionMisses: number;
+}
+
+export interface BpfLinkInventoryItem {
+  id: number;
+  type: string;
+  programId: number;
+  attachDetail?: string;
 }
 
 export interface BpfMapInventoryItem {
@@ -208,6 +216,7 @@ export interface KernelBpfInventory {
   statsEnabled: boolean;
   totalPrograms: number;
   totalMaps: number;
+  totalLinks: number;
   totalJitedBytes: number;
   totalProgMemlockBytes: number;
   totalMapMemlockBytes: number;
@@ -215,6 +224,66 @@ export interface KernelBpfInventory {
   mapsByType: BpfTypeAggregate[];
   programs: BpfProgramInventoryItem[];
   maps: BpfMapInventoryItem[];
+  links: BpfLinkInventoryItem[];
+}
+
+export interface SoftnetCpuStat {
+  cpu: number;
+  processed: number;
+  dropped: number;
+  timeSqueeze: number;
+  cpuCollision: number;
+  receivedRps: number;
+  flowLimitCount: number;
+}
+
+export interface KernelSoftnetTelemetry {
+  timestamp: string;
+  available: boolean;
+  cpuCount: number;
+  totalProcessed: number;
+  totalDropped: number;
+  totalTimeSqueeze: number;
+  totalCpuCollision: number;
+  totalReceivedRps: number;
+  totalFlowLimitCount: number;
+  perCpu: SoftnetCpuStat[];
+}
+
+export const LINUX_TCP_STATE_ORDER = [
+  'LISTEN',
+  'SYN_SENT',
+  'SYN_RECV',
+  'ESTABLISHED',
+  'FIN_WAIT1',
+  'FIN_WAIT2',
+  'CLOSE_WAIT',
+  'LAST_ACK',
+  'TIME_WAIT',
+  'CLOSING',
+  'CLOSE',
+] as const;
+
+export interface KernelListeningPort {
+  protocol: string;
+  port: number;
+  service: string;
+  ipv4Sockets: number;
+  ipv6Sockets: number;
+  totalCount: number;
+}
+
+export interface KernelSocketTelemetry {
+  timestamp: string;
+  available: boolean;
+  totalTcpSockets: number;
+  ipv4TcpSockets: number;
+  ipv6TcpSockets: number;
+  totalUdpSockets: number;
+  ipv4UdpSockets: number;
+  ipv6UdpSockets: number;
+  tcpStates: Record<string, number>;
+  listeningPorts: KernelListeningPort[];
 }
 
 export interface KernelRcaTelemetry {
@@ -408,6 +477,8 @@ export interface EbpfOverviewTelemetry {
   bpfTokens: BpfTokenCapabilityReport;
   bpfInventory?: KernelBpfInventory;
   kernelRca?: KernelRcaTelemetry;
+  softnet?: KernelSoftnetTelemetry;
+  sockets?: KernelSocketTelemetry;
   virt: VirtDutyTelemetry;
   k3s: K3sDutyTelemetry;
   nas: ZfsDeepTelemetry;
@@ -473,6 +544,7 @@ export function createEmptyKernelBpfInventory(errMsg?: string): KernelBpfInvento
     statsEnabled: false,
     totalPrograms: 0,
     totalMaps: 0,
+    totalLinks: 0,
     totalJitedBytes: 0,
     totalProgMemlockBytes: 0,
     totalMapMemlockBytes: 0,
@@ -480,6 +552,41 @@ export function createEmptyKernelBpfInventory(errMsg?: string): KernelBpfInvento
     mapsByType: [],
     programs: [],
     maps: [],
+    links: [],
+  };
+}
+
+export function createEmptySoftnetTelemetry(): KernelSoftnetTelemetry {
+  return {
+    timestamp: new Date().toISOString(),
+    available: false,
+    cpuCount: 0,
+    totalProcessed: 0,
+    totalDropped: 0,
+    totalTimeSqueeze: 0,
+    totalCpuCollision: 0,
+    totalReceivedRps: 0,
+    totalFlowLimitCount: 0,
+    perCpu: [],
+  };
+}
+
+export function createEmptyKernelSocketTelemetry(): KernelSocketTelemetry {
+  const tcpStates: Record<string, number> = {};
+  for (const st of LINUX_TCP_STATE_ORDER) {
+    tcpStates[st] = 0;
+  }
+  return {
+    timestamp: new Date().toISOString(),
+    available: false,
+    totalTcpSockets: 0,
+    ipv4TcpSockets: 0,
+    ipv6TcpSockets: 0,
+    totalUdpSockets: 0,
+    ipv4UdpSockets: 0,
+    ipv6UdpSockets: 0,
+    tcpStates,
+    listeningPorts: [],
   };
 }
 
@@ -729,21 +836,55 @@ export function normalizeEbpfOverviewResponse(raw: any): EbpfOverviewTelemetry {
   );
 
   // BPF Kernel Inventory & Kernel RCA
+  const rawInvLinks: BpfLinkInventoryItem[] = Array.isArray(raw?.bpfInventory?.links)
+    ? raw.bpfInventory.links.map((lnk: any) => ({
+        id: num(lnk?.id),
+        type: String(lnk?.type ?? 'unknown'),
+        programId: num(lnk?.programId),
+        ...(lnk?.attachDetail ? { attachDetail: String(lnk.attachDetail) } : {}),
+      }))
+    : [];
+  const rawInvProgs: BpfProgramInventoryItem[] = Array.isArray(raw?.bpfInventory?.programs)
+    ? raw.bpfInventory.programs.map((p: any) => {
+        const mapIds: number[] = Array.isArray(p?.mapIds)
+          ? p.mapIds.map((id: unknown) => num(id)).filter((id: number) => id > 0)
+          : [];
+        return {
+          id: num(p?.id),
+          type: String(p?.type ?? ''),
+          name: String(p?.name ?? ''),
+          tag: String(p?.tag ?? ''),
+          jitedBytes: num(p?.jitedBytes),
+          translatedBytes: num(p?.translatedBytes),
+          verifiedInsns: num(p?.verifiedInsns),
+          memlockBytes: num(p?.memlockBytes),
+          mapCount: p?.mapCount != null ? num(p.mapCount) : mapIds.length,
+          mapIds,
+          hasBtf: Boolean(p?.hasBtf),
+          createdByUid: num(p?.createdByUid),
+          runCount: num(p?.runCount),
+          runTimeNs: num(p?.runTimeNs),
+          recursionMisses: num(p?.recursionMisses),
+        };
+      })
+    : [];
   const bpfInventory: KernelBpfInventory = raw?.bpfInventory
     ? {
         timestamp: String(raw.bpfInventory.timestamp ?? new Date().toISOString()),
         available: Boolean(raw.bpfInventory.available),
         error: raw.bpfInventory.error ? String(raw.bpfInventory.error) : undefined,
         statsEnabled: Boolean(raw.bpfInventory.statsEnabled),
-        totalPrograms: num(raw.bpfInventory.totalPrograms),
+        totalPrograms: num(raw.bpfInventory.totalPrograms, rawInvProgs.length),
         totalMaps: num(raw.bpfInventory.totalMaps),
+        totalLinks: raw.bpfInventory.totalLinks != null ? num(raw.bpfInventory.totalLinks) : rawInvLinks.length,
         totalJitedBytes: num(raw.bpfInventory.totalJitedBytes),
         totalProgMemlockBytes: num(raw.bpfInventory.totalProgMemlockBytes),
         totalMapMemlockBytes: num(raw.bpfInventory.totalMapMemlockBytes),
         programsByType: Array.isArray(raw.bpfInventory.programsByType) ? raw.bpfInventory.programsByType : [],
         mapsByType: Array.isArray(raw.bpfInventory.mapsByType) ? raw.bpfInventory.mapsByType : [],
-        programs: Array.isArray(raw.bpfInventory.programs) ? raw.bpfInventory.programs : [],
+        programs: rawInvProgs,
         maps: Array.isArray(raw.bpfInventory.maps) ? raw.bpfInventory.maps : [],
+        links: rawInvLinks,
       }
     : createEmptyKernelBpfInventory();
 
@@ -756,6 +897,67 @@ export function normalizeEbpfOverviewResponse(raw: any): EbpfOverviewTelemetry {
         memory: { ...createEmptyKernelRca().memory, ...(raw.kernelRca.memory ?? {}) },
       }
     : createEmptyKernelRca();
+
+  const rawSoft = raw?.softnet;
+  const softnetPerCpu: SoftnetCpuStat[] = Array.isArray(rawSoft?.perCpu)
+    ? rawSoft.perCpu
+        .map((c: any) => ({
+          cpu: num(c?.cpu),
+          processed: num(c?.processed),
+          dropped: num(c?.dropped),
+          timeSqueeze: num(c?.timeSqueeze),
+          cpuCollision: num(c?.cpuCollision),
+          receivedRps: num(c?.receivedRps),
+          flowLimitCount: num(c?.flowLimitCount),
+        }))
+        .sort((a: SoftnetCpuStat, b: SoftnetCpuStat) => a.cpu - b.cpu)
+    : [];
+  const softnet: KernelSoftnetTelemetry = rawSoft
+    ? {
+        timestamp: String(rawSoft.timestamp ?? new Date().toISOString()),
+        available: Boolean(rawSoft.available ?? softnetPerCpu.length > 0),
+        cpuCount: num(rawSoft.cpuCount, softnetPerCpu.length),
+        totalProcessed: num(rawSoft.totalProcessed),
+        totalDropped: num(rawSoft.totalDropped),
+        totalTimeSqueeze: num(rawSoft.totalTimeSqueeze),
+        totalCpuCollision: num(rawSoft.totalCpuCollision),
+        totalReceivedRps: num(rawSoft.totalReceivedRps),
+        totalFlowLimitCount: num(rawSoft.totalFlowLimitCount),
+        perCpu: softnetPerCpu,
+      }
+    : createEmptySoftnetTelemetry();
+
+  const rawSock = raw?.sockets;
+  const normalizedTcpStates: Record<string, number> = { ...createEmptyKernelSocketTelemetry().tcpStates };
+  if (rawSock?.tcpStates && typeof rawSock.tcpStates === 'object') {
+    for (const [k, v] of Object.entries(rawSock.tcpStates)) {
+      normalizedTcpStates[k] = num(v);
+    }
+  }
+  const normalizedListeningPorts: KernelListeningPort[] = Array.isArray(rawSock?.listeningPorts)
+    ? rawSock.listeningPorts.map((lp: any) => ({
+        protocol: String(lp?.protocol ?? 'TCP').toUpperCase(),
+        port: num(lp?.port),
+        service: String(lp?.service ?? ''),
+        ipv4Sockets: num(lp?.ipv4Sockets),
+        ipv6Sockets: num(lp?.ipv6Sockets),
+        totalCount: num(lp?.totalCount, num(lp?.ipv4Sockets) + num(lp?.ipv6Sockets)),
+      }))
+    : [];
+  const sockets: KernelSocketTelemetry = rawSock
+    ? {
+        timestamp: String(rawSock.timestamp ?? new Date().toISOString()),
+        available: Boolean(rawSock.available),
+        totalTcpSockets: num(rawSock.totalTcpSockets),
+        ipv4TcpSockets: num(rawSock.ipv4TcpSockets),
+        ipv6TcpSockets: num(rawSock.ipv6TcpSockets),
+        totalUdpSockets: num(rawSock.totalUdpSockets),
+        ipv4UdpSockets: num(rawSock.ipv4UdpSockets),
+        ipv6UdpSockets: num(rawSock.ipv6UdpSockets),
+        tcpStates: normalizedTcpStates,
+        listeningPorts: normalizedListeningPorts,
+      }
+    : createEmptyKernelSocketTelemetry();
 
   return {
     daemonDown: Boolean(raw?.daemonDown),
@@ -818,6 +1020,8 @@ export function normalizeEbpfOverviewResponse(raw: any): EbpfOverviewTelemetry {
     },
     bpfInventory,
     kernelRca,
+    softnet,
+    sockets,
     virt: {
       timestamp: String(rawVirt?.timestamp ?? new Date().toISOString()),
       kvmAvailable: Boolean(rawVirt?.kvmAvailable ?? workloads.some((w) => w.kind === 'vm')),
@@ -894,6 +1098,7 @@ export interface DataplaneRateSample {
   lpmDropPps: number;
   v4Pps: number;
   v6Pps: number;
+  vlanPps: number;
   rxMbps: number;
 }
 
@@ -915,6 +1120,7 @@ export function computeDataplaneRatePoint(
       lpmDropPps: 0,
       v4Pps: 0,
       v6Pps: 0,
+      vlanPps: 0,
       rxMbps: 0,
     };
   }
@@ -937,6 +1143,7 @@ export function computeDataplaneRatePoint(
     lpmDropPps: rate(prev.lpmCidrDrops, next.lpmCidrDrops),
     v4Pps: rate(prev.ipv4Packets, next.ipv4Packets),
     v6Pps: rate(prev.ipv6Packets, next.ipv6Packets),
+    vlanPps: rate(prev.vlanTaggedPackets, next.vlanTaggedPackets),
     rxMbps,
   };
 }
@@ -1202,4 +1409,578 @@ export function formatDurationNs(ns: number): string {
   if (ns >= 1_000_000) return `${(ns / 1_000_000).toFixed(2)} ms`;
   if (ns >= 1_000) return `${(ns / 1_000).toFixed(1)} µs`;
   return `${Math.round(ns)} ns`;
+}
+
+export interface XdpPipelineModel {
+  mode: 'cumulative' | 'delta';
+  rxTotal: number;
+  vlanTagged: number;
+  untagged: number;
+  ipv4: number;
+  ipv6: number;
+  otherL3: number;
+  xdpPass: number;
+  xdpDrop: number;
+  lpmCidrDrop: number;
+  synFloodDrop: number;
+  hostBlocklistDrop: number;
+  tcpSyn: number;
+  dropBytes: number;
+  rxBytes: number;
+}
+
+export function buildXdpPipelineModel(
+  stats: XdpVerdictStats | null | undefined,
+  deltaSample?: DataplaneRateSample | null,
+  mode: 'cumulative' | 'delta' = 'cumulative'
+): XdpPipelineModel {
+  if (mode === 'delta' && deltaSample) {
+    const rxTotal = Math.max(0, num(deltaSample.rxPps));
+    const vlanTagged = Math.min(rxTotal, Math.max(0, num(deltaSample.vlanPps)));
+    const untagged = Math.max(0, rxTotal - vlanTagged);
+    const ipv4 = Math.min(rxTotal, Math.max(0, num(deltaSample.v4Pps)));
+    const ipv6 = Math.min(Math.max(0, rxTotal - ipv4), Math.max(0, num(deltaSample.v6Pps)));
+    const otherL3 = Math.max(0, rxTotal - ipv4 - ipv6);
+    const xdpPass = Math.max(0, num(deltaSample.passPps));
+    const xdpDrop = Math.max(0, num(deltaSample.dropPps));
+    const lpmCidrDrop = Math.min(xdpDrop, Math.max(0, num(deltaSample.lpmDropPps)));
+    const synFloodDrop = Math.min(Math.max(0, xdpDrop - lpmCidrDrop), Math.max(0, num(deltaSample.synFloodDropPps)));
+    const hostBlocklistDrop = Math.max(0, xdpDrop - lpmCidrDrop - synFloodDrop);
+
+    return {
+      mode: 'delta',
+      rxTotal,
+      vlanTagged,
+      untagged,
+      ipv4,
+      ipv6,
+      otherL3,
+      xdpPass,
+      xdpDrop,
+      lpmCidrDrop,
+      synFloodDrop,
+      hostBlocklistDrop,
+      tcpSyn: Math.max(0, num(deltaSample.synPps)),
+      dropBytes: 0,
+      rxBytes: Math.round((Math.max(0, num(deltaSample.rxMbps)) * 1_000_000) / 8),
+    };
+  }
+
+  const rxTotal = Math.max(0, num(stats?.rxPackets));
+  const vlanTagged = Math.min(rxTotal, Math.max(0, num(stats?.vlanTaggedPackets)));
+  const untagged = Math.max(0, rxTotal - vlanTagged);
+  const ipv4 = Math.min(rxTotal, Math.max(0, num(stats?.ipv4Packets)));
+  const ipv6 = Math.min(Math.max(0, rxTotal - ipv4), Math.max(0, num(stats?.ipv6Packets)));
+  const otherL3 = Math.max(0, rxTotal - ipv4 - ipv6);
+  const xdpPass = Math.max(0, num(stats?.xdpPassPackets));
+  const xdpDrop = Math.max(0, num(stats?.xdpDropPackets));
+  const lpmCidrDrop = Math.min(xdpDrop, Math.max(0, num(stats?.lpmCidrDrops)));
+  const synFloodDrop = Math.min(Math.max(0, xdpDrop - lpmCidrDrop), Math.max(0, num(stats?.synFloodDrops)));
+  const hostBlocklistDrop = Math.max(0, xdpDrop - lpmCidrDrop - synFloodDrop);
+
+  return {
+    mode: 'cumulative',
+    rxTotal,
+    vlanTagged,
+    untagged,
+    ipv4,
+    ipv6,
+    otherL3,
+    xdpPass,
+    xdpDrop,
+    lpmCidrDrop,
+    synFloodDrop,
+    hostBlocklistDrop,
+    tcpSyn: Math.max(0, num(stats?.tcpSynPackets)),
+    dropBytes: Math.max(0, num(stats?.xdpDropBytes)),
+    rxBytes: Math.max(0, num(stats?.rxBytes)),
+  };
+}
+
+export interface BpfProgramRuntimeDelta {
+  id: number;
+  name: string;
+  type: string;
+  runsPerSec: number;
+  cpuUsPerSec: number;
+  avgNsPerRun: number;
+  totalRunTimeMs: number;
+  totalRunCount: number;
+  jitedBytes: number;
+  recursionMisses: number;
+  sharePct: number;
+}
+
+export function computeBpfProgramRuntimeDeltas(
+  prevProgs: BpfProgramInventoryItem[],
+  nextProgs: BpfProgramInventoryItem[],
+  elapsedSec: number
+): BpfProgramRuntimeDelta[] {
+  const dt = elapsedSec > 0.1 ? elapsedSec : 0;
+  const prevMap = new Map<number, BpfProgramInventoryItem>();
+  for (const p of prevProgs) {
+    prevMap.set(p.id, p);
+  }
+
+  let sumCpuUsPerSec = 0;
+  let sumTotalRunTimeNs = 0;
+  const rows = nextProgs.map((next) => {
+    const prev = prevMap.get(next.id);
+    const deltaRuns = dt > 0 && prev && next.runCount >= prev.runCount ? next.runCount - prev.runCount : 0;
+    const deltaNs = dt > 0 && prev && next.runTimeNs >= prev.runTimeNs ? next.runTimeNs - prev.runTimeNs : 0;
+
+    const runsPerSec = dt > 0 && prev ? Math.round((deltaRuns / dt) * 10) / 10 : 0;
+    const cpuUsPerSec = dt > 0 && prev ? Math.round((deltaNs / 1000 / dt) * 100) / 100 : 0;
+    const avgNsPerRun =
+      deltaRuns > 0 && deltaNs >= 0
+        ? Math.round((deltaNs / deltaRuns) * 10) / 10
+        : next.runCount > 0
+          ? Math.round((next.runTimeNs / next.runCount) * 10) / 10
+          : 0;
+    const totalRunTimeMs = Math.round((next.runTimeNs / 1_000_000) * 1000) / 1000;
+
+    sumCpuUsPerSec += cpuUsPerSec;
+    sumTotalRunTimeNs += Math.max(0, next.runTimeNs);
+
+    return {
+      id: next.id,
+      name: next.name,
+      type: next.type,
+      runsPerSec,
+      cpuUsPerSec,
+      avgNsPerRun,
+      totalRunTimeMs,
+      totalRunCount: next.runCount,
+      jitedBytes: next.jitedBytes,
+      recursionMisses: next.recursionMisses,
+      rawRunTimeNs: Math.max(0, next.runTimeNs),
+      sharePct: 0,
+    };
+  });
+
+  const useDeltaShare = sumCpuUsPerSec > 0;
+  const enriched: BpfProgramRuntimeDelta[] = rows.map(({ rawRunTimeNs, ...r }) => ({
+    ...r,
+    sharePct: useDeltaShare
+      ? Math.round((r.cpuUsPerSec / sumCpuUsPerSec) * 1000) / 10
+      : sumTotalRunTimeNs > 0
+        ? Math.round((rawRunTimeNs / sumTotalRunTimeNs) * 1000) / 10
+        : 0,
+  }));
+
+  enriched.sort(
+    (a, b) =>
+      b.cpuUsPerSec - a.cpuUsPerSec ||
+      b.totalRunTimeMs - a.totalRunTimeMs ||
+      b.jitedBytes - a.jitedBytes ||
+      a.id - b.id
+  );
+  return enriched;
+}
+
+export interface SoftnetCpuDelta {
+  cpu: number;
+  processedPerSec: number;
+  droppedPerSec: number;
+  timeSqueezePerSec: number;
+  cpuCollisionPerSec: number;
+  receivedRpsPerSec: number;
+  flowLimitPerSec: number;
+}
+
+export function computeSoftnetDeltas(
+  prev: KernelSoftnetTelemetry | null | undefined,
+  next: KernelSoftnetTelemetry | null | undefined,
+  elapsedSec: number
+): SoftnetCpuDelta[] {
+  if (!next || !next.available || next.perCpu.length === 0) {
+    return [];
+  }
+  const dt = elapsedSec > 0.1 ? elapsedSec : 0;
+  const prevByCpu = new Map<number, SoftnetCpuStat>();
+  if (prev?.available) {
+    for (const c of prev.perCpu) {
+      prevByCpu.set(c.cpu, c);
+    }
+  }
+
+  const rate = (a: number | undefined, b: number): number => {
+    if (dt <= 0 || a == null || b < a) return 0;
+    return Math.round(((b - a) / dt) * 10) / 10;
+  };
+
+  return next.perCpu
+    .map((cur) => {
+      const p = prevByCpu.get(cur.cpu);
+      return {
+        cpu: cur.cpu,
+        processedPerSec: p ? rate(p.processed, cur.processed) : 0,
+        droppedPerSec: p ? rate(p.dropped, cur.dropped) : 0,
+        timeSqueezePerSec: p ? rate(p.timeSqueeze, cur.timeSqueeze) : 0,
+        cpuCollisionPerSec: p ? rate(p.cpuCollision, cur.cpuCollision) : 0,
+        receivedRpsPerSec: p ? rate(p.receivedRps, cur.receivedRps) : 0,
+        flowLimitPerSec: p ? rate(p.flowLimitCount, cur.flowLimitCount) : 0,
+      };
+    })
+    .sort((a, b) => a.cpu - b.cpu);
+}
+
+export interface BpfDependencyGraphScatterPoint {
+  id: number;
+  name: string;
+  type: string;
+  verifiedInsns: number;
+  translatedBytes: number;
+  jitedKiB: number;
+  avgNsPerRun: number;
+  runCount: number;
+  mapCount: number;
+}
+
+export interface BpfDependencyGraph {
+  links: BpfLinkInventoryItem[];
+  programs: BpfProgramInventoryItem[];
+  maps: BpfMapInventoryItem[];
+  linkToProgEdges: Array<{ id: string; linkId: number; programId: number }>;
+  progToMapEdges: Array<{ id: string; programId: number; mapId: number }>;
+  totalProgramsMatched: number;
+  totalMapsReferenced: number;
+  availableTypes: string[];
+  scatterPoints: BpfDependencyGraphScatterPoint[];
+}
+
+export function buildBpfDependencyGraph(
+  inventory: KernelBpfInventory | undefined,
+  opts: { typeFilter?: string; search?: string; maxPrograms?: number } = {}
+): BpfDependencyGraph {
+  const allProgs = inventory?.programs || [];
+  const allMaps = inventory?.maps || [];
+  const allLinks = inventory?.links || [];
+
+  const availableTypes = Array.from(new Set(allProgs.map((p) => p.type).filter(Boolean))).sort();
+  if (!inventory?.available || allProgs.length === 0) {
+    return {
+      links: [],
+      programs: [],
+      maps: [],
+      linkToProgEdges: [],
+      progToMapEdges: [],
+      totalProgramsMatched: 0,
+      totalMapsReferenced: 0,
+      availableTypes,
+      scatterPoints: [],
+    };
+  }
+
+  const mapsById = new Map<number, BpfMapInventoryItem>();
+  for (const m of allMaps) {
+    mapsById.set(m.id, m);
+  }
+
+  const linksByProg = new Map<number, BpfLinkInventoryItem[]>();
+  for (const l of allLinks) {
+    const arr = linksByProg.get(l.programId);
+    if (arr) arr.push(l);
+    else linksByProg.set(l.programId, [l]);
+  }
+
+  const typeF = (opts.typeFilter || 'all').trim().toLowerCase();
+  const q = (opts.search || '').trim().toLowerCase();
+  const maxPrograms = Math.max(1, opts.maxPrograms ?? 14);
+
+  const matched = allProgs.filter((p) => {
+    if (typeF !== 'all' && p.type.toLowerCase() !== typeF) {
+      return false;
+    }
+    if (!q) return true;
+
+    if (
+      p.name.toLowerCase().includes(q) ||
+      p.type.toLowerCase().includes(q) ||
+      p.tag.toLowerCase().includes(q) ||
+      String(p.id).includes(q)
+    ) {
+      return true;
+    }
+
+    const pLinks = linksByProg.get(p.id) || [];
+    if (
+      pLinks.some(
+        (l) =>
+          l.type.toLowerCase().includes(q) ||
+          (l.attachDetail || '').toLowerCase().includes(q) ||
+          String(l.id).includes(q)
+      )
+    ) {
+      return true;
+    }
+
+    return p.mapIds.some((mid) => {
+      const m = mapsById.get(mid);
+      if (!m) return String(mid).includes(q);
+      return m.name.toLowerCase().includes(q) || m.type.toLowerCase().includes(q) || String(m.id).includes(q);
+    });
+  });
+
+  const sortedMatched = [...matched].sort((a, b) => {
+    const scoreA = (linksByProg.get(a.id)?.length || 0) * 4 + a.mapIds.length * 2 + (a.jitedBytes > 0 ? 1 : 0);
+    const scoreB = (linksByProg.get(b.id)?.length || 0) * 4 + b.mapIds.length * 2 + (b.jitedBytes > 0 ? 1 : 0);
+    return scoreB - scoreA || b.jitedBytes - a.jitedBytes || a.id - b.id;
+  });
+
+  const scatterPoints: BpfDependencyGraphScatterPoint[] = sortedMatched.map((p) => ({
+    id: p.id,
+    name: p.name,
+    type: p.type,
+    verifiedInsns: p.verifiedInsns,
+    translatedBytes: p.translatedBytes,
+    jitedKiB: Math.round((p.jitedBytes / 1024) * 100) / 100,
+    avgNsPerRun: p.runCount > 0 ? Math.round((p.runTimeNs / p.runCount) * 10) / 10 : 0,
+    runCount: p.runCount,
+    mapCount: p.mapCount,
+  }));
+
+  const displayedProgs = sortedMatched.slice(0, maxPrograms);
+  const displayedProgIds = new Set(displayedProgs.map((p) => p.id));
+
+  const displayedLinks: BpfLinkInventoryItem[] = [];
+  const linkToProgEdges: Array<{ id: string; linkId: number; programId: number }> = [];
+  for (const l of allLinks) {
+    if (displayedProgIds.has(l.programId)) {
+      displayedLinks.push(l);
+      linkToProgEdges.push({
+        id: `link:${l.id}->prog:${l.programId}`,
+        linkId: l.id,
+        programId: l.programId,
+      });
+    }
+  }
+
+  const displayedMapIds = new Set<number>();
+  const progToMapEdges: Array<{ id: string; programId: number; mapId: number }> = [];
+  for (const p of displayedProgs) {
+    for (const mid of p.mapIds) {
+      if (mapsById.has(mid)) {
+        displayedMapIds.add(mid);
+        progToMapEdges.push({
+          id: `prog:${p.id}->map:${mid}`,
+          programId: p.id,
+          mapId: mid,
+        });
+      }
+    }
+  }
+
+  const displayedMaps = Array.from(displayedMapIds)
+    .map((id) => mapsById.get(id)!)
+    .sort((a, b) => b.memlockBytes - a.memlockBytes || a.id - b.id);
+
+  return {
+    links: displayedLinks,
+    programs: displayedProgs,
+    maps: displayedMaps,
+    linkToProgEdges,
+    progToMapEdges,
+    totalProgramsMatched: matched.length,
+    totalMapsReferenced: displayedMaps.length,
+    availableTypes,
+    scatterPoints,
+  };
+}
+
+export interface FlowHeatmapCell {
+  rowSrcIp: string;
+  colKey: string;
+  dstPort: number;
+  protocol: number;
+  protoName: string;
+  bytes: number;
+  packets: number;
+  synPackets: number;
+  rstPackets: number;
+  synRatioPct: number;
+  flowCount: number;
+  isBlocked: boolean;
+  flows: XdpFlowEntry[];
+}
+
+export interface FlowHeatmapMatrix {
+  rows: Array<{ srcIp: string; totalBytes: number; totalPackets: number; isBlocked: boolean }>;
+  cols: Array<{ colKey: string; dstPort: number; protocol: number; protoName: string; label: string; totalBytes: number }>;
+  cells: Record<string, FlowHeatmapCell>;
+  maxBytes: number;
+  maxPackets: number;
+  maxSyn: number;
+}
+
+export function buildFlowHeatmapMatrix(
+  flows: XdpFlowEntry[],
+  blockedIps: XdpBlockedEntry[],
+  maxRows = 10,
+  maxCols = 10
+): FlowHeatmapMatrix {
+  const blockedSet = new Set(blockedIps.map((b) => b.ip));
+  const rowAgg = new Map<string, { srcIp: string; totalBytes: number; totalPackets: number; isBlocked: boolean }>();
+  const colAgg = new Map<
+    string,
+    { colKey: string; dstPort: number; protocol: number; protoName: string; label: string; totalBytes: number }
+  >();
+  const rawCells = new Map<string, FlowHeatmapCell>();
+
+  const makeColKey = (f: XdpFlowEntry): { key: string; label: string } => {
+    const proto = (f.protoName || `PROTO${f.protocol}`).toUpperCase();
+    if (f.dstPort > 0) {
+      return { key: `${proto}:${f.dstPort}`, label: `${proto}:${f.dstPort}` };
+    }
+    return { key: `${proto}:0`, label: proto };
+  };
+
+  for (const f of flows) {
+    if (!f.srcIp) continue;
+    const isBlocked = blockedSet.has(f.srcIp) || blockedSet.has(f.dstIp);
+    const r = rowAgg.get(f.srcIp);
+    if (r) {
+      r.totalBytes += f.bytes;
+      r.totalPackets += f.packets;
+      r.isBlocked = r.isBlocked || blockedSet.has(f.srcIp);
+    } else {
+      rowAgg.set(f.srcIp, {
+        srcIp: f.srcIp,
+        totalBytes: f.bytes,
+        totalPackets: f.packets,
+        isBlocked: blockedSet.has(f.srcIp),
+      });
+    }
+
+    const colInfo = makeColKey(f);
+    const c = colAgg.get(colInfo.key);
+    if (c) {
+      c.totalBytes += f.bytes;
+    } else {
+      colAgg.set(colInfo.key, {
+        colKey: colInfo.key,
+        dstPort: f.dstPort,
+        protocol: f.protocol,
+        protoName: f.protoName || `PROTO:${f.protocol}`,
+        label: colInfo.label,
+        totalBytes: f.bytes,
+      });
+    }
+
+    const cellId = `${f.srcIp}|${colInfo.key}`;
+    const existing = rawCells.get(cellId);
+    if (existing) {
+      existing.bytes += f.bytes;
+      existing.packets += f.packets;
+      existing.synPackets += f.synPackets;
+      existing.rstPackets += f.rstPackets;
+      existing.flowCount += 1;
+      existing.isBlocked = existing.isBlocked || isBlocked;
+      existing.flows.push(f);
+    } else {
+      rawCells.set(cellId, {
+        rowSrcIp: f.srcIp,
+        colKey: colInfo.key,
+        dstPort: f.dstPort,
+        protocol: f.protocol,
+        protoName: f.protoName || `PROTO:${f.protocol}`,
+        bytes: f.bytes,
+        packets: f.packets,
+        synPackets: f.synPackets,
+        rstPackets: f.rstPackets,
+        synRatioPct: 0,
+        flowCount: 1,
+        isBlocked,
+        flows: [f],
+      });
+    }
+  }
+
+  const rows = Array.from(rowAgg.values())
+    .sort((a, b) => b.totalBytes - a.totalBytes || b.totalPackets - a.totalPackets || a.srcIp.localeCompare(b.srcIp))
+    .slice(0, Math.max(1, maxRows));
+  const cols = Array.from(colAgg.values())
+    .sort((a, b) => b.totalBytes - a.totalBytes || a.dstPort - b.dstPort || a.colKey.localeCompare(b.colKey))
+    .slice(0, Math.max(1, maxCols));
+
+  const rowSet = new Set(rows.map((r) => r.srcIp));
+  const colSet = new Set(cols.map((c) => c.colKey));
+
+  const cells: Record<string, FlowHeatmapCell> = {};
+  let maxBytes = 0;
+  let maxPackets = 0;
+  let maxSyn = 0;
+
+  for (const [cellId, cell] of rawCells.entries()) {
+    if (!rowSet.has(cell.rowSrcIp) || !colSet.has(cell.colKey)) continue;
+    const synRatioPct =
+      cell.packets > 0 ? Math.round((cell.synPackets / cell.packets) * 1000) / 10 : 0;
+    const enriched: FlowHeatmapCell = { ...cell, synRatioPct };
+    cells[cellId] = enriched;
+    if (enriched.bytes > maxBytes) maxBytes = enriched.bytes;
+    if (enriched.packets > maxPackets) maxPackets = enriched.packets;
+    if (enriched.synPackets > maxSyn) maxSyn = enriched.synPackets;
+  }
+
+  return { rows, cols, cells, maxBytes, maxPackets, maxSyn };
+}
+
+export interface CorrelatedListeningService {
+  protocol: string;
+  port: number;
+  service: string;
+  ipv4Sockets: number;
+  ipv6Sockets: number;
+  totalSockets: number;
+  xdpFlows: number;
+  xdpPackets: number;
+  xdpBytes: number;
+  synPackets: number;
+  synRatioPct: number;
+  activeInXdp: boolean;
+}
+
+export function correlateListeningSocketsWithXdp(
+  sockets: KernelSocketTelemetry | undefined,
+  topPorts: XdpPortSummary[] | undefined
+): CorrelatedListeningService[] {
+  const listening = sockets?.listeningPorts || [];
+  if (listening.length === 0) return [];
+
+  const portLookup = new Map<string, XdpPortSummary>();
+  for (const tp of topPorts || []) {
+    const key = `${String(tp.protoName || '').toUpperCase()}:${tp.port}`;
+    const prev = portLookup.get(key);
+    if (!prev || tp.bytes > prev.bytes) {
+      portLookup.set(key, tp);
+    }
+  }
+
+  const correlated: CorrelatedListeningService[] = listening.map((lp) => {
+    const proto = lp.protocol.toUpperCase();
+    const xdp = portLookup.get(`${proto}:${lp.port}`);
+    const xdpFlows = xdp?.flows ?? 0;
+    const xdpPackets = xdp?.packets ?? 0;
+    const xdpBytes = xdp?.bytes ?? 0;
+    const synPackets = xdp?.synPackets ?? 0;
+    const synRatioPct = xdpPackets > 0 ? Math.round((synPackets / xdpPackets) * 1000) / 10 : 0;
+
+    return {
+      protocol: proto,
+      port: lp.port,
+      service: lp.service || xdp?.service || '',
+      ipv4Sockets: lp.ipv4Sockets,
+      ipv6Sockets: lp.ipv6Sockets,
+      totalSockets: lp.totalCount,
+      xdpFlows,
+      xdpPackets,
+      xdpBytes,
+      synPackets,
+      synRatioPct,
+      activeInXdp: xdpPackets > 0 || xdpFlows > 0,
+    };
+  });
+
+  correlated.sort((a, b) => b.xdpBytes - a.xdpBytes || b.xdpPackets - a.xdpPackets || a.port - b.port);
+  return correlated;
 }

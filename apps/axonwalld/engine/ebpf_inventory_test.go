@@ -2,6 +2,8 @@ package engine
 
 import (
 	"testing"
+
+	"github.com/cilium/ebpf/link"
 )
 
 func TestSummarizeXdpFlows(t *testing.T) {
@@ -100,5 +102,91 @@ func TestGetDataplaneSnapshotNonNilSlicesWhenUnattached(t *testing.T) {
 	snap := mgr.GetDataplaneSnapshot(50)
 	if snap.PerCpuStats == nil || snap.ProtocolBreakdown == nil || snap.TopPorts == nil || snap.VlanBreakdown == nil || snap.SynRateMeters == nil || snap.TopFlows == nil || snap.ActiveBlocks == nil {
 		t.Fatalf("expected all slices in EbpfDataplaneSnapshot to be non-nil: %+v", snap)
+	}
+}
+
+func TestParseProcNetSoftnetStat(t *testing.T) {
+	raw := `
+001179be 00000004 00000002 00000000 00000000 00000000 00000000 00000000 00000001 0000000a 00000003 00000000 00000000 00000000 00000000
+00000100 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000002
+00000020 00000001 00000005
+`
+	res := ParseProcNetSoftnetStat(raw)
+	if !res.Available || res.CpuCount != 3 || len(res.PerCpu) != 3 {
+		t.Fatalf("expected 3 parsed CPUs, got %+v", res)
+	}
+	if res.PerCpu[0].Cpu != 0 || res.PerCpu[0].Processed != 0x001179be || res.PerCpu[0].Dropped != 4 || res.PerCpu[0].TimeSqueeze != 2 || res.PerCpu[0].CpuCollision != 1 || res.PerCpu[0].ReceivedRps != 10 || res.PerCpu[0].FlowLimitCount != 3 {
+		t.Fatalf("unexpected cpu 0 softnet entry: %+v", res.PerCpu[0])
+	}
+	// Row 1 explicitly encodes cpu index 2 via column 12; row 2 has short columns and falls back to index 2 -> sorted tie preserves both.
+	if res.TotalDropped != 5 || res.TotalTimeSqueeze != 7 || res.TotalCpuCollision != 1 || res.TotalReceivedRps != 10 || res.TotalFlowLimitCount != 3 {
+		t.Fatalf("unexpected softnet aggregates: %+v", res)
+	}
+
+	empty := ParseProcNetSoftnetStat("")
+	if empty.Available || empty.CpuCount != 0 || empty.PerCpu == nil {
+		t.Fatalf("expected empty softnet telemetry to remain unavailable with non-nil PerCpu: %+v", empty)
+	}
+}
+
+func TestParseProcNetSockets(t *testing.T) {
+	tcp4 := `  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
+   0: 00000000:01BB 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 100
+   1: 0100007F:0B96 0A000002:C350 01 00000000:00000000 00:00000000 00000000     0        0 101
+   2: 00000000:01BB 0A000003:C351 03 00000000:00000000 00:00000000 00000000     0        0 102
+   3: 00000000:0016 0A000004:C352 06 00000000:00000000 00:00000000 00000000     0        0 103
+   4: 00000000:0016 0A000005:C353 08 00000000:00000000 00:00000000 00000000     0        0 104
+`
+	tcp6 := `  sl  local_address                         remote_address                        st
+   0: 00000000000000000000000000000000:01BB 00000000000000000000000000000000:0000 0A
+`
+	udp4 := `  sl  local_address rem_address   st
+   0: 00000000:01BB 00000000:0000 07
+   1: 0100007F:9999 0A000002:0035 01
+`
+	udp6 := `  sl  local_address                         remote_address                        st
+   0: 00000000000000000000000000000000:0035 00000000000000000000000000000000:0000 07
+`
+
+	res := ParseProcNetSockets(tcp4, tcp6, udp4, udp6)
+	if !res.Available || res.Ipv4TcpSockets != 5 || res.Ipv6TcpSockets != 1 || res.TotalTcpSockets != 6 {
+		t.Fatalf("unexpected TCP socket totals: %+v", res)
+	}
+	if res.Ipv4UdpSockets != 2 || res.Ipv6UdpSockets != 1 || res.TotalUdpSockets != 3 {
+		t.Fatalf("unexpected UDP socket totals: %+v", res)
+	}
+	if res.TcpStates["LISTEN"] != 2 || res.TcpStates["ESTABLISHED"] != 1 || res.TcpStates["SYN_RECV"] != 1 || res.TcpStates["TIME_WAIT"] != 1 || res.TcpStates["CLOSE_WAIT"] != 1 {
+		t.Fatalf("unexpected TCP state breakdown: %+v", res.TcpStates)
+	}
+	// Expected listening ports sorted by port asc: UDP:53 (DNS), TCP:443 (HTTPS), UDP:443 (QUIC/HTTP3)
+	if len(res.ListeningPorts) != 3 {
+		t.Fatalf("expected 3 listening ports, got %+v", res.ListeningPorts)
+	}
+	if res.ListeningPorts[0].Protocol != "UDP" || res.ListeningPorts[0].Port != 53 || res.ListeningPorts[0].Service != "DNS" || res.ListeningPorts[0].Ipv6Sockets != 1 {
+		t.Fatalf("unexpected first listening port: %+v", res.ListeningPorts[0])
+	}
+	if res.ListeningPorts[1].Protocol != "TCP" || res.ListeningPorts[1].Port != 443 || res.ListeningPorts[1].Ipv4Sockets != 1 || res.ListeningPorts[1].Ipv6Sockets != 1 || res.ListeningPorts[1].TotalCount != 2 {
+		t.Fatalf("unexpected TCP 443 listening entry: %+v", res.ListeningPorts[1])
+	}
+	if res.ListeningPorts[2].Protocol != "UDP" || res.ListeningPorts[2].Port != 443 || res.ListeningPorts[2].Service != "QUIC/HTTP3" {
+		t.Fatalf("unexpected UDP 443 listening entry: %+v", res.ListeningPorts[2])
+	}
+}
+
+func TestFormatBpfLinkType(t *testing.T) {
+	cases := map[link.Type]string{
+		link.XDPType:           "xdp",
+		link.TCXType:           "tcx",
+		link.CgroupType:        "cgroup",
+		link.TracingType:       "tracing",
+		link.RawTracepointType: "raw_tracepoint",
+		link.PerfEventType:     "perf_event",
+		link.NetfilterType:     "netfilter",
+		link.Type(999):         "type_999",
+	}
+	for in, want := range cases {
+		if got := formatBpfLinkType(in); got != want {
+			t.Fatalf("formatBpfLinkType(%v) = %q, want %q", in, got, want)
+		}
 	}
 }

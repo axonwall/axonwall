@@ -29,10 +29,8 @@ import {
   Gauge,
   GitBranch,
   Flame,
-  Database,
   Save,
   Sparkles,
-  ArrowRight,
   KeyRound,
   Trash2,
 } from 'lucide-react';
@@ -45,6 +43,7 @@ import {
   manageXdpFastDropAction,
   getXdpSynLimitAction,
   setXdpSynLimitAction,
+  toggleKernelBpfStatsAction,
   renderK3sBpfTokenManifestAction,
   getCurrentDesiredState,
   applyDesiredStateAction,
@@ -56,13 +55,23 @@ import {
 import { ObservabilityConfigSchema, type DesiredState } from '@axonwall/lib/schemas';
 import { useDesiredStateApply } from '@/lib/use-desired-state-apply';
 import {
+  computeBpfProgramRuntimeDeltas,
   computeDataplaneRatePoint,
+  computeSoftnetDeltas,
+  type BpfProgramInventoryItem,
+  type BpfProgramRuntimeDelta,
   type DataplaneRateSample,
+  type KernelSoftnetTelemetry,
+  type SoftnetCpuDelta,
   type XdpVerdictStats,
 } from '@/lib/ebpf-telemetry';
 import { EbpfDataplaneCharts } from '@/components/ebpf/EbpfDataplaneCharts';
 import { EbpfFlowTopologyMap } from '@/components/ebpf/EbpfFlowTopologyMap';
+import { EbpfKernelGraphVisualizer } from '@/components/ebpf/EbpfKernelGraphVisualizer';
 import { EbpfKernelInventoryPanel } from '@/components/ebpf/EbpfKernelInventoryPanel';
+import { EbpfRuntimeProfilerVisualizer } from '@/components/ebpf/EbpfRuntimeProfilerVisualizer';
+import { EbpfSocketAndServiceVisualizer } from '@/components/ebpf/EbpfSocketAndServiceVisualizer';
+import { EbpfXdpPipelineVisualizer } from '@/components/ebpf/EbpfXdpPipelineVisualizer';
 import { EbpfCrossDutyVisualizer } from '@/components/ebpf/EbpfCrossDutyVisualizer';
 import { EbpfLsmAndTokenVisualizer } from '@/components/ebpf/EbpfSecurityVisualizer';
 import {
@@ -371,7 +380,14 @@ export default function EbpfObservabilityConsolePage() {
   const [desiredState, setDesiredState] = useState<DesiredState | null>(null);
   const [loading, setLoading] = useState(true);
   const [rateHistory, setRateHistory] = useState<DataplaneRateSample[]>([]);
+  const [bpfProgramDeltas, setBpfProgramDeltas] = useState<BpfProgramRuntimeDelta[]>([]);
+  const [bpfRuntimeHistory, setBpfRuntimeHistory] = useState<Array<Record<string, number | string>>>([]);
+  const [topProgramSeries, setTopProgramSeries] = useState<Array<{ key: string; label: string; color: string }>>([]);
+  const [softnetDeltas, setSoftnetDeltas] = useState<SoftnetCpuDelta[]>([]);
+  const [togglingBpfStats, setTogglingBpfStats] = useState(false);
   const prevStatsRef = useRef<XdpVerdictStats | null>(null);
+  const prevBpfProgsRef = useRef<BpfProgramInventoryItem[]>([]);
+  const prevSoftnetRef = useRef<KernelSoftnetTelemetry | null>(null);
   const prevPollAtRef = useRef<number>(0);
 
   // Interactive Linux 6.9+ BPF_TOKEN, XDP Fast-Drop & K3s Manifest Workbench state
@@ -416,18 +432,42 @@ export default function EbpfObservabilityConsolePage() {
         setEbpfOverview(ovData);
         if (!ovData.daemonDown) {
           const nowMs = Date.now();
+          const timeLabel = new Date(nowMs).toLocaleTimeString();
           const curStats = ovData.dataplane.xdpStats;
-          if (prevStatsRef.current && prevPollAtRef.current > 0) {
-            const elapsedSec = (nowMs - prevPollAtRef.current) / 1000;
-            const point = computeDataplaneRatePoint(
-              prevStatsRef.current,
-              curStats,
-              elapsedSec,
-              new Date(nowMs).toLocaleTimeString()
-            );
+          const curProgs = ovData.bpfInventory?.programs || [];
+          const curSoftnet = ovData.softnet || null;
+          const elapsedSec = prevPollAtRef.current > 0 ? (nowMs - prevPollAtRef.current) / 1000 : 0;
+
+          if (prevStatsRef.current && elapsedSec > 0) {
+            const point = computeDataplaneRatePoint(prevStatsRef.current, curStats, elapsedSec, timeLabel);
             setRateHistory((prev) => [...prev.slice(-39), point]);
           }
+
+          const progDeltas = computeBpfProgramRuntimeDeltas(prevBpfProgsRef.current, curProgs, elapsedSec);
+          setBpfProgramDeltas(progDeltas);
+
+          if (prevBpfProgsRef.current.length > 0 && elapsedSec > 0.1) {
+            const top5 = progDeltas.slice(0, 5);
+            const palette = ['#10b981', '#38bdf8', '#f59e0b', '#a855f7', '#f43f5e'];
+            const sampleRow: Record<string, number | string> = { time: timeLabel };
+            for (const d of progDeltas.slice(0, 8)) {
+              sampleRow[`prog_${d.id}`] = d.cpuUsPerSec;
+            }
+            setBpfRuntimeHistory((prev) => [...prev.slice(-39), sampleRow]);
+            setTopProgramSeries(
+              top5.map((d, i) => ({
+                key: `prog_${d.id}`,
+                label: `${d.name} (#${d.id})`,
+                color: palette[i % palette.length],
+              }))
+            );
+          }
+
+          setSoftnetDeltas(computeSoftnetDeltas(prevSoftnetRef.current, curSoftnet, elapsedSec));
+
           prevStatsRef.current = curStats;
+          prevBpfProgsRef.current = curProgs;
+          prevSoftnetRef.current = curSoftnet;
           prevPollAtRef.current = nowMs;
         }
       }
@@ -593,6 +633,35 @@ export default function EbpfObservabilityConsolePage() {
       setActionNotice({ type: 'err', text: err?.message || 'Failed to remove XDP_DROP entry.' });
     } finally {
       setActionBusy(false);
+    }
+  };
+
+  const handleToggleBpfStats = async (enabled: boolean) => {
+    setTogglingBpfStats(true);
+    setActionNotice(null);
+    try {
+      const res = await toggleKernelBpfStatsAction(enabled);
+      if (!res.success) {
+        setActionNotice({
+          type: 'err',
+          text: res.error || 'Failed to toggle kernel.bpf_stats_enabled sysctl.',
+        });
+      } else {
+        setActionNotice({
+          type: 'ok',
+          text: res.statsEnabled
+            ? 'Enabled kernel.bpf_stats_enabled=1 — live BPF ns/run runtime counters active.'
+            : 'Disabled kernel.bpf_stats_enabled=0.',
+        });
+        await fetchAllTelemetry();
+      }
+    } catch (err: any) {
+      setActionNotice({
+        type: 'err',
+        text: err?.message || 'Failed to toggle kernel.bpf_stats_enabled sysctl.',
+      });
+    } finally {
+      setTogglingBpfStats(false);
     }
   };
 
@@ -1184,7 +1253,7 @@ export default function EbpfObservabilityConsolePage() {
           }`}
         >
           <Flame className="w-4 h-4" />
-          FlameGraph Profiler
+          Ring-0 Profiler &amp; SoftIRQ
         </button>
         <button
           onClick={() => setActiveTab('containers')}
@@ -1238,6 +1307,12 @@ export default function EbpfObservabilityConsolePage() {
               </button>
             </div>
           )}
+
+          <EbpfXdpPipelineVisualizer
+            overview={ebpfOverview}
+            latestRateSample={rateHistory[rateHistory.length - 1] ?? null}
+            synLimitPps={synLimitPps}
+          />
 
           <EbpfDataplaneCharts overview={ebpfOverview} rateHistory={rateHistory} />
 
@@ -1548,160 +1623,48 @@ export default function EbpfObservabilityConsolePage() {
         </div>
       )}
 
-      {/* TAB 2: AXONWALL SERVICE DEPENDENCY MAP & L7 RED PROTOCOLS */}
+      {/* TAB 2: KERNEL SOCKETS, HEATMAP MATRIX & L7 RED NOTE */}
       {activeTab === 'service-map-l7' && (
         <div className="space-y-6">
-          {/* Auto-Discovered eBPF Service Topology Map */}
-          <div className="p-6 rounded-xl bg-slate-900/80 border border-slate-800 space-y-5">
-            <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-2">
-              <div>
-                <h2 className="text-lg font-bold text-white flex items-center gap-2">
-                  <GitBranch className="w-5 h-5 text-emerald-400" />
-                  Axonwall Auto-Discovered eBPF Service Dependency Map
-                </h2>
-                <p className="text-xs text-slate-400">
-                  No live service telemetry is available: the daemon exposes no per-service flow
-                  data, so the tiers below list the expected topology with no measured rates or
-                  health states.
-                </p>
-              </div>
-              <span className="px-2.5 py-1 rounded-md bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 text-xs font-mono">
-                {apmConfig.tlsUprobesEnabled ? 'TLS Uprobes: ACTIVE (SSL_read/write + Go TLS)' : 'L4/L7 Socket Mode (Enable TLS Uprobes above for mTLS payload inspection)'}
+          {actionNotice && (
+            <div
+              className={`p-4 rounded-xl border text-xs flex items-center justify-between ${
+                actionNotice.type === 'ok'
+                  ? 'bg-emerald-950/40 border-emerald-500/40 text-emerald-200'
+                  : 'bg-rose-950/40 border-rose-500/40 text-rose-200'
+              }`}
+            >
+              <span>{actionNotice.text}</span>
+              <button onClick={() => setActionNotice(null)} className="underline opacity-80">
+                Dismiss
+              </button>
+            </div>
+          )}
+
+          <EbpfSocketAndServiceVisualizer
+            sockets={ebpfOverview?.sockets}
+            flows={ebpfOverview?.dataplane.topFlows || []}
+            topPorts={ebpfOverview?.dataplane.topPorts || []}
+            blockedIps={ebpfOverview?.dataplane.blockedIps || []}
+            daemonDown={Boolean(ebpfOverview?.daemonDown)}
+            onBlockIp={(ip) => void handleQuickXdpDrop(ip)}
+          />
+
+          {/* Honest L7 RED protocol probe capability note */}
+          <div className="p-5 rounded-xl bg-slate-900/80 border border-slate-800 space-y-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <h3 className="text-base font-bold text-white flex items-center gap-2">
+                <Layers className="w-4 h-4 text-emerald-400" />
+                In-Kernel Layer-7 Protocol Dissection &amp; RED Telemetry
+              </h3>
+              <span className="px-2.5 py-1 rounded-md bg-slate-950 border border-slate-800 text-slate-300 text-xs font-mono">
+                {apmConfig.tlsUprobesEnabled ? 'TLS Uprobes Config: Enabled' : 'L3/L4 Kernel & XDP Telemetry Active'}
               </span>
             </div>
-
-            <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 items-center">
-              {/* Tier 1: Ingress & Edge */}
-              <div className="space-y-3">
-                <div className="text-[11px] font-bold uppercase tracking-wider text-slate-400 px-1">
-                  Tier 1 • Perimeter &amp; Ingress
-                </div>
-                <div className="p-4 rounded-xl bg-slate-950 border border-emerald-500/40 space-y-1.5">
-                  <div className="flex items-center justify-between">
-                    <span className="text-xs font-bold text-white">wan0 / nftables + XDP</span>
-                  </div>
-                  <div className="text-[11px] font-mono text-slate-400">
-                    SEC(&quot;xdp&quot;) -&gt; HAProxy / Caddy IAP (:443 / :2966)
-                  </div>
-                  <div className="text-[11px] text-slate-400 flex items-center gap-1 pt-1">
-                    <span>Ingress rates not measured — no daemon telemetry</span>
-                    <ArrowRight className="w-3 h-3" />
-                  </div>
-                </div>
-
-                <div className="p-4 rounded-xl bg-slate-950 border border-sky-500/40 space-y-1.5">
-                  <div className="flex items-center justify-between">
-                    <span className="text-xs font-bold text-white">WireGuard + Rosenpass PQ-KEM</span>
-                  </div>
-                  <div className="text-[11px] font-mono text-slate-400">
-                    wg0 / flannel.1 CNI Mesh (MTU 1420)
-                  </div>
-                  <div className="text-[11px] text-slate-400 flex items-center gap-1 pt-1">
-                    <span>Retransmits / RTT not measured</span>
-                    <ArrowRight className="w-3 h-3" />
-                  </div>
-                </div>
-              </div>
-
-              {/* Tier 2: Control Plane, AI & K3s Workloads */}
-              <div className="space-y-3">
-                <div className="text-[11px] font-bold uppercase tracking-wider text-slate-400 px-1">
-                  Tier 2 • Control Plane &amp; K3s Services
-                </div>
-                <div className="p-4 rounded-xl bg-slate-950 border border-slate-800 space-y-1.5">
-                  <div className="flex items-center justify-between">
-                    <span className="text-xs font-bold text-white">axonwall-controller &amp; axonwalld</span>
-                    <span className="text-[10px] font-mono text-emerald-400">gRPC / UDS</span>
-                  </div>
-                  <div className="text-[11px] text-slate-400">
-                    gRPC rates not measured — no daemon telemetry
-                  </div>
-                </div>
-
-                <div className="p-4 rounded-xl bg-slate-950 border border-purple-500/40 space-y-1.5">
-                  <div className="flex items-center justify-between">
-                    <span className="text-xs font-bold text-white">Eluvix Sovereign AI Router</span>
-                    <span className="text-[10px] font-mono text-purple-300">HTTP/2 + SSE</span>
-                  </div>
-                  <div className="text-[11px] text-slate-400">
-                    Switchyard DLP -&gt; Ollama / vLLM / Frontier APIs
-                  </div>
-                </div>
-
-                <div className="p-4 rounded-xl bg-slate-950 border border-slate-800 space-y-1.5">
-                  <div className="flex items-center justify-between">
-                    <span className="text-xs font-bold text-white">K3s VOW Workloads ({k3sStatus?.podsRunning != null ? `${k3sStatus.podsRunning} pods` : 'pod count unknown'})</span>
-                  </div>
-                  <div className="text-[11px] text-slate-400">
-                    Gitea • Tekton • Harbor • Keycloak • Vigilante SOC
-                  </div>
-                </div>
-              </div>
-
-              {/* Tier 3: Stateful Databases & ZFS Storage */}
-              <div className="space-y-3">
-                <div className="text-[11px] font-bold uppercase tracking-wider text-slate-400 px-1">
-                  Tier 3 • Databases &amp; OpenZFS Storage
-                </div>
-                <div className="p-4 rounded-xl bg-slate-950 border border-slate-800 space-y-1.5">
-                  <div className="flex items-center justify-between">
-                    <span className="text-xs font-bold text-white flex items-center gap-1.5">
-                      <Database className="w-3.5 h-3.5 text-emerald-400" /> PostgreSQL (Kubegres) &amp; Redis
-                    </span>
-                    <span className="text-[10px] font-mono text-slate-400">p99 not measured</span>
-                  </div>
-                  <div className="text-[11px] font-mono text-slate-400">
-                    PGWire / RESP rates not measured
-                  </div>
-                </div>
-
-                <div className="p-4 rounded-xl bg-slate-950 border border-slate-800 space-y-1.5">
-                  <div className="flex items-center justify-between">
-                    <span className="text-xs font-bold text-white flex items-center gap-1.5">
-                      <Activity className="w-3.5 h-3.5 text-sky-400" /> VictoriaMetrics &amp; ClickHouse
-                    </span>
-                    <span className="text-[10px] font-mono text-slate-400">p99 not measured</span>
-                  </div>
-                  <div className="text-[11px] font-mono text-slate-400">
-                    OTLP Traces, Axonwall Profiles &amp; Flow Time-Series
-                  </div>
-                </div>
-
-                <div className="p-4 rounded-xl bg-slate-950 border border-emerald-500/30 space-y-1.5">
-                  <div className="flex items-center justify-between">
-                    <span className="text-xs font-bold text-white flex items-center gap-1.5">
-                      <HardDrive className="w-3.5 h-3.5 text-emerald-400" /> OpenEBS ZFS-LocalPV / Mayastor
-                    </span>
-                    <span className="text-[10px] font-mono text-slate-400">fsync not measured</span>
-                  </div>
-                  <div className="text-[11px] font-mono text-slate-400">
-                    fexit/vfs_fsync -&gt; ZFS ZIL + LZ4 ARC
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          {/* Axonwall L7 Protocol Dissector Table */}
-          <div className="p-5 rounded-xl bg-slate-900/80 border border-slate-800 space-y-4">
-            <div className="flex items-center justify-between">
-              <div>
-                <h3 className="text-base font-bold text-white flex items-center gap-2">
-                  <Layers className="w-4 h-4 text-emerald-400" />
-                  In-Kernel Layer-7 Protocol Dissection &amp; RED Metrics (`coroot-node-agent` Engine)
-                </h3>
-                <p className="text-xs text-slate-400">
-                  Parses wire protocols directly from socket syscalls and TLS uprobes to measure Rate, Error %, and
-                  Duration (p50/p99) per container without sidecar proxies.
-                </p>
-              </div>
-            </div>
-
-            <div className="p-4 rounded-lg bg-slate-950 border border-slate-800 text-xs text-slate-400 leading-relaxed">
-              No L7 RED telemetry is available: the daemon exposes no per-protocol rate, error, or
-              latency metrics, so this table cannot show measured values. The L7 dissectors listed
-              above describe the probe capability, not observed traffic.
-            </div>
+            <p className="text-xs text-slate-400 leading-relaxed">
+              Socket states and L3/L4 Source &times; Port flows above are measured live from{' '}
+              <code className="font-mono text-slate-300">/proc/net/{'{tcp,tcp6,udp,udp6}'}</code> and XDP maps. Per-request L7 protocol dissection (HTTP/gRPC/SQL/Redis p50/p99 RED) requires external L7 uprobe streams and is not emitted directly by <code className="font-mono text-slate-300">axonwalld</code>.
+            </p>
           </div>
         </div>
       )}
@@ -1809,30 +1772,46 @@ export default function EbpfObservabilityConsolePage() {
         </div>
       )}
 
-      {/* TAB 4: CONTINUOUS EBPF FLAMEGRAPH PROFILER */}
+      {/* TAB 4: RING-0 BPF RUNTIME PROFILER & PER-CPU SOFTIRQ */}
       {activeTab === 'profiling' && (
         <div className="space-y-6">
-          <div className="p-6 rounded-xl bg-slate-900/80 border border-slate-800 space-y-5">
-            <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
-              <div>
-                <h2 className="text-lg font-bold text-white flex items-center gap-2">
-                  <Flame className="w-5 h-5 text-amber-400" />
-                  Continuous eBPF Stack-Trace FlameGraph Profiler (`BPF_MAP_TYPE_STACK_TRACE`)
-                </h2>
-                <p className="text-xs text-slate-400 mt-0.5">
-                  Samples kernel and user-space stack frames at {apmConfig.profilingSampleHz} Hz via{' '}
-                  <code className="text-emerald-300">SEC(&quot;perf_event&quot;)</code> and correlates symbol tables (
-                  <code className="text-slate-300">/proc/kallsyms</code>, Go <code className="text-slate-300">.gopclntab</code>,
-                  ELF DWARF, and JIT perf maps).
-                </p>
-              </div>
+          {actionNotice && (
+            <div
+              className={`p-4 rounded-xl border text-xs flex items-center justify-between ${
+                actionNotice.type === 'ok'
+                  ? 'bg-emerald-950/40 border-emerald-500/40 text-emerald-200'
+                  : 'bg-rose-950/40 border-rose-500/40 text-rose-200'
+              }`}
+            >
+              <span>{actionNotice.text}</span>
+              <button onClick={() => setActionNotice(null)} className="underline opacity-80">
+                Dismiss
+              </button>
             </div>
+          )}
 
-            <div className="p-4 rounded-xl bg-slate-950 border border-slate-800 text-xs text-slate-400 leading-relaxed">
-              No profiling data is available: the daemon exposes no stack-trace profiles, so no
-              FlameGraph can be rendered. Enable continuous profiling above and re-check once the
-              daemon reports profile data.
-            </div>
+          <EbpfRuntimeProfilerVisualizer
+            inventory={ebpfOverview?.bpfInventory}
+            softnet={ebpfOverview?.softnet}
+            programDeltas={bpfProgramDeltas}
+            runtimeHistory={bpfRuntimeHistory}
+            topProgramSeries={topProgramSeries}
+            softnetDeltas={softnetDeltas}
+            daemonDown={Boolean(ebpfOverview?.daemonDown)}
+            togglingStats={togglingBpfStats}
+            onToggleBpfStats={(enabled) => void handleToggleBpfStats(enabled)}
+          />
+
+          <div className="p-5 rounded-xl bg-slate-900/80 border border-slate-800 space-y-2">
+            <h3 className="text-sm font-bold text-white flex items-center gap-2">
+              <Flame className="w-4 h-4 text-amber-400" />
+              User-Space Call-Stack FlameGraph (`BPF_MAP_TYPE_STACK_TRACE`)
+            </h3>
+            <p className="text-xs text-slate-400 leading-relaxed">
+              In-kernel eBPF execution budgets and SoftIRQ pressure above are live from{' '}
+              <code className="font-mono text-slate-300">sys_bpf</code> and{' '}
+              <code className="font-mono text-slate-300">/proc/net/softnet_stat</code>. Continuous user-space DWARF/Go symbol stack sampling ({apmConfig.profilingSampleHz} Hz) is not streamed by <code className="font-mono text-slate-300">axonwalld</code> yet.
+            </p>
           </div>
         </div>
       )}
@@ -1841,6 +1820,11 @@ export default function EbpfObservabilityConsolePage() {
       {activeTab === 'containers' && (
         <div className="space-y-6">
           <EbpfKernelInventoryPanel
+            inventory={ebpfOverview?.bpfInventory}
+            daemonDown={Boolean(ebpfOverview?.daemonDown)}
+          />
+
+          <EbpfKernelGraphVisualizer
             inventory={ebpfOverview?.bpfInventory}
             daemonDown={Boolean(ebpfOverview?.daemonDown)}
           />

@@ -59,6 +59,8 @@ import {
   normalizeEbpfOverviewResponse,
   createEmptyKernelBpfInventory,
   createEmptyKernelRca,
+  createEmptySoftnetTelemetry,
+  createEmptyKernelSocketTelemetry,
   FORBIDDEN_RING0_PROG_TYPES,
   type BpfTokenProfileStatus,
   type BpfTokenCapabilityReport,
@@ -6458,6 +6460,8 @@ export async function getEbpfOverviewTelemetry(): Promise<EbpfOverviewTelemetry>
     },
     bpfInventory: createEmptyKernelBpfInventory(),
     kernelRca: createEmptyKernelRca(),
+    softnet: createEmptySoftnetTelemetry(),
+    sockets: createEmptyKernelSocketTelemetry(),
     virt: {
       timestamp: new Date().toISOString(),
       kvmAvailable: fs.existsSync('/dev/kvm'),
@@ -6636,6 +6640,36 @@ export async function setXdpSynLimitAction(
     return { success: false, maxSynPps: 0, error: res.error || 'Failed to update XDP SYN-flood rate limit.' };
   }
   return { success: true, maxSynPps: Number(res.maxSynPps ?? val) };
+}
+
+export async function toggleKernelBpfStatsAction(
+  enabled: boolean
+): Promise<{ success: boolean; statsEnabled: boolean; error?: string }> {
+  const session = await getSession();
+  assertActionPermitted(session, 'admin');
+  await enforceRateLimit(20, 60000, 'ebpf-bpf-stats');
+
+  const res = await callAgentApiResponse<any>(
+    '/v1/ebpf/bpf-stats',
+    'POST',
+    { enabled: Boolean(enabled) },
+    8000
+  );
+  if (!res) {
+    return {
+      success: false,
+      statsEnabled: !enabled,
+      error: 'Daemon unavailable — kernel.bpf_stats_enabled sysctl was not modified.',
+    };
+  }
+  if (!res.success) {
+    return {
+      success: false,
+      statsEnabled: !enabled,
+      error: res.error || 'Failed to toggle kernel.bpf_stats_enabled sysctl.',
+    };
+  }
+  return { success: true, statsEnabled: Boolean(res.statsEnabled ?? enabled) };
 }
 
 export async function renderK3sBpfTokenManifestAction(input: {
