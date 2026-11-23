@@ -13,6 +13,7 @@
     "format": "biome format --write .",
     "typecheck": "turbo run typecheck",
     "test": "turbo run test",
+    "test:ci": "turbo run test typecheck && bash scripts/ci-preflight.sh --require-build && (cd apps/axonwalld && CGO_ENABLED=0 go test ./...) && (cd apps/axonwall-console && CGO_ENABLED=0 go test ./...) && (cd apps/axonwall-satellite && CGO_ENABLED=0 go test ./...)",
     "clean": "turbo run clean && rm -rf node_modules"
   },
   "devDependencies": {
