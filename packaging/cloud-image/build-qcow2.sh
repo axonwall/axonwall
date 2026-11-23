@@ -175,7 +175,10 @@ fi
 # Copy Axonwall chroot overrides and configurations
 if [[ -d "${ROOT_DIR}/packaging/iso/config/includes.chroot" ]]; then
   echo "[+] Applying Axonwall appliance includes and hooks..."
-  cp -r "${ROOT_DIR}/packaging/iso/config/includes.chroot/"* "${TARGET}/"
+  # Use rsync -aK (--keep-dirlinks) so merged-usr symlinks on Debian 13
+  # (e.g. /lib -> usr/lib) are traversed rather than failing cp -r with
+  # "cannot overwrite non-directory '.../mnt/lib' with directory".
+  rsync -aK "${ROOT_DIR}/packaging/iso/config/includes.chroot/" "${TARGET}/"
   # R4-D-L2: this overlay copy supplies firstboot, the updater, the
   # installer and the service units. A failed or partial copy must fail
   # the build loudly, not ship a qcow2 missing them as success. The
