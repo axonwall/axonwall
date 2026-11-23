@@ -1,12 +1,12 @@
 <div align="center">
 
-# 🛡️ Axonwall (`v0.14.0`)
+# 🛡️ Axonwall (`v0.14.1`)
 
 ### The Sovereign Linux Next-Generation Firewall, OpenZFS NAS, Hypervisor & Autonomous AI SecOps Platform
 
 *Reimagining perimeter & infrastructure security: from legacy FreeBSD `pf` & PHP to **Linux 6.12+ LTS `nftables`**, **Hardened KSPP Universal & Hardware-Locked Kernels**, **Zero-Shell UEFI UKIs**, **Post-Quantum Dual-KEM**, **CO-RE BPF-LSM & Blackbox Threat-LLM Harvesting**, **OpenZFS**, **Btrfs + Snapper**, **K3s**, **KVM/LXC**, and **Guardrailed MCP AI**.*
 
-[![Release](https://img.shields.io/badge/Release-v0.14.0-10b981.svg)](https://github.com/axonwall/axonwall/releases/tag/v0.14.0)
+[![Release](https://img.shields.io/badge/Release-v0.14.1-10b981.svg)](https://github.com/axonwall/axonwall/releases/tag/v0.14.1)
 [![License](https://img.shields.io/badge/License-GPL--2.0--or--later-blue.svg)](LICENSE)
 [![Kernel](https://img.shields.io/badge/Kernel-Linux_6.12+_LTS-orange.svg)](https://www.kernel.org/)
 [![Engine](https://img.shields.io/badge/Firewall-nftables_1.1+%20%26%20eBPF%2FXDP-red.svg)](https://netfilter.org/projects/nftables/)
@@ -56,7 +56,7 @@ Run Axonwall as a dedicated zero-bloat perimeter NGFW or **Minimal Reduced-Attac
 | :--- | :--- | :--- |
 | **`core-firewall`** | **Enabled** | Stateful `table inet axonwall` firewall, Dual-Stack IPv4/IPv6 + `802.1Q`/`802.1ad` QinQ VLAN, LPM CIDR & TCP SYN-Flood eBPF XDP fast-drop, SNAT/DNAT/Hairpin/1:1 BINAT/NPTv6, Multi-WAN SD-WAN health prober, FRR (BGP/OSPF/BFD), CAKE/FQ-CoDel QoS, Kea DHCPv4/v6 IA_PD + `radvd` SLAAC, Unbound DNS/RPZ sinkhole, mDNS reflector, UPnP/NAT-PMP, Suricata 7+ IDS/IPS, CrowdSec, WireGuard, strongSwan IKEv2, OpenVPN `ovpn-dco`, Keepalived + `conntrackd` HA |
 | **`core-nas`** | Opt-in | OpenZFS Stripe/Mirror/RAIDZ1-3/dRAID pools with Special NVMe VDEVs, SLOG/L2ARC/hot-spares, Checkpoints & NVMe TRIM, `/proc/spl/kstat/zfs` ARC/L2ARC/ZIL SPL kstat telemetry, Native AES-256-GCM encrypted datasets & ZVOLs, Samba SMB3 + VSS shadow copies + Time Machine mDNS + WSDD2, NFSv4, iSCSI targets, S.M.A.R.T. tests, `rclone` Cloud Sync, SeaweedFS S3 WORM Vault, and incremental HA `zfs send/recv` |
-| **`core-k3s`** | Opt-in | Embedded single-node or 2-node HA K3s Kubernetes with selectable **Cilium eBPF CNI (`kubeProxyReplacement` + Hubble)** or WireGuard Flannel mesh, **Browser K9s Live Explorer (`/k3s/explorer`)**, Cluster Pulse & SVG Topology Map, **Node Roles & Taints Modal (`/k3s/cluster`)**, Embedded Etcd local & S3 snapshots/restore, Linux 6.9+ `UserNamespacesSupport` (`hostUsers: false`) + `BPF_TOKEN` Pod/DaemonSet profiles, OpenEBS ZFS-LocalPV & replicated Mayastor NVMe-oF storage, bundled `kubectl`, `k9s` (`v0.51.0`) & `helm` v3, and non-root `axonwall-kubeconfig --vip` sync |
+| **`core-k3s`** | Opt-in | Embedded single-node or 2-node HA K3s Kubernetes with selectable **Cilium eBPF CNI (`kubeProxyReplacement` + Hubble)** or WireGuard Flannel mesh, **Browser K9s Live Explorer (`/k3s/explorer`)** with Capacity Rings, live Pulse charts, Node Bin-Packing heatmap & barycenter SVG Topology Map, **HA Quorum, OpenEBS Storage & Workloads visualizers**, **Node Roles & Taints Modal (`/k3s/cluster`)**, Embedded Etcd local & S3 snapshots/restore, Linux 6.9+ `UserNamespacesSupport` (`hostUsers: false`) + `BPF_TOKEN` Pod/DaemonSet profiles, OpenEBS ZFS-LocalPV & replicated Mayastor NVMe-oF storage, bundled `kubectl`, `k9s` (`v0.51.0`) & `helm` v3, and non-root `axonwall-kubeconfig --vip` sync |
 | **`core-virt`** | Opt-in | Type-1 KVM/QEMU hypervisor (OVMF UEFI, Secure Boot, `swtpm` TPM 2.0, VirtioFS ZFS directory shares, CPU pinning/NUMA/Hugepages, ZFS zero-copy linked clones, QMP + ZFS live migration, canonical Libvirt Domain XML compiler, per-VM `nftables` security groups, HTML5 `noVNC` console), unprivileged LXC containers with Linux 6.9+ `BPF_TOKEN` delegation, PCIe VFIO & SR-IOV passthrough, VXLAN SDN, Hosted Virtual Edge UKI, and ZFS/S3/PBS backups |
 | **`core-vigilante`** | Opt-in | Autonomous Cyber Defense & SOAR (`vigilante-soc` on K3s): 12 modular security stacks (VigilSOC, OpenSearch, Wazuh, Falco, Zeek, BloodHound, OpenVAS, kCTF, etc.), priority `-10` kernel nftables SOAR auto-containment, ransomware entropy freeze, honeytoken deception mesh, Merkle-chained ZFS forensic vault, and 106-tool Vigilante MCP |
 
@@ -72,7 +72,7 @@ Run Axonwall as a dedicated zero-bloat perimeter NGFW or **Minimal Reduced-Attac
 - **Btrfs + Snapper Root (`installMode: "btrfs"`):** In-kernel Copy-on-Write alternative to ZFSBootMenu without external DKMS modules—featuring single-disk `compress=zstd:1` or native multi-disk Btrfs RAID-1 (`-d raid1 -m raid1`), flat subvolume isolation (`@`, `@snapshots`, `@var_log`, `@var_lib_axonwall` or LUKS2 `axon_data`), pre/post Snapper update & Kernel Studio pairs (`axonwall-update --btrfs`), bootable GRUB2 `Axonwall Btrfs Snapshots` rollback submenu, and atomic rollback via `axonwall-btrfs-grub`, Web UI, `/v1/system/btrfs`, and `axonwall-tui`.
 - **Quad-Edition Unified ISO (`axonwall`, `minimal`, `vault`, & `k3s-storage`):** Select **Standard NGFW**, **Minimal Reduced Attack Surface** (bare-minimum boot/management surface with on-demand role/plugin installation via `/system/plugins`), **Immutable S3 Vault**, or **Barebones K3s + OpenZFS/OpenEBS Storage Host** directly from the Debian 13 & Alpine UEFI/BIOS bootloader menus or the 5-step `axonwall-console --install` wizard.
 - **Expanded Ring-0 eBPF Visualizations & Live Kernel BPF Inventory (`/reporting/ebpf`, `/reporting/flows`, `/v1/ebpf/overview`):** Six live telemetry visualizers (`EbpfDataplaneCharts`, `EbpfFlowTopologyMap`, `EbpfKernelInventoryPanel`, `EbpfCrossDutyVisualizer`, `EbpfSecurityVisualizer` + `ThreatSketchWaveform`, `FlowsLiveVisualStrip`) rendering real-time XDP verdict rates, per-CPU core load, dual-stack/VLAN mix, CIDR blocklist impact, SYN rate meter, loaded kernel BPF programs & maps, and ZFS/KVM cross-duty metrics.
-- **Browser K9s Live Explorer & Node Scheduling (`/k3s/explorer`, `/k3s/cluster`):** Browser-native K9s resource inspector, Cluster Pulse charts, SVG Ingress→PVC Topology Map, live SSE log streaming, container `exec`, YAML dry-run, and interactive Node Roles & Taints Modal (`/v1/k3s/nodes/scheduling`).
+- **Browser K9s Live Explorer, Telemetry Visualizations & Node Scheduling (`/k3s/explorer`, `/k3s/cluster`, `/k3s/storage`, `/k3s/workloads`, `/k3s/vow`):** Browser-native K9s resource inspector, `K3sCapacityRings`, live Cluster Pulse charts, Top Pod Resource Consumers scatter, Event Reasons histogram, barycenter 5-column SVG Traffic Topology + Node Bin-Packing chassis heatmap, HA Etcd Quorum & OpenEBS PVC→Pod→Node visualizers, live SSE log streaming, container `exec`, YAML dry-run, and interactive Node Roles & Taints Modal (`/v1/k3s/nodes/scheduling`).
 
 - **Axonwall Blackbox: Extreme eBPF Threat-LLM Harvester (`/security/threat-harvester` & `axonwallctl harvester`):** Strictly opt-in (`defaultEnabled: false`) Ring-0 flight recorder correlating `tc_harvester_ingress`/`egress` (TCX flow sketches, `JA4T`, DNS entropy, Tier-1 L7 slices) with `sched_process_exec`, `sys_enter_memfd_create`, and guarded `uprobe/SSL_write`. Enforces mandatory pre-disk DLP secret/PII scrubbing, prefix-preserving AES-128 Crypto-PAn IPv4/IPv6 + HMAC hostname anonymization, hardcoded control-plane TLS uprobe exclusions, 45s Gold/Silver oracle correlation, Teacher-LLM reasoning distillation, OpenZFS `zstd` spooling, Dual-Track `.tar.zst` (`train.jsonl`/`val.jsonl` + Apache Parquet 1.0 `features.parquet`) export, and AWS SigV4 S3/Vault lake shipping.
 - **Universal & Hardware-Stripped Hardened Linux 6.12 LTS Kernels (`/system/kernel` & `axonwallctl kernel`):** Reproducible 7-fragment KSPP kernel pipeline (`packaging/kernel/`) tuned specifically for `k3s` rootless `USER_NS` + cgroups v2, OpenZFS DKMS symbol preservation (`CONFIG_TRIM_UNUSED_KSYMS=n`), `nftables` flowtable fastpath, and eBPF CO-RE BTF with `integrity` Lockdown LSM—plus an interactive **Custom Kernel Studio** (`/system/kernel`) that audits live host hardware (via `/boot/config-*` or `/proc/config.gz`) against 25 checks, compiles minimal `localmodconfig` kernels, and stages installs safely via ZFS Boot Environments or side-by-side GRUB entries.
@@ -142,13 +142,13 @@ axonwall/
 
 ---
 
-## 🛠️ Installation & Quickstart (`v0.14.0`)
+## 🛠️ Installation & Quickstart (`v0.14.1`)
 
 ### Option 1: Bare-Metal / VM Unified UEFI ISO (`axonwall`, `minimal`, `vault`, or `k3s-storage` Edition)
 
 ```bash
-wget https://github.com/axonwall/axonwall/releases/download/v0.14.0/axonwall-debian13-amd64.iso
-wget https://github.com/axonwall/axonwall/releases/download/v0.14.0/axonwall-debian13-amd64.iso.sha256
+wget https://github.com/axonwall/axonwall/releases/download/v0.14.1/axonwall-debian13-amd64.iso
+wget https://github.com/axonwall/axonwall/releases/download/v0.14.1/axonwall-debian13-amd64.iso.sha256
 sha256sum -c axonwall-debian13-amd64.iso.sha256
 
 # Flash to USB drive:
@@ -163,14 +163,14 @@ sudo dd if=axonwall-debian13-amd64.iso of=/dev/sdX bs=4M status=progress conv=fs
 
 ### Option 2: Cloud QCOW2 Image, Edge UEFI UKI, or `.deb` Packages
 
-- **KVM / Proxmox Cloud Image:** [`axonwall-debian13-amd64-cloud.qcow2`](https://github.com/axonwall/axonwall/releases/download/v0.14.0/axonwall-debian13-amd64-cloud.qcow2)
-- **Zero-Shell Edge NGFW UKI:** [`axonwall-edge-sku-vm-virtio.efi`](https://github.com/axonwall/axonwall/releases/download/v0.14.0/axonwall-edge-sku-vm-virtio.efi)
+- **KVM / Proxmox Cloud Image:** [`axonwall-debian13-amd64-cloud.qcow2`](https://github.com/axonwall/axonwall/releases/download/v0.14.1/axonwall-debian13-amd64-cloud.qcow2)
+- **Zero-Shell Edge NGFW UKI:** [`axonwall-edge-sku-vm-virtio.efi`](https://github.com/axonwall/axonwall/releases/download/v0.14.1/axonwall-edge-sku-vm-virtio.efi)
 - **Debian 12/13 & Ubuntu 24.04 Packages:**
   ```bash
-  wget https://github.com/axonwall/axonwall/releases/download/v0.14.0/axonwall_0.14.0_amd64.deb
-  sudo apt-get update && sudo apt-get install -y ./axonwall_0.14.0_amd64.deb
+  wget https://github.com/axonwall/axonwall/releases/download/v0.14.1/axonwall_0.14.1_amd64.deb
+  sudo apt-get update && sudo apt-get install -y ./axonwall_0.14.1_amd64.deb
   # Edition packages also published per release:
-  #   axonwall-minimal_0.14.0_amd64.deb | axonwall-vault_0.14.0_amd64.deb | axonwall-k3s-storage_0.14.0_amd64.deb
+  #   axonwall-minimal_0.14.1_amd64.deb | axonwall-vault_0.14.1_amd64.deb | axonwall-k3s-storage_0.14.1_amd64.deb
   ```
 
 ### Option 3: Local Developer Setup

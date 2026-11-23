@@ -6,6 +6,20 @@ Official build artifacts, SHA-256 checksums, and detached Ed25519 signatures (`.
 
 ---
 
+## `v0.14.1` (2026-11-22) — Full-Suite K3s Telemetry Visualizations & Explorer Stability Hardening
+
+### Highlights
+- **Full-Suite Kubernetes (K3s) Live Telemetry Visualizations (`/k3s/explorer`, `/k3s/cluster`, `/k3s/storage`, `/k3s/workloads`, `/k3s/vow`)**:
+  - **Cluster Capacity Rings & Signals (`K3sCapacityRings`)**: Five SVG radial gauges (`CPU`, `Memory`, `Pod Slots`, `Workloads`, `Storage`) with scheduler request inner-rings, overcommit/degraded badges, and a clickable `Cluster Signals` attention strip driven live from `/v1/k3s/pulse`.
+  - **Expanded K9s Pulse Charts (`K3sPulseCharts`)**: Added a rolling `Live Cluster Telemetry Trend` area chart, centered pod-health donut overlay, namespace `Pods | Objects` toggle, node `Lim` limit-overcommit bar toggle, `Top Pod Resource Consumers` (`CPU × Mem Scatter`, `Top CPU`, `Top Memory`), and a clickable `Event Reasons` histogram filtering live cluster events.
+  - **Barycenter 5-Column Topology & Node Bin-Packing Heatmap (`K3sTopologyMap`, `K3sNodeBinPackingMap`)**: Barycenter-ordered `Ingress → Service → Workload → Pod → Node / PVC` SVG flow map with directional arrowheads, `Issues Only` / `Hide Isolated` / `Fit` controls, click-to-lock trace banner with upstream/downstream hop counts, and per-node chassis pod-heatmap tiles.
+  - **Dedicated K3s Page Visualizers**: Added `K3sClusterArchitectureMap` (HA Control Plane & Etcd Quorum SVG, Allocatable/Requested/Usage/Limits chart, Kubelet Conditions & Taints matrix) in `/k3s/cluster`, `K3sStorageVisuals` (`StorageClass` GiB allocation chart, namespace donut, and interactive `PVC → Pod → Node` attachment map) in `/k3s/storage`, `K3sWorkloadsVisuals` (Controller readiness, Namespace footprint, Service/Ingress TLS posture, and `Ingress → Service → Pod` traffic chains) in `/k3s/workloads`, and `K3sVowVisuals` (Cluster RAM headroom bar, Category memory footprint, and resolved app dependency graph) in `/k3s/vow`.
+- **K9s Live Explorer Crash Fix & Resilience (`/k3s/explorer`, `apps/axonwalld/engine/k3s_explorer.go`)**:
+  - Fixed a client-side `TypeError` crash when Kubernetes API resources without short names serialized `nil` Go slices as JSON `null` in `parseAPIResourcesTable` by initializing `verbs` and `shorts` as empty slices in Go and guarding `Array.isArray(api.shortNames)` in `K9sExplorerWorkbench`.
+  - Added a dedicated React error boundary (`apps/axonwall/src/app/(console)/k3s/explorer/error.tsx`) and null-safe telemetry helpers (`apps/axonwall/src/lib/k3s-visuals.ts` with 9 Vitest unit tests in `k3s-visuals.test.ts`).
+
+---
+
 ## `v0.14.0` (2026-11-22) — Turnkey Headscale Mesh & Self-Service Portal, Ring-0 eBPF Visualizations, and Appliance Packaging Hardening
 
 ### Highlights
