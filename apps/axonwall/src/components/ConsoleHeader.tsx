@@ -181,7 +181,7 @@ export function ConsoleHeader({
             />
             <span className="font-semibold text-sm text-slate-200">axonwall-appliance</span>
             <span className="text-xs bg-slate-800 text-slate-400 px-2 py-0.5 rounded border border-slate-700">
-              v0.14.1
+              v0.15.0
             </span>
             {daemonDown && (
               <span

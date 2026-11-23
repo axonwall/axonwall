@@ -4,7 +4,7 @@ replicaCount: 1
 image:
   repository: ghcr.io/axonwall/axonwall-ui
   pullPolicy: IfNotPresent
-  tag: "v0.14.1"
+  tag: "v0.15.0"
 
 service:
   type: ClusterIP
@@ -20,7 +20,7 @@ nodeFirewall:
   enabled: true
   image:
     repository: ghcr.io/axonwall/axonwalld
-    tag: "v0.14.1"
+    tag: "v0.15.0"
 
 database:
   embedded: true
