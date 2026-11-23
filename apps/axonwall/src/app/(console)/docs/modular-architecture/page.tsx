@@ -284,6 +284,24 @@ export default function ModularArchitectureDocPage() {
                 <td className="p-2.5">802.1X WPA2/WPA3-Enterprise EAP-TLS / PEAP authentication backed by embedded OpenLDAP</td>
               </tr>
               <tr>
+                <td className="p-2.5 font-mono text-sky-400 font-semibold">netbox</td>
+                <td className="p-2.5 text-slate-400">Opt-In</td>
+                <td className="p-2.5 font-mono text-slate-400">services.yaml</td>
+                <td className="p-2.5">NetBox v4 DCIM &amp; IPAM Source of Truth deployed in K3s (<code className="font-mono">core-k3s</code>) with OpenLDAP SSO (<code className="font-mono">svc-netbox</code>) and idempotent Axonwall inventory sync</td>
+              </tr>
+              <tr>
+                <td className="p-2.5 font-mono text-sky-400 font-semibold">librenms</td>
+                <td className="p-2.5 text-slate-400">Opt-In</td>
+                <td className="p-2.5 font-mono text-slate-400">services.yaml</td>
+                <td className="p-2.5">LibreNMS SNMPv2c/v3, LLDP/CDP/FDB discovery, optical DOM &amp; alert webhook hub (<code className="font-mono">core-k3s</code> or external) with OpenLDAP SSO (<code className="font-mono">svc-librenms</code>) and NetBox Triad sync</td>
+              </tr>
+              <tr>
+                <td className="p-2.5 font-mono text-sky-400 font-semibold">topology-studio</td>
+                <td className="p-2.5 text-slate-400">Opt-In</td>
+                <td className="p-2.5 font-mono text-slate-400">topology.yaml</td>
+                <td className="p-2.5">Interactive <code className="font-mono">@xyflow/react</code> multi-host/WAN/K3s/cable fabric studio with strict Green/Yellow/Red health probes, WAN-excluded <code className="font-mono">lldpd</code>, phased transactional apply &amp; NetBox/LibreNMS Triad sync</td>
+              </tr>
+              <tr>
                 <td className="p-2.5 font-mono text-sky-400 font-semibold">snmp</td>
                 <td className="p-2.5 text-slate-400">Opt-In</td>
                 <td className="p-2.5 font-mono text-slate-400">system.yaml</td>

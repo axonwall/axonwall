@@ -1121,6 +1121,9 @@ function cmdSaveJson(fileArg?: string) {
       'snmp',
       'ups',
       'acme',
+      'netbox',
+      'librenms',
+      'topology',
     ];
     for (const k of objectKeys) {
       if (Array.isArray(parsedJson[k]) && parsedJson[k].length === 0) {

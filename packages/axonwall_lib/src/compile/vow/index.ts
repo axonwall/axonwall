@@ -767,6 +767,39 @@ export const VOW_APP_CATALOG: VowAppDefinition[] = [
     namespace: 'airflow',
     isHelm: true,
   },
+
+  // Networking & Ingress
+  {
+    id: 'netbox',
+    name: 'NetBox DCIM & IPAM',
+    category: 'Networking & Ingress',
+    description: 'IP Address Management (IPAM) and Data Center Infrastructure Management (DCIM) source of truth',
+    enablerVar: 'NETBOX_ENABLED',
+    argoPath: 'argo/netbox',
+    subdomain: 'netbox',
+    port: 8080,
+    docsUrl: 'https://netboxlabs.com/docs/netbox/',
+    icon: 'Network',
+    estimatedMemoryMb: 1024,
+    dependencies: ['kubegres'],
+    namespace: 'netbox',
+    isHelm: true,
+  },
+  {
+    id: 'librenms',
+    name: 'LibreNMS SNMP & LLDP Monitoring',
+    category: 'Networking & Ingress',
+    description: 'SNMP, LLDP/CDP/FDB topology discovery, optical DOM/sensor telemetry, and alerting platform',
+    enablerVar: 'LIBRENMS_ENABLED',
+    argoPath: 'argo/librenms',
+    subdomain: 'librenms',
+    port: 8000,
+    docsUrl: 'https://docs.librenms.org/',
+    icon: 'Activity',
+    estimatedMemoryMb: 1024,
+    namespace: 'librenms',
+    isHelm: true,
+  },
 ];
 
 export const VOW_DEPLOYMENT_PRESETS: VowDeploymentPreset[] = [

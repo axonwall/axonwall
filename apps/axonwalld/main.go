@@ -81,6 +81,9 @@ type AgentServer struct {
 	virtManager            *engine.VirtManager
 	vigilanteManager       *engine.VigilanteManager
 	threatHarvesterManager *engine.ThreatHarvesterManager
+	netboxManager          *engine.NetBoxManager
+	librenmsManager        *engine.LibreNMSManager
+	topologyManager        *engine.TopologyManager
 	etckeeperManager       *engine.EtckeeperManager
 	directoryManager       *engine.DirectoryManager
 	ddnsManager            *engine.DdnsManager
@@ -96,6 +99,24 @@ func (s *AgentServer) SetThreatHarvesterManager(thm *engine.ThreatHarvesterManag
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.threatHarvesterManager = thm
+}
+
+func (s *AgentServer) SetNetBoxManager(nm *engine.NetBoxManager) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.netboxManager = nm
+}
+
+func (s *AgentServer) SetLibreNMSManager(lm *engine.LibreNMSManager) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.librenmsManager = lm
+}
+
+func (s *AgentServer) SetTopologyManager(tm *engine.TopologyManager) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.topologyManager = tm
 }
 
 // isSnapshotEligibleName reports whether a config file name is covered
@@ -1127,6 +1148,33 @@ func (s *AgentServer) ApplyBundle(ctx context.Context, req *pb.ApplyBundleReques
 			})
 		}
 
+		if filepath.Base(cleanPath) == "netbox_config.json" && s.netboxManager != nil {
+			content := []byte(f.Content)
+			nm := s.netboxManager
+			pendingApplies = append(pendingApplies, pendingSubsystemApply{
+				name:  "NetBox config",
+				apply: func() error { return nm.ApplyConfig(content) },
+			})
+		}
+
+		if filepath.Base(cleanPath) == "librenms_config.json" && s.librenmsManager != nil {
+			content := []byte(f.Content)
+			lm := s.librenmsManager
+			pendingApplies = append(pendingApplies, pendingSubsystemApply{
+				name:  "LibreNMS config",
+				apply: func() error { return lm.ApplyConfig(content) },
+			})
+		}
+
+		if filepath.Base(cleanPath) == "topology_config.json" && s.topologyManager != nil {
+			content := []byte(f.Content)
+			tm := s.topologyManager
+			pendingApplies = append(pendingApplies, pendingSubsystemApply{
+				name:  "Topology Studio config",
+				apply: func() error { return tm.ApplyConfig(content) },
+			})
+		}
+
 		if filepath.Base(cleanPath) == "netdev_config.json" {
 			content := []byte(f.Content)
 			pendingApplies = append(pendingApplies, pendingSubsystemApply{
@@ -1549,6 +1597,15 @@ func (s *AgentServer) reapplyRestoredSubsystems() error {
 	if s.k3sManager != nil {
 		apply("k3s_config.json", func(b []byte) error { return s.k3sManager.ApplyConfig(b) })
 		apply("vow_config.json", func(b []byte) error { return s.k3sManager.ApplyVowConfig(b) })
+	}
+	if s.netboxManager != nil {
+		apply("netbox_config.json", func(b []byte) error { return s.netboxManager.ApplyConfig(b) })
+	}
+	if s.librenmsManager != nil {
+		apply("librenms_config.json", func(b []byte) error { return s.librenmsManager.ApplyConfig(b) })
+	}
+	if s.topologyManager != nil {
+		apply("topology_config.json", func(b []byte) error { return s.topologyManager.ApplyConfig(b) })
 	}
 	if s.vigilanteManager != nil {
 		apply("vigilante_config.json", func(b []byte) error { return s.vigilanteManager.ApplyConfig(b) })
@@ -3064,6 +3121,12 @@ func main() {
 
 	agentServer := NewAgentServer(*bundleDir, iapManager, haEngine, sdwanProber, pcapManager, watchdog, nasManager, k3sManager, vigilanteManager, etckeeperManager, directoryManager)
 	agentServer.SetVirtManager(virtManager)
+	netboxManager := engine.NewNetBoxManager(filepath.Join(etcDir, "netbox"), k3sManager, virtManager)
+	agentServer.SetNetBoxManager(netboxManager)
+	librenmsManager := engine.NewLibreNMSManager(filepath.Join(etcDir, "librenms"), k3sManager, netboxManager)
+	agentServer.SetLibreNMSManager(librenmsManager)
+	topologyManager := engine.NewTopologyManager(filepath.Join(etcDir, "topology"), k3sManager, virtManager, hardwareMgr, netboxManager, librenmsManager)
+	agentServer.SetTopologyManager(topologyManager)
 	pb.RegisterAgentServiceServer(grpcServer, agentServer)
 
 	go func() {
@@ -3090,6 +3153,21 @@ func main() {
 		}
 		if data, err := readManagedOrRoot("k3s_config.json"); err == nil {
 			k3sManager.LoadSavedConfig(data)
+		}
+		if data, err := readManagedOrRoot("netbox_config.json"); err == nil {
+			if err := netboxManager.ApplyConfig(data); err != nil {
+				log.Printf("[Agent] Startup NetBox config load warning: %v", err)
+			}
+		}
+		if data, err := readManagedOrRoot("librenms_config.json"); err == nil {
+			if err := librenmsManager.ApplyConfig(data); err != nil {
+				log.Printf("[Agent] Startup LibreNMS config load warning: %v", err)
+			}
+		}
+		if data, err := readManagedOrRoot("topology_config.json"); err == nil {
+			if err := topologyManager.ApplyConfig(data); err != nil {
+				log.Printf("[Agent] Startup Topology Studio config load warning: %v", err)
+			}
 		}
 		if data, err := readManagedOrRoot("ha_config.json"); err == nil {
 			if err := haEngine.ApplyFromJSON(data); err != nil {
@@ -4737,6 +4815,315 @@ func main() {
 
 		mux.HandleFunc("/v1/tasks/log", taskManager.HandleStreamTaskLogSSE)
 
+		// NetBox DCIM & IPAM APIs
+		mux.HandleFunc("/v1/netbox/status", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodGet {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(netboxManager.GetStatus(r.Context()))
+		})
+
+		mux.HandleFunc("/v1/netbox/sync", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			var req engine.NetBoxSyncRequest
+			if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+				http.Error(w, fmt.Sprintf("invalid json payload: %v", err), http.StatusBadRequest)
+				return
+			}
+			res, err := netboxManager.SyncInventory(r.Context(), &req)
+			if err != nil {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadGateway)
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"success": false,
+					"error":   err.Error(),
+					"result":  res,
+				})
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(res)
+		})
+
+		mux.HandleFunc("/v1/netbox/credentials", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodGet {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			reveal := r.URL.Query().Get("reveal") == "true"
+			creds, err := netboxManager.GetBootstrapCredentials(reveal)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(creds)
+		})
+
+		mux.HandleFunc("/v1/netbox/export", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodGet {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(netboxManager.ExportInventory(r.Context(), r.URL.Query().Get("endpoint")))
+		})
+
+		mux.HandleFunc("/v1/netbox/cables-sync", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			var req engine.NetBoxCablesSyncRequest
+			if err := json.NewDecoder(io.LimitReader(r.Body, 4<<20)).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+				http.Error(w, fmt.Sprintf("invalid json payload: %v", err), http.StatusBadRequest)
+				return
+			}
+			res, err := netboxManager.UpsertCablesAndDevices(r.Context(), &req)
+			if err != nil {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadGateway)
+				_ = json.NewEncoder(w).Encode(map[string]any{"success": false, "error": err.Error(), "result": res})
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(res)
+		})
+
+		// LibreNMS SNMP, LLDP & Alerting APIs
+		mux.HandleFunc("/v1/librenms/status", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodGet {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(librenmsManager.GetStatus(r.Context()))
+		})
+
+		mux.HandleFunc("/v1/librenms/sync", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			var req engine.LibreNMSSyncRequest
+			if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+				http.Error(w, fmt.Sprintf("invalid json payload: %v", err), http.StatusBadRequest)
+				return
+			}
+			res, err := librenmsManager.SyncDevices(r.Context(), &req)
+			if err != nil {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadGateway)
+				_ = json.NewEncoder(w).Encode(map[string]any{"success": false, "error": err.Error(), "result": res})
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(res)
+		})
+
+		mux.HandleFunc("/v1/librenms/credentials", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodGet {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			reveal := r.URL.Query().Get("reveal") == "true"
+			creds, err := librenmsManager.GetBootstrapCredentials(reveal)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(creds)
+		})
+
+		mux.HandleFunc("/v1/librenms/topology", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodGet {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(librenmsManager.GetTopologySnapshot(r.Context(), r.URL.Query().Get("endpoint")))
+		})
+
+		mux.HandleFunc("/v1/librenms/netbox-sync", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			var req engine.LibreNMSNetBoxSyncRequest
+			if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+				http.Error(w, fmt.Sprintf("invalid json payload: %v", err), http.StatusBadRequest)
+				return
+			}
+			res, err := librenmsManager.SyncWithNetBox(r.Context(), &req)
+			if err != nil {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadGateway)
+				_ = json.NewEncoder(w).Encode(map[string]any{"success": false, "error": err.Error(), "result": res})
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(res)
+		})
+
+		mux.HandleFunc("/v1/librenms/webhook", func(w http.ResponseWriter, r *http.Request) {
+			switch r.Method {
+			case http.MethodGet:
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]any{"alerts": librenmsManager.ListWebhookAlerts()})
+			case http.MethodPost:
+				secret := strings.TrimSpace(r.Header.Get("X-Axonwall-Webhook-Secret"))
+				if secret == "" {
+					authz := strings.TrimSpace(r.Header.Get("Authorization"))
+					if strings.HasPrefix(strings.ToLower(authz), "bearer ") {
+						secret = strings.TrimSpace(authz[7:])
+					}
+				}
+				bodyBytes, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+				if err != nil {
+					http.Error(w, fmt.Sprintf("failed reading body: %v", err), http.StatusBadRequest)
+					return
+				}
+				alert, recErr := librenmsManager.RecordWebhookAlert(secret, bodyBytes)
+				if recErr != nil {
+					code := http.StatusBadRequest
+					if strings.Contains(recErr.Error(), "unauthorized") {
+						code = http.StatusUnauthorized
+					}
+					http.Error(w, recErr.Error(), code)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "alert": alert})
+			default:
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			}
+		})
+
+		// Topology Studio Fabric, Multi-Host Probe & Phased Apply APIs
+		mux.HandleFunc("/v1/topology/probe", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodGet {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(topologyManager.ProbeLocal(r.Context()))
+		})
+
+		mux.HandleFunc("/v1/topology/fabric", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodGet {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(topologyManager.ProbeFabric(r.Context()))
+		})
+
+		mux.HandleFunc("/v1/topology/apply", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			var req engine.TopologyApplyRequest
+			if err := json.NewDecoder(io.LimitReader(r.Body, 8<<20)).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+				http.Error(w, fmt.Sprintf("invalid json payload: %v", err), http.StatusBadRequest)
+				return
+			}
+			res, err := topologyManager.ApplyFabricPlan(r.Context(), &req, nil)
+			if err != nil {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadGateway)
+				_ = json.NewEncoder(w).Encode(map[string]any{"success": false, "error": err.Error(), "result": res})
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(res)
+		})
+
+		mux.HandleFunc("/v1/topology/sync/netbox", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			var req struct {
+				Action          string                          `json:"action"` // "preview" | "push" | "pull"
+				DryRun          bool                            `json:"dryRun"`
+				OverwriteLabels bool                            `json:"overwriteLabels,omitempty"`
+				Devices         []engine.NetBoxUpsertDeviceSpec `json:"devices,omitempty"`
+				Cables          []engine.NetBoxUpsertCableSpec  `json:"cables,omitempty"`
+			}
+			if err := json.NewDecoder(io.LimitReader(r.Body, 4<<20)).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+				http.Error(w, fmt.Sprintf("invalid json payload: %v", err), http.StatusBadRequest)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			if strings.EqualFold(req.Action, "pull") {
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"success":   true,
+					"action":    "pull",
+					"inventory": netboxManager.ExportInventory(r.Context()),
+				})
+				return
+			}
+			dry := req.DryRun || strings.EqualFold(req.Action, "preview") || req.Action == ""
+			res, err := netboxManager.UpsertCablesAndDevices(r.Context(), &engine.NetBoxCablesSyncRequest{
+				DryRun:          dry,
+				Devices:         req.Devices,
+				Cables:          req.Cables,
+				OverwriteLabels: req.OverwriteLabels,
+			})
+			if err != nil {
+				w.WriteHeader(http.StatusBadGateway)
+				_ = json.NewEncoder(w).Encode(map[string]any{"success": false, "error": err.Error(), "result": res})
+				return
+			}
+			_ = json.NewEncoder(w).Encode(res)
+		})
+
+		mux.HandleFunc("/v1/topology/sync/librenms", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			var req struct {
+				Action          string `json:"action"` // "preview" | "push" | "pull" | "enroll"
+				DryRun          bool   `json:"dryRun"`
+				OverwriteLabels bool   `json:"overwriteLabels,omitempty"`
+			}
+			if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+				http.Error(w, fmt.Sprintf("invalid json payload: %v", err), http.StatusBadRequest)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			if strings.EqualFold(req.Action, "enroll") {
+				res, err := librenmsManager.SyncDevices(r.Context(), &engine.LibreNMSSyncRequest{DryRun: req.DryRun})
+				if err != nil {
+					w.WriteHeader(http.StatusBadGateway)
+					_ = json.NewEncoder(w).Encode(map[string]any{"success": false, "error": err.Error(), "result": res})
+					return
+				}
+				_ = json.NewEncoder(w).Encode(res)
+				return
+			}
+			res, err := librenmsManager.SyncWithNetBox(r.Context(), &engine.LibreNMSNetBoxSyncRequest{
+				Action:          req.Action,
+				DryRun:          req.DryRun,
+				OverwriteLabels: req.OverwriteLabels,
+			})
+			if err != nil {
+				w.WriteHeader(http.StatusBadGateway)
+				_ = json.NewEncoder(w).Encode(map[string]any{"success": false, "error": err.Error(), "result": res})
+				return
+			}
+			_ = json.NewEncoder(w).Encode(res)
+		})
+
+
 		// Vigilante Cyber Defense / SOAR APIs
 		mux.HandleFunc("/v1/vigilante/soar/block-ip", func(w http.ResponseWriter, r *http.Request) {
 			if r.Method != http.MethodPost {
@@ -4894,6 +5281,7 @@ func main() {
 				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			}
 		})
+
 
 		mux.HandleFunc("/v1/system/etckeeper/commit", func(w http.ResponseWriter, r *http.Request) {
 			if r.Method != http.MethodPost {
@@ -5946,6 +6334,7 @@ func main() {
 			}
 		})
 
+
 		mux.HandleFunc("/v1/ebpf/xdp/syn-limit", func(w http.ResponseWriter, r *http.Request) {
 			switch r.Method {
 			case http.MethodGet:
@@ -5978,6 +6367,7 @@ func main() {
 				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			}
 		})
+
 
 		mux.HandleFunc("/v1/ebpf/tokens", func(w http.ResponseWriter, r *http.Request) {
 			tokMgr := engine.GetDefaultBpfTokenManager()
@@ -6033,6 +6423,7 @@ func main() {
 				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			}
 		})
+
 
 		mux.HandleFunc("/v1/ebpf/tokens/render-k3s", func(w http.ResponseWriter, r *http.Request) {
 			if r.Method != http.MethodPost {

@@ -5,6 +5,9 @@ import {
   HostMalwareDefenseConfigSchema,
   ThreatHarvesterConfigSchema,
   EluvixConfigSchema,
+  NetBoxConfigSchema,
+  LibreNmsConfigSchema,
+  TopologyConfigSchema,
   NasConfigSchema,
   VirtConfigSchema,
   HaProxyPluginConfigSchema,
@@ -1000,6 +1003,112 @@ export const BUILTIN_PLUGINS: PluginManifest[] = [
     },
     cliBinaries: ['axonwallctl'],
   },
+  {
+    id: 'netbox',
+    name: 'NetBox DCIM & IPAM Source of Truth',
+    version: '4.2.0',
+    category: 'extension',
+    defaultEnabled: false,
+    dependencies: ['core-k3s'],
+    description:
+      'Industry-standard IP Address Management (IPAM) and Data Center Infrastructure Management (DCIM) running cleanly inside K3s (with PostgreSQL 16 + Valkey 8, OpenEBS PVCs, OpenLDAP SSO via svc-netbox, Unbound Auto-DNS, and automated live Axonwall inventory sync).',
+    author: 'NetBox Community / Axonwall Core',
+    systemdUnits: [],
+    privileges: ['k3s.cluster', 'services.netbox', 'network.interfaces', 'services.dns'],
+    ldapIntegration: {
+      enabledByDefault: true,
+      serviceAccountCn: 'svc-netbox',
+      inheritApplianceRoleGroups: true,
+      envPrefix: 'NETBOX_LDAP_',
+      groups: [
+        {
+          cn: 'netbox-admin',
+          gidNumber: 10240,
+          description: 'NetBox DCIM & IPAM Superusers',
+          role: 'admin',
+        },
+        {
+          cn: 'netbox-operator',
+          gidNumber: 10241,
+          description: 'NetBox DCIM & IPAM Editors and Inventory Operators',
+          role: 'operator',
+        },
+        {
+          cn: 'netbox-readonly',
+          gidNumber: 10242,
+          description: 'NetBox DCIM & IPAM Read-Only Viewers',
+          role: 'readonly',
+        },
+      ],
+    },
+    menuEntry: {
+      title: 'NetBox DCIM & IPAM',
+      path: '/services/netbox',
+      icon: 'Network',
+    },
+  },
+  {
+    id: 'librenms',
+    name: 'LibreNMS SNMP, LLDP & Health Monitoring',
+    version: '25.10.0',
+    category: 'extension',
+    defaultEnabled: false,
+    dependencies: ['core-k3s'],
+    description:
+      'Full-featured SNMP, LLDP/CDP/FDB topology discovery, optical DOM/sensor telemetry, and real-time alerting running cleanly inside K3s (MariaDB + Valkey + RRDcached + Dispatcher + Syslog/Trap receivers, OpenLDAP SSO via svc-librenms, Unbound Auto-DNS, and NetBox Triad sync).',
+    author: 'LibreNMS Community / Axonwall Core',
+    systemdUnits: [],
+    privileges: ['k3s.cluster', 'services.librenms', 'network.interfaces', 'services.dns'],
+    ldapIntegration: {
+      enabledByDefault: true,
+      serviceAccountCn: 'svc-librenms',
+      inheritApplianceRoleGroups: true,
+      envPrefix: 'LIBRENMS_LDAP_',
+      groups: [
+        {
+          cn: 'librenms-admin',
+          gidNumber: 10250,
+          description: 'LibreNMS Global Administrators',
+          role: 'admin',
+        },
+        {
+          cn: 'librenms-operator',
+          gidNumber: 10251,
+          description: 'LibreNMS Device & Alert Operators',
+          role: 'operator',
+        },
+        {
+          cn: 'librenms-readonly',
+          gidNumber: 10252,
+          description: 'LibreNMS Read-Only Monitoring Viewers',
+          role: 'readonly',
+        },
+      ],
+    },
+    menuEntry: {
+      title: 'LibreNMS Monitoring',
+      path: '/services/librenms',
+      icon: 'Activity',
+    },
+  },
+  {
+    id: 'topology-studio',
+    name: 'Topology Studio (Multi-Host Fabric & Cable Editor)',
+    version: '1.0.0',
+    category: 'extension',
+    defaultEnabled: false,
+    dependencies: [],
+    description:
+      'Interactive Eluvix-style node & physical cable fabric editor linking WAN circuits, Edge NGFWs, K3s/Storage/Vault/Satellite hosts, VLANs, VPN overlays, and Kubernetes Ingress/CRDs with strict Green/Yellow/Red health detection, LibreNMS LLDP telemetry, and NetBox Triad sync.',
+    author: 'Axonwall Core',
+    systemdUnits: [],
+    privileges: ['network.interfaces', 'system.config.write'],
+    menuEntry: {
+      title: 'Topology Studio',
+      path: '/topology',
+      icon: 'GitBranch',
+    },
+  },
 ];
 
 export function resolveCapabilities(state?: Partial<DesiredState>): CoreCapabilities {
@@ -1074,6 +1183,8 @@ const PLUGIN_PRIVILEGE_ALIASES: Record<string, string[]> = {
   'reporting.flows': ['diagnostics.read', 'system.status.read'],
   'services.haproxy': ['system.config.write'],
   'services.freeradius': ['system.config.write'],
+  'services.netbox': ['system.config.write'],
+  'services.librenms': ['system.config.write'],
 };
 
 export function isPluginAllowed(manifest: PluginManifest, grantedPrivileges: string[]): boolean {
@@ -1102,7 +1213,10 @@ export function arePluginDependenciesMet(
   pluginId: string,
   state?: Partial<DesiredState> | null
 ): { met: boolean; missing: string[] } {
-  const deps = getPluginDependencies(pluginId);
+  const deps =
+    pluginId === 'librenms' && state?.librenms?.mode === 'external'
+      ? []
+      : getPluginDependencies(pluginId);
   if (deps.length === 0) {
     return { met: true, missing: [] };
   }
@@ -1148,7 +1262,10 @@ export function isPluginEnabled(pluginId: string, state?: Partial<DesiredState> 
   }
 
   // Enforce plugin dependencies first (e.g., vigilant-octo-waffle requires core-k3s)
-  const deps = getPluginDependencies(pluginId);
+  const deps =
+    pluginId === 'librenms' && state.librenms?.mode === 'external'
+      ? []
+      : getPluginDependencies(pluginId);
   for (const depId of deps) {
     if (depId !== pluginId && !isPluginEnabled(depId, state)) {
       return false;
@@ -1206,6 +1323,15 @@ export function isPluginEnabled(pluginId: string, state?: Partial<DesiredState> 
   if (pluginId === 'eluvix') {
     return isServiceExtensionEnabled(state.eluvix?.enabled, state.plugins, 'eluvix');
   }
+  if (pluginId === 'netbox') {
+    return isServiceExtensionEnabled(state.netbox?.enabled, state.plugins, 'netbox');
+  }
+  if (pluginId === 'librenms') {
+    return isServiceExtensionEnabled(state.librenms?.enabled, state.plugins, 'librenms');
+  }
+  if (pluginId === 'topology-studio') {
+    return isServiceExtensionEnabled(state.topology?.enabled, state.plugins, 'topology-studio');
+  }
   if (pluginId === 'nut-ups') {
     return isServiceExtensionEnabled(state.ups?.enabled, state.plugins, 'nut-ups');
   }
@@ -1257,8 +1383,10 @@ export function enablePluginWithDependencies(
   });
 
   const enableSingle = (id: string, isAutoDep = false) => {
-    // Recursively enable dependencies first
-    for (const depId of getPluginDependencies(id)) {
+    // Recursively enable dependencies first (external LibreNMS mode does not require K3s)
+    const deps =
+      id === 'librenms' && next.librenms?.mode === 'external' ? [] : getPluginDependencies(id);
+    for (const depId of deps) {
       if (!isPluginEnabled(depId, next)) {
         enableSingle(depId, true);
       }
@@ -1318,6 +1446,18 @@ export function enablePluginWithDependencies(
       next.eluvix = next.eluvix
         ? { ...next.eluvix, enabled: true }
         : EluvixConfigSchema.parse({ enabled: true });
+    } else if (id === 'netbox') {
+      next.netbox = next.netbox
+        ? { ...next.netbox, enabled: true }
+        : NetBoxConfigSchema.parse({ enabled: true });
+    } else if (id === 'librenms') {
+      next.librenms = next.librenms
+        ? { ...next.librenms, enabled: true }
+        : LibreNmsConfigSchema.parse({ enabled: true });
+    } else if (id === 'topology-studio') {
+      next.topology = next.topology
+        ? { ...next.topology, enabled: true }
+        : TopologyConfigSchema.parse({ enabled: true });
     } else if (id === 'haproxy') {
       next.haproxy = next.haproxy
         ? { ...next.haproxy, enabled: true }
@@ -1383,6 +1523,8 @@ export function disablePluginWithDependents(
       if (
         isPluginEnabled(depPlugin.id, next) ||
         (depPlugin.id === 'vigilant-octo-waffle' && next.vow?.enabled) ||
+        (depPlugin.id === 'netbox' && next.netbox?.enabled) ||
+        (depPlugin.id === 'librenms' && next.librenms?.enabled) ||
         (depPlugin.id === 'core-vigilante' && (next.capabilities?.vigilanteEnabled || next.vigilante?.enabled))
       ) {
         disableSingle(depPlugin.id, true);
@@ -1440,6 +1582,18 @@ export function disablePluginWithDependents(
     } else if (id === 'eluvix') {
       if (next.eluvix) {
         next.eluvix.enabled = false;
+      }
+    } else if (id === 'netbox') {
+      if (next.netbox) {
+        next.netbox.enabled = false;
+      }
+    } else if (id === 'librenms') {
+      if (next.librenms) {
+        next.librenms.enabled = false;
+      }
+    } else if (id === 'topology-studio') {
+      if (next.topology) {
+        next.topology.enabled = false;
       }
     } else if (id === 'haproxy') {
       if (next.haproxy) {

@@ -44,7 +44,8 @@ function sendAgentApiRequest<T>(
   postData: string | undefined,
   agentToken: string | undefined,
   socketPath: string,
-  timeoutMs: number
+  timeoutMs: number,
+  extraHeaders?: Record<string, string>
 ): Promise<AgentApiResult<T>> {
   return new Promise((resolve) => {
     const req = http.request(
@@ -59,6 +60,7 @@ function sendAgentApiRequest<T>(
                 'Content-Length': Buffer.byteLength(postData),
               }
             : {}),
+          ...(extraHeaders ?? {}),
           ...(agentToken ? { 'X-Axonwall-Agent-Token': agentToken } : {}),
         },
         timeout: timeoutMs,
@@ -118,16 +120,17 @@ export async function callAgentApiDetailed<T>(
   path: string,
   method = 'GET',
   body?: any,
-  timeoutMs = 4000
+  timeoutMs = 4000,
+  extraHeaders?: Record<string, string>
 ): Promise<AgentApiResult<T>> {
   const postData = body ? JSON.stringify(body) : undefined;
   const socketPath = getAgentApiSocketPath();
   let agentToken = getAgentToken();
-  let res = await sendAgentApiRequest<T>(path, method, postData, agentToken, socketPath, timeoutMs);
+  let res = await sendAgentApiRequest<T>(path, method, postData, agentToken, socketPath, timeoutMs, extraHeaders);
   if (res.kind === 'http_error' && res.status === 401) {
     cachedAgentToken = undefined;
     agentToken = getAgentToken();
-    res = await sendAgentApiRequest<T>(path, method, postData, agentToken, socketPath, timeoutMs);
+    res = await sendAgentApiRequest<T>(path, method, postData, agentToken, socketPath, timeoutMs, extraHeaders);
   }
   return res;
 }

@@ -2713,6 +2713,312 @@ export const EluvixConfigSchema = z.object({
 });
 export type EluvixConfig = z.infer<typeof EluvixConfigSchema>;
 
+export const NetBoxLdapAuthSchema = z.object({
+  enabled: z.boolean().default(true),
+  autoBindLocalLdap: z.boolean().default(true),
+  url: z.string().default('ldap://127.0.0.1:389'),
+  baseDn: z.string().optional(),
+  bindDn: z.string().optional(),
+  adminGroups: z.array(z.string()).default(['axonwall-admin', 'netbox-admin']),
+  operatorGroups: z.array(z.string()).default(['axonwall-operator', 'netbox-operator']),
+  readonlyGroups: z.array(z.string()).default(['axonwall-readonly', 'netbox-readonly']),
+});
+export type NetBoxLdapAuth = z.infer<typeof NetBoxLdapAuthSchema>;
+
+export const NetBoxSyncConfigSchema = z.object({
+  enabled: z.boolean().default(true),
+  autoSyncOnApply: z.boolean().default(false),
+  syncInterfaces: z.boolean().default(true),
+  syncVlans: z.boolean().default(true),
+  syncVrfs: z.boolean().default(true),
+  syncPrefixes: z.boolean().default(true),
+  syncDhcpLeases: z.boolean().default(true),
+  syncVirtualIps: z.boolean().default(true),
+  syncVirtualMachines: z.boolean().default(true),
+  syncK3sNodes: z.boolean().default(true),
+});
+export type NetBoxSyncConfig = z.infer<typeof NetBoxSyncConfigSchema>;
+
+export const NetBoxConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  namespace: z.string().regex(/^[a-z0-9]([-a-z0-9]*[a-z0-9])?$/).default('netbox'),
+  domain: z.string().regex(/^[a-zA-Z0-9.-]+$/).default('netbox.axonwall.local'),
+  image: z.string().min(1).regex(/^[^\s\r\n]+$/).default('netboxcommunity/netbox:v4.2'),
+  postgresImage: z.string().min(1).regex(/^[^\s\r\n]+$/).default('postgres:16-alpine'),
+  valkeyImage: z.string().min(1).regex(/^[^\s\r\n]+$/).default('valkey/valkey:8-alpine'),
+  storageClass: z.string().regex(/^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$/).default('axonwall-zfs-local'),
+  postgresStorageGb: z.number().int().min(1).max(2000).default(20),
+  mediaStorageGb: z.number().int().min(1).max(2000).default(10),
+  replicas: z.number().int().min(1).max(5).default(1),
+  workerReplicas: z.number().int().min(1).max(5).default(1),
+  servicePort: z.number().int().min(1).max(65535).default(8080),
+  ingressEnabled: z.boolean().default(true),
+  ingressTls: z.boolean().default(true),
+  syncUnboundDns: z.boolean().default(true),
+  superuserUsername: z.string().regex(/^[a-zA-Z0-9._-]+$/).default('admin'),
+  superuserEmail: z.string().email().default('admin@axonwall.local'),
+  superuserPassword: z.string().optional(),
+  apiToken: z.string().optional(),
+  externalUrl: z.string().optional(),
+  siteName: z.string().min(1).max(100).default('Axonwall Appliance'),
+  siteSlug: z.string().regex(/^[a-z0-9-]+$/).default('axonwall-appliance'),
+  ldapAuth: NetBoxLdapAuthSchema.prefault({}),
+  sync: NetBoxSyncConfigSchema.prefault({}),
+});
+export type NetBoxConfig = z.infer<typeof NetBoxConfigSchema>;
+
+export const LibreNmsLdapAuthSchema = z.object({
+  enabled: z.boolean().default(true),
+  autoBindLocalLdap: z.boolean().default(true),
+  url: z.string().default('ldap://127.0.0.1:389'),
+  baseDn: z.string().optional(),
+  bindDn: z.string().optional(),
+  adminGroup: z.string().min(1).default('librenms-admin'),
+  operatorGroup: z.string().min(1).default('librenms-operator'),
+  readonlyGroup: z.string().min(1).default('librenms-readonly'),
+  inheritApplianceAdmins: z.boolean().default(true),
+});
+export type LibreNmsLdapAuth = z.infer<typeof LibreNmsLdapAuthSchema>;
+
+export const LibreNmsSnmpDefaultsSchema = z.object({
+  version: z.enum(['v2c', 'v3']).default('v2c'),
+  community: z.string().default('public'),
+  port: z.number().int().min(1).max(65535).default(161),
+  v3AuthLevel: z.enum(['noAuthNoPriv', 'authNoPriv', 'authPriv']).default('authPriv'),
+  v3AuthUser: z.string().optional(),
+  v3AuthAlgo: z.enum(['SHA', 'SHA-256', 'SHA-512', 'MD5']).default('SHA-256'),
+  v3AuthPass: z.string().optional(),
+  v3CryptoAlgo: z.enum(['AES', 'AES-256', 'DES']).default('AES'),
+  v3CryptoPass: z.string().optional(),
+});
+export type LibreNmsSnmpDefaults = z.infer<typeof LibreNmsSnmpDefaultsSchema>;
+
+export const LibreNmsDiscoverySubnetSchema = z.object({
+  cidr: z.string().min(1),
+  label: z.string().default(''),
+  enabled: z.boolean().default(true),
+});
+export type LibreNmsDiscoverySubnet = z.infer<typeof LibreNmsDiscoverySubnetSchema>;
+
+export const LibreNmsSyncConfigSchema = z.object({
+  enabled: z.boolean().default(true),
+  autoEnrollAxonwallHosts: z.boolean().default(true),
+  autoEnrollFleetSatellites: z.boolean().default(true),
+  autoEnrollTopologyPeers: z.boolean().default(true),
+  syncToNetBox: z.boolean().default(true),
+  pollIntervalSec: z.number().int().min(10).max(3600).default(300),
+});
+export type LibreNmsSyncConfig = z.infer<typeof LibreNmsSyncConfigSchema>;
+
+export const LibreNmsConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  mode: z.enum(['k3s', 'external']).default('k3s'),
+  namespace: z.string().regex(/^[a-z0-9]([-a-z0-9]*[a-z0-9])?$/).default('librenms'),
+  domain: z.string().regex(/^[a-zA-Z0-9.-]+$/).default('librenms.axonwall.local'),
+  image: z.string().min(1).regex(/^[^\s\r\n]+$/).default('librenms/librenms:25.10.0'),
+  dbImage: z.string().min(1).regex(/^[^\s\r\n]+$/).default('mariadb:11.4'),
+  valkeyImage: z.string().min(1).regex(/^[^\s\r\n]+$/).default('valkey/valkey:8-alpine'),
+  servicePort: z.number().int().min(1).max(65535).default(8000),
+  storageClass: z.string().regex(/^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$/).default('axonwall-zfs-local'),
+  dataVolumeSizeGb: z.number().int().min(5).max(4096).default(20),
+  dbVolumeSizeGb: z.number().int().min(5).max(4096).default(15),
+  syslogEnabled: z.boolean().default(true),
+  snmpTrapEnabled: z.boolean().default(true),
+  ingressEnabled: z.boolean().default(true),
+  ingressTls: z.boolean().default(true),
+  unboundAutoDns: z.boolean().default(true),
+  adminUsername: z.string().regex(/^[a-zA-Z0-9._-]+$/).default('admin'),
+  adminEmail: z.string().email().default('admin@axonwall.local'),
+  adminPassword: z.string().optional(),
+  externalUrl: z.string().optional(),
+  apiToken: z.string().optional(),
+  webhookSecret: z.string().optional(),
+  timezone: z.string().default('UTC'),
+  snmpDefaults: LibreNmsSnmpDefaultsSchema.prefault({}),
+  discoverySubnets: z.array(LibreNmsDiscoverySubnetSchema).default([]),
+  ldapAuth: LibreNmsLdapAuthSchema.prefault({}),
+  sync: LibreNmsSyncConfigSchema.prefault({}),
+});
+export type LibreNmsConfig = z.infer<typeof LibreNmsConfigSchema>;
+
+export const TopologyLayerSchema = z.enum(['physical', 'l2-l3', 'vpn', 'k3s', 'virt']);
+export type TopologyLayer = z.infer<typeof TopologyLayerSchema>;
+
+export const TopologyPortKindSchema = z.enum([
+  'physical-nic',
+  'sfp',
+  'wan-uplink',
+  'switch-port',
+  'vlan-if',
+  'tunnel',
+  'ingress',
+  'service',
+  'storage',
+  'virtual-nic',
+  'generic',
+]);
+export type TopologyPortKind = z.infer<typeof TopologyPortKindSchema>;
+
+export const TopologyPortSpecSchema = z.object({
+  id: z.string().min(1),
+  name: z.string().min(1),
+  kind: TopologyPortKindSchema.default('physical-nic'),
+  speedMbps: z.number().int().min(1).optional(),
+  mtu: z.number().int().min(68).max(65535).optional(),
+  vlanIds: z.array(z.number().int().min(1).max(4094)).default([]),
+  subnetCidr: z.string().optional(),
+  planned: z.boolean().default(false),
+});
+export type TopologyPortSpec = z.infer<typeof TopologyPortSpecSchema>;
+
+export const TopologyLldpConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  excludeWan: z.boolean().default(true),
+  interfaces: z.array(z.string()).default([]),
+  systemDescription: z.string().optional(),
+});
+export type TopologyLldpConfig = z.infer<typeof TopologyLldpConfigSchema>;
+
+export const TopologyPollingConfigSchema = z.object({
+  localIntervalSec: z.number().int().min(2).max(300).default(5),
+  peerIntervalSec: z.number().int().min(5).max(600).default(10),
+  pauseWhenHidden: z.boolean().default(true),
+});
+export type TopologyPollingConfig = z.infer<typeof TopologyPollingConfigSchema>;
+
+export const TopologyPeerRoleSchema = z.enum([
+  'edge-ngfw',
+  'k3s-storage',
+  'vault',
+  'nas',
+  'satellite',
+  'generic',
+]);
+export type TopologyPeerRole = z.infer<typeof TopologyPeerRoleSchema>;
+
+export const TopologyPeerHostSchema = z.object({
+  id: z.string().min(1),
+  name: z.string().min(1),
+  role: TopologyPeerRoleSchema.default('generic'),
+  apiUrl: z.string().min(1),
+  apiToken: z.string().optional(),
+  tlsCaCert: z.string().optional(),
+  tlsCertSha256: z.string().optional(),
+  useHaMtls: z.boolean().default(false),
+  enabled: z.boolean().default(true),
+  site: z.string().optional(),
+  rack: z.string().optional(),
+});
+export type TopologyPeerHost = z.infer<typeof TopologyPeerHostSchema>;
+
+export const TopologyNodeKindSchema = z.enum([
+  'wan',
+  'switch',
+  'patch-panel',
+  'edge-ngfw',
+  'k3s-node',
+  'vault',
+  'nas',
+  'satellite',
+  'generic-host',
+  'vlan',
+  'bridge-bond',
+  'vip',
+  'vpn-overlay',
+  'haproxy',
+  'k3s-ingress',
+  'k3s-service',
+  'k3s-workload',
+  'k3s-pvc',
+  'k3s-netpol',
+  'k3s-crd',
+  'kvm-vm',
+  'lxc-container',
+]);
+export type TopologyNodeKind = z.infer<typeof TopologyNodeKindSchema>;
+
+export const TopologyCanvasNodeSchema = z.object({
+  id: z.string().min(1),
+  kind: TopologyNodeKindSchema,
+  label: z.string().min(1),
+  position: z.object({ x: z.number(), y: z.number() }).default({ x: 0, y: 0 }),
+  hostRef: z.string().optional(),
+  layer: TopologyLayerSchema.default('physical'),
+  managed: z.boolean().default(false),
+  ports: z.array(TopologyPortSpecSchema).default([]),
+  metadata: z.record(z.string(), z.unknown()).default({}),
+});
+export type TopologyCanvasNode = z.infer<typeof TopologyCanvasNodeSchema>;
+
+export const TopologyCableMediumSchema = z.enum([
+  'rj45-cat6a',
+  'sfp-dac',
+  'fiber-om4',
+  'fiber-os2',
+  'ont-coax',
+  'vlan-trunk',
+  'l3-route',
+  'wireguard',
+  'headscale',
+  'ipsec',
+  'k3s-route',
+  'k3s-storage',
+  'virt-bridge',
+]);
+export type TopologyCableMedium = z.infer<typeof TopologyCableMediumSchema>;
+
+export const TopologyCableEdgeSchema = z.object({
+  id: z.string().min(1),
+  sourceNodeId: z.string().min(1),
+  sourcePortId: z.string().min(1),
+  targetNodeId: z.string().min(1),
+  targetPortId: z.string().min(1),
+  layer: TopologyLayerSchema.default('physical'),
+  medium: TopologyCableMediumSchema.default('rj45-cat6a'),
+  status: z.enum(['planned', 'installed', 'virtual']).default('planned'),
+  speedMbps: z.number().int().min(1).optional(),
+  lengthMeters: z.number().min(0).optional(),
+  color: z.string().optional(),
+  cableLabel: z.string().optional(),
+  vlanIds: z.array(z.number().int().min(1).max(4094)).default([]),
+  mtu: z.number().int().min(68).max(65535).optional(),
+  notes: z.string().optional(),
+});
+export type TopologyCableEdge = z.infer<typeof TopologyCableEdgeSchema>;
+
+export const TopologyScenarioSchema = z.object({
+  id: z.string().min(1),
+  name: z.string().min(1),
+  description: z.string().default(''),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+  nodes: z.array(TopologyCanvasNodeSchema).default([]),
+  cables: z.array(TopologyCableEdgeSchema).default([]),
+});
+export type TopologyScenario = z.infer<typeof TopologyScenarioSchema>;
+
+export const TopologyLayerDefaultsSchema = z.object({
+  physical: z.boolean().default(true),
+  l2L3: z.boolean().default(true),
+  vpn: z.boolean().default(true),
+  k3s: z.boolean().default(true),
+  virt: z.boolean().default(false),
+});
+export type TopologyLayerDefaults = z.infer<typeof TopologyLayerDefaultsSchema>;
+
+export const TopologyConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  lldp: TopologyLldpConfigSchema.prefault({}),
+  polling: TopologyPollingConfigSchema.prefault({}),
+  peers: z.array(TopologyPeerHostSchema).default([]),
+  nodes: z.array(TopologyCanvasNodeSchema).default([]),
+  cables: z.array(TopologyCableEdgeSchema).default([]),
+  scenarios: z.array(TopologyScenarioSchema).default([]),
+  activeScenarioId: z.string().optional(),
+  layerDefaults: TopologyLayerDefaultsSchema.prefault({}),
+});
+export type TopologyConfig = z.infer<typeof TopologyConfigSchema>;
+
 export const HostedEdgeConfigSchema = z.object({
   enabled: z.boolean().default(false),
   placement: z.enum(['hosted', 'dedicated']).default('hosted'),
@@ -2816,6 +3122,9 @@ export const DesiredStateSchema = z.object({
   hostDefense: HostMalwareDefenseConfigSchema.optional(),
   threatHarvester: ThreatHarvesterConfigSchema.optional(),
   eluvix: EluvixConfigSchema.optional(),
+  netbox: NetBoxConfigSchema.optional(),
+  librenms: LibreNmsConfigSchema.optional(),
+  topology: TopologyConfigSchema.optional(),
   mcp: McpServerConfigSchema.optional(),
 });
 export type DesiredState = z.infer<typeof DesiredStateSchema>;

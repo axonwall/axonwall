@@ -87,6 +87,18 @@
       "types": "./dist/compile/nut/index.d.ts",
       "default": "./dist/compile/nut/index.js"
     },
+    "./compile/netbox": {
+      "types": "./dist/compile/netbox/index.d.ts",
+      "default": "./dist/compile/netbox/index.js"
+    },
+    "./compile/librenms": {
+      "types": "./dist/compile/librenms/index.d.ts",
+      "default": "./dist/compile/librenms/index.js"
+    },
+    "./compile/topology": {
+      "types": "./dist/compile/topology/index.d.ts",
+      "default": "./dist/compile/topology/index.js"
+    },
     "./plugins": {
       "types": "./dist/plugins/index.d.ts",
       "default": "./dist/plugins/index.js"

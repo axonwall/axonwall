@@ -827,7 +827,7 @@ export function AxonwallTuiApp({
     const nextEnabled = !currentlyEnabled;
     let depNotice = '';
 
-    if (pluginId === 'vigilant-octo-waffle' || pluginId === 'host-malware-rootkit' || pluginId === 'eluvix') {
+    if (pluginId === 'vigilant-octo-waffle' || pluginId === 'host-malware-rootkit' || pluginId === 'eluvix' || pluginId === 'netbox' || pluginId === 'librenms' || pluginId === 'topology-studio') {
       if (nextEnabled) {
         const depRes = enablePluginWithDependencies(pluginId, next);
         next = depRes.state;
@@ -2049,7 +2049,7 @@ export function AxonwallTuiApp({
         );
       } else if (activeTab === 'compute') {
         if (cmpSubView === 'roles') {
-          const roles = ['core-k3s', 'core-virt', 'core-vigilante', 'vigilant-octo-waffle', 'eluvix', 'host-malware-rootkit'];
+          const roles = ['core-k3s', 'core-virt', 'core-vigilante', 'vigilant-octo-waffle', 'eluvix', 'host-malware-rootkit', 'netbox', 'librenms', 'topology-studio'];
           const roleId = roles[cursorIdx % roles.length]!;
           if (CORE_ROLE_PLUGIN_IDS.has(roleId)) {
             const next = structuredClone(state);
@@ -2658,8 +2658,26 @@ export function AxonwallTuiApp({
                 enabled: isPluginEnabled('host-malware-rootkit', state),
                 detail: 'rkhunter, AIDE, YARA, io_uring & eBPF ring audit',
               },
+              {
+                id: 'netbox',
+                name: 'NetBox DCIM & IPAM Source of Truth',
+                enabled: isPluginEnabled('netbox', state),
+                detail: 'K3s IPAM/DCIM + Axonwall inventory sync (requires core-k3s)',
+              },
+              {
+                id: 'librenms',
+                name: 'LibreNMS SNMP, LLDP & Health Monitoring',
+                enabled: isPluginEnabled('librenms', state),
+                detail: 'SNMP/LLDP/FDB + DOM sensors + NetBox Triad bridge',
+              },
+              {
+                id: 'topology-studio',
+                name: 'Topology Studio Fabric Editor',
+                enabled: isPluginEnabled('topology-studio', state),
+                detail: 'Interactive multi-host, cable, K3s & Triad topology canvas',
+              },
             ].map((r, idx) => {
-              const sel = idx === cursorIdx % 6;
+              const sel = idx === cursorIdx % 9;
               return (
                 <Text key={r.id} wrap="truncate-end">
                   <Text color={sel ? 'cyan' : 'gray'} bold>{sel ? '▶ ' : '  '}</Text>

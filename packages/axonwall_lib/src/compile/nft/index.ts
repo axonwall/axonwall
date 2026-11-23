@@ -26,6 +26,9 @@ import { compileWireGuard } from '../wireguard/index.js';
 import { compileRosenpass } from '../rosenpass/index.js';
 import { compileVigilanteBundle } from '../vigilante/index.js';
 import { compileVowBundle } from '../vow/index.js';
+import { compileNetBoxBundle } from '../netbox/index.js';
+import { compileLibreNmsBundle } from '../librenms/index.js';
+import { compileTopologyBundle } from '../topology/index.js';
 import { compileHaProxy } from '../haproxy/index.js';
 import { compileFreeRadiusClients } from '../freeradius/index.js';
 import { compileSnmpd } from '../snmp/index.js';
@@ -553,6 +556,95 @@ export function compileNftables(state: DesiredState): CompileResult {
         fileMode: 0o644,
       });
     }
+  }
+
+  // Emit NetBox DCIM & IPAM K3s deployment bundle and Unbound overrides when configured/enabled
+  const netboxRequested =
+    state.netbox?.enabled !== undefined
+      ? state.netbox.enabled
+      : Boolean(state.plugins?.some((p) => p.id === 'netbox' && p.enabled));
+  if (state.netbox || netboxRequested) {
+    const netboxCompiled = compileNetBoxBundle(state);
+    files.push({
+      path: '/etc/axonwall/managed/netbox_config.json',
+      content: JSON.stringify(
+        {
+          ...netboxCompiled,
+          apiToken: state.netbox?.apiToken,
+          superuserPassword: state.netbox?.superuserPassword,
+        },
+        null,
+        2,
+      ),
+      fileMode: 0o600,
+    });
+    if (
+      capabilities.firewallEnabled &&
+      state.dns?.enabled &&
+      netboxCompiled.enabled &&
+      state.netbox?.syncUnboundDns !== false &&
+      netboxCompiled.unboundOverrides
+    ) {
+      files.push({
+        path: '/etc/unbound/unbound.conf.d/netbox.conf',
+        content: netboxCompiled.unboundOverrides,
+        fileMode: 0o644,
+      });
+    }
+  }
+
+  // Emit LibreNMS SNMP/LLDP monitoring bundle and Unbound overrides when configured/enabled
+  const librenmsRequested =
+    state.librenms?.enabled !== undefined
+      ? state.librenms.enabled
+      : Boolean(state.plugins?.some((p) => p.id === 'librenms' && p.enabled));
+  if (state.librenms || librenmsRequested) {
+    const librenmsCompiled = compileLibreNmsBundle(state);
+    files.push({
+      path: '/etc/axonwall/managed/librenms_config.json',
+      content: JSON.stringify(
+        {
+          ...librenmsCompiled,
+          apiToken: state.librenms?.apiToken,
+          webhookSecret: state.librenms?.webhookSecret,
+          adminPassword: state.librenms?.adminPassword,
+          snmpV3AuthPass: state.librenms?.snmpDefaults?.v3AuthPass,
+          snmpV3CryptoPass: state.librenms?.snmpDefaults?.v3CryptoPass,
+          snmpCommunity: state.librenms?.snmpDefaults?.community,
+        },
+        null,
+        2,
+      ),
+      fileMode: 0o600,
+    });
+    if (
+      capabilities.firewallEnabled &&
+      state.dns?.enabled &&
+      librenmsCompiled.enabled &&
+      librenmsCompiled.mode === 'k3s' &&
+      state.librenms?.unboundAutoDns !== false &&
+      librenmsCompiled.unboundOverrides
+    ) {
+      files.push({
+        path: '/etc/unbound/unbound.conf.d/librenms.conf',
+        content: librenmsCompiled.unboundOverrides,
+        fileMode: 0o644,
+      });
+    }
+  }
+
+  // Emit Topology Studio configuration (including peer endpoints & WAN-excluded lldpd config)
+  const topologyRequested =
+    state.topology?.enabled !== undefined
+      ? state.topology.enabled
+      : Boolean(state.plugins?.some((p) => p.id === 'topology-studio' && p.enabled));
+  if (state.topology || topologyRequested) {
+    const topoCompiled = compileTopologyBundle(state);
+    files.push({
+      path: '/etc/axonwall/managed/topology_config.json',
+      content: JSON.stringify(topoCompiled, null, 2),
+      fileMode: 0o600,
+    });
   }
 
   // Emit Axonwall Blackbox (ebpf-threat-harvester) configuration when opted-in

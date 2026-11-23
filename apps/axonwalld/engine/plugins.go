@@ -1222,6 +1222,106 @@ func GetExtensionPluginDefinitions() []PluginDefinition {
 			ArchPackages:     []string{},
 			RequiredBinaries: []string{},
 		},
+		{
+			ID:               "netbox",
+			Name:             "NetBox DCIM & IPAM Source of Truth",
+			Version:          "4.2.0",
+			Category:         "extension",
+			DefaultEnabled:   false,
+			Dependencies:     []string{"core-k3s"},
+			Description:      "Industry-standard IP Address Management (IPAM) and Data Center Infrastructure Management (DCIM) running cleanly inside K3s (with PostgreSQL 16 + Valkey 8, OpenEBS PVCs, OpenLDAP SSO via svc-netbox, Unbound Auto-DNS, and automated live Axonwall inventory sync).",
+			Author:           "NetBox Community / Axonwall Core",
+			SystemdUnits:     []string{},
+			Privileges:       []string{"k3s.cluster", "services.netbox", "network.interfaces", "services.dns"},
+			DebianPackages:   []string{},
+			AlpinePackages:   []string{},
+			ArchPackages:     []string{},
+			RequiredBinaries: []string{},
+			LdapIntegration: &PluginLDAPSpec{
+				EnabledByDefault:           true,
+				ServiceAccountCN:           "svc-netbox",
+				InheritApplianceRoleGroups: true,
+				EnvPrefix:                  "NETBOX_LDAP_",
+				Groups: []PluginLdapGroupSpec{
+					{
+						CN:          "netbox-admin",
+						GIDNumber:   10240,
+						Description: "NetBox DCIM & IPAM Superusers",
+						Role:        "admin",
+					},
+					{
+						CN:          "netbox-operator",
+						GIDNumber:   10241,
+						Description: "NetBox DCIM & IPAM Editors and Inventory Operators",
+						Role:        "operator",
+					},
+					{
+						CN:          "netbox-readonly",
+						GIDNumber:   10242,
+						Description: "NetBox DCIM & IPAM Read-Only Viewers",
+						Role:        "readonly",
+					},
+				},
+			},
+		},
+		{
+			ID:               "librenms",
+			Name:             "LibreNMS SNMP, LLDP & Health Monitoring",
+			Version:          "25.10.0",
+			Category:         "extension",
+			DefaultEnabled:   false,
+			Dependencies:     []string{"core-k3s"},
+			Description:      "Full-featured SNMP, LLDP/CDP/FDB topology discovery, optical DOM/sensor telemetry, and real-time alerting running cleanly inside K3s (MariaDB + Valkey + RRDcached + Dispatcher + Syslog/Trap receivers, OpenLDAP SSO via svc-librenms, Unbound Auto-DNS, and NetBox Triad sync).",
+			Author:           "LibreNMS Community / Axonwall Core",
+			SystemdUnits:     []string{},
+			Privileges:       []string{"k3s.cluster", "services.librenms", "network.interfaces", "services.dns"},
+			DebianPackages:   []string{},
+			AlpinePackages:   []string{},
+			ArchPackages:     []string{},
+			RequiredBinaries: []string{},
+			LdapIntegration: &PluginLDAPSpec{
+				EnabledByDefault:           true,
+				ServiceAccountCN:           "svc-librenms",
+				InheritApplianceRoleGroups: true,
+				EnvPrefix:                  "LIBRENMS_LDAP_",
+				Groups: []PluginLdapGroupSpec{
+					{
+						CN:          "librenms-admin",
+						GIDNumber:   10250,
+						Description: "LibreNMS Global Administrators",
+						Role:        "admin",
+					},
+					{
+						CN:          "librenms-operator",
+						GIDNumber:   10251,
+						Description: "LibreNMS Device & Alert Operators",
+						Role:        "operator",
+					},
+					{
+						CN:          "librenms-readonly",
+						GIDNumber:   10252,
+						Description: "LibreNMS Read-Only Monitoring Viewers",
+						Role:        "readonly",
+					},
+				},
+			},
+		},
+		{
+			ID:               "topology-studio",
+			Name:             "Topology Studio (Multi-Host Fabric & Cable Editor)",
+			Version:          "1.0.0",
+			Category:         "extension",
+			DefaultEnabled:   false,
+			Dependencies:     []string{},
+			Description:      "Interactive node & physical cable fabric editor linking WAN circuits, Edge NGFWs, K3s/Storage/Vault/Satellite hosts, VLANs, VPN overlays, and Kubernetes Ingress/CRDs with strict Green/Yellow/Red health detection, LibreNMS LLDP telemetry, and NetBox Triad sync.",
+			Author:           "Axonwall Core",
+			SystemdUnits:     []string{},
+			Privileges:       []string{"network.interfaces", "system.config.write"},
+			DebianPackages:   []string{},
+			AlpinePackages:   []string{},
+			ArchPackages:     []string{},
+			RequiredBinaries: []string{},
+		},
 	}
 }
 
@@ -3005,6 +3105,15 @@ func (pm *PluginManager) DisablePlugin(pluginID string) PluginActionResponse {
 			log.Printf("[PluginManager] Warning: disabling ebpf-threat-harvester did not stop the harvester: %v", err)
 		}
 	}
+	if pluginID == "netbox" {
+		_ = removeFileIfExists(filepath.Join(k3sServerManifestDir, "axonwall-netbox.yaml"))
+	}
+	if pluginID == "librenms" {
+		_ = removeFileIfExists(filepath.Join(k3sServerManifestDir, "axonwall-librenms.yaml"))
+	}
+	if pluginID == "topology-studio" {
+		_ = removeFileIfExists("/etc/lldpd.d/axonwall.conf")
+	}
 
 	pm.mu.Lock()
 	pm.disabledMap[pluginID] = true
@@ -3953,6 +4062,19 @@ func (pm *PluginManager) InstallPlugin(pluginID string) PluginActionResponse {
 	if pluginID == "eluvix" {
 		_ = os.MkdirAll("/etc/axonwall/eluvix", 0755)
 	}
+	if pluginID == "netbox" {
+		_ = os.MkdirAll("/etc/axonwall/netbox", 0755)
+		_ = os.MkdirAll(k3sEtcDir, 0755)
+		_ = os.MkdirAll(k3sServerManifestDir, 0755)
+	}
+	if pluginID == "librenms" {
+		_ = os.MkdirAll("/etc/axonwall/librenms", 0755)
+		_ = os.MkdirAll(k3sEtcDir, 0755)
+		_ = os.MkdirAll(k3sServerManifestDir, 0755)
+	}
+	if pluginID == "topology-studio" {
+		_ = os.MkdirAll("/etc/axonwall/topology", 0750)
+	}
 	if pluginID == "ebpf-threat-harvester" {
 		_ = os.MkdirAll("/var/lib/axonwall/threat-corpus", 0750)
 		// R4-A-M4: installing the plugin must actually start the
@@ -4174,6 +4296,16 @@ func (pm *PluginManager) UninstallPlugin(pluginID string) PluginActionResponse {
 		}
 	}
 
+	if pluginID == "netbox" {
+		_ = removeFileIfExists(filepath.Join(k3sServerManifestDir, "axonwall-netbox.yaml"))
+	}
+	if pluginID == "librenms" {
+		_ = removeFileIfExists(filepath.Join(k3sServerManifestDir, "axonwall-librenms.yaml"))
+	}
+	if pluginID == "topology-studio" {
+		_ = removeFileIfExists("/etc/lldpd.d/axonwall.conf")
+	}
+
 	pm.mu.Lock()
 	delete(pm.installedMap, pluginID)
 	if target.DefaultEnabled {
@@ -4365,6 +4497,54 @@ func (pm *PluginManager) ReconfigurePlugin(pluginID string) PluginActionResponse
 		return PluginActionResponse{
 			Success: true,
 			Message: "Eluvix Sovereign AI Router, Enterprise Tokenomics & Prompt/PII Guard enabled; configuration provisioned.",
+		}
+	}
+	if pluginID == "netbox" {
+		_ = os.MkdirAll("/etc/axonwall/netbox", 0755)
+		_ = os.MkdirAll(k3sEtcDir, 0755)
+		_ = os.MkdirAll(k3sServerManifestDir, 0755)
+		pm.mu.Lock()
+		delete(pm.disabledMap, pluginID)
+		if pm.installedMap[pluginID] == "" {
+			pm.installedMap[pluginID] = time.Now().UTC().Format(time.RFC3339)
+		}
+		pm.saveState()
+		pm.mu.Unlock()
+		pm.ensurePluginLDAP(pluginID)
+		return PluginActionResponse{
+			Success: true,
+			Message: "NetBox DCIM & IPAM OpenLDAP integration and K3s manifest staging directory provisioned (Dependency: core-k3s).",
+		}
+	}
+	if pluginID == "librenms" {
+		_ = os.MkdirAll("/etc/axonwall/librenms", 0755)
+		_ = os.MkdirAll(k3sEtcDir, 0755)
+		_ = os.MkdirAll(k3sServerManifestDir, 0755)
+		pm.mu.Lock()
+		delete(pm.disabledMap, pluginID)
+		if pm.installedMap[pluginID] == "" {
+			pm.installedMap[pluginID] = time.Now().UTC().Format(time.RFC3339)
+		}
+		pm.saveState()
+		pm.mu.Unlock()
+		pm.ensurePluginLDAP(pluginID)
+		return PluginActionResponse{
+			Success: true,
+			Message: "LibreNMS monitoring OpenLDAP integration and K3s manifest staging directory provisioned (Dependency: core-k3s).",
+		}
+	}
+	if pluginID == "topology-studio" {
+		_ = os.MkdirAll("/etc/axonwall/topology", 0750)
+		pm.mu.Lock()
+		delete(pm.disabledMap, pluginID)
+		if pm.installedMap[pluginID] == "" {
+			pm.installedMap[pluginID] = time.Now().UTC().Format(time.RFC3339)
+		}
+		pm.saveState()
+		pm.mu.Unlock()
+		return PluginActionResponse{
+			Success: true,
+			Message: "Topology Studio multi-host fabric directory provisioned.",
 		}
 	}
 	if pluginID == "ebpf-threat-harvester" {

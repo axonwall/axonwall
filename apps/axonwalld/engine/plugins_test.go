@@ -25,6 +25,7 @@ func TestPluginManager_ListPlugins(t *testing.T) {
 	foundNastyMap := false
 	foundVow := false
 	foundEluvix := false
+	foundNetbox := false
 	for _, p := range plugins {
 		if p.ID == "cli-workstation" {
 			foundWorkstation = true
@@ -50,6 +51,18 @@ func TestPluginManager_ListPlugins(t *testing.T) {
 		if p.ID == "eluvix" {
 			foundEluvix = true
 		}
+		if p.ID == "netbox" {
+			foundNetbox = true
+			if len(p.Dependencies) != 1 || p.Dependencies[0] != "core-k3s" {
+				t.Errorf("expected netbox to have Dependencies=[core-k3s], got %v", p.Dependencies)
+			}
+			if p.LdapIntegration == nil || p.LdapIntegration.ServiceAccountCN != "svc-netbox" {
+				t.Errorf("expected netbox OpenLDAP ServiceAccountCN=svc-netbox, got %+v", p.LdapIntegration)
+			}
+			if p.LdapIntegration == nil || len(p.LdapIntegration.Groups) != 3 {
+				t.Errorf("expected 3 LDAP groups on netbox plugin, got %+v", p.LdapIntegration)
+			}
+		}
 	}
 
 	if !foundWorkstation {
@@ -63,6 +76,9 @@ func TestPluginManager_ListPlugins(t *testing.T) {
 	}
 	if !foundEluvix {
 		t.Errorf("expected eluvix plugin in definitions")
+	}
+	if !foundNetbox {
+		t.Errorf("expected netbox plugin in definitions")
 	}
 }
 
@@ -250,5 +266,44 @@ func TestPluginManager_MinimalOnDemandHelpers(t *testing.T) {
 	_ = os.WriteFile(filepath.Join(rootMinimalMarker, "etc/axonwall/.minimal-edition"), nil, 0644)
 	if !isMinimalEditionRoot(rootMinimalMarker) {
 		t.Fatalf("root with .minimal-edition marker must report minimal")
+	}
+}
+
+func TestLibreNmsPluginDefinitionAndLifecycle(t *testing.T) {
+	def, ok := findExtensionPluginDefinition("librenms")
+	if !ok {
+		t.Fatalf("librenms extension plugin definition missing")
+	}
+	if len(def.Dependencies) != 1 || def.Dependencies[0] != "core-k3s" {
+		t.Fatalf("librenms must depend on core-k3s, got: %v", def.Dependencies)
+	}
+	if len(def.SystemdUnits) != 0 {
+		t.Fatalf("librenms must not list host systemd units (disabling must never stop k3s.service), got: %v", def.SystemdUnits)
+	}
+	if def.LdapIntegration == nil || def.LdapIntegration.ServiceAccountCN != "svc-librenms" {
+		t.Fatalf("librenms LDAP integration missing svc-librenms, got: %+v", def.LdapIntegration)
+	}
+
+	tmpDir := t.TempDir()
+	origManifestDir := k3sServerManifestDir
+	manifestTmp := filepath.Join(tmpDir, "manifests")
+	k3sServerManifestDir = manifestTmp
+	t.Cleanup(func() { k3sServerManifestDir = origManifestDir })
+
+	pm := NewPluginManager(filepath.Join(tmpDir, "plugins"))
+	resp := pm.ReconfigurePlugin("librenms")
+	if !resp.Success {
+		t.Fatalf("ReconfigurePlugin(librenms) failed: %+v", resp)
+	}
+	_ = os.MkdirAll(manifestTmp, 0755)
+	manifestPath := filepath.Join(manifestTmp, "axonwall-librenms.yaml")
+	_ = os.WriteFile(manifestPath, []byte("apiVersion: v1\nkind: Namespace\nmetadata:\n  name: librenms\n"), 0600)
+
+	dis := pm.DisablePlugin("librenms")
+	if !dis.Success {
+		t.Fatalf("DisablePlugin(librenms) failed: %+v", dis)
+	}
+	if _, err := os.Stat(manifestPath); !os.IsNotExist(err) {
+		t.Fatalf("DisablePlugin(librenms) should remove %s", manifestPath)
 	}
 }

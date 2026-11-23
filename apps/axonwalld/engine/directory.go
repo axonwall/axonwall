@@ -2532,6 +2532,14 @@ userPassword: %s
 		_ = os.MkdirAll("/etc/axonwall/vow", 0755)
 		mirrorWrite("/etc/axonwall/vow/ldap.json", jsonBytes)
 	}
+	if pluginID == "netbox" {
+		_ = os.MkdirAll("/etc/axonwall/netbox", 0755)
+		mirrorWrite("/etc/axonwall/netbox/ldap.json", jsonBytes)
+	}
+	if pluginID == "librenms" {
+		_ = os.MkdirAll("/etc/axonwall/librenms", 0755)
+		mirrorWrite("/etc/axonwall/librenms/ldap.json", jsonBytes)
+	}
 	if pluginID == "core-vigilante" || pluginID == "vigilante" {
 		mirrorWrite(filepath.Join(ldapPluginClientsDir, "vigilante.json"), jsonBytes)
 		mirrorWrite(filepath.Join(ldapPluginClientsDir, "vigilante.env"), []byte(envBuf.String()))

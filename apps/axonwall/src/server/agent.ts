@@ -1,6 +1,8 @@
 'use server';
 
 import { compileNftables } from '@axonwall/lib/compile/nft';
+import { buildNetBoxSyncPlan, resolveNetBoxConfig } from '@axonwall/lib/compile/netbox';
+import { buildLibreNmsEnrollmentPlan, resolveLibreNmsConfig } from '@axonwall/lib/compile/librenms';
 import { lintRuleset } from '@axonwall/lib/lint';
 import {
   DesiredStateSchema,
@@ -580,6 +582,25 @@ function redactDesiredStateForSession(state: DesiredState, session: UserSession)
       redacted.threatHarvester.fleetShipper.secretKey = MASK;
     }
   }
+  if (redacted.netbox) {
+    if (redacted.netbox.apiToken) redacted.netbox.apiToken = MASK;
+    if (redacted.netbox.superuserPassword) redacted.netbox.superuserPassword = MASK;
+  }
+  if (redacted.librenms) {
+    if (redacted.librenms.apiToken) redacted.librenms.apiToken = MASK;
+    if (redacted.librenms.webhookSecret) redacted.librenms.webhookSecret = MASK;
+    if (redacted.librenms.adminPassword) redacted.librenms.adminPassword = MASK;
+    if (redacted.librenms.snmpDefaults) {
+      if (redacted.librenms.snmpDefaults.community) redacted.librenms.snmpDefaults.community = MASK;
+      if (redacted.librenms.snmpDefaults.v3AuthPass) redacted.librenms.snmpDefaults.v3AuthPass = MASK;
+      if (redacted.librenms.snmpDefaults.v3CryptoPass) redacted.librenms.snmpDefaults.v3CryptoPass = MASK;
+    }
+  }
+  if (redacted.topology && Array.isArray(redacted.topology.peers)) {
+    for (const peer of redacted.topology.peers) {
+      if (peer?.apiToken) peer.apiToken = MASK;
+    }
+  }
 
   return redacted as DesiredState;
 }
@@ -954,6 +975,57 @@ export async function applyDesiredState(
   assertActionPermitted(session, 'admin');
 
   const normalizedState = DesiredStateSchema.parse(state);
+  const needsExistingForMask =
+    (normalizedState.netbox &&
+      (normalizedState.netbox.apiToken === '********' ||
+        normalizedState.netbox.superuserPassword === '********')) ||
+    (normalizedState.librenms &&
+      (normalizedState.librenms.apiToken === '********' ||
+        normalizedState.librenms.webhookSecret === '********' ||
+        normalizedState.librenms.adminPassword === '********' ||
+        normalizedState.librenms.snmpDefaults?.community === '********' ||
+        normalizedState.librenms.snmpDefaults?.v3AuthPass === '********' ||
+        normalizedState.librenms.snmpDefaults?.v3CryptoPass === '********')) ||
+    Boolean(normalizedState.topology?.peers?.some((p) => p.apiToken === '********'));
+  if (needsExistingForMask) {
+    const existing = await getDesiredStateInternal().catch(() => null);
+    if (normalizedState.netbox) {
+      if (normalizedState.netbox.apiToken === '********') {
+        normalizedState.netbox.apiToken = existing?.netbox?.apiToken;
+      }
+      if (normalizedState.netbox.superuserPassword === '********') {
+        normalizedState.netbox.superuserPassword = existing?.netbox?.superuserPassword;
+      }
+    }
+    if (normalizedState.librenms) {
+      if (normalizedState.librenms.apiToken === '********') {
+        normalizedState.librenms.apiToken = existing?.librenms?.apiToken;
+      }
+      if (normalizedState.librenms.webhookSecret === '********') {
+        normalizedState.librenms.webhookSecret = existing?.librenms?.webhookSecret;
+      }
+      if (normalizedState.librenms.adminPassword === '********') {
+        normalizedState.librenms.adminPassword = existing?.librenms?.adminPassword;
+      }
+      if (normalizedState.librenms.snmpDefaults) {
+        if (normalizedState.librenms.snmpDefaults.community === '********' && existing?.librenms?.snmpDefaults?.community) {
+          normalizedState.librenms.snmpDefaults.community = existing.librenms.snmpDefaults.community;
+        }
+        if (normalizedState.librenms.snmpDefaults.v3AuthPass === '********') {
+          normalizedState.librenms.snmpDefaults.v3AuthPass = existing?.librenms?.snmpDefaults?.v3AuthPass;
+        }
+        if (normalizedState.librenms.snmpDefaults.v3CryptoPass === '********') {
+          normalizedState.librenms.snmpDefaults.v3CryptoPass = existing?.librenms?.snmpDefaults?.v3CryptoPass;
+        }
+      }
+    }
+    if (normalizedState.topology?.peers?.length) {
+      const existingPeers = new Map((existing?.topology?.peers ?? []).map((p) => [p.id, p]));
+      normalizedState.topology.peers = normalizedState.topology.peers.map((p) =>
+        p.apiToken === '********' ? { ...p, apiToken: existingPeers.get(p.id)?.apiToken } : p,
+      );
+    }
+  }
   const { devMode: _devMode, ...result } = await runDesiredStateApplyPipeline(
     normalizedState,
     confirmTimeoutSeconds,
@@ -7310,6 +7382,197 @@ export async function executeK3sAction(payload: K3sActionRequest): Promise<K3sAc
   };
 }
 
+export interface NetBoxPodStatusSnapshot {
+  name: string;
+  phase: string;
+  ready: boolean;
+  image?: string;
+  node?: string;
+  reason?: string;
+}
+
+export interface NetBoxSyncCountsSnapshot {
+  created: number;
+  updated: number;
+  unchanged: number;
+}
+
+export interface NetBoxSyncResultSnapshot {
+  success: boolean;
+  dryRun: boolean;
+  timestamp: string;
+  endpoint: string;
+  devicesSynced: number;
+  vrfs: NetBoxSyncCountsSnapshot;
+  vlans: NetBoxSyncCountsSnapshot;
+  interfaces: NetBoxSyncCountsSnapshot;
+  prefixes: NetBoxSyncCountsSnapshot;
+  ipAddresses: NetBoxSyncCountsSnapshot;
+  virtualMachines: NetBoxSyncCountsSnapshot;
+  warnings?: string[];
+  error?: string;
+}
+
+export interface NetBoxStatusSnapshot {
+  daemonDown?: boolean;
+  enabled: boolean;
+  k3sDependencyMet: boolean;
+  k3sReady: boolean;
+  manifestPresent: boolean;
+  ldapBound: boolean;
+  apiReachable: boolean;
+  netboxVersion?: string;
+  namespace: string;
+  domain: string;
+  endpointUrl: string;
+  internalServiceUrl: string;
+  clusterIp?: string;
+  siteName: string;
+  siteSlug: string;
+  pods: NetBoxPodStatusSnapshot[];
+  podReadyCount: number;
+  podTotalCount: number;
+  lastSync?: NetBoxSyncResultSnapshot;
+  plannedSummary?: {
+    vrfsCount: number;
+    vlansCount: number;
+    interfacesCount: number;
+    prefixesCount: number;
+    ipAddressesCount: number;
+    virtualMachinesCount: number;
+    totalObjects: number;
+  };
+  statusError?: string;
+}
+
+export interface NetBoxCredentialsSnapshot {
+  configured: boolean;
+  superuserUsername: string;
+  superuserEmail: string;
+  endpointUrl: string;
+  internalServiceUrl: string;
+  tokenPreview?: string;
+  apiToken?: string;
+  superuserPassword?: string;
+}
+
+export async function getNetBoxStatusAction(): Promise<NetBoxStatusSnapshot> {
+  const session = await getSession();
+  assertActionPermitted(session);
+
+  const res = await callAgentApiDetailed<NetBoxStatusSnapshot>('/v1/netbox/status', 'GET', undefined, 8_000);
+  if (res.kind === 'ok' && res.data) {
+    return {
+      ...res.data,
+      daemonDown: false,
+      pods: Array.isArray(res.data.pods) ? res.data.pods : [],
+    };
+  }
+
+  const state = await getCurrentDesiredState().catch(() => null);
+  const cfg = resolveNetBoxConfig(state);
+  const plan = state ? buildNetBoxSyncPlan(state) : undefined;
+  const proto = cfg.ingressTls ? 'https' : 'http';
+  const endpointUrl = cfg.externalUrl?.trim() || `${proto}://${cfg.domain}`;
+
+  return {
+    daemonDown: true,
+    enabled: cfg.enabled,
+    k3sDependencyMet: Boolean(state?.capabilities?.k3sEnabled ?? state?.k3s?.enabled),
+    k3sReady: false,
+    manifestPresent: false,
+    ldapBound: false,
+    apiReachable: false,
+    namespace: cfg.namespace,
+    domain: cfg.domain,
+    endpointUrl,
+    internalServiceUrl: `http://netbox.${cfg.namespace}.svc.cluster.local:${cfg.servicePort}`,
+    siteName: cfg.siteName,
+    siteSlug: cfg.siteSlug,
+    pods: [],
+    podReadyCount: 0,
+    podTotalCount: 0,
+    plannedSummary: plan?.summary,
+    statusError:
+      res.kind === 'http_error'
+        ? res.message
+        : res.kind === 'timeout'
+          ? 'Timed out querying NetBox status from axonwalld.'
+          : 'axonwalld daemon unreachable.',
+  };
+}
+
+export async function triggerNetBoxSyncAction(options?: {
+  dryRun?: boolean;
+  endpointOverride?: string;
+}): Promise<NetBoxSyncResultSnapshot> {
+  const session = await getSession();
+  await enforceRateLimit(10, 60000);
+  assertActionPermitted(session, 'admin');
+
+  const payload = {
+    dryRun: Boolean(options?.dryRun),
+    ...(options?.endpointOverride?.trim() ? { endpointOverride: options.endpointOverride.trim() } : {}),
+  };
+  const res = await callAgentApiDetailed<NetBoxSyncResultSnapshot | { error?: string; result?: NetBoxSyncResultSnapshot }>(
+    '/v1/netbox/sync',
+    'POST',
+    payload,
+    45_000,
+  );
+  if (res.kind === 'ok' && res.data) {
+    return res.data as NetBoxSyncResultSnapshot;
+  }
+  const errData = (res.kind === 'http_error' ? res.data : undefined) as
+    | { error?: string; result?: NetBoxSyncResultSnapshot }
+    | undefined;
+  if (errData?.result) {
+    return errData.result;
+  }
+  return {
+    success: false,
+    dryRun: Boolean(options?.dryRun),
+    timestamp: new Date().toISOString(),
+    endpoint: options?.endpointOverride?.trim() || '',
+    devicesSynced: 0,
+    vrfs: { created: 0, updated: 0, unchanged: 0 },
+    vlans: { created: 0, updated: 0, unchanged: 0 },
+    interfaces: { created: 0, updated: 0, unchanged: 0 },
+    prefixes: { created: 0, updated: 0, unchanged: 0 },
+    ipAddresses: { created: 0, updated: 0, unchanged: 0 },
+    virtualMachines: { created: 0, updated: 0, unchanged: 0 },
+    error:
+      errData?.error ||
+      (res.kind === 'http_error'
+        ? res.message
+        : res.kind === 'timeout'
+          ? 'Timed out waiting for NetBox inventory sync.'
+          : 'axonwalld daemon unreachable: could not sync inventory to NetBox.'),
+  };
+}
+
+export async function getNetBoxCredentialsAction(reveal = false): Promise<NetBoxCredentialsSnapshot> {
+  const session = await getSession();
+  assertActionPermitted(session, 'admin');
+
+  const suffix = reveal ? '?reveal=true' : '';
+  const res = await callAgentApiDetailed<NetBoxCredentialsSnapshot>(
+    `/v1/netbox/credentials${suffix}`,
+    'GET',
+    undefined,
+    5_000,
+  );
+  if (res.kind === 'ok' && res.data) {
+    return res.data;
+  }
+  return {
+    configured: false,
+    superuserUsername: 'admin',
+    superuserEmail: 'admin@axonwall.local',
+    endpointUrl: 'https://netbox.axonwall.local',
+    internalServiceUrl: 'http://netbox.netbox.svc.cluster.local:8080',
+  };
+}
 
 
 
@@ -7318,3 +7581,736 @@ export async function executeK3sAction(payload: K3sActionRequest): Promise<K3sAc
 
 
 
+
+
+
+export interface LibreNmsStatusSnapshot {
+  daemonDown?: boolean;
+  enabled: boolean;
+  mode: 'k3s' | 'external';
+  k3sDependencyMet: boolean;
+  k3sReady: boolean;
+  manifestPresent: boolean;
+  ldapBound: boolean;
+  apiReachable: boolean;
+  librenmsVersion?: string;
+  namespace: string;
+  domain: string;
+  endpointUrl: string;
+  internalServiceUrl: string;
+  clusterIp?: string;
+  deviceCount: number;
+  portCount: number;
+  linkCount: number;
+  activeAlertCount: number;
+  webhookAlertCount: number;
+  pods: NetBoxPodStatusSnapshot[];
+  podReadyCount: number;
+  podTotalCount: number;
+  lastSync?: LibreNmsSyncResultSnapshot;
+  enrollmentPlan?: {
+    snmpEnabledOnLocal: boolean;
+    targets: Array<{
+      id: string;
+      hostname: string;
+      displayName: string;
+      source: string;
+      snmpVersion: string;
+      port: number;
+      sysRole: string;
+    }>;
+    discoverySubnets: Array<{ cidr: string; label: string }>;
+    summary: { targetsCount: number; subnetsCount: number };
+  };
+  statusError?: string;
+}
+
+export interface LibreNmsSyncResultSnapshot {
+  success: boolean;
+  dryRun: boolean;
+  timestamp: string;
+  endpoint: string;
+  enrolled: number;
+  existing: number;
+  failed: number;
+  subnets: number;
+  warnings?: string[];
+  error?: string;
+}
+
+export interface LibreNmsCredentialsSnapshot {
+  configured: boolean;
+  adminUsername: string;
+  adminEmail: string;
+  endpointUrl: string;
+  internalServiceUrl: string;
+  webhookPath: string;
+  tokenPreview?: string;
+  apiToken?: string;
+  adminPassword?: string;
+  webhookSecret?: string;
+}
+
+export interface LibreNmsTopologySnapshot {
+  available: boolean;
+  endpoint?: string;
+  timestamp: string;
+  devices: Array<{
+    deviceId: number;
+    hostname: string;
+    sysName?: string;
+    ip?: string;
+    os?: string;
+    hardware?: string;
+    version?: string;
+    serial?: string;
+    status: boolean;
+    disabled: boolean;
+    location?: string;
+    purpose?: string;
+    uptime?: number;
+  }>;
+  ports: Array<{
+    portId: number;
+    deviceId: number;
+    deviceHost?: string;
+    ifName: string;
+    ifDescr?: string;
+    ifAlias?: string;
+    ifOperStatus: string;
+    ifAdminStatus: string;
+    ifSpeedBps?: number;
+    inRateBps?: number;
+    outRateBps?: number;
+    inErrors?: number;
+    outErrors?: number;
+    ifVlan?: string;
+    ifMtu?: number;
+    ifPhysAddress?: string;
+    ifType?: string;
+  }>;
+  links: Array<{
+    id: number;
+    localDeviceId: number;
+    localDevice?: string;
+    localPortId: number;
+    localPort: string;
+    remoteDeviceId?: number;
+    remoteDevice: string;
+    remotePortId?: number;
+    remotePort: string;
+    protocol: string;
+    active: boolean;
+  }>;
+  fdb: Array<{ deviceId: number; portId: number; vlanId?: number; macAddress: string }>;
+  arp: Array<{ deviceId: number; portId?: number; macAddress: string; ipAddress: string }>;
+  healthSensors: Array<{
+    deviceId: number;
+    class: string;
+    descr: string;
+    current: number;
+    highLimit?: number;
+    lowLimit?: number;
+    alerted: boolean;
+  }>;
+  alerts: Array<{
+    id: string;
+    deviceId?: number;
+    deviceHostname: string;
+    deviceIp?: string;
+    rule: string;
+    severity: string;
+    state: number;
+    timestamp: string;
+    portName?: string;
+    message: string;
+    source: string;
+  }>;
+  webhookAlerts: Array<{
+    id: string;
+    deviceId?: number;
+    deviceHostname: string;
+    deviceIp?: string;
+    rule: string;
+    severity: string;
+    state: number;
+    timestamp: string;
+    portName?: string;
+    message: string;
+    source: string;
+  }>;
+  error?: string;
+}
+
+export interface LibreNmsNetBoxSyncResultSnapshot {
+  success: boolean;
+  action: 'preview' | 'push' | 'pull';
+  dryRun: boolean;
+  timestamp: string;
+  librenmsEndpoint?: string;
+  netboxEndpoint?: string;
+  devicesQueued: number;
+  cablesQueued: number;
+  netboxResult?: {
+    success: boolean;
+    dryRun: boolean;
+    timestamp: string;
+    endpoint: string;
+    devices: { created: number; updated: number; unchanged: number };
+    interfaces: { created: number; updated: number; unchanged: number };
+    cables: { created: number; updated: number; unchanged: number };
+    conflicts: Array<{ key: string; field: string; axonwallVal: string; netboxVal: string; resolution?: string }>;
+    warnings?: string[];
+    error?: string;
+  };
+  pullResult?: LibreNmsSyncResultSnapshot;
+  warnings?: string[];
+  error?: string;
+}
+
+export async function getLibreNmsStatusAction(): Promise<LibreNmsStatusSnapshot> {
+  const session = await getSession();
+  assertActionPermitted(session);
+
+  const res = await callAgentApiDetailed<LibreNmsStatusSnapshot>('/v1/librenms/status', 'GET', undefined, 8_000);
+  if (res.kind === 'ok' && res.data) {
+    return {
+      ...res.data,
+      daemonDown: false,
+      pods: Array.isArray(res.data.pods) ? res.data.pods : [],
+    };
+  }
+
+  const state = await getCurrentDesiredState().catch(() => null);
+  const cfg = resolveLibreNmsConfig(state);
+  const plan = buildLibreNmsEnrollmentPlan(state);
+  const proto = cfg.ingressTls ? 'https' : 'http';
+  const endpointUrl = cfg.externalUrl?.trim() || `${proto}://${cfg.domain}`;
+
+  return {
+    daemonDown: true,
+    enabled: cfg.enabled,
+    mode: cfg.mode,
+    k3sDependencyMet:
+      cfg.mode === 'external' || Boolean(state?.capabilities?.k3sEnabled ?? state?.k3s?.enabled),
+    k3sReady: false,
+    manifestPresent: false,
+    ldapBound: false,
+    apiReachable: false,
+    namespace: cfg.namespace,
+    domain: cfg.domain,
+    endpointUrl,
+    internalServiceUrl: `http://librenms.${cfg.namespace}.svc.cluster.local:${cfg.servicePort}`,
+    deviceCount: 0,
+    portCount: 0,
+    linkCount: 0,
+    activeAlertCount: 0,
+    webhookAlertCount: 0,
+    pods: [],
+    podReadyCount: 0,
+    podTotalCount: 0,
+    enrollmentPlan: plan,
+    statusError:
+      res.kind === 'http_error'
+        ? res.message
+        : res.kind === 'timeout'
+          ? 'Timed out querying LibreNMS status from axonwalld.'
+          : 'axonwalld daemon unreachable.',
+  };
+}
+
+export async function triggerLibreNmsSyncAction(options?: {
+  dryRun?: boolean;
+  endpointOverride?: string;
+}): Promise<LibreNmsSyncResultSnapshot> {
+  const session = await getSession();
+  await enforceRateLimit(10, 60000);
+  assertActionPermitted(session, 'admin');
+
+  const payload = {
+    dryRun: Boolean(options?.dryRun),
+    ...(options?.endpointOverride?.trim() ? { endpointOverride: options.endpointOverride.trim() } : {}),
+  };
+  const res = await callAgentApiDetailed<
+    LibreNmsSyncResultSnapshot | { error?: string; result?: LibreNmsSyncResultSnapshot }
+  >('/v1/librenms/sync', 'POST', payload, 45_000);
+  if (res.kind === 'ok' && res.data) {
+    return res.data as LibreNmsSyncResultSnapshot;
+  }
+  const errData = (res.kind === 'http_error' ? res.data : undefined) as
+    | { error?: string; result?: LibreNmsSyncResultSnapshot }
+    | undefined;
+  if (errData?.result) {
+    return errData.result;
+  }
+  return {
+    success: false,
+    dryRun: Boolean(options?.dryRun),
+    timestamp: new Date().toISOString(),
+    endpoint: options?.endpointOverride?.trim() || '',
+    enrolled: 0,
+    existing: 0,
+    failed: 0,
+    subnets: 0,
+    error:
+      errData?.error ||
+      (res.kind === 'http_error'
+        ? res.message
+        : res.kind === 'timeout'
+          ? 'Timed out waiting for LibreNMS device enrollment.'
+          : 'axonwalld daemon unreachable: could not sync devices to LibreNMS.'),
+  };
+}
+
+export async function getLibreNmsCredentialsAction(reveal = false): Promise<LibreNmsCredentialsSnapshot> {
+  const session = await getSession();
+  assertActionPermitted(session, 'admin');
+
+  const suffix = reveal ? '?reveal=true' : '';
+  const res = await callAgentApiDetailed<LibreNmsCredentialsSnapshot>(
+    `/v1/librenms/credentials${suffix}`,
+    'GET',
+    undefined,
+    5_000,
+  );
+  if (res.kind === 'ok' && res.data) {
+    return res.data;
+  }
+  return {
+    configured: false,
+    adminUsername: 'admin',
+    adminEmail: 'admin@axonwall.local',
+    endpointUrl: 'https://librenms.axonwall.local',
+    internalServiceUrl: 'http://librenms.librenms.svc.cluster.local:8000',
+    webhookPath: '/api/v1/services/librenms/webhook',
+  };
+}
+
+export async function getLibreNmsTopologyAction(endpointOverride?: string): Promise<LibreNmsTopologySnapshot> {
+  const session = await getSession();
+  assertActionPermitted(session);
+
+  const q = endpointOverride?.trim() ? `?endpoint=${encodeURIComponent(endpointOverride.trim())}` : '';
+  const res = await callAgentApiDetailed<LibreNmsTopologySnapshot>(
+    `/v1/librenms/topology${q}`,
+    'GET',
+    undefined,
+    10_000,
+  );
+  if (res.kind === 'ok' && res.data) {
+    return {
+      ...res.data,
+      devices: Array.isArray(res.data.devices) ? res.data.devices : [],
+      ports: Array.isArray(res.data.ports) ? res.data.ports : [],
+      links: Array.isArray(res.data.links) ? res.data.links : [],
+      fdb: Array.isArray(res.data.fdb) ? res.data.fdb : [],
+      arp: Array.isArray(res.data.arp) ? res.data.arp : [],
+      healthSensors: Array.isArray(res.data.healthSensors) ? res.data.healthSensors : [],
+      alerts: Array.isArray(res.data.alerts) ? res.data.alerts : [],
+      webhookAlerts: Array.isArray(res.data.webhookAlerts) ? res.data.webhookAlerts : [],
+    };
+  }
+  return {
+    available: false,
+    timestamp: new Date().toISOString(),
+    devices: [],
+    ports: [],
+    links: [],
+    fdb: [],
+    arp: [],
+    healthSensors: [],
+    alerts: [],
+    webhookAlerts: [],
+    error: res.kind === 'http_error' ? res.message : 'axonwalld daemon unreachable.',
+  };
+}
+
+export async function triggerLibreNmsNetBoxSyncAction(options?: {
+  action?: 'preview' | 'push' | 'pull';
+  dryRun?: boolean;
+  overwriteLabels?: boolean;
+  endpointOverride?: string;
+  netboxOverride?: string;
+}): Promise<LibreNmsNetBoxSyncResultSnapshot> {
+  const session = await getSession();
+  await enforceRateLimit(10, 60000);
+  assertActionPermitted(session, 'admin');
+
+  const action = options?.action || 'preview';
+  const payload = {
+    action,
+    dryRun: options?.dryRun ?? action === 'preview',
+    overwriteLabels: Boolean(options?.overwriteLabels),
+    ...(options?.endpointOverride?.trim() ? { endpointOverride: options.endpointOverride.trim() } : {}),
+    ...(options?.netboxOverride?.trim() ? { netboxOverride: options.netboxOverride.trim() } : {}),
+  };
+  const res = await callAgentApiDetailed<
+    LibreNmsNetBoxSyncResultSnapshot | { error?: string; result?: LibreNmsNetBoxSyncResultSnapshot }
+  >('/v1/librenms/netbox-sync', 'POST', payload, 45_000);
+  if (res.kind === 'ok' && res.data) {
+    return res.data as LibreNmsNetBoxSyncResultSnapshot;
+  }
+  const errData = (res.kind === 'http_error' ? res.data : undefined) as
+    | { error?: string; result?: LibreNmsNetBoxSyncResultSnapshot }
+    | undefined;
+  if (errData?.result) {
+    return errData.result;
+  }
+  return {
+    success: false,
+    action,
+    dryRun: payload.dryRun,
+    timestamp: new Date().toISOString(),
+    devicesQueued: 0,
+    cablesQueued: 0,
+    error: errData?.error || (res.kind === 'http_error' ? res.message : 'axonwalld daemon unreachable.'),
+  };
+}
+
+export interface TopologyLocalProbeSnapshot {
+  timestamp: string;
+  localHostId: string;
+  nics: Array<{
+    hostId: string;
+    device: string;
+    name?: string;
+    role?: string;
+    adminUp: boolean;
+    carrierUp: boolean;
+    speedMbps?: number;
+    mtu?: number;
+    mac?: string;
+    ipv4Addresses?: string[];
+    domAlarm?: boolean;
+    rxErrors?: number;
+    txErrors?: number;
+    lldpNeighbors?: Array<{ chassisName: string; portId: string; portDescr?: string }>;
+  }>;
+  tunnels: Array<{
+    hostId: string;
+    name: string;
+    kind: 'wireguard' | 'ipsec' | 'headscale';
+    up: boolean;
+    handshakeAgeSec?: number;
+    peerEndpoint?: string;
+  }>;
+  transceivers: Array<{
+    interface: string;
+    vendor: string;
+    partNumber: string;
+    temperature: number;
+    voltage: number;
+    txPowerDbm: number;
+    rxPowerDbm: number;
+    biasCurrentMa: number;
+    status: string;
+  }>;
+  vms: Array<{ vmid: number; name: string; status: string; cores?: number; memoryMb?: number }>;
+  containers: Array<{ ctid: number; name: string; status: string; ipAddress?: string }>;
+  k3s?: {
+    available: boolean;
+    nodes: Array<{ name: string; status: string; roles?: string; internalIp?: string; unschedulable?: boolean }>;
+    ingresses: Array<{
+      name: string;
+      namespace: string;
+      hosts?: string[];
+      backendServices: Array<{ name: string; port?: number }>;
+      tlsSecretNames?: string[];
+      kind: 'Ingress' | 'IngressRoute' | 'HTTPRoute';
+    }>;
+    services: Array<{
+      name: string;
+      namespace: string;
+      type?: string;
+      clusterIp?: string;
+      ports?: number[];
+      readyEndpoints: number;
+      selector?: Record<string, string>;
+    }>;
+    workloads: Array<{
+      kind: 'Deployment' | 'StatefulSet' | 'DaemonSet';
+      name: string;
+      namespace: string;
+      readyReplicas: number;
+      desiredReplicas: number;
+      selector?: Record<string, string>;
+    }>;
+    pvcs: Array<{
+      name: string;
+      namespace: string;
+      storageClass?: string;
+      capacity?: string;
+      bound: boolean;
+    }>;
+    networkPolicies: Array<{
+      kind: 'NetworkPolicy' | 'CiliumNetworkPolicy';
+      name: string;
+      namespace: string;
+    }>;
+  };
+}
+
+export interface TopologyFabricSnapshot {
+  daemonDown?: boolean;
+  timestamp: string;
+  local: TopologyLocalProbeSnapshot | null;
+  peers: Array<{
+    peerId: string;
+    name: string;
+    role: string;
+    reachable: boolean;
+    authError?: string;
+    error?: string;
+    nics: TopologyLocalProbeSnapshot['nics'];
+    tunnels: TopologyLocalProbeSnapshot['tunnels'];
+  }>;
+  librenms?: LibreNmsTopologySnapshot;
+  netbox?: {
+    available: boolean;
+    endpoint?: string;
+    timestamp: string;
+    sites: string[];
+    racks: Array<{ id: number; name: string; site?: string; uHeight?: number }>;
+    devices: Array<{ id: number; name: string; role?: string; deviceType?: string; site?: string; rack?: string; primaryIp?: string; status?: string; comments?: string }>;
+    interfaces: Array<{ id: number; deviceId: number; deviceName: string; name: string; type?: string; enabled: boolean; mtu?: number; macAddress?: string; description?: string }>;
+    cables: Array<{ id: number; aDevice: string; aInterface: string; bDevice: string; bInterface: string; type?: string; status?: string; label?: string; color?: string; length?: number; lengthUnit?: string; comments?: string }>;
+    prefixes: string[];
+    vlans: number[];
+    error?: string;
+  };
+  error?: string;
+}
+
+export interface TopologyApplyTargetResultSnapshot {
+  phase: number;
+  targetType: 'k3s' | 'peer' | 'local';
+  targetId: string;
+  success: boolean;
+  rolledBack?: boolean;
+  message?: string;
+  error?: string;
+}
+
+export interface TopologyApplyPlanResultSnapshot {
+  success: boolean;
+  dryRun: boolean;
+  timestamp: string;
+  confirmTimeoutSeconds: number;
+  rolledBackAny: boolean;
+  results: TopologyApplyTargetResultSnapshot[];
+  error?: string;
+}
+
+export async function getLocalTopologyProbeAction(): Promise<TopologyLocalProbeSnapshot> {
+  const session = await getSession();
+  assertActionPermitted(session);
+
+  const res = await callAgentApiDetailed<TopologyLocalProbeSnapshot>('/v1/topology/probe', 'GET', undefined, 8_000);
+  if (res.kind === 'ok' && res.data) {
+    return {
+      ...res.data,
+      nics: Array.isArray(res.data.nics) ? res.data.nics : [],
+      tunnels: Array.isArray(res.data.tunnels) ? res.data.tunnels : [],
+      transceivers: Array.isArray(res.data.transceivers) ? res.data.transceivers : [],
+      vms: Array.isArray(res.data.vms) ? res.data.vms : [],
+      containers: Array.isArray(res.data.containers) ? res.data.containers : [],
+    };
+  }
+  return {
+    timestamp: new Date().toISOString(),
+    localHostId: 'axonwall-local',
+    nics: [],
+    tunnels: [],
+    transceivers: [],
+    vms: [],
+    containers: [],
+  };
+}
+
+export async function getFabricTopologyAction(): Promise<TopologyFabricSnapshot> {
+  const session = await getSession();
+  assertActionPermitted(session);
+
+  const res = await callAgentApiDetailed<TopologyFabricSnapshot>('/v1/topology/fabric', 'GET', undefined, 12_000);
+  if (res.kind === 'ok' && res.data) {
+    return {
+      ...res.data,
+      daemonDown: false,
+      peers: Array.isArray(res.data.peers) ? res.data.peers : [],
+    };
+  }
+  return {
+    daemonDown: true,
+    timestamp: new Date().toISOString(),
+    local: null,
+    peers: [],
+    error:
+      res.kind === 'http_error'
+        ? res.message
+        : res.kind === 'timeout'
+          ? 'Timed out aggregating fabric topology probe.'
+          : 'axonwalld daemon unreachable.',
+  };
+}
+
+export async function applyFabricPlanAction(input: {
+  dryRun?: boolean;
+  confirmTimeoutSeconds?: number;
+  k3sEdits?: Array<{
+    kind: string;
+    name: string;
+    namespace?: string;
+    manifestYaml?: string;
+    scaleReplicas?: number;
+    nodeRoles?: string[];
+  }>;
+  peerEdits?: Array<{
+    peerId: string;
+    name?: string;
+    state: DesiredState;
+  }>;
+  localState?: DesiredState;
+}): Promise<TopologyApplyPlanResultSnapshot> {
+  const session = await getSession();
+  await enforceRateLimit(10, 60000);
+  assertActionPermitted(session, 'admin');
+
+  const timeout = Math.max(10, Math.min(3600, Math.round(input.confirmTimeoutSeconds ?? 120)));
+  const dryRun = Boolean(input.dryRun);
+  const k3sEdits = input.k3sEdits ?? [];
+  const peerEdits = input.peerEdits ?? [];
+
+  if (input.localState) {
+    DesiredStateSchema.parse(input.localState);
+  }
+
+  let baseResult: TopologyApplyPlanResultSnapshot = {
+    success: true,
+    dryRun,
+    timestamp: new Date().toISOString(),
+    confirmTimeoutSeconds: timeout,
+    rolledBackAny: false,
+    results: [],
+  };
+
+  if (dryRun || k3sEdits.length > 0 || peerEdits.length > 0) {
+    const res = await callAgentApiDetailed<
+      TopologyApplyPlanResultSnapshot | { error?: string; result?: TopologyApplyPlanResultSnapshot }
+    >(
+      '/v1/topology/apply',
+      'POST',
+      {
+        dryRun,
+        confirmTimeoutSeconds: timeout,
+        k3sEdits,
+        peerEdits,
+        hasLocalChanges: Boolean(input.localState),
+      },
+      45_000,
+    );
+    if (res.kind === 'ok' && res.data) {
+      baseResult = res.data as TopologyApplyPlanResultSnapshot;
+    } else {
+      const errData = (res.kind === 'http_error' ? res.data : undefined) as
+        | { error?: string; result?: TopologyApplyPlanResultSnapshot }
+        | undefined;
+      if (errData?.result) return errData.result;
+      return {
+        ...baseResult,
+        success: false,
+        error: errData?.error || (res.kind === 'http_error' ? res.message : 'axonwalld daemon unreachable.'),
+      };
+    }
+  }
+
+  if (!dryRun && input.localState) {
+    try {
+      const localRes = await applyDesiredState(input.localState, timeout);
+      baseResult.results = [
+        ...(baseResult.results ?? []),
+        {
+          phase: 3,
+          targetType: 'local',
+          targetId: 'local-appliance',
+          success: localRes.success,
+          message: localRes.message,
+        },
+      ];
+      if (!localRes.success) {
+        baseResult.success = false;
+        baseResult.error = localRes.message;
+      }
+    } catch (err) {
+      baseResult.success = false;
+      baseResult.error = err instanceof Error ? err.message : 'Local apply failed';
+      baseResult.results = [
+        ...(baseResult.results ?? []),
+        {
+          phase: 3,
+          targetType: 'local',
+          targetId: 'local-appliance',
+          success: false,
+          error: baseResult.error,
+        },
+      ];
+    }
+  }
+
+  return baseResult;
+}
+
+export async function syncTopologyNetBoxAction(options: {
+  action: 'preview' | 'push' | 'pull';
+  dryRun?: boolean;
+  overwriteLabels?: boolean;
+  devices?: Array<{ name: string; role?: string; model?: string; mfg?: string; primaryIp?: string; status?: string; comments?: string }>;
+  cables?: Array<{ aDevice: string; aInterface: string; bDevice: string; bInterface: string; type?: string; status?: string; label?: string; color?: string; length?: number; lengthUnit?: string; comments?: string }>;
+}): Promise<Record<string, unknown>> {
+  const session = await getSession();
+  await enforceRateLimit(10, 60000);
+  assertActionPermitted(session, 'admin');
+
+  const res = await callAgentApiDetailed<Record<string, unknown>>(
+    '/v1/topology/sync/netbox',
+    'POST',
+    options,
+    45_000,
+  );
+  if (res.kind === 'ok' && res.data) {
+    return res.data;
+  }
+  const errData = (res.kind === 'http_error' ? res.data : undefined) as Record<string, unknown> | undefined;
+  return (
+    (errData?.result as Record<string, unknown> | undefined) ?? {
+      success: false,
+      error: (errData?.error as string) || (res.kind === 'http_error' ? res.message : 'axonwalld unreachable'),
+    }
+  );
+}
+
+export async function syncTopologyLibreNmsAction(options: {
+  action: 'preview' | 'push' | 'pull' | 'enroll';
+  dryRun?: boolean;
+  overwriteLabels?: boolean;
+}): Promise<Record<string, unknown>> {
+  const session = await getSession();
+  await enforceRateLimit(10, 60000);
+  assertActionPermitted(session, 'admin');
+
+  const res = await callAgentApiDetailed<Record<string, unknown>>(
+    '/v1/topology/sync/librenms',
+    'POST',
+    options,
+    45_000,
+  );
+  if (res.kind === 'ok' && res.data) {
+    return res.data;
+  }
+  const errData = (res.kind === 'http_error' ? res.data : undefined) as Record<string, unknown> | undefined;
+  return (
+    (errData?.result as Record<string, unknown> | undefined) ?? {
+      success: false,
+      error: (errData?.error as string) || (res.kind === 'http_error' ? res.message : 'axonwalld unreachable'),
+    }
+  );
+}

@@ -109,6 +109,7 @@ export const NAV_SECTIONS: NavSection[] = [
     items: [
       { name: 'Assignments & Status', href: '/interfaces', icon: Network },
       { name: 'Advanced Topologies', href: '/interfaces/advanced', icon: Layers },
+      { name: 'Topology Studio', href: '/topology', icon: GitBranch, badge: 'Fabric', pluginId: 'topology-studio' },
     ],
   },
   {
@@ -197,6 +198,8 @@ export const NAV_SECTIONS: NavSection[] = [
       { name: 'OpenEBS Storage', href: '/k3s/storage', icon: Database },
       { name: 'Workloads & Apps', href: '/k3s/workloads', icon: Boxes },
       { name: 'Vigilant Octo Waffle', href: '/k3s/vow', icon: Layers, badge: 'GitOps', pluginId: 'vigilant-octo-waffle' },
+      { name: 'NetBox DCIM & IPAM', href: '/services/netbox', icon: Network, badge: 'IPAM', pluginId: 'netbox' },
+      { name: 'LibreNMS Monitoring', href: '/services/librenms', icon: Activity, badge: 'SNMP', pluginId: 'librenms' },
     ],
   },
   {

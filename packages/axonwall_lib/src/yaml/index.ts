@@ -13,7 +13,8 @@ export type AxonwallYamlDomainFile =
   | 'storage.yaml'
   | 'k3s.yaml'
   | 'virt.yaml'
-  | 'vigilante.yaml';
+  | 'vigilante.yaml'
+  | 'topology.yaml';
 
 export interface DomainYamlDefinition {
   filename: AxonwallYamlDomainFile;
@@ -53,10 +54,10 @@ export const AXONWALL_YAML_DOMAINS: DomainYamlDefinition[] = [
   },
   {
     filename: 'services.yaml',
-    title: 'Axonwall Core Network Services (DHCPv4/v6, DNS, mDNS, UPnP, DDNS, Captive Portal, HAProxy, RADIUS)',
+    title: 'Axonwall Core Network Services (DHCPv4/v6, DNS, mDNS, UPnP, DDNS, Captive Portal, HAProxy, RADIUS, NetBox, LibreNMS)',
     description:
-      'Controls DHCPv4/DHCPv6 + SLAAC RA pools & reservations, Unbound DNS resolver & DNSBL blocklists, mDNS reflector, hardened UPnP/NAT-PMP, Dynamic DNS, Captive Portal zones, HAProxy load balancer, and FreeRADIUS.',
-    keys: ['dhcp', 'dns', 'mdnsReflector', 'upnp', 'ddns', 'captivePortal', 'haproxy', 'freeradius'],
+      'Controls DHCPv4/DHCPv6 + SLAAC RA pools & reservations, Unbound DNS resolver & DNSBL blocklists, mDNS reflector, hardened UPnP/NAT-PMP, Dynamic DNS, Captive Portal zones, HAProxy load balancer, FreeRADIUS, NetBox DCIM/IPAM, and LibreNMS SNMP/LLDP monitoring.',
+    keys: ['dhcp', 'dns', 'mdnsReflector', 'upnp', 'ddns', 'captivePortal', 'haproxy', 'freeradius', 'netbox', 'librenms'],
   },
   {
     filename: 'vpn.yaml',
@@ -106,6 +107,13 @@ export const AXONWALL_YAML_DOMAINS: DomainYamlDefinition[] = [
     description:
       'Controls autonomous cyber defense operations, SOAR active containment, honeynet deception mesh, embedded security data lake, PCAP forensics, and 12 modular security packages.',
     keys: ['vigilante'],
+  },
+  {
+    filename: 'topology.yaml',
+    title: 'Axonwall Topology Studio Fabric, Physical Cables & Peer Hosts',
+    description:
+      'Controls visual fabric node layout, planned and installed physical cables, remote peer Axonwall hosts (Vault/Storage/Edge), opt-in non-WAN LLDP neighbor discovery, and What-If scenarios.',
+    keys: ['topology'],
   },
 ];
 
