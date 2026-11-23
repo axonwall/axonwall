@@ -1,12 +1,13 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import Link from 'next/link';
-import { Boxes, Plus, Trash2, Globe, Activity, Terminal, RefreshCw, Network } from 'lucide-react';
+import { Boxes, Plus, Trash2, Globe, Activity, Terminal, RefreshCw, Network, Search } from 'lucide-react';
 import { getCurrentDesiredState, getK3sClusterPulseAction } from '@/server/agent';
 import { useDesiredStateApply } from '@/lib/use-desired-state-apply';
 import type { DesiredState, K3sWorkloadSpec } from '@axonwall/lib/schemas';
 import { formatAge, type K3sClusterPulse } from '@/components/k3s/types';
+import { K3sWorkloadsVisuals } from '@/components/k3s/K3sWorkloadsVisuals';
 
 export default function K3sWorkloadsPage() {
   const { applyState } = useDesiredStateApply();
@@ -14,6 +15,9 @@ export default function K3sWorkloadsPage() {
   const [pulse, setPulse] = useState<K3sClusterPulse | null>(null);
   const [liveTab, setLiveTab] = useState<'workloads' | 'services' | 'ingresses'>('workloads');
   const [refreshingLive, setRefreshingLive] = useState(false);
+  const [selectedNs, setSelectedNs] = useState<string>('_all');
+  const [searchQuery, setSearchQuery] = useState<string>('');
+  const [zeroEndpointsOnly, setZeroEndpointsOnly] = useState<boolean>(false);
   const [name, setName] = useState('minio-s3');
   const [image, setImage] = useState('quay.io/minio/minio:latest');
   const [port, setPort] = useState(9000);
@@ -38,6 +42,55 @@ export default function K3sWorkloadsPage() {
     getCurrentDesiredState().then(setState).catch(() => {});
     loadLive();
   }, []);
+
+  const filteredWorkloads = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    return (pulse?.workloadsSummary || []).filter((w) => {
+      if (selectedNs !== '_all' && (w.namespace || 'default') !== selectedNs) return false;
+      if (
+        q &&
+        !w.name.toLowerCase().includes(q) &&
+        !(w.namespace || '').toLowerCase().includes(q) &&
+        !w.kind.toLowerCase().includes(q)
+      ) {
+        return false;
+      }
+      return true;
+    });
+  }, [pulse?.workloadsSummary, selectedNs, searchQuery]);
+
+  const filteredServices = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    return (pulse?.servicesSummary || []).filter((sv) => {
+      if (selectedNs !== '_all' && (sv.namespace || 'default') !== selectedNs) return false;
+      if (zeroEndpointsOnly && sv.readyEndpoints !== 0) return false;
+      if (
+        q &&
+        !sv.name.toLowerCase().includes(q) &&
+        !(sv.namespace || '').toLowerCase().includes(q) &&
+        !sv.type.toLowerCase().includes(q)
+      ) {
+        return false;
+      }
+      return true;
+    });
+  }, [pulse?.servicesSummary, selectedNs, searchQuery, zeroEndpointsOnly]);
+
+  const filteredIngresses = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    return (pulse?.ingressesSummary || []).filter((ing) => {
+      if (selectedNs !== '_all' && (ing.namespace || 'default') !== selectedNs) return false;
+      if (
+        q &&
+        !ing.name.toLowerCase().includes(q) &&
+        !(ing.namespace || '').toLowerCase().includes(q) &&
+        !(ing.hosts || []).join(',').toLowerCase().includes(q)
+      ) {
+        return false;
+      }
+      return true;
+    });
+  }, [pulse?.ingressesSummary, selectedNs, searchQuery]);
 
   const addWorkload = async () => {
     if (!state || !name.trim()) return;
@@ -270,10 +323,23 @@ export default function K3sWorkloadsPage() {
         )}
       </div>
 
+      {/* Live Cluster Workloads & Ingress Visualizations */}
+      {pulse?.available && (
+        <K3sWorkloadsVisuals
+          pulse={pulse}
+          selectedNs={selectedNs}
+          onSelectNamespace={setSelectedNs}
+          onShowZeroEndpointServices={() => {
+            setLiveTab('services');
+            setZeroEndpointsOnly((prev) => !prev);
+          }}
+        />
+      )}
+
       {/* Live Cluster Workloads, Services & Ingresses Inspector */}
       <div className="bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden">
         <div className="p-4 border-b border-slate-800 flex flex-wrap items-center justify-between gap-3">
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <Activity className="w-4 h-4 text-emerald-400" />
             <h3 className="text-sm font-bold text-white">Live Cluster Inventory</h3>
             {pulse?.available && (
@@ -281,14 +347,42 @@ export default function K3sWorkloadsPage() {
                 ({pulse.counts.podsRunning}/{pulse.counts.podsTotal} pods running)
               </span>
             )}
+            {selectedNs !== '_all' && (
+              <button
+                type="button"
+                onClick={() => setSelectedNs('_all')}
+                className="px-2 py-0.5 rounded bg-sky-500/15 border border-sky-500/30 text-[11px] font-mono text-sky-300 hover:text-white"
+              >
+                ns: {selectedNs} ✕
+              </button>
+            )}
+            {zeroEndpointsOnly && (
+              <button
+                type="button"
+                onClick={() => setZeroEndpointsOnly(false)}
+                className="px-2 py-0.5 rounded bg-amber-500/15 border border-amber-500/30 text-[11px] font-mono text-amber-300 hover:text-white"
+              >
+                0-Endpoint Services ✕
+              </button>
+            )}
           </div>
           <div className="flex flex-wrap items-center gap-2">
+            <div className="relative">
+              <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2" />
+              <input
+                type="text"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                placeholder="Filter rows..."
+                className="bg-slate-950 border border-slate-800 rounded-lg pl-8 pr-3 py-1 text-xs text-white placeholder-slate-400 font-mono w-40"
+              />
+            </div>
             <div className="flex items-center bg-slate-950 border border-slate-800 rounded-lg p-0.5 text-xs">
               {(
                 [
-                  { id: 'workloads', label: `Workloads (${pulse?.workloadsSummary?.length ?? 0})` },
-                  { id: 'services', label: `Services (${pulse?.servicesSummary?.length ?? 0})` },
-                  { id: 'ingresses', label: `Ingresses (${pulse?.ingressesSummary?.length ?? 0})` },
+                  { id: 'workloads', label: `Workloads (${filteredWorkloads.length})` },
+                  { id: 'services', label: `Services (${filteredServices.length})` },
+                  { id: 'ingresses', label: `Ingresses (${filteredIngresses.length})` },
                 ] as const
               ).map((t) => (
                 <button
@@ -333,7 +427,7 @@ export default function K3sWorkloadsPage() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-800/60">
-                {pulse.workloadsSummary.map((w) => {
+                {filteredWorkloads.map((w) => {
                   const pct = w.desired > 0 ? Math.min(100, Math.round((w.ready / w.desired) * 100)) : 100;
                   return (
                     <tr key={`${w.kind}/${w.namespace}/${w.name}`} className="hover:bg-slate-800/40">
@@ -392,7 +486,7 @@ export default function K3sWorkloadsPage() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-800/60">
-                {pulse.servicesSummary.map((sv) => (
+                {filteredServices.map((sv) => (
                   <tr key={`${sv.namespace}/${sv.name}`} className="hover:bg-slate-800/40">
                     <td className="py-2.5 px-4 text-slate-400">{sv.namespace}</td>
                     <td className="py-2.5 px-4 text-white font-semibold">{sv.name}</td>
@@ -433,7 +527,7 @@ export default function K3sWorkloadsPage() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-800/60">
-                {pulse.ingressesSummary.map((ing) => (
+                {filteredIngresses.map((ing) => (
                   <tr key={`${ing.namespace}/${ing.name}`} className="hover:bg-slate-800/40">
                     <td className="py-2.5 px-4 text-slate-400">{ing.namespace}</td>
                     <td className="py-2.5 px-4 text-white font-semibold">{ing.name}</td>

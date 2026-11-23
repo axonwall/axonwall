@@ -30,6 +30,8 @@ import {
   type K3sNodeTaintItem,
 } from '@/server/agent';
 import type { K3sClusterPulse } from '@/components/k3s/types';
+import { K3sCapacityRings } from '@/components/k3s/K3sCapacityRings';
+import { K3sClusterArchitectureMap } from '@/components/k3s/K3sClusterArchitectureMap';
 import { useDesiredStateApply } from '@/lib/use-desired-state-apply';
 import { executePluginAction } from '@/server/plugins';
 import { K3sConfigSchema, type DesiredState } from '@axonwall/lib/schemas';
@@ -389,6 +391,21 @@ export default function K3sClusterPage() {
           </span>
         </div>
       </div>
+
+      {/* Live Cluster Capacity Rings & HA Architecture Map */}
+      {pulse?.available && (
+        <div className="space-y-5">
+          <K3sCapacityRings pulse={pulse} />
+          <K3sClusterArchitectureMap
+            pulse={pulse}
+            cniPlugin={state?.k3s?.cniPlugin || pulse.cniPlugin || 'flannel'}
+            onConfigureNode={(nodeName) => {
+              const found = (status?.nodes ?? []).find((x) => x.name === nodeName);
+              if (found) openNodeModal(found);
+            }}
+          />
+        </div>
+      )}
 
       {/* Live Cluster Visualization & Resource Inventory Strip */}
       {pulse?.available && (

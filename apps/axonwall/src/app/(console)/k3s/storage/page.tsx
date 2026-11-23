@@ -2,27 +2,19 @@
 
 import { useState, useEffect, useMemo } from 'react';
 import Link from 'next/link';
-import { Database, CheckCircle2, Layers, Terminal, RefreshCw, HardDrive } from 'lucide-react';
-import {
-  Bar,
-  BarChart,
-  CartesianGrid,
-  Legend,
-  ResponsiveContainer,
-  Tooltip,
-  XAxis,
-  YAxis,
-} from 'recharts';
+import { Database, Terminal, RefreshCw } from 'lucide-react';
 import { getCurrentDesiredState, getK3sClusterPulseAction } from '@/server/agent';
 import { useDesiredStateApply } from '@/lib/use-desired-state-apply';
 import type { DesiredState } from '@axonwall/lib/schemas';
 import { formatAge, type K3sClusterPulse } from '@/components/k3s/types';
+import { K3sStorageVisuals } from '@/components/k3s/K3sStorageVisuals';
 
 export default function OpenEbsStoragePage() {
   const { applyState } = useDesiredStateApply();
   const [state, setState] = useState<DesiredState | null>(null);
   const [pulse, setPulse] = useState<K3sClusterPulse | null>(null);
   const [refreshingLive, setRefreshingLive] = useState(false);
+  const [selectedNs, setSelectedNs] = useState<string>('_all');
   const [zfsPool, setZfsPool] = useState('tank');
   const [replicatedPool, setReplicatedPool] = useState('tank/openebs-replicated');
   const [replicas, setReplicas] = useState(2);
@@ -52,16 +44,11 @@ export default function OpenEbsStoragePage() {
     loadLive();
   }, []);
 
-  const storageChartData = useMemo(() => {
-    if (!pulse?.storageByClass) return [];
-    const gi = 1024 * 1024 * 1024;
-    return pulse.storageByClass.map((sc) => ({
-      name: sc.name,
-      gib: Number((sc.totalBytes / gi).toFixed(2)),
-      pvcs: sc.pvcCount,
-      bound: sc.boundCount,
-    }));
-  }, [pulse?.storageByClass]);
+  const filteredPvcs = useMemo(() => {
+    const pvcs = pulse?.pvcsSummary || [];
+    if (selectedNs === '_all') return pvcs;
+    return pvcs.filter((p) => (p.namespace || 'default') === selectedNs);
+  }, [pulse?.pvcsSummary, selectedNs]);
 
   const handleSave = async () => {
     if (!state) return;
@@ -208,59 +195,32 @@ export default function OpenEbsStoragePage() {
 
       {/* Live OpenEBS & Persistent Volume Visualization */}
       <div className="space-y-6 pt-2">
-        <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 space-y-4">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <div>
-              <h2 className="text-sm font-bold text-white flex items-center gap-2">
-                <HardDrive className="w-4 h-4 text-amber-400" /> StorageClass Allocation (Live Cluster)
-              </h2>
-              <p className="text-xs text-slate-400">
-                Provisioned PVC GiB capacity and bound claim counts grouped by CSI StorageClass.
-              </p>
-            </div>
-            {pulse?.available && (
-              <div className="text-xs font-mono text-slate-300">
-                {pulse.counts.pvcsBound}/{pulse.counts.pvcsTotal} PVCs Bound • {pulse.counts.pvsTotal} PVs
-              </div>
-            )}
+        {!pulse?.available ? (
+          <div className="p-6 rounded-2xl bg-slate-900 border border-slate-800 text-xs font-mono text-slate-400">
+            {pulse?.error || 'Live OpenEBS storage telemetry unavailable until k3s.service answers.'}
           </div>
-
-          {!pulse?.available ? (
-            <div className="p-4 rounded-xl bg-slate-950 border border-slate-800 text-xs font-mono text-slate-400">
-              {pulse?.error || 'Live OpenEBS storage telemetry unavailable until k3s.service answers.'}
-            </div>
-          ) : storageChartData.length === 0 ? (
-            <div className="text-xs text-slate-500 py-6 text-center">No StorageClasses detected yet.</div>
-          ) : (
-            <div className="h-[240px]">
-              <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={storageChartData}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" vertical={false} />
-                  <XAxis dataKey="name" tick={{ fill: '#cbd5e1', fontSize: 11 }} />
-                  <YAxis yAxisId="left" tick={{ fill: '#94a3b8', fontSize: 11 }} unit=" GiB" />
-                  <YAxis yAxisId="right" orientation="right" tick={{ fill: '#94a3b8', fontSize: 11 }} />
-                  <Tooltip
-                    contentStyle={{
-                      backgroundColor: '#0f172a',
-                      borderColor: '#334155',
-                      borderRadius: '0.5rem',
-                      fontSize: '12px',
-                      color: '#f1f5f9',
-                    }}
-                  />
-                  <Legend wrapperStyle={{ fontSize: '11px' }} />
-                  <Bar yAxisId="left" dataKey="gib" name="Allocated GiB" fill="#10b981" />
-                  <Bar yAxisId="right" dataKey="pvcs" name="Total PVCs" fill="#38bdf8" />
-                  <Bar yAxisId="right" dataKey="bound" name="Bound PVCs" fill="#f59e0b" />
-                </BarChart>
-              </ResponsiveContainer>
-            </div>
-          )}
-        </div>
+        ) : (
+          <K3sStorageVisuals
+            pulse={pulse}
+            selectedNs={selectedNs}
+            onSelectNamespace={setSelectedNs}
+          />
+        )}
 
         <div className="bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden">
-          <div className="p-4 border-b border-slate-800 flex items-center justify-between">
-            <h3 className="text-sm font-bold text-white">Live PersistentVolumeClaims (PVCs)</h3>
+          <div className="p-4 border-b border-slate-800 flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-2.5">
+              <h3 className="text-sm font-bold text-white">Live PersistentVolumeClaims (PVCs)</h3>
+              {selectedNs !== '_all' && (
+                <button
+                  type="button"
+                  onClick={() => setSelectedNs('_all')}
+                  className="px-2 py-0.5 rounded bg-sky-500/15 border border-sky-500/30 text-[11px] font-mono text-sky-300 hover:text-white"
+                >
+                  Namespace: {selectedNs} ✕
+                </button>
+              )}
+            </div>
             <Link
               href="/k3s/explorer?resource=persistentvolumes"
               className="text-xs font-mono text-sky-400 hover:underline"
@@ -272,8 +232,12 @@ export default function OpenEbsStoragePage() {
             <div className="p-6 text-xs font-mono text-slate-400">
               {pulse?.error || 'Live PVC inventory unavailable.'}
             </div>
-          ) : pulse.pvcsSummary.length === 0 ? (
-            <div className="p-6 text-xs text-slate-500">No PersistentVolumeClaims provisioned in cluster.</div>
+          ) : filteredPvcs.length === 0 ? (
+            <div className="p-6 text-xs text-slate-400">
+              {selectedNs !== '_all'
+                ? `No PersistentVolumeClaims found in namespace '${selectedNs}'.`
+                : 'No PersistentVolumeClaims provisioned in cluster.'}
+            </div>
           ) : (
             <div className="overflow-x-auto">
               <table className="w-full text-left border-collapse text-xs font-mono">
@@ -291,7 +255,7 @@ export default function OpenEbsStoragePage() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-800/60">
-                  {pulse.pvcsSummary.map((pvc) => (
+                  {filteredPvcs.map((pvc) => (
                     <tr key={`${pvc.namespace}/${pvc.name}`} className="hover:bg-slate-800/40">
                       <td className="py-2.5 px-4 text-slate-400">{pvc.namespace}</td>
                       <td className="py-2.5 px-4 text-white font-semibold">{pvc.name}</td>

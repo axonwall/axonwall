@@ -62,6 +62,11 @@ import {
 import { K3sPulseCharts } from './K3sPulseCharts';
 import { K3sTopologyMap } from './K3sTopologyMap';
 import { K3sInspectorDrawer, type InspectorTab } from './K3sInspectorDrawer';
+import {
+  appendPulseHistory,
+  computeClusterCapacitySummary,
+  type K3sPulseHistoryPoint,
+} from '@/lib/k3s-visuals';
 
 type ViewMode = 'explorer' | 'pulse' | 'topology';
 
@@ -149,6 +154,7 @@ export function K9sExplorerWorkbench() {
   const [breadcrumbs, setBreadcrumbs] = useState<CrumbFrame[]>([]);
 
   const [pulse, setPulse] = useState<K3sClusterPulse | null>(null);
+  const [pulseHistory, setPulseHistory] = useState<K3sPulseHistoryPoint[]>([]);
   const [apiResources, setApiResources] = useState<K3sAPIResource[]>([]);
   const [namespaces, setNamespaces] = useState<K3sNamespaceSummary[]>([]);
   const [items, setItems] = useState<K3sResourceItem[]>([]);
@@ -212,11 +218,22 @@ export function K9sExplorerWorkbench() {
         getK3sNamespacesAction().catch(() => []),
       ]);
       setPulse(p);
+      setPulseHistory((prev) => appendPulseHistory(prev, p));
       if (apis.length > 0) setApiResources(apis);
       if (nss.length > 0) setNamespaces(nss);
     } catch {
     } finally {
       setLoadingPulse(false);
+    }
+  }, []);
+
+  // Lightweight live pulse snapshot for continuous polling history
+  const refreshPulseSnapshot = useCallback(async () => {
+    try {
+      const p = await getK3sClusterPulseAction();
+      setPulse(p);
+      setPulseHistory((prev) => appendPulseHistory(prev, p));
+    } catch {
     }
   }, []);
 
@@ -269,17 +286,22 @@ export function K9sExplorerWorkbench() {
   }, [initialNameParam, initialResParam, initialNsParam, initialTabParam]);
 
   // Auto refresh interval
+  const pollTickRef = useRef(0);
   useEffect(() => {
     if (autoRefreshSec <= 0) return;
     const timer = setInterval(() => {
+      pollTickRef.current += 1;
       if (viewMode === 'explorer') {
         refreshResourceList();
+        if (pollTickRef.current % 2 === 0) {
+          refreshPulseSnapshot();
+        }
       } else {
-        refreshClusterTelemetry();
+        refreshPulseSnapshot();
       }
     }, autoRefreshSec * 1000);
     return () => clearInterval(timer);
-  }, [autoRefreshSec, viewMode, refreshResourceList, refreshClusterTelemetry]);
+  }, [autoRefreshSec, viewMode, refreshResourceList, refreshPulseSnapshot]);
 
   const openInspector = useCallback(
     async (opts: {
@@ -773,6 +795,11 @@ export function K9sExplorerWorkbench() {
 
   const activeDef = K9S_RESOURCE_MAP[activeResource];
 
+  const capSummary = useMemo(
+    () => (pulse?.available ? computeClusterCapacitySummary(pulse) : null),
+    [pulse]
+  );
+
   const toggleSort = (col: 'name' | 'status' | 'namespace' | 'age') => {
     if (sortCol === col) setSortAsc((a) => !a);
     else {
@@ -809,25 +836,53 @@ export function K9sExplorerWorkbench() {
               )}
             </div>
             {pulse?.available && (
-              <div className="flex flex-wrap items-center gap-3 text-[11px] font-mono text-slate-400">
-                <span>
-                  Nodes: <strong className="text-emerald-300">{pulse.counts.nodesReady}/{pulse.counts.nodesTotal}</strong>
-                </span>
-                <span>
-                  Pods: <strong className="text-emerald-300">{pulse.counts.podsRunning}/{pulse.counts.podsTotal}</strong>
-                </span>
-                <span>
-                  Deploy: <strong className="text-sky-300">{pulse.counts.deploymentsReady}/{pulse.counts.deploymentsTotal}</strong>
-                </span>
-                <span>
-                  Svc/Ing: <strong className="text-cyan-300">{pulse.counts.servicesTotal}/{pulse.counts.ingressesTotal}</strong>
-                </span>
-                <span>
-                  PVCs: <strong className="text-amber-300">{pulse.counts.pvcsBound}/{pulse.counts.pvcsTotal}</strong>
-                </span>
-                <span>
-                  Warnings: <strong className={pulse.counts.warningEventsCount > 0 ? 'text-amber-300' : 'text-slate-300'}>{pulse.counts.warningEventsCount}</strong>
-                </span>
+              <div className="space-y-1.5">
+                <div className="flex flex-wrap items-center gap-3 text-[11px] font-mono tabular-nums text-slate-400">
+                  <span>
+                    Nodes: <strong className="text-emerald-300">{pulse.counts.nodesReady}/{pulse.counts.nodesTotal}</strong>
+                  </span>
+                  <span>
+                    Pods: <strong className="text-emerald-300">{pulse.counts.podsRunning}/{pulse.counts.podsTotal}</strong>
+                  </span>
+                  <span>
+                    Deploy: <strong className="text-sky-300">{pulse.counts.deploymentsReady}/{pulse.counts.deploymentsTotal}</strong>
+                  </span>
+                  <span>
+                    Svc/Ing: <strong className="text-cyan-300">{pulse.counts.servicesTotal}/{pulse.counts.ingressesTotal}</strong>
+                  </span>
+                  <span>
+                    PVCs: <strong className="text-amber-300">{pulse.counts.pvcsBound}/{pulse.counts.pvcsTotal}</strong>
+                  </span>
+                  <span>
+                    Warnings: <strong className={pulse.counts.warningEventsCount > 0 ? 'text-amber-300' : 'text-slate-300'}>{pulse.counts.warningEventsCount}</strong>
+                  </span>
+                </div>
+
+                {capSummary && (
+                  <div className="flex flex-wrap items-center gap-4 text-[10px] font-mono tabular-nums text-slate-300">
+                    <span className="inline-flex items-center gap-1.5">
+                      <span className="text-slate-400">CPU</span>
+                      <span className="w-16 h-1.5 rounded-full bg-slate-800 overflow-hidden inline-block">
+                        <span className="h-full bg-emerald-500 block" style={{ width: `${capSummary.cpuUsagePct}%` }} />
+                      </span>
+                      <span className="text-emerald-300">{capSummary.cpuUsagePct}%</span>
+                    </span>
+                    <span className="inline-flex items-center gap-1.5">
+                      <span className="text-slate-400">MEM</span>
+                      <span className="w-16 h-1.5 rounded-full bg-slate-800 overflow-hidden inline-block">
+                        <span className="h-full bg-sky-500 block" style={{ width: `${capSummary.memUsagePct}%` }} />
+                      </span>
+                      <span className="text-sky-300">{capSummary.memUsagePct}%</span>
+                    </span>
+                    <span className="inline-flex items-center gap-1.5">
+                      <span className="text-slate-400">SLOTS</span>
+                      <span className="w-16 h-1.5 rounded-full bg-slate-800 overflow-hidden inline-block">
+                        <span className="h-full bg-cyan-500 block" style={{ width: `${capSummary.podDensityPct}%` }} />
+                      </span>
+                      <span className="text-cyan-300">{capSummary.podDensityPct}%</span>
+                    </span>
+                  </div>
+                )}
               </div>
             )}
           </div>
@@ -997,6 +1052,8 @@ export function K9sExplorerWorkbench() {
         pulse?.available ? (
           <K3sPulseCharts
             pulse={pulse}
+            history={pulseHistory}
+            autoRefreshSec={autoRefreshSec}
             onSelectFilter={(opts) => {
               setViewMode('explorer');
               setActiveResource(resolveK9sResourceAlias(opts.resource));
@@ -1025,12 +1082,24 @@ export function K9sExplorerWorkbench() {
             graph={pulse.topology}
             namespaces={namespaceNames}
             initialNamespace={activeNamespace}
+            pulse={pulse}
+            nodes={pulse.nodes}
+            topResourcePods={pulse.topResourcePods}
+            topRestartingPods={pulse.topRestartingPods}
             onInspectNode={(node: K3sTopologyNode) => {
               openInspector({
                 resource: node.resource,
                 name: node.name,
                 namespace: node.namespace,
                 tab: 'overview',
+              });
+            }}
+            onInspectResource={(opts) => {
+              openInspector({
+                resource: opts.resource,
+                name: opts.name,
+                namespace: opts.namespace,
+                tab: opts.tab || 'overview',
               });
             }}
           />

@@ -24,6 +24,7 @@ import { executePluginAction } from '@/server/plugins';
 import { useDesiredStateApply } from '@/lib/use-desired-state-apply';
 import { VowConfigSchema, type DesiredState, type VowConfig, type VowCdRunner } from '@axonwall/lib/schemas';
 import type { K3sClusterPulse } from '@/components/k3s/types';
+import { K3sVowVisuals } from '@/components/k3s/K3sVowVisuals';
 import {
   isPluginEnabled,
   enablePluginWithDependencies,
@@ -465,6 +466,15 @@ export default function VigilantOctoWafflePage() {
         </div>
       </div>
 
+      {/* VOW RAM Headroom & Dependency Graph Visualizations */}
+      <K3sVowVisuals
+        enabledAppIds={vowConfig.enabledApps ?? []}
+        resolvedAppIds={resolvedApps}
+        autoDeps={autoAddedDependencies}
+        catalog={VOW_APP_CATALOG}
+        pulse={pulse}
+      />
+
       {/* Navigation Tabs */}
       <div className="flex flex-wrap items-center gap-2 border-b border-slate-800 pb-3">
         {[
@@ -788,10 +798,10 @@ export default function VigilantOctoWafflePage() {
           </div>
 
           <div className="space-y-2">
-            <h3 className="text-xs font-bold uppercase tracking-wider text-purple-400">
+            <h3 className="text-xs font-bold uppercase tracking-wider text-sky-400">
               Compiled VOW Environment (.env.enabler)
             </h3>
-            <pre className="p-4 rounded-2xl bg-slate-950 border border-slate-800 text-[11px] font-mono text-purple-300 overflow-x-auto max-h-80">
+            <pre className="p-4 rounded-2xl bg-slate-950 border border-slate-800 text-[11px] font-mono text-sky-300 overflow-x-auto max-h-80">
               {compiledBundle.enablerEnv}
             </pre>
           </div>
