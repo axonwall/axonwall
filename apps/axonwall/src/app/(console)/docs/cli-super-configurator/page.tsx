@@ -5,7 +5,7 @@ import { CodeBlock } from '../components/CodeBlock';
 export const metadata = {
   title: 'Neovim Super Configurator, axonwall-tui, axonwallctl & ZSH Workstation | Axonwall Documentation',
   description:
-    'Configure every Axonwall v0.13.1 subsystem from SSH or serial console using the 12-domain Neovim Super Configurator (axonwall-config), standalone axonwall-tui + Btrfs Snapper + NastyMap simulator, axonwallctl CLI, and ZSH workstation.',
+    'Configure every Axonwall v0.14.0 subsystem from SSH or serial console using the 12-domain Neovim Super Configurator (axonwall-config), standalone axonwall-tui + Btrfs Snapper + NastyMap simulator, axonwallctl CLI, and ZSH workstation.',
 };
 
 export default function CliSuperConfiguratorDocPage() {
@@ -15,7 +15,7 @@ export default function CliSuperConfiguratorDocPage() {
       <div className="space-y-4 border-b border-slate-800/80 pb-8">
         <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-950/60 border border-emerald-500/30 text-emerald-400 text-xs font-semibold">
           <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-          Terminal UX • 12-Domain Neovim TUI, axonwall-tui &amp; ZSH Workstation • v0.13.1
+          Terminal UX • 12-Domain Neovim TUI, axonwall-tui &amp; ZSH Workstation • v0.14.0
         </div>
         <h1 className="text-3xl sm:text-5xl font-extrabold text-white tracking-tight">
           Neovim Super Configurator, axonwall-tui &amp; CLI Reference

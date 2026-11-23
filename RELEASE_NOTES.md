@@ -6,6 +6,30 @@ Official build artifacts, SHA-256 checksums, and detached Ed25519 signatures (`.
 
 ---
 
+## `v0.14.0` (2026-11-22) — Turnkey Headscale Mesh & Self-Service Portal, Ring-0 eBPF Visualizations, and Appliance Packaging Hardening
+
+### Highlights
+- **Turnkey Headscale Mesh Onboarding, Magic Invite Links & User Self-Service Portal (`/vpn/mesh`, `/portal/vpn`, `/invite/[token]`)**:
+  - **Magic Invite Links & Turnkey Onboarding**: Administrators can invite users with configurable expiration, device registration quotas, pre-assigned tags, and auto-registration flags. Generates single-use invite tokens with instant QR codes and direct links.
+  - **Self-Service VPN Portal (`/portal/vpn`)**: Dedicated end-user interface (`MeshSelfServicePortal`) for non-root users to view active mesh nodes, generate authentication keys (reusable, ephemeral, pre-authenticated), register devices via interactive auth-key commands or machine registration keys, inspect WireGuard configs, and manage their credentials.
+  - **Headscale Management Engine (`apps/axonwalld` & `apps/axonwall-controller`)**:
+    - Native `headscale` configuration reconciliation engine (`headscale_config.go`), automated SQLite/Postgres DB initialization, and secure server key management.
+    - Endpoints for user lifecycle management (`/v1/vpn/mesh/people`, `/v1/vpn/mesh/invites/preview`, `/v1/vpn/mesh/invites/redeem`, `/v1/vpn/mesh/self/*`), machine tagging, routing advertisements, and session expiration tracking.
+    - Full RBAC integration across OpenLDAP directory users, local accounts, and session revocation tracking.
+- **Advanced Ring-0 eBPF Visualizations, Runtime Profiling & Dependency Topologies (`/reporting/ebpf`)**:
+  - **Interactive XDP Packet Flow Sankey Diagram (`EbpfXdpPipelineVisualizer`)**: Real-time vector-based visualization of ingress packets traversing Ring-0 DMA RX rings, VLAN decapsulation, IPv4/IPv6 layer parsing, and final XDP verdicts (`PASS`, `DROP`, `TX`, `REDIRECT`), switchable between Cumulative Packets and Live PPS deltas.
+  - **Kernel TCP State Machine Funnel & Traffic Heatmap Matrix (`EbpfSocketAndServiceVisualizer`)**: Funnel diagram detailing active TCP connections through kernel states (`LISTEN`, `SYN_SENT`, `ESTABLISHED`, `FIN_WAIT`, `TIME_WAIT`), paired with an interactive Source IP $\\times$ Destination Port traffic matrix supporting 1-click fast-drop defensive rules.
+  - **eBPF Execution Profiler & SoftIRQ/NAPI Pressure Heatmap (`EbpfRuntimeProfilerVisualizer`)**: 1-click toggle for `/proc/sys/kernel/bpf_stats_enabled` runtime metric collection, 3-tier execution budget icicle flame-strip, rolling top-program CPU timeline, and per-CPU SoftIRQ/NAPI core pressure heatmap parsing `/proc/net/softnet_stat`.
+  - **BPF Kernel Dependency Graph & Verifier Complexity Scatter Plot (`EbpfKernelGraphVisualizer`)**: Force-directed topology connecting BPF links, programs, and maps with type filters, coupled with a Verifier Complexity vs. JIT execution latency scatter plot for instant kernel performance auditing.
+  - **Raw Link Enumeration & Socket Telemetry (`apps/axonwalld`)**: Enumerates `bpf_link` objects via raw `BPF_LINK_GET_NEXT_ID` syscalls (`unix.SYS_BPF`), maps program-to-map associations, and collects `/proc/net/{tcp,udp,raw}*` socket exposure telemetry.
+- **Appliance ISO, Cloud Image & CI Packaging Hardening**:
+  - **Merged-Usr `rsync -aK` Cloud Image Build Fix**: Replaced `cp -r` with `rsync -aK` (`--keep-dirlinks`) in `packaging/cloud-image/build-qcow2.sh` to safely preserve Debian 13 merged-usr `/lib -> usr/lib` symlinks without `cp: cannot overwrite non-directory` errors.
+  - **Alpine BusyBox `mktemp` Compatibility**: Adjusted K9s download temporary file pattern in `packaging/alpine/build-alpine-iso.sh` to comply with BusyBox `mktemp` strict requirement that templates end with `XXXXXX`.
+  - **Next.js 16 Runtime Standalone Validation**: Aligned Next.js standalone payload checks with Next.js 16 (`dist/shared/lib/errors/code-frame.js`).
+  - **Automated CI & Packaging Preflight Suite**: Added `scripts/ci-preflight.sh` and `ci-preflight.test.ts` into monorepo preflight to statically test POSIX/bash syntax, duplicate script parity, BusyBox `mktemp`, merged-usr preservation, and bootloader cache before expensive image builds.
+
+---
+
 ## `v0.13.1` (2026-11-22) — Headscale Turnkey Onboarding & Self-Service Portal, Advanced Ring-0 eBPF Visualizations, and Offline ISO Packaging Hardening
 
 ### Highlights

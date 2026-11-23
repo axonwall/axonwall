@@ -1,12 +1,12 @@
 <div align="center">
 
-# 🛡️ Axonwall (`v0.13.1`)
+# 🛡️ Axonwall (`v0.14.0`)
 
 ### The Sovereign Linux Next-Generation Firewall, OpenZFS NAS, Hypervisor & Autonomous AI SecOps Platform
 
 *Reimagining perimeter & infrastructure security: from legacy FreeBSD `pf` & PHP to **Linux 6.12+ LTS `nftables`**, **Hardened KSPP Universal & Hardware-Locked Kernels**, **Zero-Shell UEFI UKIs**, **Post-Quantum Dual-KEM**, **CO-RE BPF-LSM & Blackbox Threat-LLM Harvesting**, **OpenZFS**, **Btrfs + Snapper**, **K3s**, **KVM/LXC**, and **Guardrailed MCP AI**.*
 
-[![Release](https://img.shields.io/badge/Release-v0.13.1-10b981.svg)](https://github.com/axonwall/axonwall/releases/tag/v0.13.1)
+[![Release](https://img.shields.io/badge/Release-v0.14.0-10b981.svg)](https://github.com/axonwall/axonwall/releases/tag/v0.14.0)
 [![License](https://img.shields.io/badge/License-GPL--2.0--or--later-blue.svg)](LICENSE)
 [![Kernel](https://img.shields.io/badge/Kernel-Linux_6.12+_LTS-orange.svg)](https://www.kernel.org/)
 [![Engine](https://img.shields.io/badge/Firewall-nftables_1.1+%20%26%20eBPF%2FXDP-red.svg)](https://netfilter.org/projects/nftables/)
@@ -142,13 +142,13 @@ axonwall/
 
 ---
 
-## 🛠️ Installation & Quickstart (`v0.13.1`)
+## 🛠️ Installation & Quickstart (`v0.14.0`)
 
 ### Option 1: Bare-Metal / VM Unified UEFI ISO (`axonwall`, `minimal`, `vault`, or `k3s-storage` Edition)
 
 ```bash
-wget https://github.com/axonwall/axonwall/releases/download/v0.13.1/axonwall-debian13-amd64.iso
-wget https://github.com/axonwall/axonwall/releases/download/v0.13.1/axonwall-debian13-amd64.iso.sha256
+wget https://github.com/axonwall/axonwall/releases/download/v0.14.0/axonwall-debian13-amd64.iso
+wget https://github.com/axonwall/axonwall/releases/download/v0.14.0/axonwall-debian13-amd64.iso.sha256
 sha256sum -c axonwall-debian13-amd64.iso.sha256
 
 # Flash to USB drive:
@@ -163,14 +163,14 @@ sudo dd if=axonwall-debian13-amd64.iso of=/dev/sdX bs=4M status=progress conv=fs
 
 ### Option 2: Cloud QCOW2 Image, Edge UEFI UKI, or `.deb` Packages
 
-- **KVM / Proxmox Cloud Image:** [`axonwall-debian13-amd64-cloud.qcow2`](https://github.com/axonwall/axonwall/releases/download/v0.13.1/axonwall-debian13-amd64-cloud.qcow2)
-- **Zero-Shell Edge NGFW UKI:** [`axonwall-edge-sku-vm-virtio.efi`](https://github.com/axonwall/axonwall/releases/download/v0.13.1/axonwall-edge-sku-vm-virtio.efi)
+- **KVM / Proxmox Cloud Image:** [`axonwall-debian13-amd64-cloud.qcow2`](https://github.com/axonwall/axonwall/releases/download/v0.14.0/axonwall-debian13-amd64-cloud.qcow2)
+- **Zero-Shell Edge NGFW UKI:** [`axonwall-edge-sku-vm-virtio.efi`](https://github.com/axonwall/axonwall/releases/download/v0.14.0/axonwall-edge-sku-vm-virtio.efi)
 - **Debian 12/13 & Ubuntu 24.04 Packages:**
   ```bash
-  wget https://github.com/axonwall/axonwall/releases/download/v0.13.1/axonwall_0.13.1_amd64.deb
-  sudo apt-get update && sudo apt-get install -y ./axonwall_0.13.1_amd64.deb
+  wget https://github.com/axonwall/axonwall/releases/download/v0.14.0/axonwall_0.14.0_amd64.deb
+  sudo apt-get update && sudo apt-get install -y ./axonwall_0.14.0_amd64.deb
   # Edition packages also published per release:
-  #   axonwall-minimal_0.13.1_amd64.deb | axonwall-vault_0.13.1_amd64.deb | axonwall-k3s-storage_0.13.1_amd64.deb
+  #   axonwall-minimal_0.14.0_amd64.deb | axonwall-vault_0.14.0_amd64.deb | axonwall-k3s-storage_0.14.0_amd64.deb
   ```
 
 ### Option 3: Local Developer Setup

@@ -7,7 +7,7 @@ import { CodeBlock } from '../components/CodeBlock';
 export const metadata = {
   title: 'Next-Gen Installer, Multi-Disk RAID, LUKS2+TPM2, Btrfs & ZFSBootMenu | Axonwall Documentation',
   description:
-    'Documentation for Axonwall v0.13.1 bare-metal installation: axonwall-console --install Express/Custom TUI, --unattended automation, 4 unified editions (axonwall, minimal, vault, k3s-storage), Smart Disk Tiering, LUKS2 + TPM 2.0 PCR 0+2+7 auto-unlock, Btrfs + Snapper Root RAID-1, and ZFSBootMenu v3.1.0 Boot Environments.',
+    'Documentation for Axonwall v0.14.0 bare-metal installation: axonwall-console --install Express/Custom TUI, --unattended automation, 4 unified editions (axonwall, minimal, vault, k3s-storage), Smart Disk Tiering, LUKS2 + TPM 2.0 PCR 0+2+7 auto-unlock, Btrfs + Snapper Root RAID-1, and ZFSBootMenu v3.1.0 Boot Environments.',
 };
 
 export default function InstallerRaidZfsDocPage() {
@@ -17,7 +17,7 @@ export default function InstallerRaidZfsDocPage() {
       <div className="space-y-4 border-b border-slate-800/80 pb-8">
         <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-950/60 border border-emerald-500/30 text-emerald-400 text-xs font-semibold">
           <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-          Bare-Metal Installer &amp; Boot Engines • v0.13.1
+          Bare-Metal Installer &amp; Boot Engines • v0.14.0
         </div>
         <h1 className="text-3xl sm:text-5xl font-extrabold text-white tracking-tight">
           Next-Gen Installer, Multi-Disk RAID, Btrfs &amp; ZFSBootMenu
@@ -232,7 +232,7 @@ Enter ZFS pool name [default: tank]: tank`}
               <span>Native Boot Environments (BEs)</span>
             </div>
             <p className="text-xs text-slate-400 leading-relaxed">
-              System root datasets reside in <code className="text-slate-200 font-mono">zroot/ROOT/&lt;be_name&gt;</code>. OTA firmware updates snapshot the active BE (e.g. <code className="text-slate-200 font-mono">zroot/ROOT/axonwall-0.12.4@pre-update-v0.13.1</code>) and clone it instantaneously with zero wasted disk space into a new target BE (<code className="text-slate-200 font-mono">zroot/ROOT/axonwall-0.13.1</code>).
+              System root datasets reside in <code className="text-slate-200 font-mono">zroot/ROOT/&lt;be_name&gt;</code>. OTA firmware updates snapshot the active BE (e.g. <code className="text-slate-200 font-mono">zroot/ROOT/axonwall-0.12.4@pre-update-v0.14.0</code>) and clone it instantaneously with zero wasted disk space into a new target BE (<code className="text-slate-200 font-mono">zroot/ROOT/axonwall-0.14.0</code>).
             </p>
             <ul className="text-xs text-slate-300 list-disc list-inside space-y-1">
               <li>Instantaneous atomic updates and rollbacks via <code className="font-mono text-emerald-300">axonwallctl zbm</code></li>
@@ -273,8 +273,8 @@ Dataset Hierarchy:
 zroot
 ├── ROOT
 │   ├── axonwall-0.12.4           (mountpoint=/, org.zfsbootmenu:commandline="...")
-│   │   └── @pre-update-v0.13.1   (Point-in-time snapshot)
-│   └── axonwall-0.13.1           (mountpoint=/, clone/promoted next-boot BE)
+│   │   └── @pre-update-v0.14.0   (Point-in-time snapshot)
+│   └── axonwall-0.14.0           (mountpoint=/, clone/promoted next-boot BE)
 └── data
     └── axonwall                  (mountpoint=/var/lib/axonwall, persistent config & logs)`}
         />
@@ -286,13 +286,13 @@ zroot
 axonwallctl zbm list
 
 # Create a point-in-time snapshot, clone into a new BE, and activate for next boot
-sudo axonwallctl zbm snapshot axonwall-0.13.1 pre-change
-sudo axonwallctl zbm clone axonwall-0.13.1@pre-change axonwall-canary
+sudo axonwallctl zbm snapshot axonwall-0.14.0 pre-change
+sudo axonwallctl zbm clone axonwall-0.14.0@pre-change axonwall-canary
 sudo axonwallctl zbm activate axonwall-canary
 
 # Prune obsolete Boot Environments or snapshots
 sudo axonwallctl zbm delete axonwall-0.12.2
-sudo axonwallctl zbm delete-snapshot axonwall-0.13.1@pre-change
+sudo axonwallctl zbm delete-snapshot axonwall-0.14.0@pre-change
 
 # Stage cryptographically verified OTA firmware update (SHA-256 + OpenSSL .sig
 # verified against /etc/axonwall/release-signing.pub before writing standby slot/BE)
