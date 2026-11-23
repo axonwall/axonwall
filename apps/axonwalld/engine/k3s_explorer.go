@@ -2136,7 +2136,7 @@ func parseAPIResourcesTable(raw string) []K3sAPIResource {
 			continue
 		}
 		// Match bracketed verbs if `-o wide` was used
-		var verbs []string
+		verbs := []string{}
 		left := line
 		if idx := strings.Index(line, "["); idx >= 0 {
 			right := strings.LastIndex(line, "]")
@@ -2165,7 +2165,7 @@ func parseAPIResourcesTable(raw string) []K3sAPIResource {
 		} else {
 			continue
 		}
-		var shorts []string
+		shorts := []string{}
 		if shortStr != "" && shortStr != "<none>" {
 			for _, sn := range strings.Split(shortStr, ",") {
 				sn = strings.TrimSpace(sn)

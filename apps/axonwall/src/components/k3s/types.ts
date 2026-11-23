@@ -239,11 +239,11 @@ export interface K3sClusterPulse {
 
 export interface K3sAPIResource {
   name: string;
-  shortNames: string[];
+  shortNames?: string[] | null;
   apiVersion: string;
   namespaced: boolean;
   kind: string;
-  verbs: string[];
+  verbs?: string[] | null;
 }
 
 export interface K3sNamespaceSummary {

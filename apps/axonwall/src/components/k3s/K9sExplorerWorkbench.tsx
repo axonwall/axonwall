@@ -417,10 +417,11 @@ export function K9sExplorerWorkbench() {
     for (const api of apiResources) {
       if (!seen.has(api.name)) {
         seen.add(api.name);
+        const shortsStr = Array.isArray(api.shortNames) && api.shortNames.length > 0 ? api.shortNames.join(', ') : '';
         list.push({
           cmd: api.name,
           label: `${api.kind} (${api.apiVersion})`,
-          desc: `${api.shortNames.join(', ') || api.name} • ${api.namespaced ? 'Namespaced' : 'Cluster'}`,
+          desc: `${shortsStr || api.name} • ${api.namespaced ? 'Namespaced' : 'Cluster'}`,
           type: 'resource',
           target: api.name,
         });
