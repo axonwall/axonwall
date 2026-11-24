@@ -5,7 +5,7 @@ import { CodeBlock } from '../components/CodeBlock';
 export const metadata = {
   title: 'Neovim Super Configurator, axonwall-tui, axonwallctl & ZSH Workstation | Axonwall Documentation',
   description:
-    'Configure every Axonwall v0.14.1 subsystem from SSH or serial console using the 12-domain Neovim Super Configurator (axonwall-config), standalone axonwall-tui + Btrfs Snapper + NastyMap simulator, axonwallctl CLI, and ZSH workstation.',
+    'Configure every Axonwall v0.15.1 subsystem from SSH or serial console using the 14-domain Neovim Super Configurator (axonwall-config), standalone axonwall-tui + Btrfs Snapper + NastyMap simulator, axonwallctl CLI (including netflow queries & reports), and ZSH workstation.',
 };
 
 export default function CliSuperConfiguratorDocPage() {
@@ -15,13 +15,13 @@ export default function CliSuperConfiguratorDocPage() {
       <div className="space-y-4 border-b border-slate-800/80 pb-8">
         <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-950/60 border border-emerald-500/30 text-emerald-400 text-xs font-semibold">
           <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-          Terminal UX • 12-Domain Neovim TUI, axonwall-tui &amp; ZSH Workstation • v0.14.1
+          Terminal UX • 14-Domain Neovim TUI, axonwall-tui &amp; ZSH Workstation • v0.15.1
         </div>
         <h1 className="text-3xl sm:text-5xl font-extrabold text-white tracking-tight">
           Neovim Super Configurator, axonwall-tui &amp; CLI Reference
         </h1>
         <p className="text-base sm:text-lg text-slate-400 leading-relaxed max-w-3xl">
-          Axonwall treats the command line as a first-class cockpit. Connect over SSH or serial console to drive the 12-domain <strong>Neovim Super Configurator</strong> (
+          Axonwall treats the command line as a first-class cockpit. Connect over SSH or serial console to drive the 14-domain <strong>Neovim Super Configurator</strong> (
           <code className="text-emerald-400 font-mono">axonwall-config</code>), the standalone 11-tab{' '}
           <strong>Axonwall TUI &amp; NastyMap Simulator</strong> (<code className="text-emerald-400 font-mono">axonwall-tui</code>), the declarative{' '}
           <code className="text-white font-mono">axonwallctl</code> CLI, and a pre-tuned <strong>Oh My Zsh + Starship</strong> workstation.
@@ -31,17 +31,17 @@ export default function CliSuperConfiguratorDocPage() {
       {/* Section 1: Neovim Super Configurator */}
       <section id="neovim-super-configurator" className="space-y-6">
         <h2 className="text-2xl font-bold text-white flex items-center gap-2">
-          <Terminal className="w-6 h-6 text-emerald-400" /> 1. Neovim Super Configurator (<code className="font-mono text-emerald-400">axonwall-config</code>) — All 12 YAML Domains
+          <Terminal className="w-6 h-6 text-emerald-400" /> 1. Neovim Super Configurator (<code className="font-mono text-emerald-400">axonwall-config</code>) — All 14 YAML Domains
         </h2>
         <p className="text-sm text-slate-300 leading-relaxed">
-          <code className="text-emerald-400 font-mono">axonwall-config</code> (also accessible via <code className="text-emerald-400 font-mono">axonwallctl config [domain]</code>) launches an isolated Neovim Lua workspace mapping 1:1 to all <strong>12 canonical YAML domain files</strong> in <code className="text-slate-200 font-mono">/etc/axonwall/</code>, pairing structured multi-pane navigation with live diff and schema drawers:
+          <code className="text-emerald-400 font-mono">axonwall-config</code> (also accessible via <code className="text-emerald-400 font-mono">axonwallctl config [domain]</code>) launches an isolated Neovim Lua workspace mapping 1:1 to all <strong>14 canonical YAML domain files</strong> in <code className="text-slate-200 font-mono">/etc/axonwall/</code>, pairing structured multi-pane navigation with live diff and schema drawers:
         </p>
 
         <CodeBlock
-          title="Neovim Super Configurator 12-Domain TUI Layout (axonwall-config)"
+          title="Neovim Super Configurator 14-Domain TUI Layout (axonwall-config)"
           language="text"
           code={`+------------------------+------------------------------------------------------------+
-|  12 AXONWALL DOMAINS   |  [8] ha.yaml — High Availability & Fleet Satellites        |
+|  14 AXONWALL DOMAINS   |  [8] ha.yaml — High Availability & Fleet Satellites        |
 |                        |  Path: /etc/axonwall/ha.yaml                    [MODIFIED] |
 |  1. system             |------------------------------------------------------------|
 |  2. interfaces         |  ha:                                                       |
@@ -55,7 +55,8 @@ export default function CliSuperConfiguratorDocPage() {
 | 10. k3s                |      requireSignedPayloads: true                           |
 | 11. virt               |                                                            |
 | 12. vigilante          |  [<Tab>] Switch Pane  [j/k] Domain  [<C-d>] Diff Drawer    |
-|                        |  [<C-y>] YAML/Schema  [<C-s>/:AxonSave]  [:AxonApply]      |
+| 13. topology           |  [<C-y>] YAML/Schema  [<C-s>/:AxonSave]  [:AxonApply]      |
+| 14. netflow            |                                                            |
 +------------------------+------------------------------------------------------------+`}
         />
 
@@ -63,8 +64,8 @@ export default function CliSuperConfiguratorDocPage() {
           <div className="p-4 rounded-xl bg-slate-900 border border-slate-800 space-y-2">
             <h3 className="font-bold text-white text-sm">Keybindings, Drawers &amp; Ex Commands</h3>
             <ul className="space-y-1.5 text-slate-300 list-disc list-inside">
-              <li><code className="font-mono text-emerald-400">&lt;Tab&gt;</code>: Switch focus between left 12-domain sidebar and active editor pane</li>
-              <li><code className="font-mono text-emerald-400">j</code> / <code className="font-mono text-emerald-400">k</code> (in sidebar): Navigate across the 12 canonical YAML domains</li>
+              <li><code className="font-mono text-emerald-400">&lt;Tab&gt;</code>: Switch focus between left 14-domain sidebar and active editor pane</li>
+              <li><code className="font-mono text-emerald-400">j</code> / <code className="font-mono text-emerald-400">k</code> (in sidebar): Navigate across the 14 canonical YAML domains</li>
               <li><code className="font-mono text-emerald-400">&lt;C-d&gt;</code>: Toggle live structural unified diff drawer against committed state</li>
               <li><code className="font-mono text-emerald-400">&lt;C-y&gt;</code>: Toggle compiled YAML / Zod schema reference drawer</li>
               <li><code className="font-mono text-emerald-400">&lt;C-s&gt;</code> or <code className="font-mono text-emerald-400">:AxonSave</code>: Validate schema and write domain file to <code className="font-mono">/etc/axonwall/*.yaml</code></li>
@@ -73,23 +74,25 @@ export default function CliSuperConfiguratorDocPage() {
           </div>
 
           <div className="p-4 rounded-xl bg-slate-900 border border-slate-800 space-y-2">
-            <h3 className="font-bold text-white text-sm">Direct Jump to Any of the 12 Domains</h3>
+            <h3 className="font-bold text-white text-sm">Direct Jump to Any of the 14 Domains</h3>
             <CodeBlock
               title="Open Directly to Any Canonical YAML Domain"
               language="bash"
-              code={`axonwall-config              # Interactive 12-domain workspace
+              code={`axonwall-config              # Interactive 14-domain workspace
 axonwall-config system       # Capabilities, plugins, Eluvix, observability
 axonwall-config interfaces   # Physical NICs, VLANs, bridges, bonds, VRFs
 axonwall-config firewall     # Aliases, nftables rules, NAT, trafficShaper
 axonwall-config routing      # Gateways, multi-WAN groups, static & FRR BGP/OSPF
-axonwall-config services     # Kea DHCP, Unbound DNS/RPZ, HAProxy, FreeRADIUS
+axonwall-config services     # Kea DHCP, Unbound RPZ, HAProxy, RADIUS, NetBox, LibreNMS
 axonwall-config vpn          # WireGuard, PQ Rosenpass, IPsec, OpenVPN, Headscale
-axonwall-config security     # Suricata, CrowdSec, GeoIP, SSO, hostDefense
+axonwall-config security     # Suricata, CrowdSec, GeoIP, SSO, hostDefense, threatHarvester
 axonwall-config ha           # 2-Host High Availability & Fleet Edge nodes
 axonwall-config storage      # OpenZFS pools, datasets, SMB/NFS/iSCSI, S3 Vault
 axonwall-config k3s          # K3s cluster, OpenEBS CSI, Vigilant Octo Waffle
 axonwall-config virt         # KVM/QEMU VMs, LXC containers, VFIO, hostedEdge
-axonwall-config vigilante    # Vigilante Autonomous SOC & SOAR`}
+axonwall-config vigilante    # Vigilante Autonomous SOC & SOAR
+axonwall-config topology     # Topology Studio fabric links, lldpd & probes
+axonwall-config netflow      # NetFlow/IPFIX/sFlow collector, ClickHouse & baselines`}
             />
           </div>
         </div>
@@ -147,7 +150,7 @@ axonwall-tui --readonly`}
           title="axonwallctl Control-Plane CLI Commands"
           language="bash"
           code={`axonwallctl status                         # Daemon health, boot slot/BE, active roles, pending timer
-axonwallctl validate                       # Lint all 12 /etc/axonwall/*.yaml files + nft -c dry-run
+axonwallctl validate                       # Lint all 14 /etc/axonwall/*.yaml files + nft -c dry-run
 axonwallctl diff                           # Structural diff between /etc/axonwall/*.yaml and live state
 sudo axonwallctl apply                     # Apply bundle with 120s Commit-Confirm auto-revert timer
 sudo axonwallctl apply --no-confirm        # Apply and commit immediately (automation / CI pipelines)
@@ -169,6 +172,10 @@ sudo axonwallctl ebpf xdp-unblock <ip|cidr>
 sudo axonwallctl ebpf syn-limit [pps|off]  # Inspect or set Ring-0 TCP SYN-flood PPS rate limit (>= 100 PPS)
 axonwallctl ebpf render-k3s [--profile networking-safe] [--namespace default] [--name <pod>]
 axonwallctl harvester <status|episodes|simulate|export|ship> [--json]  # Blackbox Threat-LLM Harvester CLI
+axonwallctl netflow status [--json]        # NetFlow/IPFIX/sFlow listeners, eBPF self-exporter & template cache
+axonwallctl netflow query [fql] [--fql <expr>] [--minutes <n>] [--limit <n>] [--scope local|fleet] [--biflow]
+axonwallctl netflow fleet-query [fql] [--minutes <n>] [--limit <n>] [--biflow]
+axonwallctl netflow report [--range 7d] [--group interface|exporter|asn|application|vlan|subnet] [--format markdown|csv|json] [--json]
 axonwallctl nas <status|snapshot|rollback|scrub|trim|checkpoint|unlock|lock> ...
 axonwallctl virt <list|start|stop|reboot|snapshot|rollback|clone|migrate|xml> ...
 axonwallctl k3s <status|etcd-snapshots|etcd-save|etcd-restore> ...

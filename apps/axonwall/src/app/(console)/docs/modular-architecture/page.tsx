@@ -5,9 +5,9 @@ import { Callout } from '../components/Callout';
 import { CodeBlock } from '../components/CodeBlock';
 
 export const metadata = {
-  title: 'Modular Appliance Architecture: 5 Core Roles & 18 Plugins | Axonwall Documentation',
+  title: 'Modular Appliance Architecture: 5 Core Roles & 22 Plugins | Axonwall Documentation',
   description:
-    'Comprehensive documentation for Axonwall v0.14.1 modular core roles (core-firewall, core-nas, core-k3s, core-virt, core-vigilante), 18 built-in systemd sandboxed extension plugins, SHA-256 bundled binary provisioning, and Minimal edition on-demand installation.',
+    'Comprehensive documentation for Axonwall v0.15.1 modular core roles (core-firewall, core-nas, core-k3s, core-virt, core-vigilante), 22 built-in systemd sandboxed extension plugins (27 total), SHA-256 bundled binary provisioning, and Minimal edition on-demand installation.',
 };
 
 export default function ModularArchitectureDocPage() {
@@ -17,14 +17,14 @@ export default function ModularArchitectureDocPage() {
       <div className="space-y-4 border-b border-slate-800/80 pb-8">
         <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-950/60 border border-emerald-500/30 text-emerald-400 text-xs font-semibold">
           <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-          Core Appliance System Architecture • v0.14.1
+          Core Appliance System Architecture • v0.15.1
         </div>
         <h1 className="text-3xl sm:text-5xl font-extrabold text-white tracking-tight">
           Modular Core Roles: Firewall, ZFS NAS, K3s, Hypervisor &amp; Vigilante SOC
         </h1>
         <p className="text-base sm:text-lg text-slate-400 leading-relaxed max-w-3xl">
           Axonwall is a hyper-converged, role-modular operating system governed by <strong>5 Core Roles</strong> and{' '}
-          <strong>18 built-in sandboxed extension plugins</strong> (23 total plugins with SHA-256-verified bundled binary archives and on-demand installation on <code className="text-amber-300 font-mono">minimal</code> hosts). Disable <code className="text-emerald-400 font-mono">core-firewall</code> to run as a dedicated Host-Mode ZFS NAS or KVM hypervisor, run as a wire-speed Next-Gen Firewall, or converge all five roles on high-availability bare-metal clusters.
+          <strong>22 built-in sandboxed extension plugins</strong> (27 total plugins with SHA-256-verified bundled binary archives and on-demand installation on <code className="text-amber-300 font-mono">minimal</code> hosts). Disable <code className="text-emerald-400 font-mono">core-firewall</code> to run as a dedicated Host-Mode ZFS NAS or KVM hypervisor, run as a wire-speed Next-Gen Firewall, or converge all five roles on high-availability bare-metal clusters.
         </p>
       </div>
 
@@ -188,15 +188,15 @@ export default function ModularArchitectureDocPage() {
         </div>
       </section>
 
-      {/* 18 Built-in Extension Plugins */}
+      {/* 22 Built-in Extension Plugins */}
       <section id="extension-plugins" className="space-y-6 pt-6 border-t border-slate-800/80">
         <h2 className="text-2xl font-bold text-white flex items-center gap-2">
-          <Zap className="w-6 h-6 text-emerald-400" /> 18 Built-In Extension Plugins &amp; Bundled Binaries
+          <Zap className="w-6 h-6 text-emerald-400" /> 22 Built-In Extension Plugins &amp; Bundled Binaries
         </h2>
         <p className="text-sm text-slate-300 leading-relaxed">
-          Beyond the 5 Core Roles, Axonwall includes <strong>18 first-party extension plugins</strong> managed declaratively in{' '}
+          Beyond the 5 Core Roles, Axonwall includes <strong>22 first-party extension plugins</strong> managed declaratively in{' '}
           <code className="text-emerald-400 font-mono">/etc/axonwall/system.yaml</code> or imperatively via{' '}
-          <code className="text-emerald-400 font-mono">axonwallctl plugin</code>. Three workstation &amp; host-security plugins ship enabled out of the box (unless provisioned with the <code className="text-amber-300 font-mono">minimal</code> edition), while fifteen specialized network, VPN, AI, editor, and SecOps plugins remain opt-in to keep the default attack surface minimal.
+          <code className="text-emerald-400 font-mono">axonwallctl plugin</code>. Three workstation &amp; host-security plugins ship enabled out of the box (unless provisioned with the <code className="text-amber-300 font-mono">minimal</code> edition), while nineteen specialized network, NetFlow/topology, DCIM/monitoring, VPN, AI, editor, and SecOps plugins remain opt-in to keep the default attack surface minimal.
         </p>
 
         <div className="p-4 rounded-xl bg-slate-900/90 border border-emerald-500/25 text-xs text-slate-300 leading-relaxed space-y-1.5">
@@ -305,7 +305,7 @@ export default function ModularArchitectureDocPage() {
                 <td className="p-2.5 font-mono text-sky-400 font-semibold">netflow-collector</td>
                 <td className="p-2.5 text-slate-400">Opt-In</td>
                 <td className="p-2.5 font-mono text-slate-400">netflow.yaml</td>
-                <td className="p-2.5">High-speed NetFlow v5/v9, IPFIX &amp; sFlow v5 collector with eBPF self-export, UDP fan-out replicator, compressed Zstd/ClickHouse analytics, DNS/SNMP/GeoIP/K3s/Threat enrichment, FQL query engine &amp; SOAR/XDP auto-mitigation</td>
+                <td className="p-2.5">Multi-protocol NetFlow v5/v9, IPFIX (UDP/TCP/TLS 1.3 mTLS) &amp; sFlow v5 collector (<code className="font-mono">SO_REUSEPORT</code>), dual-stack eBPF self-export + <code className="font-mono">NETLINK_SOCK_DIAG</code> TCP RTT/retransmits, UDP fan-out replicator, pure-Go <code className="font-mono">.mmdb</code>/FRR BGP/K3s/conntrack NAT enrichment, 1m/5m/1h Zstd + ClickHouse SQL pushdown, 95th-pct reports, 7d×24h EWMA baselines, Fleet Federation, Prometheus <code className="font-mono">/metrics</code> &amp; FQL Studio</td>
               </tr>
               <tr>
                 <td className="p-2.5 font-mono text-sky-400 font-semibold">snmp</td>
@@ -360,7 +360,7 @@ export default function ModularArchitectureDocPage() {
           <Terminal className="w-5 h-5 text-emerald-400" /> Managing Roles &amp; Plugins via YAML and CLI
         </h2>
         <p className="text-xs text-slate-400 leading-relaxed">
-          Configure Core Roles and extension plugins declaratively in <code className="text-emerald-400 font-mono">/etc/axonwall/system.yaml</code> (with domain-specific settings in <code className="text-slate-200 font-mono">storage.yaml</code>, <code className="text-slate-200 font-mono">k3s.yaml</code>, <code className="text-slate-200 font-mono">virt.yaml</code>, and <code className="text-slate-200 font-mono">vigilante.yaml</code>), or manage plugins directly from the CLI:
+          Configure Core Roles and extension plugins declaratively in <code className="text-emerald-400 font-mono">/etc/axonwall/system.yaml</code> (with domain-specific settings in <code className="text-slate-200 font-mono">storage.yaml</code>, <code className="text-slate-200 font-mono">k3s.yaml</code>, <code className="text-slate-200 font-mono">virt.yaml</code>, <code className="text-slate-200 font-mono">vigilante.yaml</code>, <code className="text-slate-200 font-mono">topology.yaml</code>, and <code className="text-slate-200 font-mono">netflow.yaml</code>), or manage plugins directly from the CLI:
         </p>
 
         <CodeBlock
@@ -392,7 +392,7 @@ plugins:
         <CodeBlock
           title="CLI Plugin Lifecycle Management (axonwallctl plugin)"
           language="bash"
-          code={`# List all 5 Core Roles & 18 extension plugins with live systemd & binary state
+          code={`# List all 5 Core Roles & 22 extension plugins with live systemd & binary state
 axonwallctl plugin list
 
 # Enable or disable built-in plugins (updates /etc/axonwall/system.yaml & reconciles)

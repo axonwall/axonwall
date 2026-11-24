@@ -7,7 +7,7 @@ import { CodeBlock } from '../components/CodeBlock';
 export const metadata = {
   title: 'REST API, Fleet/MCP, Agent Sockets & Terraform Reference | Axonwall Documentation',
   description:
-    'Complete REST/OpenAPI endpoints, Server-Sent Events (SSE) packet streams, Fleet & MCP security APIs, Go agent Unix socket IPC, and official Terraform / OpenTofu provider for Axonwall v0.14.1.',
+    'Complete REST/OpenAPI endpoints, Server-Sent Events (SSE) packet streams, Fleet & MCP security APIs, Go agent Unix socket IPC, and official Terraform / OpenTofu provider for Axonwall v0.15.1.',
 };
 
 export default function ApiReferenceDocPage() {
@@ -17,7 +17,7 @@ export default function ApiReferenceDocPage() {
       <div className="space-y-4 border-b border-slate-800/80 pb-8">
         <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-950/60 border border-emerald-500/30 text-emerald-400 text-xs font-semibold">
           <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-          Developer, IaC &amp; Automation • v0.14.1
+          Developer, IaC &amp; Automation • v0.15.1
         </div>
         <h1 className="text-3xl sm:text-5xl font-extrabold text-white tracking-tight">
           REST, Fleet/MCP, Agent Socket &amp; Terraform Reference
@@ -71,12 +71,12 @@ export default function ApiReferenceDocPage() {
               <tr>
                 <td className="p-3 font-mono text-sky-400 font-bold">GET</td>
                 <td className="p-3 font-mono text-emerald-400">/api/v1/status</td>
-                <td className="p-3">Appliance health, version (<code className="font-mono">0.13.0</code>), active boot slot/BE/snapshot, and Commit-Confirm timer state.</td>
+                <td className="p-3">Appliance health, version (<code className="font-mono">0.15.1</code>), active boot slot/BE/snapshot, and Commit-Confirm timer state.</td>
               </tr>
               <tr>
                 <td className="p-3 font-mono text-sky-400 font-bold">GET / PUT</td>
                 <td className="p-3 font-mono text-emerald-400">/api/v1/state</td>
-                <td className="p-3">Read or stage the merged DesiredState across all 12 <code className="font-mono">/etc/axonwall/*.yaml</code> domains.</td>
+                <td className="p-3">Read or stage the merged DesiredState across all 14 <code className="font-mono">/etc/axonwall/*.yaml</code> domains.</td>
               </tr>
               <tr>
                 <td className="p-3 font-mono text-emerald-400 font-bold">POST</td>
@@ -142,6 +142,21 @@ export default function ApiReferenceDocPage() {
                 <td className="p-3 font-mono text-sky-400 font-bold">GET / POST</td>
                 <td className="p-3 font-mono text-cyan-400">/api/v1/security/threat-harvester/*</td>
                 <td className="p-3">Axonwall Blackbox Threat-LLM Harvester: inspect TCX/tracepoint/uprobe telemetry (<code className="font-mono">status</code>), filter/review/Teacher-LLM-annotate/simulate episodes (<code className="font-mono">episodes</code>), stream Crypto-PAn anonymized Dual-Track <code className="font-mono">.tar.zst</code> bundles (<code className="font-mono">export</code>), and upload via AWS SigV4 (<code className="font-mono">ship</code>).</td>
+              </tr>
+              <tr>
+                <td className="p-3 font-mono text-sky-400 font-bold">GET / POST / DEL</td>
+                <td className="p-3 font-mono text-sky-400">/api/v1/netflow/*</td>
+                <td className="p-3">NetFlow/IPFIX/sFlow Collector Studio: <code className="font-mono">status</code>, <code className="font-mono">query</code> (FQL / ClickHouse / <code className="font-mono">scope: fleet</code>), <code className="font-mono">stream</code> (SSE), <code className="font-mono">exporters</code>, <code className="font-mono">templates</code>, <code className="font-mono">alerts</code>, <code className="font-mono">reports</code> (95th-pct CSV/MD/JSON), <code className="font-mono">baselines</code>, <code className="font-mono">geoip/update</code>, <code className="font-mono">metrics</code> (Prometheus), and <code className="font-mono">test-inject</code>.</td>
+              </tr>
+              <tr>
+                <td className="p-3 font-mono text-sky-400 font-bold">GET / POST</td>
+                <td className="p-3 font-mono text-emerald-400">/api/v1/topology/*</td>
+                <td className="p-3">Topology Studio multi-host fabric editor: merged <code className="font-mono">fabric</code> graph, strict Green/Yellow/Red <code className="font-mono">probe</code>, phased transactional <code className="font-mono">apply</code>, and NetBox/LibreNMS Triad <code className="font-mono">sync</code>.</td>
+              </tr>
+              <tr>
+                <td className="p-3 font-mono text-sky-400 font-bold">GET / POST</td>
+                <td className="p-3 font-mono text-emerald-400">/api/v1/services/&#123;netbox,librenms&#125;/*</td>
+                <td className="p-3">K3s NetBox v4 DCIM/IPAM (<code className="font-mono">status</code>, <code className="font-mono">sync</code>) and LibreNMS discovery hub (<code className="font-mono">status</code>, <code className="font-mono">sync</code>, <code className="font-mono">topology</code>, <code className="font-mono">netbox-sync</code>, <code className="font-mono">webhook</code>).</td>
               </tr>
             </tbody>
           </table>
@@ -274,6 +289,9 @@ sudo curl -s --unix-socket /run/axonwall/agent-api.sock \\
 //    POST /v1/security/threat-harvester/ship     -> Ship Crypto-PAn anonymized bundle to S3 / Vault via AWS SigV4
 //    GET  /v1/ha/sync-trust              -> HA PKI enrollment, effective transport (mtls), SHA-256 fingerprints
 //    GET  /v1/system/telemetry/hardware  -> HWMON thermal/fan/voltage sensors & SFP+/QSFP optical DOM
+//    GET/POST /v1/netflow/{status,query,stream,exporters,templates,alerts,alerts/ack,reports,reports/generate,baselines,geoip/update,metrics,test-inject}
+//    GET/POST /v1/topology/{fabric,probe,apply,sync/netbox,sync/librenms}
+//    GET/POST /v1/{netbox,librenms}/*    -> NetBox v4 & LibreNMS Triad sync, credentials, topology & alert webhooks
 
 // 2. /run/axonwall/agent.sock            -> Internal gRPC control-plane socket
 // 3. /run/axonwall/ha.sock               -> 0600 root:root SO_PEERCRED Keepalived MASTER/BACKUP/FAULT hook`}
@@ -296,7 +314,7 @@ sudo curl -s --unix-socket /run/axonwall/agent-api.sock \\
   required_providers {
     axonwall = {
       source  = "axonwall/axonwall"
-      version = "~> 0.14.1"
+      version = "~> 0.15.1"
     }
   }
 }

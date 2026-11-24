@@ -5,7 +5,7 @@ import { CodeBlock } from '../components/CodeBlock';
 export const metadata = {
   title: 'Kubernetes (K3s), Cilium eBPF CNI, Etcd Snapshots & OpenEBS | Axonwall Documentation',
   description:
-    'Complete guide to running K3s Kubernetes and OpenEBS distributed storage on Axonwall v0.14.1: Cilium eBPF CNI (kube-proxy replacement + Hubble), Browser K9s Live Explorer, Node Roles & Taints Modal, embedded etcd snapshots & S3 backup/restore, automated HA peer join, WireGuard flannel mesh, axonwall-kubeconfig VIP sync, ZFS-LocalPV, and Mayastor NVMe-oF replication.',
+    'Complete guide to running K3s Kubernetes and OpenEBS distributed storage on Axonwall v0.15.1: Cilium eBPF CNI (kube-proxy replacement + Hubble), Browser K9s Live Explorer, Node Roles & Taints Modal, embedded etcd snapshots & S3 backup/restore, automated HA peer join, WireGuard flannel mesh, axonwall-kubeconfig VIP sync, ZFS-LocalPV, and Mayastor NVMe-oF replication.',
 };
 
 export default function K3sKubernetesDocPage() {
@@ -15,7 +15,7 @@ export default function K3sKubernetesDocPage() {
       <div className="space-y-4 border-b border-slate-800/80 pb-8">
         <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-950/60 border border-emerald-500/30 text-emerald-400 text-xs font-semibold">
           <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-          Container Orchestration &amp; Cloud-Native Storage • v0.14.1
+          Container Orchestration &amp; Cloud-Native Storage • v0.15.1
         </div>
         <h1 className="text-3xl sm:text-5xl font-extrabold text-white tracking-tight">
           Kubernetes (K3s) &amp; OpenEBS Distributed Storage

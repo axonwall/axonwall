@@ -325,6 +325,308 @@ export async function GET() {
           },
         },
       },
+      '/netflow/status': {
+        get: {
+          summary: 'Get NetFlow / IPFIX / sFlow collector pipeline & exporter status',
+          description:
+            'Returns active UDP/TCP/TLS 1.3 mTLS listener health, eBPF self-exporter state, ClickHouse & Zstd rollup status, GeoIP database status, and aggregated flow counters.',
+          responses: {
+            '200': { description: 'NetFlow collector pipeline status snapshot' },
+            '401': { description: 'Unauthorized' },
+          },
+        },
+      },
+      '/netflow/query': {
+        post: {
+          summary: 'Execute Flow Query Language (FQL) search or ClickHouse SQL pushdown',
+          description:
+            'Queries ingested flows and historical 1m/5m/1h Zstd rollups or ClickHouse using FQL filters, optional bidirectional session stitching (biflow), heatmaps, geo arcs, or multi-host Fleet Federation (scope: fleet).',
+          requestBody: {
+            required: true,
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    fql: { type: 'string', description: 'Flow Query Language expression' },
+                    rangeMinutes: { type: 'integer', default: 60 },
+                    startMs: { type: 'integer', description: 'Optional brush-zoom window start epoch ms' },
+                    endMs: { type: 'integer', description: 'Optional brush-zoom window end epoch ms' },
+                    limit: { type: 'integer', default: 100 },
+                    scope: { type: 'string', enum: ['local', 'fleet'], default: 'local' },
+                    biflow: { type: 'boolean', default: false },
+                  },
+                },
+              },
+            },
+          },
+          responses: {
+            '200': { description: 'Matched flow records, aggregates, rollups, sessions, heatmaps, and geo arcs' },
+            '400': { description: 'Invalid FQL syntax or parameters' },
+          },
+        },
+      },
+      '/netflow/stream': {
+        get: {
+          summary: 'Stream real-time enriched flow records (SSE)',
+          description:
+            'Establishes a persistent Server-Sent Events (text/event-stream) feed of enriched NetFlow v5/v9, IPFIX, sFlow v5, and eBPF flows, optionally filtered by ?fql=...',
+          parameters: [
+            {
+              name: 'fql',
+              in: 'query',
+              required: false,
+              schema: { type: 'string' },
+            },
+          ],
+          responses: {
+            '200': { description: 'SSE flow telemetry stream' },
+            '401': { description: 'Unauthorized' },
+          },
+        },
+      },
+      '/netflow/exporters': {
+        get: {
+          summary: 'List discovered flow exporters and live packet rates',
+          description:
+            'Returns exporting router/switch/host IPs, protocol versions (NetFlow v5/v9, IPFIX, sFlow v5), TLS/mTLS session state, packet/flow rates, and last-seen timestamps.',
+          responses: {
+            '200': { description: 'Discovered NetFlow/IPFIX/sFlow exporters' },
+            '401': { description: 'Unauthorized' },
+          },
+        },
+      },
+      '/netflow/templates': {
+        get: {
+          summary: 'Inspect decoded NetFlow v9 & IPFIX option/data templates',
+          description:
+            'Lists active template IDs (including eBPF dual-stack Template 256 IPv4 and Template 257 IPv6), Enterprise Private PEN fields, NAT/CGNAT IEs 225-228, and decoded field definitions.',
+          responses: {
+            '200': { description: 'Template cache inventory' },
+            '401': { description: 'Unauthorized' },
+          },
+        },
+      },
+      '/netflow/alerts': {
+        get: {
+          summary: 'List flow anomaly, threshold & baseline deviation alerts',
+          description:
+            'Returns active and acknowledged volumetric, DDoS, EWMA Z-score baseline deviation, and first-seen peer-pair alerts.',
+          responses: {
+            '200': { description: 'NetFlow anomaly and threshold alerts' },
+            '401': { description: 'Unauthorized' },
+          },
+        },
+        post: {
+          summary: 'Acknowledge a NetFlow alert or all active alerts',
+          requestBody: {
+            required: false,
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    id: { type: 'string', default: 'all' },
+                  },
+                },
+              },
+            },
+          },
+          responses: {
+            '200': { description: 'Alert acknowledgement result' },
+          },
+        },
+      },
+      '/netflow/reports': {
+        get: {
+          summary: 'Generate 95th/99th percentile capacity & billing report',
+          description:
+            'Computes 95th/99th percentile throughput and byte/packet rollups grouped by interface, exporter, ASN, application, VLAN, or subnet in json, csv, or markdown format (pass raw=1 for direct file download).',
+          parameters: [
+            { name: 'rangeDays', in: 'query', required: false, schema: { type: 'integer', default: 7 } },
+            { name: 'groupBy', in: 'query', required: false, schema: { type: 'string', default: 'interface' } },
+            { name: 'format', in: 'query', required: false, schema: { type: 'string', enum: ['json', 'csv', 'markdown'], default: 'json' } },
+            { name: 'raw', in: 'query', required: false, schema: { type: 'string', enum: ['0', '1'] } },
+          ],
+          responses: {
+            '200': { description: '95th-percentile report payload or attachment' },
+          },
+        },
+        post: {
+          summary: 'Persist a scheduled 95th-percentile report snapshot',
+          requestBody: {
+            required: false,
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    rangeDays: { type: 'integer', default: 7 },
+                    groupBy: { type: 'string', default: 'interface' },
+                    format: { type: 'string', enum: ['json', 'csv', 'markdown'], default: 'json' },
+                  },
+                },
+              },
+            },
+          },
+          responses: {
+            '200': { description: 'Generated report snapshot metadata' },
+          },
+        },
+      },
+      '/netflow/baselines': {
+        get: {
+          summary: 'Inspect learned 7d x 24h EWMA anomaly baselines',
+          parameters: [
+            { name: 'limit', in: 'query', required: false, schema: { type: 'integer', default: 50 } },
+          ],
+          responses: {
+            '200': { description: 'Learned 168-slot baseline entries' },
+          },
+        },
+        delete: {
+          summary: 'Reset learned 7d x 24h EWMA baselines',
+          responses: {
+            '200': { description: 'Baselines cleared' },
+          },
+        },
+      },
+      '/netflow/geoip/update': {
+        post: {
+          summary: 'Trigger on-demand HTTPS MaxMind GeoLite2 / DB-IP MMDB database update',
+          responses: {
+            '200': { description: 'GeoIP MMDB databases refreshed' },
+            '502': { description: 'Upstream MMDB update failed' },
+          },
+        },
+      },
+      '/netflow/metrics': {
+        get: {
+          summary: 'Expose Prometheus text format NetFlow collector & exporter metrics',
+          description:
+            'Returns OpenMetrics / Prometheus text/plain; version=0.0.4 metrics for collector throughput, drops, templates, exporters, alerts, and baselines.',
+          responses: {
+            '200': { description: 'Prometheus metrics exposition' },
+            '401': { description: 'Unauthorized' },
+          },
+        },
+      },
+      '/netflow/test-inject': {
+        post: {
+          summary: 'Inject a synthetic flow burst for collector & FQL pipeline validation',
+          requestBody: {
+            required: false,
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    protocol: { type: 'string', default: 'ipfix' },
+                    count: { type: 'integer', default: 12 },
+                  },
+                },
+              },
+            },
+          },
+          responses: {
+            '200': { description: 'Synthetic flow burst injected' },
+          },
+        },
+      },
+      '/topology/fabric': {
+        get: {
+          summary: 'Inspect Topology Studio merged multi-host fabric graph & DesiredState projection',
+          responses: {
+            '200': { description: 'Merged fabric topology graph' },
+          },
+        },
+      },
+      '/topology/probe': {
+        get: {
+          summary: 'Run strict Green/Yellow/Red live link, carrier, LLDP & BGP fabric probes',
+          responses: {
+            '200': { description: 'Live fabric health probe report' },
+          },
+        },
+      },
+      '/topology/apply': {
+        post: {
+          summary: 'Execute phased transactional Topology Studio fabric apply',
+          responses: {
+            '200': { description: 'Fabric plan applied' },
+          },
+        },
+      },
+      '/topology/sync': {
+        post: {
+          summary: 'Synchronize Topology Studio graph with NetBox or LibreNMS Triad',
+          responses: {
+            '200': { description: 'Triad synchronization result' },
+          },
+        },
+      },
+      '/services/netbox/status': {
+        get: {
+          summary: 'Get K3s-native NetBox v4 DCIM/IPAM deployment & OpenLDAP SSO status',
+          responses: {
+            '200': { description: 'NetBox status snapshot' },
+          },
+        },
+      },
+      '/services/netbox/sync': {
+        post: {
+          summary: 'Run idempotent Axonwall-to-NetBox DCIM/IPAM inventory reconciliation',
+          responses: {
+            '200': { description: 'NetBox sync report' },
+          },
+        },
+      },
+      '/services/librenms/status': {
+        get: {
+          summary: 'Get LibreNMS SNMPv2c/v3, LLDP/CDP & optical DOM hub status',
+          responses: {
+            '200': { description: 'LibreNMS status snapshot' },
+          },
+        },
+      },
+      '/services/librenms/sync': {
+        post: {
+          summary: 'Synchronize monitored hosts and SNMP credentials with LibreNMS',
+          responses: {
+            '200': { description: 'LibreNMS sync report' },
+          },
+        },
+      },
+      '/services/librenms/topology': {
+        get: {
+          summary: 'Fetch LLDP/CDP/FDB L2/L3 neighbor discovery graph from LibreNMS',
+          responses: {
+            '200': { description: 'LibreNMS discovery topology' },
+          },
+        },
+      },
+      '/services/librenms/netbox-sync': {
+        post: {
+          summary: 'Cross-sync discovered LibreNMS links and cables into NetBox DCIM',
+          responses: {
+            '200': { description: 'LibreNMS-to-NetBox sync report' },
+          },
+        },
+      },
+      '/services/librenms/webhook': {
+        get: {
+          summary: 'Inspect recent LibreNMS alert webhook deliveries',
+          responses: {
+            '200': { description: 'Recent LibreNMS alert webhooks' },
+          },
+        },
+        post: {
+          summary: 'Receive LibreNMS alert webhook notification',
+          responses: {
+            '200': { description: 'Webhook ingested' },
+          },
+        },
+      },
     },
   };
 

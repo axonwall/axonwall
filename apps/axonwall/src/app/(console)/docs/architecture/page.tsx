@@ -4,9 +4,9 @@ import { Callout } from '../components/Callout';
 import { CodeBlock } from '../components/CodeBlock';
 
 export const metadata = {
-  title: 'Axonwall Architecture | Linux nftables, 12-Domain YAML & Boot Engines',
+  title: 'Axonwall Architecture | Linux nftables, 14-Domain YAML & Boot Engines',
   description:
-    'Deep-dive into Axonwall v0.14.1 architecture: Linux nftables + eBPF XDP multi-core scaling, 12 declarative /etc/axonwall/*.yaml domains, Junos-style commit-confirm, A/B Dual-Root, Btrfs + Snapper & ZFSBootMenu updates, and Go daemon IPC.',
+    'Deep-dive into Axonwall v0.15.1 architecture: Linux nftables + eBPF XDP multi-core scaling, 14 declarative /etc/axonwall/*.yaml domains, Junos-style commit-confirm, A/B Dual-Root, Btrfs + Snapper & ZFSBootMenu updates, and Go daemon IPC.',
 };
 
 export default function ArchitectureDocPage() {
@@ -16,13 +16,13 @@ export default function ArchitectureDocPage() {
       <div className="space-y-4 border-b border-slate-800/80 pb-8">
         <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-950/60 border border-emerald-500/30 text-emerald-400 text-xs font-semibold">
           <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-          Core Subsystems • v0.14.1
+          Core Subsystems • v0.15.1
         </div>
         <h1 className="text-3xl sm:text-5xl font-extrabold text-white tracking-tight">
           System Architecture &amp; Engine
         </h1>
         <p className="text-base sm:text-lg text-slate-400 leading-relaxed max-w-3xl">
-          Axonwall replaces the 20-year-old FreeBSD <code className="text-slate-200 font-mono">pf</code> model with the modern Linux 6.12 LTS networking stack, pure <code className="text-emerald-400 font-mono">nftables</code> + Ring-0 eBPF XDP packet processing, 12 declarative YAML domain manifests, unbrickable A/B Dual-Root &amp; ZFSBootMenu updates, and Junos-style transactional commit-confirm.
+          Axonwall replaces the 20-year-old FreeBSD <code className="text-slate-200 font-mono">pf</code> model with the modern Linux 6.12 LTS networking stack, pure <code className="text-emerald-400 font-mono">nftables</code> + Ring-0 eBPF XDP packet processing, 14 declarative YAML domain manifests, unbrickable A/B Dual-Root &amp; ZFSBootMenu updates, and Junos-style transactional commit-confirm.
         </p>
       </div>
 
@@ -106,13 +106,13 @@ export default function ArchitectureDocPage() {
         />
       </section>
 
-      {/* Declarative 12-Domain YAML Configuration */}
+      {/* Declarative 14-Domain YAML Configuration */}
       <section id="declarative-yaml" className="space-y-6 pt-6 border-t border-slate-800/80">
         <h2 className="text-2xl font-bold text-white flex items-center gap-2">
-          <Layers className="w-6 h-6 text-emerald-400" /> 12-Domain Declarative YAML Configuration
+          <Layers className="w-6 h-6 text-emerald-400" /> 14-Domain Declarative YAML Configuration
         </h2>
         <p className="text-sm text-slate-300 leading-relaxed">
-          Axonwall decomposes its entire appliance state into <strong>12 canonical YAML domain files</strong> inside{' '}
+          Axonwall decomposes its entire appliance state into <strong>14 canonical YAML domain files</strong> inside{' '}
           <code className="text-emerald-400 font-mono">/etc/axonwall/</code>, merged deterministically with optional lexical drop-in overrides in{' '}
           <code className="text-emerald-400 font-mono">/etc/axonwall/conf.d/*.yaml</code> and compiled into a validated runtime snapshot at{' '}
           <code className="text-slate-200 font-mono">/etc/axonwall/state.json</code>. On A/B Dual-Root appliances,{' '}
@@ -134,14 +134,16 @@ export default function ArchitectureDocPage() {
               <tr><td className="p-2.5 text-slate-500">2</td><td className="p-2.5 text-emerald-400">/etc/axonwall/interfaces.yaml</td><td className="p-2.5 text-slate-300">interfaces, vlans, bridges, bonds, virtualIps, vrfs</td></tr>
               <tr><td className="p-2.5 text-slate-500">3</td><td className="p-2.5 text-emerald-400">/etc/axonwall/firewall.yaml</td><td className="p-2.5 text-slate-300">aliases, rules, nat, trafficShaper</td></tr>
               <tr><td className="p-2.5 text-slate-500">4</td><td className="p-2.5 text-emerald-400">/etc/axonwall/routing.yaml</td><td className="p-2.5 text-slate-300">gateways, gatewayGroups, routes, frr</td></tr>
-              <tr><td className="p-2.5 text-slate-500">5</td><td className="p-2.5 text-emerald-400">/etc/axonwall/services.yaml</td><td className="p-2.5 text-slate-300">dhcp, dns, captivePortal, haproxy, freeradius</td></tr>
+              <tr><td className="p-2.5 text-slate-500">5</td><td className="p-2.5 text-emerald-400">/etc/axonwall/services.yaml</td><td className="p-2.5 text-slate-300">dhcp, dns, captivePortal, haproxy, freeradius, netbox, librenms</td></tr>
               <tr><td className="p-2.5 text-slate-500">6</td><td className="p-2.5 text-emerald-400">/etc/axonwall/vpn.yaml</td><td className="p-2.5 text-slate-300">wireguard, rosenpass, ipsec, openvpn, headscale</td></tr>
-              <tr><td className="p-2.5 text-slate-500">7</td><td className="p-2.5 text-emerald-400">/etc/axonwall/security.yaml</td><td className="p-2.5 text-slate-300">suricata, crowdsec, geoip, zeroTrust, sso, tlsDecryption, hostDefense</td></tr>
+              <tr><td className="p-2.5 text-slate-500">7</td><td className="p-2.5 text-emerald-400">/etc/axonwall/security.yaml</td><td className="p-2.5 text-slate-300">suricata, crowdsec, geoip, zeroTrust, sso, tlsDecryption, hostDefense, threatHarvester</td></tr>
               <tr><td className="p-2.5 text-slate-500">8</td><td className="p-2.5 text-emerald-400">/etc/axonwall/ha.yaml</td><td className="p-2.5 text-slate-300">ha, fleet</td></tr>
               <tr><td className="p-2.5 text-slate-500">9</td><td className="p-2.5 text-emerald-400">/etc/axonwall/storage.yaml</td><td className="p-2.5 text-slate-300">nas</td></tr>
               <tr><td className="p-2.5 text-slate-500">10</td><td className="p-2.5 text-emerald-400">/etc/axonwall/k3s.yaml</td><td className="p-2.5 text-slate-300">k3s, vow</td></tr>
               <tr><td className="p-2.5 text-slate-500">11</td><td className="p-2.5 text-emerald-400">/etc/axonwall/virt.yaml</td><td className="p-2.5 text-slate-300">virt, hostedEdge</td></tr>
               <tr><td className="p-2.5 text-slate-500">12</td><td className="p-2.5 text-emerald-400">/etc/axonwall/vigilante.yaml</td><td className="p-2.5 text-slate-300">vigilante</td></tr>
+              <tr><td className="p-2.5 text-slate-500">13</td><td className="p-2.5 text-emerald-400">/etc/axonwall/topology.yaml</td><td className="p-2.5 text-slate-300">topology (fabric graph, physical/VLAN links, lldpd, health probes &amp; peers)</td></tr>
+              <tr><td className="p-2.5 text-slate-500">14</td><td className="p-2.5 text-emerald-400">/etc/axonwall/netflow.yaml</td><td className="p-2.5 text-slate-300">netflow (listeners, selfExporter, replicator, enrichment, rollups, ClickHouse, baselines)</td></tr>
             </tbody>
           </table>
         </div>

@@ -28,7 +28,7 @@ import { CodeBlock } from './components/CodeBlock';
 export const metadata = {
   title: 'Axonwall Documentation | Overview & Quickstart',
   description:
-    'Comprehensive documentation for Axonwall v0.14.1: Linux 6.12 LTS nftables firewall, Super-Slim Edge NGFW UEFI UKI, Blackbox eBPF Threat-LLM Harvester, Custom Hardened Kernels, ZFSBootMenu & Btrfs + Snapper Root, Minimal Edition, Bundled-Binary Plugins, KVM/LXC Hypervisor, Browser K9s, Vigilante Autonomous SOC, Eluvix Sovereign AI Router & DLP, 2-Host High Availability, Ghost-in-the-Ring rootkit hunter, and Post-Quantum Rosenpass VPN.',
+    'Comprehensive documentation for Axonwall v0.15.1: Linux 6.12 LTS nftables firewall, Super-Slim Edge NGFW UEFI UKI, NetFlow/IPFIX/sFlow Collector Studio, NetBox/LibreNMS/Topology Studio, Blackbox eBPF Threat-LLM Harvester, Custom Hardened Kernels, ZFSBootMenu & Btrfs + Snapper Root, Minimal Edition, Bundled-Binary Plugins, KVM/LXC Hypervisor, Browser K9s, Vigilante Autonomous SOC, Eluvix Sovereign AI Router & DLP, 2-Host High Availability, Ghost-in-the-Ring rootkit hunter, and Post-Quantum Rosenpass VPN.',
 };
 
 export default function DocsOverviewPage() {
@@ -38,7 +38,7 @@ export default function DocsOverviewPage() {
       <div className="space-y-4 border-b border-slate-800/80 pb-8">
         <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-950/60 border border-emerald-500/30 text-emerald-400 text-xs font-semibold">
           <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-          Documentation Portal • v0.14.1
+          Documentation Portal • v0.15.1
         </div>
         <h1 className="text-3xl sm:text-5xl font-extrabold text-white tracking-tight">
           Axonwall Documentation
@@ -180,7 +180,7 @@ export default function DocsOverviewPage() {
               <ArrowRight className="w-4 h-4 text-slate-500 group-hover:text-emerald-400 transition transform group-hover:translate-x-1" />
             </div>
             <p className="text-xs text-slate-400 leading-relaxed">
-              Hyperfocused Lua form TUI (axonwall-config) with native Vim motions across 12 domains, standalone axonwall-tui NastyMap topology simulator, and Oh My Zsh + Starship workstation.
+              Hyperfocused Lua form TUI (axonwall-config) with native Vim motions across 14 domains, standalone axonwall-tui NastyMap topology simulator, axonwallctl netflow CLI, and Oh My Zsh + Starship workstation.
             </p>
           </Link>
 
@@ -239,12 +239,12 @@ export default function DocsOverviewPage() {
             <div className="flex items-center justify-between mb-2">
               <div className="flex items-center gap-2.5 font-bold text-white text-base">
                 <Cpu className="w-4 h-4 text-emerald-400" />
-                <span>Modular Core Roles (5 Core Roles + 18 Plugins)</span>
+                <span>Modular Core Roles (5 Core Roles + 22 Plugins)</span>
               </div>
               <ArrowRight className="w-4 h-4 text-slate-500 group-hover:text-emerald-400 transition transform group-hover:translate-x-1" />
             </div>
             <p className="text-xs text-slate-400 leading-relaxed">
-              Compose all 5 Core Roles (core-firewall, core-nas, core-k3s, core-virt, core-vigilante) and 18 sandboxed extension plugins (with SHA-256 bundled binaries and Minimal on-demand installation)—from pure Host-Mode ZFS NAS to hyper-converged bare metal.
+              Compose all 5 Core Roles (core-firewall, core-nas, core-k3s, core-virt, core-vigilante) and 22 sandboxed extension plugins (including netflow-collector, topology-studio, netbox &amp; librenms, with SHA-256 bundled binaries and Minimal on-demand installation)—from pure Host-Mode ZFS NAS to hyper-converged bare metal.
             </p>
           </Link>
 
@@ -393,6 +393,22 @@ export default function DocsOverviewPage() {
           </Link>
 
           <Link
+            href="/docs/observability#netflow-collector"
+            className="p-5 rounded-xl bg-slate-900/60 border border-sky-500/40 hover:border-sky-500 hover:bg-slate-900 transition group block"
+          >
+            <div className="flex items-center justify-between mb-2">
+              <div className="flex items-center gap-2.5 font-bold text-white text-base">
+                <Activity className="w-4 h-4 text-sky-400" />
+                <span>NetFlow / IPFIX / sFlow Collector Studio</span>
+              </div>
+              <ArrowRight className="w-4 h-4 text-slate-500 group-hover:text-sky-400 transition transform group-hover:translate-x-1" />
+            </div>
+            <p className="text-xs text-slate-400 leading-relaxed">
+              Multi-protocol NetFlow v5/v9, IPFIX (UDP/TCP/TLS 1.3 mTLS) &amp; sFlow v5 ingest, dual-stack eBPF self-export with TCP RTT/retransmits, pure-Go MMDB GeoIP/ASN, FRR BGP/K3s/conntrack enrichment, FQL ClickHouse SQL pushdown, 95th-pct reports, 7d×24h EWMA baselines &amp; Fleet Federation.
+            </p>
+          </Link>
+
+          <Link
             href="/docs/hardware-telemetry"
             className="p-5 rounded-xl bg-slate-900/60 border border-slate-800 hover:border-emerald-500/40 hover:bg-slate-900 transition group block"
           >
@@ -485,9 +501,9 @@ export default function DocsOverviewPage() {
           <CodeBlock
             title="Flash ISO to USB Drive & Verify SHA-256"
             language="bash"
-            code={`# Download and verify the unified v0.14.1 Debian 13 (NGFW, Minimal, Vault & K3s-Storage) ISO
-wget https://github.com/axonwall/axonwall/releases/download/v0.14.1/axonwall-debian13-amd64.iso
-wget https://github.com/axonwall/axonwall/releases/download/v0.14.1/axonwall-debian13-amd64.iso.sha256
+            code={`# Download and verify the unified v0.15.1 Debian 13 (NGFW, Minimal, Vault & K3s-Storage) ISO
+wget https://github.com/axonwall/axonwall/releases/download/v0.15.1/axonwall-debian13-amd64.iso
+wget https://github.com/axonwall/axonwall/releases/download/v0.15.1/axonwall-debian13-amd64.iso.sha256
 sha256sum -c axonwall-debian13-amd64.iso.sha256
 
 # Replace /dev/sdX with your destination USB drive
@@ -533,7 +549,7 @@ sudo dd if=axonwall-debian13-amd64.iso of=/dev/sdX bs=4M status=progress conv=fs
           <CodeBlock
             title="Proxmox VE Cloud-Init QCOW2 Import"
             language="bash"
-            code={`wget https://github.com/axonwall/axonwall/releases/download/v0.14.1/axonwall-debian13-amd64-cloud.qcow2
+            code={`wget https://github.com/axonwall/axonwall/releases/download/v0.15.1/axonwall-debian13-amd64-cloud.qcow2
 qm create 9000 --name axonwall-ngfw --memory 4096 --cores 4 --net0 virtio,bridge=vmbr0 --net1 virtio,bridge=vmbr1
 qm importdisk 9000 axonwall-debian13-amd64-cloud.qcow2 local-zfs
 qm set 9000 --scsihw virtio-scsi-single --scsi0 local-zfs:vm-9000-disk-0,discard=on --ide2 local-zfs:cloudinit --boot c --bootdisk scsi0`}
@@ -549,13 +565,13 @@ qm set 9000 --scsihw virtio-scsi-single --scsi0 local-zfs:vm-9000-disk-0,discard
             title="Install Debian Package"
             language="bash"
             code={`# Download the latest .deb release artifact from GitHub Releases
-wget https://github.com/axonwall/axonwall/releases/download/v0.14.1/axonwall_0.14.1_amd64.deb
-wget https://github.com/axonwall/axonwall/releases/download/v0.14.1/axonwall_0.14.1_amd64.deb.sha256
-sha256sum -c axonwall_0.14.1_amd64.deb.sha256
+wget https://github.com/axonwall/axonwall/releases/download/v0.15.1/axonwall_0.15.1_amd64.deb
+wget https://github.com/axonwall/axonwall/releases/download/v0.15.1/axonwall_0.15.1_amd64.deb.sha256
+sha256sum -c axonwall_0.15.1_amd64.deb.sha256
 
 # Install package with dependencies
 sudo apt-get update
-sudo apt-get install -y ./axonwall_0.14.1_amd64.deb
+sudo apt-get install -y ./axonwall_0.15.1_amd64.deb
 
 # Verify running services
 sudo systemctl status axonwalld axonwall-ui axonwall-controller`}
@@ -567,7 +583,7 @@ sudo systemctl status axonwalld axonwall-ui axonwall-controller`}
             language="yaml"
             code={`services:
   axonwall:
-    image: ghcr.io/axonwall/axonwall:v0.14.1
+    image: ghcr.io/axonwall/axonwall:v0.15.1
     cap_add:
       - NET_ADMIN
       - NET_RAW

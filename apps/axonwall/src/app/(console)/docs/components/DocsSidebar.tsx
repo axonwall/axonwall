@@ -214,6 +214,7 @@ export const DOCS_NAVIGATION: DocCategory[] = [
     icon: Activity,
     items: [
       { title: 'Observability & Tracing', href: '/docs/observability', badge: 'eBPF' },
+      { title: 'NetFlow / IPFIX / sFlow Studio', href: '/docs/observability#netflow-collector', badge: 'New' },
       { title: 'Metrics, Logs & Traces', href: '/docs/observability#metrics-logs-traces' },
       { title: 'Container Network & FS I/O', href: '/docs/observability#container-tracking' },
       { title: 'K3s Cluster Troubleshooting', href: '/docs/observability#kubernetes-troubleshooting' },
@@ -363,7 +364,7 @@ export function DocsSidebar({ onClose }: DocsSidebarProps) {
 
       {/* Footer Status */}
       <div className="p-3 border-t border-slate-800/80 text-[11px] text-slate-500 flex items-center justify-between">
-        <span className="font-mono">Axonwall v0.14.1</span>
+        <span className="font-mono">Axonwall v0.15.1</span>
         <span className="text-emerald-400 font-medium">26 Guides</span>
       </div>
     </aside>

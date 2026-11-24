@@ -7,7 +7,7 @@ import { CodeBlock } from '../components/CodeBlock';
 export const metadata = {
   title: 'Hardware Telemetry, Optical DOM & Console Command Runner | Axonwall Documentation',
   description:
-    'Comprehensive hardware telemetry and shell access documentation for Axonwall v0.14.1: Linux HWMON chassis sensor telemetry, SFP+/QSFP optical DOM transceiver monitoring, RBAC Console Command Runner, KVM noVNC consoles, and SSH/serial TUI.',
+    'Comprehensive hardware telemetry and shell access documentation for Axonwall v0.15.1: Linux HWMON chassis sensor telemetry, SFP+/QSFP optical DOM transceiver monitoring, RBAC Console Command Runner, KVM noVNC consoles, and SSH/serial TUI.',
 };
 
 export default function HardwareTelemetryDocPage() {
@@ -17,7 +17,7 @@ export default function HardwareTelemetryDocPage() {
       <div className="space-y-4 border-b border-slate-800/80 pb-8">
         <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-950/60 border border-emerald-500/30 text-emerald-400 text-xs font-semibold">
           <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-          Hardware &amp; Management • v0.14.1
+          Hardware &amp; Management • v0.15.1
         </div>
         <h1 className="text-3xl sm:text-5xl font-extrabold text-white tracking-tight">
           Hardware Telemetry, Optical DOM &amp; Shell Access
@@ -103,7 +103,7 @@ export default function HardwareTelemetryDocPage() {
           <div className="p-4 rounded-xl bg-slate-900 border border-slate-800 space-y-2">
             <h3 className="font-bold text-sky-400 text-sm">2. Full Interactive SSH Workstation (cli-workstation)</h3>
             <p className="text-slate-400 leading-relaxed">
-              Connect via OpenSSH for persistent Tmux sessions, Oh My Zsh + Starship prompts, the 12-domain Neovim Super Configurator (<code className="text-slate-200 font-mono">axonwall-config</code>), and the 11-tab <code className="text-slate-200 font-mono">axonwall-tui</code> cockpit.
+              Connect via OpenSSH for persistent Tmux sessions, Oh My Zsh + Starship prompts, the 14-domain Neovim Super Configurator (<code className="text-slate-200 font-mono">axonwall-config</code>), and the 11-tab <code className="text-slate-200 font-mono">axonwall-tui</code> cockpit.
             </p>
           </div>
 

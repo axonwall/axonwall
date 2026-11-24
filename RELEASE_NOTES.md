@@ -6,6 +6,38 @@ Official build artifacts, SHA-256 checksums, and detached Ed25519 signatures (`.
 
 ---
 
+## `v0.15.1` (2026-11-23) — Enterprise NetFlow / IPFIX / sFlow Collector & Analytics Studio (Phases 1–5)
+
+### Highlights
+- **Multi-Protocol Flow Collector, Transport Hardening & Replication (`netflow-collector`, `/etc/axonwall/netflow.yaml`, `apps/axonwalld/engine/netflow_*.go`)**:
+  - Added full decoding and session management for **NetFlow v5**, **NetFlow v9**, **IPFIX (RFC 7011)** over UDP, TCP, and **TLS 1.3 / optional mTLS**, plus **sFlow v5** sample extraction.
+  - Enabled Linux `SO_REUSEPORT` multi-worker socket scaling for high-throughput UDP/IPFIX ingest and a UDP fan-out replicator with optional raw-socket source-IP spoofing (`CAP_NET_RAW`) for downstream SIEM/collectors.
+- **Dual-Stack eBPF Self-Exporter & Kernel NPM Telemetry (`netflow_decoders.go`, `netflow_sockdiag.go`)**:
+  - Built dual-stack IPFIX self-export emitting **Template 256 (IPv4)** and **Template 257 (IPv6)** with NAT/CGNAT Information Elements (`225`–`228`), VLAN/interface indexes, and kernel TCP NPM metrics sampled via Linux `NETLINK_SOCK_DIAG` (TCP RTT and retransmit counters).
+- **Zero-CGO Pure-Go Enrichment Pipeline (`netflow_mmdb.go`, `netflow_enrich.go`)**:
+  - Implemented a pure-Go MaxMind `.mmdb` v2 reader with scheduled and on-demand HTTPS GeoLite2/DB-IP updaters (`POST /api/v1/netflow/geoip/update`), live FRR BGP RIB longest-prefix-match (AS-Path / Next-Hop), live K3s Pod/Namespace/Service attribution, Linux `conntrack` NAT/CGNAT mapping, reverse DNS resolution, SNMP `ifAlias` tagging, and Suricata/CrowdSec/Threat-Intel correlation.
+- **High-Speed Storage, Multi-Tier Rollups, ClickHouse SQL Pushdown & Prometheus (`netflow_store.go`, `netflow_clickhouse_sql.go`, `netflow_metrics.go`)**:
+  - Added persisted `1m` / `5m` / `1h` Zstd rollups with multi-tier historical query merging across `[startMs, endMs]`, parameterized FQL-to-ClickHouse SQL pushdown, and native Prometheus text exposition at `/api/v1/netflow/metrics` (`/v1/netflow/metrics`).
+- **Session Stitching, 95th-Pct Reports, Adaptive Baselines & Fleet Federation (`netflow_sessions.go`, `netflow_reports.go`, `netflow_baselines.go`, `netflow_federation.go`)**:
+  - Added bidirectional biflow session stitching, Source×Dest & Port×Time heatmaps, and geo arc aggregation.
+  - Added **95th/99th-percentile capacity & billing reports** exportable in CSV, Markdown, and JSON with scheduled snapshots (`/api/v1/netflow/reports`).
+  - Added **168-slot (7d×24h) EWMA/Z-score baselines** and first-seen peer-pair anomaly detection (`/api/v1/netflow/baselines`), plus multi-host **Fleet Federation** queries across `topology.peers`.
+- **Interactive Analytics Studio, API Routes & CLI (`/reporting/netflow`, `axonwallctl netflow`)**:
+  - Shipped the 5-tab NetFlow Studio with `FqlInputBar` autocomplete, `FlowExplorerTab` interactive time-brush zoom, bidirectional sessions, `FlowHeatmapsPanel`, offline SVG `GeoTrafficMap`, `ReportsPanel`, `LiveTailTab` (SSE `/api/v1/netflow/stream`), `ExportersTemplatesTab`, `AlertsAnomaliesTab`, and `PipelineConfigTab`, plus 1-click pivots to XDP Drop, Packet Capture (`/diagnostics/packet-capture`), Firewall Alias, and Topology Studio (`/topology`).
+  - Added 11 secret-redacted `/api/v1/netflow/*` REST endpoints (`status`, `query`, `stream`, `exporters`, `templates`, `alerts`, `reports`, `baselines`, `geoip/update`, `metrics`, `test-inject`) and `axonwallctl netflow status|query|fleet-query|report` + `axonwall-tui` integration.
+
+---
+
+## `v0.15.0` (2026-11-23) — NetBox v4 DCIM/IPAM, LibreNMS Monitoring & Interactive Topology Studio
+
+### Highlights
+- **Interactive Fabric Topology Studio (`topology-studio`, `/topology`, `/etc/axonwall/topology.yaml`)**:
+  - Added a browser-native `@xyflow/react` multi-host, WAN, K3s, and cable fabric topology editor (`TopologyStudioWorkspace`) with inspector, path tracer, cable cut sheet, staged diff, scenario manager, and Triad sync drawers, strict Green/Yellow/Red health probes (`/api/v1/topology/probe`), WAN-excluded `lldpd`, and phased transactional apply (`/api/v1/topology/apply`).
+- **NetBox v4 DCIM/IPAM & LibreNMS Discovery Triad (`netbox`, `librenms`, `/services/netbox`, `/services/librenms`, `services.yaml`)**:
+  - Added turnkey K3s-native deployment and idempotent inventory sync for **NetBox v4** and **LibreNMS** (SNMPv2c/v3, LLDP/CDP/FDB discovery, optical DOM, and alert webhooks) with zero-touch OpenLDAP SSO service accounts (`svc-netbox`, `svc-librenms`), Triad cross-sync (`/api/v1/services/{netbox,librenms}/*`), secret redaction suites, and `14` canonical YAML domains + `27` total plugins (`5` Core Roles + `22` Extensions).
+
+---
+
 ## `v0.14.1` (2026-11-22) — Full-Suite K3s Telemetry Visualizations & Explorer Stability Hardening
 
 ### Highlights

@@ -20,9 +20,9 @@ import { Callout } from '../components/Callout';
 import { CodeBlock } from '../components/CodeBlock';
 
 export const metadata = {
-  title: 'eBPF Infrastructure & Kubernetes Observability | Axonwall Documentation',
+  title: 'eBPF Infrastructure, NetFlow/IPFIX & Kubernetes Observability | Axonwall Documentation',
   description:
-    'Zero-instrumentation eBPF observability in Axonwall: gathering metrics, logs, and distributed traces at Ring-0, tracking container network calls and VFS/ZFS filesystem operations, troubleshooting Kubernetes (K3s) clusters, and streaming live NFLOG/SSE packet telemetry.',
+    'Zero-instrumentation eBPF observability and enterprise NetFlow v5/v9, IPFIX (UDP/TCP/TLS 1.3 mTLS) & sFlow v5 telemetry in Axonwall: Ring-0 metrics/logs/traces, dual-stack eBPF self-exporter, pure-Go MMDB GeoIP/ASN, FRR BGP/K3s/conntrack enrichment, FQL ClickHouse SQL pushdown, 95th-pct reports, 7d x 24h baselines, and live NFLOG/SSE streaming.',
 };
 
 export default function ObservabilityDocPage() {
@@ -32,7 +32,7 @@ export default function ObservabilityDocPage() {
       <div className="space-y-4 border-b border-slate-800/80 pb-8">
         <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-950/60 border border-emerald-500/30 text-emerald-400 text-xs font-semibold">
           <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-          Zero-Instrumentation Kernel Telemetry • eBPF &amp; K3s • v0.14.1
+          Zero-Instrumentation Kernel Telemetry • eBPF &amp; K3s • v0.15.1
         </div>
         <h1 className="text-3xl sm:text-5xl font-extrabold text-white tracking-tight">
           eBPF Infrastructure &amp; Kubernetes Observability
@@ -57,6 +57,12 @@ export default function ObservabilityDocPage() {
             className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-700 text-xs font-semibold text-slate-200 transition"
           >
             Live Packet &amp; Flow Stream (/reporting/flows)
+          </Link>
+          <Link
+            href="/reporting/netflow"
+            className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-sky-950/70 hover:bg-sky-900/70 border border-sky-500/40 text-xs font-semibold text-sky-300 transition"
+          >
+            NetFlow / IPFIX Studio (/reporting/netflow)
           </Link>
         </div>
       </div>
@@ -373,17 +379,137 @@ observability:
     xdpDualStackVlanEnabled: true
     zfsArcZilTelemetryEnabled: true`}
         />
-      <div className="rounded-xl border border-slate-800 bg-slate-900/70 p-4 text-sm text-slate-300 space-y-2">
-        <p>
-          For full multi-protocol NetFlow v5/v9, IPFIX (RFC 7011 over UDP, TCP, and TLS 1.3 mTLS), and sFlow v5 collection,
-          dual-stack IPv4/IPv6 eBPF self-export with kernel TCP RTT/retransmit NPM telemetry, SO_REUSEPORT scaling, raw UDP fan-out replication,
-          pure-Go MaxMind <code>.mmdb</code> GeoIP/ASN, FRR BGP AS-Path &amp; live K3s Pod/Service attribution, conntrack NAT/CGNAT forensics,
-          Zstd + ClickHouse SQL pushdown, 95th-percentile scheduled reports, adaptive EWMA Z-score baselines, fleet-wide federated queries,
-          and Prometheus <code className="font-mono text-emerald-400">/api/v1/netflow/metrics</code>, enable <code className="font-mono text-sky-400">netflow-collector</code> via{' '}
-          <code className="font-mono text-slate-200">/etc/axonwall/netflow.yaml</code> or visit{' '}
-          <Link href="/reporting/netflow" className="text-sky-400 hover:underline">/reporting/netflow</Link>.
+      </section>
+
+      {/* NetFlow / IPFIX / sFlow Collector & Analytics Studio */}
+      <section id="netflow-collector" className="space-y-6 pt-6 border-t border-slate-800/80">
+        <h2 className="text-2xl font-bold text-white flex items-center gap-2">
+          <Network className="w-6 h-6 text-sky-400" /> NetFlow / IPFIX / sFlow Collector &amp; Analytics Studio (
+          <code className="font-mono text-sky-400">netflow-collector</code>)
+        </h2>
+        <p className="text-sm text-slate-300 leading-relaxed">
+          Axonwall ships a turnkey, zero-CGO flow intelligence pipeline configured declaratively via{' '}
+          <code className="text-sky-400 font-mono">/etc/axonwall/netflow.yaml</code> and explored interactively in{' '}
+          <Link href="/reporting/netflow" className="text-sky-400 hover:underline">
+            /reporting/netflow
+          </Link>
+          . Ingest NetFlow v5/v9, IPFIX (RFC 7011), and sFlow v5 from external routers/switches alongside dual-stack
+          Axonwall eBPF self-export, replicate raw UDP streams to upstream SIEMs, enrich every record in flight, and
+          retain multi-tier compressed rollups or push directly into ClickHouse.
         </p>
-      </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
+          <div className="p-4 rounded-xl bg-slate-900 border border-slate-800 space-y-1.5">
+            <span className="font-bold text-sky-400">1. Multi-Protocol Ingest, TLS 1.3 mTLS &amp; Replication</span>
+            <p className="text-slate-400 leading-relaxed">
+              Accepts NetFlow v5, NetFlow v9, IPFIX (UDP, TCP &amp; TLS 1.3 with optional client mTLS), and sFlow v5
+              with Linux <code className="text-slate-200 font-mono">SO_REUSEPORT</code> multi-worker socket scaling.
+              Dual-stack eBPF self-export emits IPv4 Template <code className="text-slate-200 font-mono">256</code> and
+              IPv6 Template <code className="text-slate-200 font-mono">257</code> enriched with{' '}
+              <code className="text-slate-200 font-mono">NETLINK_SOCK_DIAG</code> TCP RTT &amp; retransmits, while
+              the UDP fan-out replicator supports optional raw-socket source-IP spoofing (<code className="font-mono">CAP_NET_RAW</code>).
+            </p>
+          </div>
+
+          <div className="p-4 rounded-xl bg-slate-900 border border-slate-800 space-y-1.5">
+            <span className="font-bold text-emerald-400">2. Real-Time Multi-Source Enrichment Pipeline</span>
+            <p className="text-slate-400 leading-relaxed">
+              Every ingested flow is enriched in memory with a pure-Go MaxMind <code className="font-mono">.mmdb</code>{' '}
+              v2 reader + scheduled/on-demand HTTPS updater, live FRR BGP RIB longest-prefix-match AS-Path &amp;
+              next-hop, live K3s Pod/Namespace/Service attribution, Linux <code className="font-mono">conntrack</code>{' '}
+              NAT/CGNAT mapping (IEs 225–228), reverse DNS, SNMP <code className="font-mono">ifAlias</code>, and
+              Suricata/CrowdSec/Threat-Intel matching.
+            </p>
+          </div>
+
+          <div className="p-4 rounded-xl bg-slate-900 border border-slate-800 space-y-1.5">
+            <span className="font-bold text-purple-400">3. Rollups, ClickHouse Pushdown, Reports &amp; Prometheus</span>
+            <p className="text-slate-400 leading-relaxed">
+              Persists <code className="font-mono">1m</code> / <code className="font-mono">5m</code> /{' '}
+              <code className="font-mono">1h</code> Zstd rollups with parameterized FQL-to-ClickHouse SQL pushdown,
+              computes 95th/99th-percentile capacity &amp; billing reports (CSV/Markdown/JSON + scheduled snapshots),
+              maintains 168-slot (7d×24h) EWMA/Z-score &amp; first-seen pair anomaly baselines, executes federated
+              queries across <code className="font-mono">topology.peers</code>, and exposes Prometheus metrics at{' '}
+              <code className="text-emerald-300 font-mono">/api/v1/netflow/metrics</code>.
+            </p>
+          </div>
+
+          <div className="p-4 rounded-xl bg-slate-900 border border-slate-800 space-y-1.5">
+            <span className="font-bold text-amber-400">4. Interactive Analytics Studio &amp; Inline Pivots</span>
+            <p className="text-slate-400 leading-relaxed">
+              <Link href="/reporting/netflow" className="text-sky-400 hover:underline font-mono">
+                /reporting/netflow
+              </Link>{' '}
+              combines an autocomplete Flow Query Language (FQL) bar, drag-to-zoom time-brush explorer, bidirectional
+              session stitching, Source×Dest &amp; Port×Time heatmaps, an offline SVG world Geo Traffic Map, SSE live
+              tail, and 1-click inline pivots to <strong className="text-slate-200">XDP Drop</strong>,{' '}
+              <strong className="text-slate-200">Packet Capture</strong> (<code className="font-mono">/diagnostics/packet-capture</code>),{' '}
+              <strong className="text-slate-200">Firewall Alias</strong>, and <strong className="text-slate-200">Topology Studio</strong> (<code className="font-mono">/topology</code>).
+            </p>
+          </div>
+        </div>
+
+        <CodeBlock
+          title="/etc/axonwall/netflow.yaml — Declarative Collector, Self-Exporter, Enrichment & Baselines"
+          language="yaml"
+          code={`plugins:
+  - id: netflow-collector
+    enabled: true
+
+netflow:
+  enabled: true
+  listeners:
+    - name: core-ipfix-udp
+      protocol: auto          # auto (NetFlow v5/v9 + IPFIX), ipfix, netflow5, netflow9, sflow5
+      bindAddress: 0.0.0.0
+      port: 2055
+      reusePort: true         # Linux SO_REUSEPORT multi-worker scaling
+      workers: 4
+    - name: wan-ipfix-mtls
+      protocol: ipfix
+      transport: tls          # udp | tcp | tls (RFC 7011 TLS 1.3 + optional mTLS)
+      port: 4740
+      tlsClientAuth: true
+  selfExporter:
+    enabled: true
+    interfaces: ["wan0", "lan0"]
+    activeTimeoutSec: 30
+    idleTimeoutSec: 15
+    samplingRate: 1
+    exportSockDiagRtt: true   # NETLINK_SOCK_DIAG kernel TCP RTT & retransmits
+    exportConntrackNat: true  # IPFIX NAT/CGNAT IEs 225-228 (Templates 256 IPv4 / 257 IPv6)
+  enrichment:
+    mmdbAutoUpdate: true
+    geoipCityPath: /var/lib/axonwall/geoip/GeoLite2-City.mmdb
+    geoipAsnPath: /var/lib/axonwall/geoip/GeoLite2-ASN.mmdb
+    frrBgpLpm: true
+    k3sAttribution: true
+    reverseDns: true
+    snmpIfAlias: true
+  storage:
+    zstdRollups: true
+    clickhousePushdown: true
+  analytics:
+    baselines7x24Enabled: true
+    scheduledReports95th: true
+    fleetFederation: true`}
+        />
+
+        <CodeBlock
+          title="Flow Query Language (FQL) & axonwallctl netflow CLI Examples"
+          language="bash"
+          code={`# Inspect NetFlow collector pipeline status, listeners & template cache
+axonwallctl netflow status --json
+
+# Execute an FQL query with bidirectional session stitching (biflow)
+axonwallctl netflow query 'src.ip == 10.0.0.0/8 and dst.port == 443 and bytes > 1000000' --biflow --minutes 60
+
+# Run a federated threat-flow query across all topology.peers appliances
+axonwallctl netflow fleet-query 'threat.matched == true or tcp.rtt_ms > 150' --limit 100
+
+# Generate a 7-day 95th-percentile capacity & billing Markdown report
+axonwallctl netflow report --range 7d --group interface --format markdown`}
+        />
       </section>
 
       {/* Linux 6.9+ BPF_TOKEN_CREATE Delegation & Dual-Stack XDP */}
@@ -671,9 +797,10 @@ curl -N "https://192.168.1.1:2966/api/v1/events/packets?iface=eth0&proto=tcp"`}
         </p>
 
         <Callout type="tip" title="Web Console Dashboards">
-          Explore live eBPF observability in your console under{' '}
+          Explore live eBPF and flow observability in your console under{' '}
           <code className="text-emerald-300 font-mono">Reporting &gt; eBPF &amp; K3s Observability (/reporting/ebpf)</code>,{' '}
-          <code className="text-emerald-300 font-mono">Reporting &gt; Live Flow Monitor (/reporting/flows)</code>, and{' '}
+          <code className="text-emerald-300 font-mono">Reporting &gt; Live Flow Monitor (/reporting/flows)</code>,{' '}
+          <code className="text-sky-300 font-mono">Reporting &gt; NetFlow Collector Studio (/reporting/netflow)</code>, and{' '}
           <code className="text-emerald-300 font-mono">Diagnostics &gt; Packet Tracer (/diagnostics/packet-tracer)</code>.
         </Callout>
       </section>
