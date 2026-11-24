@@ -430,6 +430,38 @@ func TestFormatInstallerConfigK3sFieldsAndCycleEdition(t *testing.T) {
 	}
 }
 
+func TestFormatInstallerConfigStarterPacksSerializationAndReset(t *testing.T) {
+	cfg := DefaultInstallerConfig()
+	cfg.Edition = "axonwall"
+	cfg.StarterPacks = []string{"operator-diagnostics", "enterprise-ngfw", "unknown-pack", "enterprise-ngfw"}
+
+	serialized := FormatInstallerConfig(cfg)
+	wantLine := "INSTALL_STARTER_PACKS='enterprise-ngfw,operator-diagnostics'"
+	if !strings.Contains(serialized, wantLine) {
+		t.Fatalf("expected %q in serialized config:\n%s", wantLine, serialized)
+	}
+
+	// Empty StarterPacks omits INSTALL_STARTER_PACKS
+	emptyCfg := DefaultInstallerConfig()
+	emptyCfg.Edition = "axonwall"
+	if out := FormatInstallerConfig(emptyCfg); strings.Contains(out, "INSTALL_STARTER_PACKS=") {
+		t.Errorf("expected empty StarterPacks to omit INSTALL_STARTER_PACKS, got:\n%s", out)
+	}
+
+	// Cycling edition away from axonwall clears StarterPacks, and minimal omits INSTALL_STARTER_PACKS
+	cycleEdition(&cfg)
+	if cfg.Edition != "minimal" {
+		t.Fatalf("expected minimal after cycleEdition, got %q", cfg.Edition)
+	}
+	if len(cfg.StarterPacks) != 0 {
+		t.Errorf("expected StarterPacks cleared after leaving axonwall edition, got %v", cfg.StarterPacks)
+	}
+	cfg.StarterPacks = []string{"enterprise-ngfw"}
+	if minOut := FormatInstallerConfig(cfg); strings.Contains(minOut, "INSTALL_STARTER_PACKS=") {
+		t.Errorf("minimal edition must not emit INSTALL_STARTER_PACKS, got:\n%s", minOut)
+	}
+}
+
 func TestFormatInstallerDiagnosticsBundleRedactsK3sJoinToken(t *testing.T) {
 	cfg := DefaultInstallerConfig()
 	cfg.Edition = "k3s-storage"

@@ -438,10 +438,38 @@ fi
 
 EDITION_LABEL="Axonwall NGFW Appliance"
 INSTALL_EDITION="axonwall"
+INSTALL_STARTER_PACKS="${INSTALL_STARTER_PACKS:-}"
 K3S_ROLE="server"
 K3S_SERVER_URL=""
 K3S_JOIN_TOKEN=""
 ZFS_ARC_MAX_MB=0
+
+validate_install_starter_packs() {
+  _raw_packs="${INSTALL_STARTER_PACKS:-}"
+  [ -z "$_raw_packs" ] && return 0
+  _clean_packs=""
+  _old_ifs="$IFS"
+  IFS=','
+  for _tok in $_raw_packs; do
+    _tok="$(printf '%s' "$_tok" | tr -d ' \t\r\n')"
+    [ -z "$_tok" ] && continue
+    case "$_tok" in
+      enterprise-ngfw|remote-access-vpn|operator-diagnostics|ai-observability)
+        case ",${_clean_packs}," in
+          *",${_tok},"*) ;;
+          *) _clean_packs="${_clean_packs:+${_clean_packs},}${_tok}" ;;
+        esac
+        ;;
+      *)
+        IFS="$_old_ifs"
+        echo "[!] ERROR: invalid starter pack '${_tok}' in INSTALL_STARTER_PACKS (expected enterprise-ngfw, remote-access-vpn, operator-diagnostics, or ai-observability)." >&2
+        exit 1
+        ;;
+    esac
+  done
+  IFS="$_old_ifs"
+  INSTALL_STARTER_PACKS="$_clean_packs"
+}
 
 # D-M9 (marker): the live ISO carries /etc/axonwall/edition (written by
 # the image builder) — trust it first for the default edition, then the
@@ -683,6 +711,7 @@ if [ "$MODE" = "apply-config" ]; then
     agent|worker) K3S_ROLE="agent" ;;
     *) K3S_ROLE="server" ;;
   esac
+  validate_install_starter_packs
 elif [ "$MODE" = "unattended" ]; then
   echo "================================================================================"
   echo "  ${EDITION_LABEL} — Zero-Touch Unattended Installer (${OS_FAMILY})"
@@ -821,6 +850,22 @@ elif [ "$MODE" = "unattended" ]; then
     if [ -n "$ci_pw" ]; then
       ADMIN_PASSWORD="$ci_pw"
     fi
+
+    _ci_packs="$(awk '
+      /^[[:space:]]*starter_packs:[[:space:]]*\[/ {
+        sub(/^[^[]*\[/, ""); sub(/\].*$/, ""); gsub(/["'\''[:space:]]/, ""); print; exit
+      }
+      /^[[:space:]]*starter_packs:[[:space:]]*$/ { in_sp=1; next }
+      in_sp && /^[[:space:]]*-[[:space:]]+/ {
+        sub(/^[[:space:]]*-[[:space:]]+/, ""); sub(/[[:space:]]*#.*$/, ""); gsub(/^["'\''[:space:]]+|["'\''[:space:]]+$/, ""); items = items ? items "," $0 : $0; next
+      }
+      in_sp && /^[^[:space:]#]/ { in_sp=0 }
+      END { if (items) print items }
+    ' "$CI_FILE" 2>/dev/null || true)"
+    if [ -n "$_ci_packs" ]; then
+      INSTALL_STARTER_PACKS="$_ci_packs"
+      validate_install_starter_packs
+    fi
   fi
 
   if [ -z "$SYSTEM_DISKS" ]; then
@@ -947,6 +992,39 @@ else
       *)
         INSTALL_EDITION="axonwall"
         EDITION_LABEL="Axonwall NGFW Appliance"
+        if [ -t 0 ] && [ -z "${INSTALL_STARTER_PACKS:-}" ]; then
+          echo ""
+          echo "Optional Starter Packs (press Enter for Lean Router/NGFW Core only):"
+          echo "  [1] enterprise-ngfw      (Suricata IDS/IPS + CrowdSec + FRR + HA + OpenLDAP + Etckeeper)"
+          echo "  [2] remote-access-vpn    (OpenVPN DCO + strongSwan IPsec + Headscale Mesh + Rosenpass)"
+          echo "  [3] operator-diagnostics (ZSH/Neovim Workstation + Packet Capture/Tracer + Web TTY + Etckeeper)"
+          echo "  [4] ai-observability     (AI Copilot + MCP + Coroot eBPF APM + NetFlow + Topology Studio)"
+          printf "Comma-separated numbers [1-4] (default none): "
+          read -r SP_CHOICES || SP_CHOICES=""
+          if [ -n "$SP_CHOICES" ]; then
+            _sp_list=""
+            _old_ifs="$IFS"
+            IFS=', '
+            for _sc in $SP_CHOICES; do
+              case "$_sc" in
+                "") continue ;;
+                1|enterprise-ngfw) _sp_id="enterprise-ngfw" ;;
+                2|remote-access-vpn) _sp_id="remote-access-vpn" ;;
+                3|operator-diagnostics) _sp_id="operator-diagnostics" ;;
+                4|ai-observability) _sp_id="ai-observability" ;;
+                *)
+                  IFS="$_old_ifs"
+                  echo "[!] ERROR: invalid starter pack selection '${_sc}' (expected 1-4 or canonical pack ID)." >&2
+                  exit 1
+                  ;;
+              esac
+              _sp_list="${_sp_list:+${_sp_list},}${_sp_id}"
+            done
+            IFS="$_old_ifs"
+            INSTALL_STARTER_PACKS="$_sp_list"
+            validate_install_starter_packs
+          fi
+        fi
         ;;
     esac
 
@@ -2502,6 +2580,13 @@ else
         /mnt/slot_a/etc/axonwall/workstation.disabled \
         /mnt/data/etc-axonwall/workstation.disabled
   touch /mnt/slot_a/etc/axonwall/.firstboot
+fi
+rm -f /mnt/slot_a/etc/axonwall/starter-packs.seed /mnt/data/etc-axonwall/starter-packs.seed 2>/dev/null || true
+if [ "${INSTALL_EDITION:-axonwall}" = "axonwall" ] && [ -n "${INSTALL_STARTER_PACKS:-}" ]; then
+  validate_install_starter_packs
+  mkdir -p /mnt/slot_a/etc/axonwall /mnt/data/etc-axonwall
+  printf '%s\n' "$INSTALL_STARTER_PACKS" | tr ',' '\n' > /mnt/slot_a/etc/axonwall/starter-packs.seed
+  cp -a /mnt/slot_a/etc/axonwall/starter-packs.seed /mnt/data/etc-axonwall/starter-packs.seed 2>/dev/null || true
 fi
 if [ "${INSTALL_EDITION:-axonwall}" = "axonwall" ] || [ "${INSTALL_EDITION:-axonwall}" = "k3s-storage" ]; then
   if [ -d /mnt/slot_a/var/lib/axonwall/core-k3s ]; then

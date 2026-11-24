@@ -5,6 +5,7 @@ import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { getSession } from './auth';
 import { assertActionPermitted } from './auth-guard';
+import { assertPluginEnabled } from './plugin-guard';
 import { DesiredStateSchema, type DesiredState } from '@axonwall/lib/schemas';
 import {
   AXONWALL_YAML_FILENAMES,
@@ -80,6 +81,7 @@ export interface EtckeeperCommitLog {
 export async function getEtckeeperStatus(): Promise<EtckeeperStatus | null> {
   const session = await getSession();
   assertActionPermitted(session, 'admin');
+  await assertPluginEnabled('etckeeper-audit');
   const resp = await callAgentApi<EtckeeperStatus & { error?: string }>('/v1/system/etckeeper/status', 'GET');
   if (!resp || resp.error) {
     return null;
@@ -90,6 +92,7 @@ export async function getEtckeeperStatus(): Promise<EtckeeperStatus | null> {
 export async function getEtckeeperConfig(): Promise<EtckeeperConfig | null> {
   const session = await getSession();
   assertActionPermitted(session, 'admin');
+  await assertPluginEnabled('etckeeper-audit');
   const resp = await callAgentApi<EtckeeperConfig & { error?: string }>('/v1/system/etckeeper/config', 'GET');
   if (!resp || resp.error) {
     return null;
@@ -102,6 +105,7 @@ export async function saveEtckeeperConfig(
 ): Promise<{ success: boolean; message: string; config?: EtckeeperConfig }> {
   const session = await getSession();
   assertActionPermitted(session, 'admin');
+  await assertPluginEnabled('etckeeper-audit');
   const resp = await callAgentApiResponse<{
     success?: boolean;
     message?: string;
@@ -128,6 +132,7 @@ export async function initEtckeeper(): Promise<{
 }> {
   const session = await getSession();
   assertActionPermitted(session, 'admin');
+  await assertPluginEnabled('etckeeper-audit');
   const resp = await callAgentApiResponse<{
     success?: boolean;
     message?: string;
@@ -153,6 +158,7 @@ export async function getEtckeeperHistory(
 ): Promise<EtckeeperCommitLog[]> {
   const session = await getSession();
   assertActionPermitted(session, 'admin');
+  await assertPluginEnabled('etckeeper-audit');
   const params = new URLSearchParams();
   if (limit > 0) params.set('limit', String(limit));
   if (pathFilter && pathFilter.trim()) {
@@ -169,6 +175,7 @@ export async function getEtckeeperHistory(
 export async function getEtckeeperDiff(commitHash?: string): Promise<string> {
   const session = await getSession();
   assertActionPermitted(session, 'admin');
+  await assertPluginEnabled('etckeeper-audit');
   if (commitHash !== undefined && commitHash !== '') {
     if (!/^[0-9a-fA-F]{4,64}$/.test(commitHash)) {
       throw new Error('Invalid commit hash format');
@@ -194,6 +201,7 @@ export async function getEtckeeperDiff(commitHash?: string): Promise<string> {
 export async function commitEtckeeper(message: string): Promise<{ success: boolean; message: string }> {
   const session = await getSession();
   assertActionPermitted(session, 'admin');
+  await assertPluginEnabled('etckeeper-audit');
   const author = session.username || 'admin';
   const resp = await callAgentApiResponse<{ success?: boolean; message?: string; error?: string }>(
     '/v1/system/etckeeper/commit',

@@ -8,6 +8,7 @@ import {
   buildAuditPrompt,
 } from '@axonwall/lib/ai';
 import type { AiProviderType, AiConfig } from '@axonwall/lib/schemas';
+import { isPluginEnabled } from '@axonwall/lib/plugins';
 import { getSession } from './auth';
 import { assertActionPermitted } from './auth-guard';
 import { getDesiredStateInternal } from './desired-state-internal';
@@ -72,6 +73,13 @@ export async function testAiProviderProbe(
   assertActionPermitted(session, currentConfig ? 'admin' : 'operator');
 
   const state = await getDesiredStateInternal();
+  if (!isPluginEnabled('ai-copilot', state)) {
+    return {
+      ok: false,
+      status: 'Plugin Disabled',
+      error: 'AI Network Copilot plugin (ai-copilot) is disabled. Enable it in System > Plugins or /ai before probing providers.',
+    };
+  }
   const aiCfg = currentConfig || state.ai;
   const isClientConfig = Boolean(currentConfig);
   const start = Date.now();
@@ -365,6 +373,11 @@ export async function generateAiCompletion(
   assertActionPermitted(session, (currentConfig || mode === 'audit') ? 'admin' : 'operator');
 
   const state = await getDesiredStateInternal();
+  if (!isPluginEnabled('ai-copilot', state)) {
+    throw new Error(
+      'AI Network Copilot plugin (ai-copilot) is disabled. Enable it in System > Plugins or /ai before running completions.'
+    );
+  }
   const aiCfg = currentConfig || state.ai;
   const isClientConfig = Boolean(currentConfig);
 

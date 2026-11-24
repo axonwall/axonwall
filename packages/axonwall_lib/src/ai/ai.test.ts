@@ -9,7 +9,13 @@ import {
   parseLogAnalysis,
   simulateAiResponse,
 } from './index.js';
-import { AiConfigSchema, type AiProviderType } from '../schemas/index.js';
+import { AiConfigSchema, DesiredStateSchema, type AiProviderType } from '../schemas/index.js';
+import {
+  BUILTIN_PLUGINS,
+  isPluginEnabled,
+  enablePluginWithDependencies,
+  disablePluginWithDependents,
+} from '../plugins/index.js';
 
 describe('AI Copilot: Provider Architecture & Configuration', () => {
   const expectedProviders: AiProviderType[] = [
@@ -167,5 +173,30 @@ Source: 198.51.100.25
 
     const audit = await simulateAiResponse('vllm', 'Audit config', 'audit');
     expect(audit).toContain('Configuration Audit Report');
+  });
+});
+
+describe('AI Network Copilot Plugin Lifecycle (ai-copilot)', () => {
+  it('registers ai-copilot in BUILTIN_PLUGINS as opt-in and pointing to /ai', () => {
+    const plugin = BUILTIN_PLUGINS.find((p) => p.id === 'ai-copilot');
+    expect(plugin).toBeDefined();
+    expect(plugin?.category).toBe('extension');
+    expect(plugin?.defaultEnabled).toBe(false);
+    expect(plugin?.menuEntry?.path).toBe('/ai');
+  });
+
+  it('defaults to disabled and toggles state.ai.enabled + state.plugins synchronously', () => {
+    expect(isPluginEnabled('ai-copilot', null)).toBe(false);
+
+    const base = DesiredStateSchema.parse({ version: 1 });
+    expect(isPluginEnabled('ai-copilot', base)).toBe(false);
+
+    const enabledRes = enablePluginWithDependencies('ai-copilot', base);
+    expect(enabledRes.state.ai?.enabled).toBe(true);
+    expect(isPluginEnabled('ai-copilot', enabledRes.state)).toBe(true);
+
+    const disabledRes = disablePluginWithDependents('ai-copilot', enabledRes.state);
+    expect(disabledRes.state.ai?.enabled).toBe(false);
+    expect(isPluginEnabled('ai-copilot', disabledRes.state)).toBe(false);
   });
 });

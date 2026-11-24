@@ -44,6 +44,7 @@ import {
   type McpTacticalLease,
   type McpServerStatus,
 } from '@axonwall/lib/mcp';
+import { isPluginEnabled } from '@axonwall/lib/plugins';
 import http from 'node:http';
 import os from 'node:os';
 import crypto from 'node:crypto';
@@ -54,6 +55,7 @@ import { execSync, execFileSync, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { getSession } from './auth';
 import { assertActionPermitted, isPasswordChangeEnforced } from './auth-guard';
+import { assertPluginEnabled } from './plugin-guard';
 import { ssrfSafeFetch } from './ssrf-guard';
 import type { UserSession } from '@axonwall/lib/rbac';
 import { headers } from 'next/headers';
@@ -876,6 +878,7 @@ async function collectHostIntrospectionData(): Promise<HostIntrospectionData> {
     }
   >();
 
+  const defaultAdminShell = fs.existsSync('/usr/bin/zsh') ? '/usr/bin/zsh' : '/bin/bash';
   try {
     const daemonUsers = await callAgentApi<{ users: any[] }>('/v1/system/users', 'GET');
     if (daemonUsers && Array.isArray(daemonUsers.users)) {
@@ -888,7 +891,7 @@ async function collectHostIntrospectionData(): Promise<HostIntrospectionData> {
           name: u.username,
           gecos: u.comment || `${u.username} (${u.applianceRole || 'operator'})`,
           sudo: isPriv ? 'ALL=(ALL) NOPASSWD:ALL' : undefined,
-          shell: u.shell || '/usr/bin/zsh',
+          shell: u.shell || defaultAdminShell,
           lockPasswd: Boolean(u.passwordLocked),
           sshAuthorizedKeys: Array.isArray(u.sshKeys) ? u.sshKeys : [],
         });
@@ -919,7 +922,7 @@ async function collectHostIntrospectionData(): Promise<HostIntrospectionData> {
             name: dirName,
             gecos: `${dirName} Administrator`,
             sudo: 'ALL=(ALL) NOPASSWD:ALL',
-            shell: '/usr/bin/zsh',
+            shell: defaultAdminShell,
             sshAuthorizedKeys: keys,
           });
         }
@@ -1282,6 +1285,7 @@ export async function startPacketCapture(
   const session = await getSession();
   await enforceRateLimit(10, 60000);
   assertActionPermitted(session, 'admin');
+  await assertPluginEnabled('packet-diagnostics');
 
   return executeCapture({ iface, filter, count });
 }
@@ -1391,6 +1395,7 @@ export interface HASyncTrustStatus {
 export async function getHASyncTrustStatus(): Promise<HASyncTrustStatus | null> {
   const session = await getSession();
   assertActionPermitted(session);
+  await assertPluginEnabled('high-availability');
 
   const resp = await callAgentApi<HASyncTrustStatus>('/v1/ha/sync-trust');
   return resp ?? null;
@@ -1499,6 +1504,8 @@ export interface SystemServiceInfo {
   name: string;
   unit: string;
   description: string;
+  pluginId?: string;
+  pluginEnabled?: boolean;
   // C-B15: 'unknown' means the state could not be read (systemctl
   // failed); it is distinct from 'not-installed' (no unit file) and
   // from 'inactive' (installed but stopped).
@@ -1510,26 +1517,13 @@ export interface SystemServiceInfo {
 
 export type LiveServiceInfo = SystemServiceInfo;
 
-// C-B15: file-based unit existence check, used when `systemctl show`
-// fails and the state is otherwise unreadable. `list-unit-files`
-// reads unit files from disk (no manager connection), so it still
-// answers during a dbus outage. Returns true when the unit file
-// exists, false when it is provably absent (exit 1, no output), and
-// null when the probe itself is inconclusive (binary missing,
-// timeout, unexpected exit) — inconclusive must never be reported
-// as "not installed".
-function isSystemdUnitFilePresent(unit: string): boolean | null {
-  try {
-    const out = execFileSync('systemctl', ['--no-ask-password', 'list-unit-files', unit, '--no-legend', '--no-pager'], {
-      encoding: 'utf8',
-      timeout: 1000,
-      stdio: ['ignore', 'pipe', 'ignore'],
-    });
-    return out.split('\n').some((line) => line.trim().startsWith(unit));
-  } catch (err: any) {
-    if (err?.status === 1) return false;
-    return null;
-  }
+interface SystemdUnitProbe {
+  unit: string;
+  loadState?: string;
+  status: 'active' | 'inactive' | 'failed' | 'not-installed' | 'unknown';
+  pid: number | null;
+  memory: string | null;
+  uptime: string | null;
 }
 
 const SERVICE_UNIT_ALIASES: Record<string, string[]> = {
@@ -1541,63 +1535,99 @@ const SERVICE_UNIT_ALIASES: Record<string, string[]> = {
   'ssh.service': ['ssh.service', 'sshd.service'],
   'freeradius.service': ['freeradius.service', 'radiusd.service'],
   'rtslib-fb-targetctl.service': ['rtslib-fb-targetctl.service', 'target.service'],
+  'openvpn-server@axonwall.service': ['openvpn-server@axonwall.service', 'openvpn-server@server.service'],
+  'strongswan-starter.service': ['strongswan-starter.service', 'strongswan.service', 'charon.service'],
 };
 
-function querySingleSystemdUnit(unit: string): {
-  unit: string;
-  loadState?: string;
-  status: 'active' | 'inactive' | 'failed' | 'not-installed' | 'unknown';
-  pid: number | null;
-  memory: string | null;
-  uptime: string | null;
-} {
+/**
+ * Queries multiple systemd units in a single batched async invocation so the
+ * Next.js event loop is never blocked by sequential `execFileSync` calls.
+ */
+async function querySystemdUnitsBatch(units: string[]): Promise<Map<string, SystemdUnitProbe>> {
+  const uniqueUnits = Array.from(new Set(units.filter(Boolean)));
+  const resultMap = new Map<string, SystemdUnitProbe>();
+  if (uniqueUnits.length === 0) return resultMap;
+
   try {
-    const showOut = execFileSync(
+    const { stdout } = await execFileAsync(
       'systemctl',
-      ['--no-ask-password', 'show', unit, '--property=LoadState,ActiveState,SubState,MainPID,MemoryCurrent'],
-      { encoding: 'utf8', timeout: 500, stdio: ['ignore', 'pipe', 'ignore'] }
+      [
+        '--no-ask-password',
+        'show',
+        '--property=Id,LoadState,ActiveState,SubState,MainPID,MemoryCurrent',
+        ...uniqueUnits,
+      ],
+      { encoding: 'utf8', timeout: 2500, maxBuffer: 4 * 1024 * 1024 }
     );
-    const props: Record<string, string> = {};
-    for (const line of showOut.split('\n')) {
-      const idx = line.indexOf('=');
-      if (idx > 0) {
-        props[line.slice(0, idx).trim()] = line.slice(idx + 1).trim();
+    const blocks = stdout.trim() ? stdout.trim().split(/\r?\n\r?\n+/) : [];
+    for (let i = 0; i < blocks.length; i++) {
+      const props: Record<string, string> = {};
+      for (const line of blocks[i]!.split(/\r?\n/)) {
+        const idx = line.indexOf('=');
+        if (idx > 0) {
+          props[line.slice(0, idx).trim()] = line.slice(idx + 1).trim();
+        }
+      }
+      const unitId = props['Id'] || (blocks.length === uniqueUnits.length ? uniqueUnits[i]! : '');
+      if (!unitId) continue;
+
+      const activeState = props['ActiveState'];
+      let status: SystemdUnitProbe['status'] = 'inactive';
+      if (props['LoadState'] === 'not-found') status = 'not-installed';
+      else if (activeState === 'active') status = 'active';
+      else if (activeState === 'failed') status = 'failed';
+      else status = 'inactive';
+
+      let pid: number | null = null;
+      const parsedPid = parseInt(props['MainPID'] || '0', 10);
+      if (parsedPid > 0) pid = parsedPid;
+
+      let memory: string | null = null;
+      const memBytes = parseInt(props['MemoryCurrent'] || '0', 10);
+      if (memBytes > 0 && memBytes < 1e15) {
+        memory = `${(memBytes / (1024 * 1024)).toFixed(1)} MB`;
+      }
+
+      const requestedUnit = blocks.length === uniqueUnits.length ? uniqueUnits[i]! : unitId;
+      const probe: SystemdUnitProbe = {
+        unit: requestedUnit,
+        loadState: props['LoadState'],
+        status,
+        pid,
+        memory,
+        uptime: status === 'active' && pid ? 'Active' : null,
+      };
+      resultMap.set(requestedUnit, probe);
+      if (!resultMap.has(unitId)) resultMap.set(unitId, probe);
+    }
+    return resultMap;
+  } catch {
+    // Fallback when dbus/manager is unavailable: list unit files from disk in one async call.
+    // Preserves the C-B15 invariant: inconclusive probes report 'unknown', never 'not-installed'.
+    let presentUnits: Set<string> | null = null;
+    try {
+      const { stdout } = await execFileAsync(
+        'systemctl',
+        ['--no-ask-password', 'list-unit-files', '--no-legend', '--no-pager', ...uniqueUnits],
+        { encoding: 'utf8', timeout: 1500, maxBuffer: 2 * 1024 * 1024 }
+      );
+      presentUnits = new Set(
+        stdout
+          .split(/\r?\n/)
+          .map((l) => l.trim().split(/\s+/)[0] || '')
+          .filter(Boolean)
+      );
+    } catch (err: any) {
+      if (err?.code === 1 || err?.status === 1) {
+        presentUnits = new Set<string>();
       }
     }
-
-    const activeState = props['ActiveState'];
-    let status: 'active' | 'inactive' | 'failed' | 'not-installed' | 'unknown' = 'inactive';
-    if (props['LoadState'] === 'not-found') status = 'not-installed';
-    else if (activeState === 'active') status = 'active';
-    else if (activeState === 'failed') status = 'failed';
-    else status = 'inactive';
-
-    let pid: number | null = null;
-    const parsedPid = parseInt(props['MainPID'] || '0', 10);
-    if (parsedPid > 0) pid = parsedPid;
-
-    let memory: string | null = null;
-    const memBytes = parseInt(props['MemoryCurrent'] || '0', 10);
-    if (memBytes > 0 && memBytes < 1e15) {
-      memory = `${(memBytes / (1024 * 1024)).toFixed(1)} MB`;
+    for (const unit of uniqueUnits) {
+      const status: SystemdUnitProbe['status'] =
+        presentUnits === null ? 'unknown' : presentUnits.has(unit) ? 'unknown' : 'not-installed';
+      resultMap.set(unit, { unit, status, pid: null, memory: null, uptime: null });
     }
-
-    return {
-      unit,
-      loadState: props['LoadState'],
-      status,
-      pid,
-      memory,
-      uptime: status === 'active' && pid ? 'Active' : null,
-    };
-  } catch {
-    return {
-      unit,
-      status: isSystemdUnitFilePresent(unit) === false ? 'not-installed' : 'unknown',
-      pid: null,
-      memory: null,
-      uptime: null,
-    };
+    return resultMap;
   }
 }
 
@@ -1605,38 +1635,59 @@ export async function getSystemServicesStatus(): Promise<SystemServiceInfo[]> {
   const session = await getSession();
   assertActionPermitted(session);
 
-  const units = [
+  const desiredState = await getDesiredStateInternal().catch(() => null);
+
+  const units: Array<{ name: string; unit: string; description: string; pluginId?: string }> = [
     { name: 'Axonwall Privileged Daemon', unit: 'axonwalld.service', description: 'Go privileged nftables & netlink transaction supervisor' },
     { name: 'Axonwall Web Console', unit: 'axonwall-ui.service', description: 'Next.js web management application' },
     { name: 'Axonwall Controller', unit: 'axonwall-controller.service', description: 'State synchronization and orchestration engine' },
-    { name: 'Keepalived VRRP Daemon', unit: 'keepalived.service', description: 'High availability virtual router failover daemon' },
-    { name: 'Conntrack State Sync', unit: 'conntrackd.service', description: 'Connection tracking state table sync over FTFW' },
-    { name: 'Suricata IDS/IPS', unit: 'suricata.service', description: 'Next-gen intrusion detection and prevention (NFQUEUE)' },
-    { name: 'Unbound DNS Resolver', unit: 'unbound.service', description: 'Recursive DNSSEC validating caching resolver with RPZ blocklists' },
-    { name: 'ISC Kea DHCPv4 Server', unit: 'kea-dhcp4-server.service', description: 'High-performance DHCPv4 server' },
-    { name: 'FRRouting Dynamic Engine', unit: 'frr.service', description: 'BGP, OSPF, and BFD routing protocol daemon' },
-    { name: 'CrowdSec Security Engine', unit: 'crowdsec.service', description: 'Collaborative IPS agent and nftables set bouncer' },
-    { name: 'Headscale Mesh VPN', unit: 'headscale.service', description: 'Private WireGuard mesh coordination server' },
-    { name: 'Network UPS Tools (NUT)', unit: 'nut-server.service', description: 'UPS hardware monitoring and shutdown supervisor' },
+    { name: 'Keepalived VRRP Daemon', unit: 'keepalived.service', description: 'High availability virtual router failover daemon', pluginId: 'high-availability' },
+    { name: 'Conntrack State Sync', unit: 'conntrackd.service', description: 'Connection tracking state table sync over FTFW', pluginId: 'high-availability' },
+    { name: 'Suricata IDS/IPS', unit: 'suricata.service', description: 'Next-gen intrusion detection and prevention (NFQUEUE)', pluginId: 'suricata-ids' },
+    { name: 'Unbound DNS Resolver', unit: 'unbound.service', description: 'Recursive DNSSEC validating caching resolver with RPZ blocklists', pluginId: 'core-firewall' },
+    { name: 'ISC Kea DHCPv4 Server', unit: 'kea-dhcp4-server.service', description: 'High-performance DHCPv4 server', pluginId: 'core-firewall' },
+    { name: 'FRRouting Dynamic Engine', unit: 'frr.service', description: 'BGP, OSPF, and BFD routing protocol daemon', pluginId: 'frr-routing' },
+    { name: 'CrowdSec Security Engine', unit: 'crowdsec.service', description: 'Collaborative IPS agent and nftables set bouncer', pluginId: 'crowdsec-bouncer' },
+    { name: 'Headscale Mesh VPN', unit: 'headscale.service', description: 'Private WireGuard mesh coordination server', pluginId: 'headscale' },
+    { name: 'Tailscale Mesh Client', unit: 'tailscaled.service', description: 'Zero-config WireGuard mesh VPN daemon', pluginId: 'tailscale' },
+    { name: 'OpenVPN Server', unit: 'openvpn-server@axonwall.service', description: 'SSL/TLS routed and bridged VPN tunnel server', pluginId: 'openvpn' },
+    { name: 'strongSwan IPsec', unit: 'strongswan-starter.service', description: 'IKEv2 site-to-site and roadwarrior IPsec VPN', pluginId: 'ipsec-strongswan' },
+    { name: 'OpenLDAP Directory Server', unit: 'slapd.service', description: 'Enterprise LDAP directory authentication backend', pluginId: 'directory-ldap' },
+    { name: 'SSSD Identity Cache', unit: 'sssd.service', description: 'System Security Services Daemon for LDAP/AD auth', pluginId: 'directory-ldap' },
+    { name: 'HAProxy Load Balancer', unit: 'haproxy.service', description: 'L4/L7 reverse proxy and TLS termination daemon', pluginId: 'haproxy' },
+    { name: 'FreeRADIUS Server', unit: 'freeradius.service', description: 'RADIUS authentication, authorization, and accounting server', pluginId: 'freeradius' },
+    { name: 'SNMP Telemetry Agent', unit: 'snmpd.service', description: 'SNMPv3 telemetry and MIB exporter daemon', pluginId: 'snmp' },
+    { name: 'Network UPS Tools (NUT)', unit: 'nut-server.service', description: 'UPS hardware monitoring and shutdown supervisor', pluginId: 'nut-ups' },
+    { name: 'Coroot eBPF Node Agent', unit: 'coroot-node-agent.service', description: 'Kernel eBPF APM and service-map collector', pluginId: 'coroot-ebpf-apm' },
+    { name: 'ntopng Flow Monitor', unit: 'ntopng.service', description: 'High-speed deep packet inspection and flow monitor', pluginId: 'ntopng' },
+    { name: 'Samba File Server', unit: 'smbd.service', description: 'SMB/CIFS enterprise file sharing service', pluginId: 'core-nas' },
+    { name: 'K3s Kubernetes Cluster', unit: 'k3s.service', description: 'Lightweight embedded Kubernetes cluster runtime', pluginId: 'core-k3s' },
   ];
+
+  const allCandidates = units.flatMap((u) => SERVICE_UNIT_ALIASES[u.unit] || [u.unit]);
+  const probeMap = await querySystemdUnitsBatch(allCandidates);
 
   const results: SystemServiceInfo[] = [];
 
   for (const u of units) {
     const candidates = SERVICE_UNIT_ALIASES[u.unit] || [u.unit];
-    let probe = querySingleSystemdUnit(candidates[0]);
+    let probe: SystemdUnitProbe =
+      probeMap.get(candidates[0]!) ?? { unit: candidates[0]!, status: 'unknown', pid: null, memory: null, uptime: null };
     if (probe.status === 'not-installed' && candidates.length > 1) {
       for (const altUnit of candidates.slice(1)) {
-        const altProbe = querySingleSystemdUnit(altUnit);
-        if (altProbe.status !== 'not-installed') {
+        const altProbe = probeMap.get(altUnit);
+        if (altProbe && altProbe.status !== 'not-installed') {
           probe = altProbe;
           break;
         }
       }
     }
 
+    const pluginEnabled = u.pluginId ? isPluginEnabled(u.pluginId, desiredState ?? undefined) : true;
+
     results.push({
       ...u,
+      pluginEnabled,
       unit: probe.unit,
       status: probe.status,
       pid: probe.pid,
@@ -1714,6 +1765,19 @@ const CONTROLLABLE_SERVICE_UNITS = [
   'frr.service',
   'crowdsec.service',
   'headscale.service',
+  'tailscaled.service',
+  'openvpn-server@axonwall.service',
+  'openvpn-server@server.service',
+  'strongswan-starter.service',
+  'strongswan.service',
+  'charon.service',
+  'slapd.service',
+  'sssd.service',
+  'haproxy.service',
+  'snmpd.service',
+  'coroot-node-agent.service',
+  'ntopng.service',
+  'k3s.service',
   'nut-server.service',
   'upsd.service',
   'chrony.service',
@@ -1746,10 +1810,12 @@ export async function controlSystemService(
   let resolvedUnit = cleanUnit;
   const aliases = SERVICE_UNIT_ALIASES[cleanUnit];
   if (aliases && aliases.length > 1) {
-    const primary = querySingleSystemdUnit(aliases[0]);
-    if (primary.status === 'not-installed') {
+    const probeMap = await querySystemdUnitsBatch(aliases);
+    const primary = probeMap.get(aliases[0]!);
+    if (!primary || primary.status === 'not-installed') {
       for (const alt of aliases.slice(1)) {
-        if (querySingleSystemdUnit(alt).status !== 'not-installed') {
+        const altProbe = probeMap.get(alt);
+        if (altProbe && altProbe.status !== 'not-installed') {
           resolvedUnit = alt;
           break;
         }
@@ -1784,6 +1850,7 @@ export async function testOidcDiscoveryAction(
 ): Promise<{ ok: boolean; message: string }> {
   const session = await getSession();
   assertActionPermitted(session, 'admin');
+  await assertPluginEnabled('enterprise-sso');
 
   const issuer = (issuerUrl || '').trim().replace(/\/+$/, '');
   if (!issuer) {
@@ -4457,6 +4524,7 @@ export async function executeTerminalCommand(command: string): Promise<TerminalE
   const session = await getSession();
   await enforceRateLimit(30, 60000);
   assertActionPermitted(session, 'admin');
+  await assertPluginEnabled('web-terminal');
 
   const cleanCmd = command.trim();
   if (!cleanCmd) {
@@ -5883,6 +5951,7 @@ export interface McpDashboardData {
 export async function getMcpDashboardData(): Promise<McpDashboardData> {
   const session = await getSession();
   assertActionPermitted(session);
+  await assertPluginEnabled('mcp-ai-control');
 
   const keys = readStoredMcpKeys().map(({ secretHashSha256: _omit, ...pub }) => pub);
   const { entries, integrity } = readAndVerifyMcpAuditLog(100);
@@ -5939,6 +6008,7 @@ export async function createMcpApiKeyAction(input: {
 }): Promise<{ success: boolean; rawToken?: string; key?: McpApiKeyPublic; error?: string }> {
   const session = await getSession();
   assertActionPermitted(session, 'admin');
+  await assertPluginEnabled('mcp-ai-control');
 
   if (!input.name || input.name.trim().length < 2) {
     return { success: false, error: 'Key name must be at least 2 characters' };
@@ -6000,6 +6070,7 @@ export async function createMcpApiKeyAction(input: {
 export async function revokeMcpApiKeyAction(keyId: string): Promise<{ success: boolean; error?: string }> {
   const session = await getSession();
   assertActionPermitted(session, 'admin');
+  await assertPluginEnabled('mcp-ai-control');
 
   const existing = readStoredMcpKeys();
   const idx = existing.findIndex((k) => k.id === keyId);
@@ -6017,6 +6088,7 @@ export async function toggleMcpApiKeyAction(
 ): Promise<{ success: boolean; error?: string }> {
   const session = await getSession();
   assertActionPermitted(session, 'admin');
+  await assertPluginEnabled('mcp-ai-control');
 
   const existing = readStoredMcpKeys();
   const target = existing.find((k) => k.id === keyId);
@@ -6034,6 +6106,7 @@ export async function revertMcpLeaseAction(
 ): Promise<{ success: boolean; error?: string }> {
   const session = await getSession();
   assertActionPermitted(session, 'admin');
+  await assertPluginEnabled('mcp-ai-control');
 
   const res = await callAgentApiResponse<any>('/v1/mcp/revert', 'POST', { leaseId, reason }, 30_000);
   if (!res) {
@@ -6050,6 +6123,7 @@ export async function emergencyFlushMcpLeasesAction(
 ): Promise<{ success: boolean; clearedCount: number; error?: string }> {
   const session = await getSession();
   assertActionPermitted(session, 'admin');
+  await assertPluginEnabled('mcp-ai-control');
 
   const res = await callAgentApiResponse<any>('/v1/mcp/flush', 'POST', { reason }, 30_000);
   // C-B6: a null response means the daemon never ran the flush — the
@@ -6078,6 +6152,7 @@ export async function toggleMcpServerMasterSwitchAction(
 ): Promise<{ success: boolean; status: McpServerStatus; error?: string }> {
   const session = await getSession();
   assertActionPermitted(session, 'admin');
+  await assertPluginEnabled('mcp-ai-control');
 
   const settingsPath = resolveMcpSettingsPath();
   const currentStatus = getMcpServerStatus(settingsPath);
@@ -6416,6 +6491,7 @@ export interface HostRootkitAuditApiResponse {
 export async function getHostRootkitAuditStatus(): Promise<HostRootkitAuditApiResponse | null> {
   const session = await getSession();
   assertActionPermitted(session);
+  await assertPluginEnabled('host-malware-rootkit');
   await enforceRateLimit(30, 60000, 'rootkit-status');
   return callAgentApi<HostRootkitAuditApiResponse>('/v1/security/rootkit/status', 'GET', undefined, 10000);
 }
@@ -6423,6 +6499,7 @@ export async function getHostRootkitAuditStatus(): Promise<HostRootkitAuditApiRe
 export async function runHostRootkitScan(): Promise<HostRootkitAuditApiResponse | null> {
   const session = await getSession();
   assertActionPermitted(session, 'admin');
+  await assertPluginEnabled('host-malware-rootkit');
   await enforceRateLimit(10, 60000, 'rootkit-scan');
   return callAgentApi<HostRootkitAuditApiResponse>('/v1/security/rootkit/scan', 'POST', {}, 30000);
 }
@@ -6488,6 +6565,7 @@ function mapBpfTokenPreset(preset?: string): CanonicalBpfTokenPreset {
 export async function getEbpfOverviewTelemetry(): Promise<EbpfOverviewTelemetry> {
   const session = await getSession();
   assertActionPermitted(session);
+  await assertPluginEnabled('coroot-ebpf-apm');
   await enforceRateLimit(60, 60000, 'ebpf-overview');
 
   const res = await callAgentApi<any>('/v1/ebpf/overview?limit=100', 'GET', undefined, 8000);
@@ -6642,6 +6720,7 @@ export async function manageBpfTokenProfileAction(input: {
 }): Promise<{ success: boolean; profile?: BpfTokenProfileStatus; error?: string }> {
   const session = await getSession();
   assertActionPermitted(session, 'admin');
+  await assertPluginEnabled('coroot-ebpf-apm');
   await enforceRateLimit(20, 60000, 'ebpf-token-manage');
 
   const cleanName = (input.name || '').trim().toLowerCase();
@@ -6696,6 +6775,7 @@ export async function manageXdpFastDropAction(input: {
 }): Promise<{ success: boolean; error?: string }> {
   const session = await getSession();
   assertActionPermitted(session, 'admin');
+  await assertPluginEnabled('coroot-ebpf-apm');
   await enforceRateLimit(30, 60000, 'ebpf-xdp-block');
 
   const cleanIp = (input.ip || '').trim();
@@ -6728,6 +6808,7 @@ export async function manageXdpFastDropAction(input: {
 export async function getXdpSynLimitAction(): Promise<{ maxSynPps: number; daemonDown: boolean }> {
   const session = await getSession();
   assertActionPermitted(session);
+  await assertPluginEnabled('coroot-ebpf-apm');
   const res = await callAgentApi<{ maxSynPps?: number }>('/v1/ebpf/xdp/syn-limit', 'GET', undefined, 5000);
   if (!res) {
     return { maxSynPps: 0, daemonDown: true };
@@ -6740,6 +6821,7 @@ export async function setXdpSynLimitAction(
 ): Promise<{ success: boolean; maxSynPps: number; error?: string }> {
   const session = await getSession();
   assertActionPermitted(session, 'admin');
+  await assertPluginEnabled('coroot-ebpf-apm');
   await enforceRateLimit(20, 60000, 'ebpf-xdp-syn-limit');
 
   const val = Math.floor(Number(maxSynPps));
@@ -6765,6 +6847,7 @@ export async function toggleKernelBpfStatsAction(
 ): Promise<{ success: boolean; statsEnabled: boolean; error?: string }> {
   const session = await getSession();
   assertActionPermitted(session, 'admin');
+  await assertPluginEnabled('coroot-ebpf-apm');
   await enforceRateLimit(20, 60000, 'ebpf-bpf-stats');
 
   const res = await callAgentApiResponse<any>(
@@ -6800,6 +6883,7 @@ export async function renderK3sBpfTokenManifestAction(input: {
 }): Promise<{ success: boolean; manifestYaml: string; error?: string }> {
   const session = await getSession();
   assertActionPermitted(session);
+  await assertPluginEnabled('coroot-ebpf-apm');
   await enforceRateLimit(30, 60000, 'ebpf-render-k3s');
 
   const cleanName = /^[a-z0-9-]{2,48}$/.test((input.name || '').trim()) ? input.name.trim() : 'ebpf-packet-sensor';
@@ -6920,6 +7004,7 @@ export interface ThreatHarvesterStatusSnapshot {
 export async function getThreatHarvesterStatus(): Promise<ThreatHarvesterStatusSnapshot> {
   const session = await getSession();
   assertActionPermitted(session);
+  await assertPluginEnabled('ebpf-threat-harvester');
   await enforceRateLimit(60, 60000, 'threat-harvester-status');
 
   const res = await callAgentApi<ThreatHarvesterStatusSnapshot>(
@@ -6993,6 +7078,7 @@ export async function listThreatHarvesterEpisodes(params?: {
 }): Promise<{ episodes: ThreatEpisode[]; total: number; daemonDown?: boolean }> {
   const session = await getSession();
   assertActionPermitted(session);
+  await assertPluginEnabled('ebpf-threat-harvester');
   await enforceRateLimit(60, 60000, 'threat-harvester-episodes');
 
   const qs = new URLSearchParams();
@@ -7021,6 +7107,7 @@ export async function updateThreatHarvesterLiveConfigAction(
 ): Promise<{ success: boolean; status?: ThreatHarvesterStatusSnapshot; error?: string }> {
   const session = await getSession();
   assertActionPermitted(session, 'admin');
+  await assertPluginEnabled('ebpf-threat-harvester');
   await enforceRateLimit(20, 60000, 'threat-harvester-config');
 
   const validated = ThreatHarvesterConfigSchema.parse(cfg);
@@ -7045,6 +7132,7 @@ export async function reviewThreatHarvesterEpisodeAction(input: {
 }): Promise<{ success: boolean; episode?: ThreatEpisode; error?: string }> {
   const session = await getSession();
   assertActionPermitted(session, 'operator');
+  await assertPluginEnabled('ebpf-threat-harvester');
   await enforceRateLimit(60, 60000, 'threat-harvester-review');
 
   const cleanId = String(input?.id || '').trim();
@@ -7072,6 +7160,7 @@ export async function annotateThreatHarvesterEpisodeAction(
 ): Promise<{ success: boolean; episode?: ThreatEpisode; error?: string }> {
   const session = await getSession();
   assertActionPermitted(session, 'operator');
+  await assertPluginEnabled('ebpf-threat-harvester');
   await enforceRateLimit(30, 60000, 'threat-harvester-annotate');
 
   const cleanId = String(id || '').trim();
@@ -7103,6 +7192,7 @@ export async function simulateThreatHarvesterEpisodeAction(
 ): Promise<{ success: boolean; episode?: ThreatEpisode; error?: string }> {
   const session = await getSession();
   assertActionPermitted(session, 'admin');
+  await assertPluginEnabled('ebpf-threat-harvester');
   await enforceRateLimit(30, 60000, 'threat-harvester-simulate');
 
   const res = await callAgentApiResponse<{ success?: boolean; episode?: ThreatEpisode; error?: string; message?: string }>(
@@ -7127,6 +7217,7 @@ export async function shipThreatHarvesterCorpusAction(): Promise<{
 }> {
   const session = await getSession();
   assertActionPermitted(session, 'admin');
+  await assertPluginEnabled('ebpf-threat-harvester');
   await enforceRateLimit(10, 60000, 'threat-harvester-ship');
 
   const res = await callAgentApiResponse<{ success?: boolean; objectKey?: string; error?: string; message?: string }>(
@@ -7505,6 +7596,7 @@ export interface NetBoxCredentialsSnapshot {
 export async function getNetBoxStatusAction(): Promise<NetBoxStatusSnapshot> {
   const session = await getSession();
   assertActionPermitted(session);
+  await assertPluginEnabled('netbox');
 
   const res = await callAgentApiDetailed<NetBoxStatusSnapshot>('/v1/netbox/status', 'GET', undefined, 8_000);
   if (res.kind === 'ok' && res.data) {
@@ -7555,6 +7647,7 @@ export async function triggerNetBoxSyncAction(options?: {
   const session = await getSession();
   await enforceRateLimit(10, 60000);
   assertActionPermitted(session, 'admin');
+  await assertPluginEnabled('netbox');
 
   const payload = {
     dryRun: Boolean(options?.dryRun),
@@ -7600,6 +7693,7 @@ export async function triggerNetBoxSyncAction(options?: {
 export async function getNetBoxCredentialsAction(reveal = false): Promise<NetBoxCredentialsSnapshot> {
   const session = await getSession();
   assertActionPermitted(session, 'admin');
+  await assertPluginEnabled('netbox');
 
   const suffix = reveal ? '?reveal=true' : '';
   const res = await callAgentApiDetailed<NetBoxCredentialsSnapshot>(
@@ -7817,6 +7911,7 @@ export interface LibreNmsNetBoxSyncResultSnapshot {
 export async function getLibreNmsStatusAction(): Promise<LibreNmsStatusSnapshot> {
   const session = await getSession();
   assertActionPermitted(session);
+  await assertPluginEnabled('librenms');
 
   const res = await callAgentApiDetailed<LibreNmsStatusSnapshot>('/v1/librenms/status', 'GET', undefined, 8_000);
   if (res.kind === 'ok' && res.data) {
@@ -7872,6 +7967,7 @@ export async function triggerLibreNmsSyncAction(options?: {
   const session = await getSession();
   await enforceRateLimit(10, 60000);
   assertActionPermitted(session, 'admin');
+  await assertPluginEnabled('librenms');
 
   const payload = {
     dryRun: Boolean(options?.dryRun),
@@ -7911,6 +8007,7 @@ export async function triggerLibreNmsSyncAction(options?: {
 export async function getLibreNmsCredentialsAction(reveal = false): Promise<LibreNmsCredentialsSnapshot> {
   const session = await getSession();
   assertActionPermitted(session, 'admin');
+  await assertPluginEnabled('librenms');
 
   const suffix = reveal ? '?reveal=true' : '';
   const res = await callAgentApiDetailed<LibreNmsCredentialsSnapshot>(
@@ -7935,6 +8032,7 @@ export async function getLibreNmsCredentialsAction(reveal = false): Promise<Libr
 export async function getLibreNmsTopologyAction(endpointOverride?: string): Promise<LibreNmsTopologySnapshot> {
   const session = await getSession();
   assertActionPermitted(session);
+  await assertPluginEnabled('librenms');
 
   const q = endpointOverride?.trim() ? `?endpoint=${encodeURIComponent(endpointOverride.trim())}` : '';
   const res = await callAgentApiDetailed<LibreNmsTopologySnapshot>(
@@ -7981,6 +8079,7 @@ export async function triggerLibreNmsNetBoxSyncAction(options?: {
   const session = await getSession();
   await enforceRateLimit(10, 60000);
   assertActionPermitted(session, 'admin');
+  await assertPluginEnabled('librenms');
 
   const action = options?.action || 'preview';
   const payload = {
@@ -8151,6 +8250,7 @@ export interface TopologyApplyPlanResultSnapshot {
 export async function getLocalTopologyProbeAction(): Promise<TopologyLocalProbeSnapshot> {
   const session = await getSession();
   assertActionPermitted(session);
+  await assertPluginEnabled('topology-studio');
 
   const res = await callAgentApiDetailed<TopologyLocalProbeSnapshot>('/v1/topology/probe', 'GET', undefined, 8_000);
   if (res.kind === 'ok' && res.data) {
@@ -8177,6 +8277,7 @@ export async function getLocalTopologyProbeAction(): Promise<TopologyLocalProbeS
 export async function getFabricTopologyAction(): Promise<TopologyFabricSnapshot> {
   const session = await getSession();
   assertActionPermitted(session);
+  await assertPluginEnabled('topology-studio');
 
   const res = await callAgentApiDetailed<TopologyFabricSnapshot>('/v1/topology/fabric', 'GET', undefined, 12_000);
   if (res.kind === 'ok' && res.data) {
@@ -8221,6 +8322,7 @@ export async function applyFabricPlanAction(input: {
   const session = await getSession();
   await enforceRateLimit(10, 60000);
   assertActionPermitted(session, 'admin');
+  await assertPluginEnabled('topology-studio');
 
   const timeout = Math.max(10, Math.min(3600, Math.round(input.confirmTimeoutSeconds ?? 120)));
   const dryRun = Boolean(input.dryRun);
@@ -8316,6 +8418,7 @@ export async function syncTopologyNetBoxAction(options: {
   const session = await getSession();
   await enforceRateLimit(10, 60000);
   assertActionPermitted(session, 'admin');
+  await assertPluginEnabled('topology-studio');
 
   const res = await callAgentApiDetailed<Record<string, unknown>>(
     '/v1/topology/sync/netbox',
@@ -8343,6 +8446,7 @@ export async function syncTopologyLibreNmsAction(options: {
   const session = await getSession();
   await enforceRateLimit(10, 60000);
   assertActionPermitted(session, 'admin');
+  await assertPluginEnabled('topology-studio');
 
   const res = await callAgentApiDetailed<Record<string, unknown>>(
     '/v1/topology/sync/librenms',
@@ -8716,6 +8820,7 @@ export interface NetFlowAlertSnapshot {
 export async function getNetFlowStatusAction(): Promise<NetFlowStatusSnapshot> {
   const session = await getSession();
   assertActionPermitted(session);
+  await assertPluginEnabled('netflow-collector');
 
   const res = await callAgentApiDetailed<NetFlowStatusSnapshot>('/v1/netflow/status', 'GET', undefined, 5_000);
   if (res.kind === 'ok' && res.data) {
@@ -8765,6 +8870,7 @@ export async function queryNetFlowAction(options?: {
 }): Promise<NetFlowQueryResponseSnapshot> {
   const session = await getSession();
   assertActionPermitted(session);
+  await assertPluginEnabled('netflow-collector');
 
   const res = await callAgentApiDetailed<NetFlowQueryResponseSnapshot>(
     '/v1/netflow/query',
@@ -8834,6 +8940,7 @@ export async function queryNetFlowAction(options?: {
 export async function getNetFlowExportersAction(): Promise<NetFlowExporterSnapshot[]> {
   const session = await getSession();
   assertActionPermitted(session);
+  await assertPluginEnabled('netflow-collector');
   const res = await callAgentApiDetailed<{ exporters?: NetFlowExporterSnapshot[] }>('/v1/netflow/exporters', 'GET', undefined, 5_000);
   if (res.kind === 'ok' && Array.isArray(res.data?.exporters)) {
     return res.data.exporters;
@@ -8844,6 +8951,7 @@ export async function getNetFlowExportersAction(): Promise<NetFlowExporterSnapsh
 export async function getNetFlowTemplatesAction(): Promise<NetFlowTemplateSnapshot[]> {
   const session = await getSession();
   assertActionPermitted(session);
+  await assertPluginEnabled('netflow-collector');
   const res = await callAgentApiDetailed<{ templates?: NetFlowTemplateSnapshot[] }>('/v1/netflow/templates', 'GET', undefined, 5_000);
   if (res.kind === 'ok' && Array.isArray(res.data?.templates)) {
     return res.data.templates;
@@ -8854,6 +8962,7 @@ export async function getNetFlowTemplatesAction(): Promise<NetFlowTemplateSnapsh
 export async function getNetFlowAlertsAction(): Promise<NetFlowAlertSnapshot[]> {
   const session = await getSession();
   assertActionPermitted(session);
+  await assertPluginEnabled('netflow-collector');
   const res = await callAgentApiDetailed<{ alerts?: NetFlowAlertSnapshot[] }>('/v1/netflow/alerts', 'GET', undefined, 5_000);
   if (res.kind === 'ok' && Array.isArray(res.data?.alerts)) {
     return res.data.alerts;
@@ -8864,6 +8973,7 @@ export async function getNetFlowAlertsAction(): Promise<NetFlowAlertSnapshot[]> 
 export async function ackNetFlowAlertAction(id: string): Promise<{ success: boolean }> {
   const session = await getSession();
   assertActionPermitted(session, 'admin');
+  await assertPluginEnabled('netflow-collector');
   const res = await callAgentApiDetailed<{ success?: boolean }>('/v1/netflow/alerts/ack', 'POST', { id }, 5_000);
   return { success: res.kind === 'ok' && Boolean(res.data?.success) };
 }
@@ -8872,6 +8982,7 @@ export async function injectNetFlowTestBurstAction(protocol = 'ipfix', count = 1
   const session = await getSession();
   await enforceRateLimit(15, 60000);
   assertActionPermitted(session, 'admin');
+  await assertPluginEnabled('netflow-collector');
   const res = await callAgentApiDetailed<{ success?: boolean; injected?: number }>('/v1/netflow/test-inject', 'POST', { protocol, count }, 8_000);
   if (res.kind === 'ok' && res.data) {
     return { success: Boolean(res.data.success), injected: res.data.injected ?? 0 };
@@ -8890,6 +9001,7 @@ export async function getNetFlowReportAction(options?: {
 }): Promise<NetFlowReportResponseSnapshot> {
   const session = await getSession();
   assertActionPermitted(session);
+  await assertPluginEnabled('netflow-collector');
   const qs = new URLSearchParams({
     rangeDays: String(options?.rangeDays ?? 7),
     groupBy: options?.groupBy ?? 'interface',
@@ -8922,6 +9034,7 @@ export async function generateNetFlowReportAction(options?: {
 }): Promise<{ success: boolean; savedPath?: string; report?: NetFlowReportResponseSnapshot }> {
   const session = await getSession();
   assertActionPermitted(session, 'admin');
+  await assertPluginEnabled('netflow-collector');
   const res = await callAgentApiDetailed<{ success?: boolean; savedPath?: string; report?: NetFlowReportResponseSnapshot }>(
     '/v1/netflow/reports/generate',
     'POST',
@@ -8945,6 +9058,7 @@ export async function generateNetFlowReportAction(options?: {
 export async function getNetFlowBaselinesAction(limit = 50): Promise<NetFlowBaselineSummarySnapshot[]> {
   const session = await getSession();
   assertActionPermitted(session);
+  await assertPluginEnabled('netflow-collector');
   const res = await callAgentApiDetailed<{ entries?: NetFlowBaselineSummarySnapshot[] }>(
     `/v1/netflow/baselines?limit=${Math.max(1, limit)}`,
     'GET',
@@ -8960,6 +9074,7 @@ export async function getNetFlowBaselinesAction(limit = 50): Promise<NetFlowBase
 export async function resetNetFlowBaselinesAction(): Promise<{ success: boolean }> {
   const session = await getSession();
   assertActionPermitted(session, 'admin');
+  await assertPluginEnabled('netflow-collector');
   const res = await callAgentApiDetailed<{ success?: boolean }>('/v1/netflow/baselines', 'DELETE', undefined, 5_000);
   return { success: res.kind === 'ok' && Boolean(res.data?.success) };
 }
@@ -8967,6 +9082,7 @@ export async function resetNetFlowBaselinesAction(): Promise<{ success: boolean 
 export async function triggerNetFlowGeoIPUpdateAction(): Promise<{ success: boolean; error?: string }> {
   const session = await getSession();
   assertActionPermitted(session, 'admin');
+  await assertPluginEnabled('netflow-collector');
   const res = await callAgentApiDetailed<{ success?: boolean; error?: string }>('/v1/netflow/geoip/update', 'POST', undefined, 50_000);
   if (res.kind === 'ok') {
     return { success: Boolean(res.data?.success), error: res.data?.error };

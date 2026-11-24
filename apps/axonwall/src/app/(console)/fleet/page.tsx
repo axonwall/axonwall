@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useState, useEffect, useCallback } from 'react';
+import { PluginDisabledGate } from '@/components/PluginDisabledGate';
 import {
   Radio,
   Server,
@@ -70,7 +71,7 @@ function formatUptime(seconds: number): string {
   return `${mins}m`;
 }
 
-export default function FleetPage() {
+function FleetPageContent() {
   const { applyState } = useDesiredStateApply();
   const [satellites, setSatellites] = useState<SatelliteNodeView[]>([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -1051,5 +1052,13 @@ export default function FleetPage() {
         </div>
       )}
     </div>
+  );
+}
+
+export default function FleetPage() {
+  return (
+    <PluginDisabledGate pluginId="fleet-controller">
+      <FleetPageContent />
+    </PluginDisabledGate>
   );
 }

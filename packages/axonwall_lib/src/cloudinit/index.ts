@@ -1,6 +1,12 @@
 import { z } from 'zod';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import { DesiredStateSchema, inferInterfaceRole, type DesiredState } from '../schemas/index.js';
+import {
+  BUILTIN_PLUGINS,
+  enableStarterPack,
+  findStarterPackById,
+  isPluginEnabled,
+} from '../plugins/index.js';
 
 // ==============================================================================
 // 1. Storage & Custom Partitioning Schemas (used during ISO install & cloud init)
@@ -180,6 +186,7 @@ export type CloudInitK3sStorageBootstrap = z.infer<typeof CloudInitK3sStorageBoo
 
 export const AxonwallCloudConfigSchema = z.object({
   edition: ApplianceEditionSchema.optional(),
+  starter_packs: z.array(z.string()).optional(),
   k3s_storage: CloudInitK3sStorageBootstrapSchema.optional(),
   storage: CloudInitStorageSchema.optional(),
   auth: CloudInitAuthSchema.optional(),
@@ -281,6 +288,7 @@ export interface InstallerChoices {
   INSTALL_MODE?: 'ab' | 'rolling' | 'zbm';
   PARTITION_MODE?: 'ab' | 'rolling' | 'zbm' | 'wizard';
   INSTALL_EDITION?: 'axonwall' | 'minimal' | 'vault' | 'k3s-storage';
+  INSTALL_STARTER_PACKS?: string;
   K3S_ROLE?: 'server' | 'agent';
   K3S_SERVER_URL?: string;
   K3S_JOIN_TOKEN?: string;
@@ -324,6 +332,10 @@ export function cloudInitStorageToInstallerChoices(
   const luksPassphrase = storage.encryption?.passphrase || '';
 
   const installEdition = axonwallConfig?.edition ?? 'axonwall';
+  const starterPacksCsv = (axonwallConfig?.starter_packs || [])
+    .map((p) => p.trim())
+    .filter((p) => Boolean(p && findStarterPackById(p)))
+    .join(',');
   const zfsEnabled = Boolean(storage.zfs?.enabled);
   const zfsAllocMode = zfsEnabled
     ? storage.zfs.system_disk_size_gb > 0
@@ -381,6 +393,7 @@ export function cloudInitStorageToInstallerChoices(
     INSTALL_MODE: installMode,
     PARTITION_MODE: partitionMode,
     INSTALL_EDITION: installEdition,
+    ...(starterPacksCsv ? { INSTALL_STARTER_PACKS: starterPacksCsv } : {}),
     K3S_ROLE: k3sRole,
     K3S_SERVER_URL: k3sServerUrl,
     K3S_JOIN_TOKEN: k3sJoinToken,
@@ -455,6 +468,9 @@ export function formatInstallerChoicesEnv(choices: InstallerChoices): string {
     `ZFS_RAID_TOPOLOGY=${escapeShellSingleQuotes(choices.ZFS_RAID_TOPOLOGY)}`,
     `CUSTOM_MOUNTS_JSON=${escapeShellSingleQuotes(choices.CUSTOM_MOUNTS_JSON)}`,
     `INSTALL_EDITION=${escapeShellSingleQuotes(installEdition)}`,
+    ...(choices.INSTALL_STARTER_PACKS
+      ? [`INSTALL_STARTER_PACKS=${escapeShellSingleQuotes(choices.INSTALL_STARTER_PACKS)}`]
+      : []),
     `K3S_ROLE=${escapeShellSingleQuotes(k3sRole)}`,
     `K3S_SERVER_URL=${escapeShellSingleQuotes(k3sServerUrl)}`,
     `ZFS_ARC_MAX_MB=${zfsArcMaxMb}`,
@@ -1211,10 +1227,31 @@ export function prepareDesiredStateForCloudInit(
 }
 
 /**
+ * Enables any curated starter packs declared under `axonwall.starter_packs` on DesiredState.
+ */
+export function applyCloudInitStarterPacks(state: DesiredState, starterPacks?: string[]): DesiredState {
+  let next = state;
+  for (const rawPackId of starterPacks || []) {
+    const packId = rawPackId.trim();
+    if (!packId || !findStarterPackById(packId)) continue;
+    next = enableStarterPack(packId, next).state;
+  }
+  return next;
+}
+
+/**
  * Infers required OS packages from enabled plugins and services in DesiredState.
  */
 export function inferCloudInitPackages(state: DesiredState, extraPackages: string[] = []): string[] {
   const pkgs = new Set<string>(['qemu-guest-agent', 'cloud-guest-utils', ...extraPackages]);
+
+  for (const plugin of BUILTIN_PLUGINS) {
+    if (isPluginEnabled(plugin.id, state) && plugin.packages?.debian) {
+      for (const pkg of plugin.packages.debian) {
+        pkgs.add(pkg);
+      }
+    }
+  }
 
   const enabledPluginIds = new Set(
     (state.plugins || []).filter((p) => p.enabled !== false).map((p) => p.id)
@@ -1309,7 +1346,11 @@ export function buildCloudInitFromSystem(
         name,
         gecos: osUser.gecos || `${name} User`,
         sudo: osUser.sudo,
-        shell: osUser.shell || (data.edition === 'minimal' ? '/bin/bash' : '/usr/bin/zsh'),
+        shell:
+          osUser.shell ||
+          (data.edition === 'minimal' || !isPluginEnabled('cli-workstation', data.desiredState)
+            ? '/bin/bash'
+            : '/usr/bin/zsh'),
         lock_passwd: osUser.lockPasswd ?? false,
         ssh_authorized_keys: Array.from(new Set(validKeys)),
       });

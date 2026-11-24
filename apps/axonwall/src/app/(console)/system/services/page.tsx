@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
+import Link from 'next/link';
 import {
   Server,
   Play,
@@ -30,6 +31,7 @@ export default function ServicesSupervisorPage() {
   const [actionError, setActionError] = useState<string | null>(null);
   const [actingUnit, setActingUnit] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
+  const [showDisabledPlugins, setShowDisabledPlugins] = useState(false);
 
   const loadServices = async () => {
     setLoading(true);
@@ -84,11 +86,21 @@ export default function ServicesSupervisorPage() {
     }
   };
 
-  const filteredServices = services.filter(
-    (s) =>
-      s.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      s.unit.toLowerCase().includes(searchQuery.toLowerCase())
-  );
+  const hiddenDisabledCount = services.filter(
+    (s) => s.pluginEnabled === false && s.status !== 'active'
+  ).length;
+
+  const filteredServices = services.filter((s) => {
+    if (!showDisabledPlugins && s.pluginEnabled === false && s.status !== 'active') {
+      return false;
+    }
+    const q = searchQuery.toLowerCase();
+    return (
+      s.name.toLowerCase().includes(q) ||
+      s.unit.toLowerCase().includes(q) ||
+      (s.pluginId ? s.pluginId.toLowerCase().includes(q) : false)
+    );
+  });
 
   return (
     <div className="p-8 max-w-7xl mx-auto space-y-8">
@@ -106,7 +118,24 @@ export default function ServicesSupervisorPage() {
           </div>
         </div>
 
-        <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-center gap-3">
+          {hiddenDisabledCount > 0 && (
+            <button
+              type="button"
+              onClick={() => setShowDisabledPlugins((prev) => !prev)}
+              className={`px-3 py-2 rounded-lg border text-xs font-medium transition cursor-pointer ${
+                showDisabledPlugins
+                  ? 'bg-amber-500/15 border-amber-500/40 text-amber-300'
+                  : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-white hover:bg-slate-800'
+              }`}
+              title="Toggle visibility of services belonging to disabled opt-in plugins"
+            >
+              {showDisabledPlugins
+                ? `Hide disabled plugins (${hiddenDisabledCount})`
+                : `Show disabled plugins (${hiddenDisabledCount})`}
+            </button>
+          )}
+
           <button
             onClick={loadServices}
             disabled={loading}
@@ -175,8 +204,27 @@ export default function ServicesSupervisorPage() {
                 filteredServices.map((svc) => (
                   <tr key={svc.unit} className="hover:bg-slate-800/30">
                     <td className="py-4">
-                      <span className="font-sans font-semibold text-white block">{svc.name}</span>
-                      <span className="text-[11px] font-sans text-slate-400">{svc.description}</span>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="font-sans font-semibold text-white">{svc.name}</span>
+                        {svc.pluginId && (
+                          <Link
+                            href="/system/plugins"
+                            className={`inline-flex items-center px-2 py-0.5 rounded text-[10px] font-mono border transition ${
+                              svc.pluginEnabled === false
+                                ? 'bg-slate-800/80 text-slate-400 border-slate-700 hover:text-white'
+                                : 'bg-cyan-500/10 text-cyan-300 border-cyan-500/20 hover:bg-cyan-500/20'
+                            }`}
+                            title={
+                              svc.pluginEnabled === false
+                                ? `Managed by disabled plugin '${svc.pluginId}' — enable in Plugin Store`
+                                : `Managed by plugin '${svc.pluginId}'`
+                            }
+                          >
+                            plugin: {svc.pluginId}
+                          </Link>
+                        )}
+                      </div>
+                      <span className="text-[11px] font-sans text-slate-400 block mt-0.5">{svc.description}</span>
                     </td>
                     <td className="py-4 text-emerald-400">{svc.unit}</td>
                     <td className="py-4">

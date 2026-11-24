@@ -459,7 +459,10 @@ export function compileNftables(state: DesiredState): CompileResult {
   }
 
   // Compile IPsec & Traffic Shaper early so XFRM/TC commands are included in netdev reconciliation
-  const ipsecCompiled = state.ipsec?.enabled ? compileIpsec(state.ipsec) : undefined;
+  const ipsecCompiled =
+    isPluginEnabled('ipsec-strongswan', state) && state.ipsec?.enabled
+      ? compileIpsec(state.ipsec)
+      : undefined;
   const tcCompiled = state.trafficShaper?.enabled
     ? compileTrafficShaper(state.trafficShaper, state.interfaces)
     : undefined;
@@ -738,7 +741,7 @@ export function compileNftables(state: DesiredState): CompileResult {
 
   // Emit FRRouting (FRR) configuration (only when core-firewall is enabled),
   // automatically integrating K3s Bare-Metal ServiceLB BGP pools when BGP is active.
-  if (capabilities.firewallEnabled && state.frr?.enabled) {
+  if (capabilities.firewallEnabled && isPluginEnabled('frr-routing', state) && state.frr?.enabled) {
     let effectiveFrr = state.frr;
     const bgpLbPools = (state.k3s?.serviceLbPools ?? []).filter(
       (p) => p.mode === 'bgp' || p.mode === 'both',
@@ -795,7 +798,7 @@ export function compileNftables(state: DesiredState): CompileResult {
   }
 
   // Emit OpenVPN 2.6 DCO server configurations when enabled
-  if (state.openvpn?.enabled) {
+  if (isPluginEnabled('openvpn', state) && state.openvpn?.enabled) {
     const ovpnCompiled = compileOpenVpn(state.openvpn);
     for (const srv of ovpnCompiled.servers) {
       const safeSrv = srv.name.replace(/[^a-zA-Z0-9_-]/g, '_');
@@ -1082,19 +1085,22 @@ export function compileNftables(state: DesiredState): CompileResult {
     };
   }
 
-  const suricataConfig = state.suricata
-    ? {
-        ...state.suricata,
-        interfaces: state.suricata.interfaces
-          .map((i) => ifDeviceMap.get(i) || i)
-          .filter(isValidDevice),
-      }
-    : undefined;
+  const suricataConfig =
+    isPluginEnabled('suricata-ids', state) && state.suricata
+      ? {
+          ...state.suricata,
+          interfaces: state.suricata.interfaces
+            .map((i) => ifDeviceMap.get(i) || i)
+            .filter(isValidDevice),
+        }
+      : undefined;
   const suricataCompiled = compileSuricata(suricataConfig);
-  const crowdsecCompiled = compileCrowdSec(state.crowdsec);
+  const crowdsecCompiled = compileCrowdSec(
+    isPluginEnabled('crowdsec-bouncer', state) ? state.crowdsec : undefined,
+  );
   const geoipCompiled = compileGeoIp(state.geoip);
 
-  if (state.suricata?.enabled) {
+  if (isPluginEnabled('suricata-ids', state) && state.suricata?.enabled) {
     files.push({
       path: '/etc/suricata/suricata.yaml',
       content: suricataCompiled.suricataYaml,
@@ -1103,7 +1109,7 @@ export function compileNftables(state: DesiredState): CompileResult {
     reloadServices.push('suricata');
   }
 
-  if (state.crowdsec?.enabled) {
+  if (isPluginEnabled('crowdsec-bouncer', state) && state.crowdsec?.enabled) {
     files.push({
       path: '/etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml',
       content: crowdsecCompiled.bouncerYaml,

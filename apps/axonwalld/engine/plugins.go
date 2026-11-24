@@ -243,8 +243,10 @@ type PluginManager struct {
 	// the toggle can never report success while nothing runs. Nil
 	// when the daemon has not wired one (unit tests, tooling) — the
 	// toggle then fails closed instead of claiming success.
-	harvester *ThreatHarvesterManager
-	netflow   *NetFlowManager
+	harvester         *ThreatHarvesterManager
+	netflow           *NetFlowManager
+	docsBundleBaseURL string
+	releaseKeyPaths   []string
 }
 
 func (pm *PluginManager) SetDirectoryManager(dm *DirectoryManager) {
@@ -335,6 +337,10 @@ func GetCoreVigilanteLDAPSpec() PluginLDAPSpec {
 }
 
 func (pm *PluginManager) ensurePluginLDAP(pluginID string) {
+	if pluginID != "directory-ldap" && !pm.IsPluginEnabled("directory-ldap") {
+		log.Printf("[Plugins] Skipping OpenLDAP integration for %s because directory-ldap plugin is disabled.", pluginID)
+		return
+	}
 	pm.mu.RLock()
 	dm := pm.dirMgr
 	pm.mu.RUnlock()
@@ -462,9 +468,9 @@ func GetExtensionPluginDefinitions() []PluginDefinition {
 			Name:           "Modern Operator Shell & Editor (ZSH, Oh My Zsh, Starship, VIM & Neovim Super Configurator)",
 			Version:        "1.2.0",
 			Category:       "extension",
-			Description:    "Enabled by default: first-class shell environment with ZSH, Oh My Zsh (https://ohmyz.sh), Starship cyber-emerald prompt, Neovim Super Configurator (axonwall-config / nui — zero-chrome Lua form TUI with full Vim motions), VIM syntax defaults, Tmux multiplexer, and deep stack autocompletions (kubectl, helm, k3s, zfs/zpool, nftables, wireguard, rosenpass, virsh, lxc, axonwallctl, axonwall-tui, axonwall-config). Can be disabled to minimize attack surface.",
+			Description:    "Opt-in operator shell environment with ZSH, Oh My Zsh (https://ohmyz.sh), Starship cyber-emerald prompt, Neovim Super Configurator (axonwall-config / nui — zero-chrome Lua form TUI with full Vim motions), VIM syntax defaults, Tmux multiplexer, and deep stack autocompletions (kubectl, helm, k3s, zfs/zpool, nftables, wireguard, rosenpass, virsh, lxc, axonwallctl, axonwall-tui, axonwall-config).",
 			Author:         "Axonwall Core",
-			DefaultEnabled: true,
+			DefaultEnabled: false,
 			Privileges:     []string{"system.users", "system.hardware"},
 			// VIM + NEOVIM ARE BUNDLED, NOT SYSTEM-INSTALLED — Debian
 			// only (coordinator decisions 1–2, 2026-11-20). vim is
@@ -930,8 +936,8 @@ func GetExtensionPluginDefinitions() []PluginDefinition {
 			Author:           "Axonwall Core / NastyMap",
 			Privileges:       []string{"system.monitoring", "network.interfaces"},
 			DebianPackages:   []string{"nmap", "dnsutils", "net-tools", "btop", "htop", "iftop", "iotop", "slurm", "sysstat"},
-			AlpinePackages:   []string{"nmap", "bind-tools", "net-tools", "btop", "htop", "iftop", "iotop", "slurm", "sysstat"},
-			ArchPackages:     []string{"nmap", "bind", "net-tools", "btop", "htop", "iftop", "iotop", "sysstat"},
+			AlpinePackages:   []string{"nmap", "bind-tools", "net-tools", "btop", "htop", "iftop", "iotop", "sysstat"},
+			ArchPackages:     []string{"nmap", "bind", "net-tools", "btop", "htop", "iftop", "iotop-c", "sysstat"},
 			RequiredBinaries: []string{"nmap", "dig", "netstat", "btop", "htop", "iftop", "iostat", "mpstat"},
 		},
 		{
@@ -957,8 +963,8 @@ func GetExtensionPluginDefinitions() []PluginDefinition {
 			Author:           "Network RADIUS / Axonwall Core",
 			SystemdUnits:     []string{"freeradius.service"},
 			Privileges:       []string{"services.freeradius", "system.users"},
-			DebianPackages:   []string{"freeradius", "freeradius-ldap"},
-			AlpinePackages:   []string{"freeradius"},
+			DebianPackages:   []string{"freeradius", "freeradius-ldap", "freeradius-utils"},
+			AlpinePackages:   []string{"freeradius", "freeradius-ldap"},
 			ArchPackages:     []string{"freeradius"},
 			RequiredBinaries: []string{"freeradius"},
 			LdapIntegration: &PluginLDAPSpec{
@@ -986,7 +992,7 @@ func GetExtensionPluginDefinitions() []PluginDefinition {
 			SystemdUnits:     []string{"snmpd.service"},
 			Privileges:       []string{"system.monitoring"},
 			DebianPackages:   []string{"snmpd", "snmp"},
-			AlpinePackages:   []string{"net-snmp"},
+			AlpinePackages:   []string{"net-snmp", "net-snmp-tools"},
 			ArchPackages:     []string{"net-snmp"},
 			RequiredBinaries: []string{"snmpd"},
 		},
@@ -999,7 +1005,7 @@ func GetExtensionPluginDefinitions() []PluginDefinition {
 			Author:           "NUT Project / Axonwall Core",
 			SystemdUnits:     []string{"nut-server.service", "nut-client.service"},
 			Privileges:       []string{"system.hardware", "system.power"},
-			DebianPackages:   []string{"nut-server", "nut-client"},
+			DebianPackages:   []string{"nut", "nut-server", "nut-client"},
 			AlpinePackages:   []string{"nut"},
 			ArchPackages:     []string{"nut"},
 			RequiredBinaries: []string{"upsd"},
@@ -1109,8 +1115,8 @@ func GetExtensionPluginDefinitions() []PluginDefinition {
 			SystemdUnits:     []string{"k3s.service"},
 			Privileges:       []string{"k3s.cluster", "services.vow", "security.certificates", "services.dns"},
 			DebianPackages:   []string{"kubectl", "mkcert", "libnss3-tools", "gettext-base", "git", "curl", "jq"},
-			AlpinePackages:   []string{"kubectl", "mkcert", "nss-tools", "gettext", "git", "curl", "jq"},
-			ArchPackages:     []string{"kubectl", "helm", "mkcert", "nss", "gettext", "git", "curl", "jq"},
+			AlpinePackages:   []string{"mkcert", "nss-tools", "gettext", "git", "curl", "jq"},
+			ArchPackages:     []string{"kubectl", "mkcert", "nss", "gettext", "git", "curl", "jq"},
 			RequiredBinaries: []string{"kubectl", "helm", "mkcert", "git", "envsubst"},
 			LdapIntegration: &PluginLDAPSpec{
 				EnabledByDefault:           true,
@@ -1144,7 +1150,7 @@ func GetExtensionPluginDefinitions() []PluginDefinition {
 			Name:           "Host Malware, Rootkit & Ghost-in-the-Ring Kernel Hunter",
 			Version:        "1.0.0",
 			Category:       "extension",
-			DefaultEnabled: true,
+			DefaultEnabled: false,
 			Description:    "Defense-in-depth host malware, rootkit, and Ring-0 implant suite combining classic scanners (rkhunter, chkrootkit, ClamAV, AIDE, Lynis, YARA, unhide, debsums) with Ghost-in-the-Ring telemetry: io_uring SQPOLL/FIXED_FILE implant hunting (Curing/RingReaper), drgn /proc/kcore prog_idr XArray vs sys_bpf diffing for self-hiding eBPF rootkits (TripleCross/Boopkit/Symbiote), Silicon PMU LBR/BRS branch tracing, and preventive BPF_LSM + sysctl kernel lockdown.",
 			Author:         "Tekromancy / Axonwall Core",
 			SystemdUnits:   []string{"clamav-freshclam.service"},
@@ -1177,13 +1183,13 @@ func GetExtensionPluginDefinitions() []PluginDefinition {
 			},
 			ArchPackages: []string{
 				"rkhunter",
-				"chkrootkit",
 				"clamav",
 				"lynis",
 				"aide",
 				"yara",
 				"bpf",
 				"bpftrace",
+				"drgn",
 				"perf",
 			},
 			RequiredBinaries: []string{"rkhunter", "chkrootkit", "yara", "unhide", "debsums"},
@@ -1239,9 +1245,9 @@ func GetExtensionPluginDefinitions() []PluginDefinition {
 			Author:           "Axonwall Core",
 			SystemdUnits:     []string{},
 			Privileges:       []string{"security.forensics", "system.monitoring", "system.ai"},
-			DebianPackages:   []string{},
-			AlpinePackages:   []string{},
-			ArchPackages:     []string{},
+			DebianPackages:   []string{"bpftool", "zstd"},
+			AlpinePackages:   []string{"bpftool", "zstd"},
+			ArchPackages:     []string{"bpf", "zstd"},
 			RequiredBinaries: []string{},
 		},
 		{
@@ -1360,6 +1366,342 @@ func GetExtensionPluginDefinitions() []PluginDefinition {
 			ArchPackages:     []string{},
 			RequiredBinaries: []string{},
 		},
+		{
+			ID:               "ai-copilot",
+			Name:             "AI Network Copilot",
+			Version:          "1.0.0",
+			Category:         "extension",
+			DefaultEnabled:   false,
+			Dependencies:     []string{},
+			Description:      "Multi-provider AI Network Copilot supporting Antigravity (Gemini), Ollama, Claude Code, Codex (OpenAI), and vLLM for interactive nftables rule synthesis, configuration security auditing, and Suricata/syslog threat log explanation.",
+			Author:           "Axonwall Core",
+			SystemdUnits:     []string{},
+			Privileges:       []string{"firewall.rules", "system.config.write"},
+			DebianPackages:   []string{},
+			AlpinePackages:   []string{},
+			ArchPackages:     []string{},
+			RequiredBinaries: []string{},
+		},
+		{
+			ID:               "docs-portal",
+			Name:             "Offline Documentation Portal (26 Guides)",
+			Version:          "1.0.0",
+			Category:         "extension",
+			DefaultEnabled:   false,
+			Dependencies:     []string{},
+			Description:      "On-demand offline copy of all 26 Axonwall documentation guides (~1.2 MB compressed) installed into /var/lib/axonwall/docs-portal. Falls back to https://axonwall.com/docs when not installed.",
+			Author:           "Axonwall Core",
+			SystemdUnits:     []string{},
+			Privileges:       []string{"system.status.read"},
+			DebianPackages:   []string{},
+			AlpinePackages:   []string{},
+			ArchPackages:     []string{},
+			RequiredBinaries: []string{},
+		},
+		{
+			ID:               "coroot-ebpf-apm",
+			Name:             "Coroot eBPF APM, L7 RED Dissector, Continuous Profiler & Automated RCA",
+			Version:          "1.14.0",
+			Category:         "extension",
+			DefaultEnabled:   false,
+			Dependencies:     []string{},
+			Description:      "Zero-instrumentation eBPF APM & Root-Cause Analysis engine with Service Dependency Map, L7 RED metrics, optional TLS uprobes, perf profiling, and SLO inspections.",
+			Author:           "Coroot / Axonwall Core",
+			SystemdUnits:     []string{"coroot-node-agent.service"},
+			Privileges:       []string{"system.monitoring", "reporting.flows", "system.hardware"},
+			DebianPackages:   []string{"bpftool", "linux-perf"},
+			AlpinePackages:   []string{"bpftool", "perf"},
+			ArchPackages:     []string{"bpf", "perf"},
+			RequiredBinaries: []string{"bpftool"},
+		},
+		{
+			ID:               "suricata-ids",
+			Name:             "Suricata IDS/IPS Engine",
+			Version:          "7.0.8",
+			Category:         "extension",
+			DefaultEnabled:   false,
+			Dependencies:     []string{},
+			Description:      "High-speed multi-threaded Suricata 7 IDS/IPS engine with NFQUEUE inline bypass/fail-open protection, Emerging Threats Open rulesets, and Eve JSON alerts.",
+			Author:           "OISF / Axonwall Core",
+			SystemdUnits:     []string{"suricata.service"},
+			Privileges:       []string{"firewall.rules", "security.forensics"},
+			DebianPackages:   []string{"suricata"},
+			AlpinePackages:   []string{"suricata"},
+			ArchPackages:     []string{"suricata"},
+			RequiredBinaries: []string{"suricata"},
+		},
+		{
+			ID:               "crowdsec-bouncer",
+			Name:             "CrowdSec Collaborative IPS & nftables Bouncer",
+			Version:          "1.6.4",
+			Category:         "extension",
+			DefaultEnabled:   false,
+			Dependencies:     []string{},
+			Description:      "CrowdSec behavior analysis engine and real-time nftables remediation bouncer fed by Suricata, SSH, and web logs.",
+			Author:           "CrowdSec / Axonwall Core",
+			SystemdUnits:     []string{"crowdsec.service", "crowdsec-firewall-bouncer.service"},
+			Privileges:       []string{"firewall.rules", "system.monitoring"},
+			DebianPackages:   []string{"crowdsec", "crowdsec-firewall-bouncer-nftables"},
+			AlpinePackages:   []string{"crowdsec"},
+			ArchPackages:     []string{"crowdsec"},
+			RequiredBinaries: []string{"cscli"},
+		},
+		{
+			ID:               "frr-routing",
+			Name:             "FRRouting Dynamic Routing (BGP / OSPF / BFD)",
+			Version:          "10.2.0",
+			Category:         "extension",
+			DefaultEnabled:   false,
+			Dependencies:     []string{},
+			Description:      "Enterprise BGPv4/MP-BGP, OSPFv2/OSPFv3, and BFD control plane via FRRouting, including automated K3s ServiceLB BGP peer stitching.",
+			Author:           "FRRouting / Axonwall Core",
+			SystemdUnits:     []string{"frr.service"},
+			Privileges:       []string{"network.routing"},
+			DebianPackages:   []string{"frr"},
+			AlpinePackages:   []string{"frr"},
+			ArchPackages:     []string{"frr"},
+			RequiredBinaries: []string{"vtysh"},
+		},
+		{
+			ID:               "openvpn",
+			Name:             "OpenVPN 2.6 Data Channel Offload (DCO) Server",
+			Version:          "2.6.12",
+			Category:         "extension",
+			DefaultEnabled:   false,
+			Dependencies:     []string{},
+			Description:      "Kernel-accelerated OpenVPN 2.6 DCO server with per-client CSO overrides, automated PKI profile export, and TLS authentication.",
+			Author:           "OpenVPN / Axonwall Core",
+			SystemdUnits:     []string{"openvpn-server@axonwall.service"},
+			Privileges:       []string{"vpn.admin", "network.interfaces"},
+			DebianPackages:   []string{"openvpn"},
+			AlpinePackages:   []string{"openvpn"},
+			ArchPackages:     []string{"openvpn"},
+			RequiredBinaries: []string{"openvpn"},
+		},
+		{
+			ID:               "ipsec-strongswan",
+			Name:             "strongSwan IKEv2 / IPsec Site-to-Site & Roadwarrior",
+			Version:          "5.9.14",
+			Category:         "extension",
+			DefaultEnabled:   false,
+			Dependencies:     []string{},
+			Description:      "Hardware-accelerated strongSwan swanctl IKEv2 IPsec tunnel orchestrator with VTI routed tunnels, DPD, and PSK/X.509 authentication.",
+			Author:           "strongSwan / Axonwall Core",
+			SystemdUnits:     []string{"strongswan-starter.service"},
+			Privileges:       []string{"vpn.admin", "network.routing"},
+			DebianPackages:   []string{"strongswan", "strongswan-swanctl"},
+			AlpinePackages:   []string{"strongswan"},
+			ArchPackages:     []string{"strongswan"},
+			RequiredBinaries: []string{"swanctl"},
+		},
+		{
+			ID:               "captive-portal",
+			Name:             "Captive Portal & Guest Network Gateway",
+			Version:          "1.0.0",
+			Category:         "extension",
+			DefaultEnabled:   false,
+			Dependencies:     []string{},
+			Description:      "Zone-scoped captive portal authentication gateway with per-client session/idle timeouts, MAC/IP bypass lists, and bandwidth quotas.",
+			Author:           "Axonwall Core",
+			SystemdUnits:     []string{},
+			Privileges:       []string{"firewall.rules", "system.users"},
+			DebianPackages:   []string{},
+			AlpinePackages:   []string{},
+			ArchPackages:     []string{},
+			RequiredBinaries: []string{},
+		},
+		{
+			ID:               "tls-decryption",
+			Name:             "TLS Inspection & MITM Decryption Proxy",
+			Version:          "1.0.0",
+			Category:         "extension",
+			DefaultEnabled:   false,
+			Dependencies:     []string{},
+			Description:      "Transparent TLS inspection proxy for deep Suricata L7 inspection with configurable internal CA signing and healthcare/banking bypass allowlists.",
+			Author:           "Axonwall Core",
+			SystemdUnits:     []string{},
+			Privileges:       []string{"security.certificates", "firewall.rules"},
+			DebianPackages:   []string{},
+			AlpinePackages:   []string{},
+			ArchPackages:     []string{},
+			RequiredBinaries: []string{},
+		},
+		{
+			ID:               "identity-aware-proxy",
+			Name:             "Zero-Trust Identity-Aware Proxy (IAP)",
+			Version:          "1.0.0",
+			Category:         "extension",
+			DefaultEnabled:   false,
+			Dependencies:     []string{},
+			Description:      "Session-verified Zero-Trust reverse proxy exposing internal web applications behind Axonwall RBAC roles and SSO policies.",
+			Author:           "Axonwall Core",
+			SystemdUnits:     []string{},
+			Privileges:       []string{"system.users", "firewall.rules"},
+			DebianPackages:   []string{},
+			AlpinePackages:   []string{},
+			ArchPackages:     []string{},
+			RequiredBinaries: []string{},
+		},
+		{
+			ID:               "directory-ldap",
+			Name:             "Embedded OpenLDAP & SSSD Identity Directory",
+			Version:          "2.5.18",
+			Category:         "extension",
+			DefaultEnabled:   false,
+			Dependencies:     []string{},
+			Description:      "Embedded OpenLDAP (slapd) + SSSD identity provider federating Linux/SSH, console RBAC, HA Syncrepl replication, FreeRADIUS, NetBox, LibreNMS, and VOW.",
+			Author:           "OpenLDAP / SSSD / Axonwall Core",
+			SystemdUnits:     []string{"slapd.service", "sssd.service"},
+			Privileges:       []string{"system.users", "system.config.write"},
+			DebianPackages:   []string{"slapd", "ldap-utils", "sssd-ldap", "sssd-tools", "libnss-sss", "libpam-sss"},
+			AlpinePackages:   []string{"openldap", "sssd"},
+			ArchPackages:     []string{"openldap", "sssd"},
+			RequiredBinaries: []string{"slapd"},
+		},
+		{
+			ID:               "enterprise-sso",
+			Name:             "Enterprise OIDC SSO (Okta / Entra ID / Google)",
+			Version:          "1.0.0",
+			Category:         "extension",
+			DefaultEnabled:   false,
+			Dependencies:     []string{},
+			Description:      "OpenID Connect single sign-on integration mapping identity provider groups directly onto Axonwall RBAC roles.",
+			Author:           "Axonwall Core",
+			SystemdUnits:     []string{},
+			Privileges:       []string{"system.users", "system.config.write"},
+			DebianPackages:   []string{},
+			AlpinePackages:   []string{},
+			ArchPackages:     []string{},
+			RequiredBinaries: []string{},
+		},
+		{
+			ID:               "firewall-importer",
+			Name:             "Firewall Migration Studio (7-Platform Importer)",
+			Version:          "1.0.0",
+			Category:         "extension",
+			DefaultEnabled:   false,
+			Dependencies:     []string{},
+			Description:      "On-demand configuration importer translating OPNsense, pfSense, VyOS, MikroTik, Cisco ASA, iptables, and firewalld backups into Axonwall DesiredState.",
+			Author:           "Axonwall Core",
+			SystemdUnits:     []string{},
+			Privileges:       []string{"system.config.write", "firewall.rules"},
+			DebianPackages:   []string{},
+			AlpinePackages:   []string{},
+			ArchPackages:     []string{},
+			RequiredBinaries: []string{},
+		},
+		{
+			ID:               "mcp-ai-control",
+			Name:             "MCP Security AI Control Plane & Tactical Leases",
+			Version:          "1.0.0",
+			Category:         "extension",
+			DefaultEnabled:   false,
+			Dependencies:     []string{},
+			Description:      "Model Context Protocol (MCP) server, scoped API keys, time-bounded tactical firewall leases, and cryptographic audit chain for autonomous AI operators.",
+			Author:           "Axonwall Core",
+			SystemdUnits:     []string{},
+			Privileges:       []string{"firewall.rules", "system.config.write"},
+			DebianPackages:   []string{},
+			AlpinePackages:   []string{},
+			ArchPackages:     []string{},
+			RequiredBinaries: []string{},
+		},
+		{
+			ID:               "custom-kernel-studio",
+			Name:             "Custom Hardened Kernel Builder & Studio (KSPP)",
+			Version:          "1.0.0",
+			Category:         "extension",
+			DefaultEnabled:   false,
+			Dependencies:     []string{},
+			Description:      "In-appliance Linux kernel compiler studio generating KSPP-hardened, eBPF/XDP-tuned, or minimal UKI kernels directly from curated profiles.",
+			Author:           "Axonwall Core",
+			SystemdUnits:     []string{},
+			Privileges:       []string{"system.hardware", "system.config.write"},
+			DebianPackages:   []string{"build-essential", "bc", "bison", "flex", "libssl-dev", "libelf-dev", "dwarves", "zstd"},
+			AlpinePackages:   []string{"alpine-sdk", "bc", "bison", "flex", "openssl-dev", "elfutils-dev"},
+			ArchPackages:     []string{"base-devel", "bc", "pahole"},
+			RequiredBinaries: []string{"make"},
+		},
+		{
+			ID:               "high-availability",
+			Name:             "2-Host High Availability (Keepalived + conntrackd)",
+			Version:          "1.0.0",
+			Category:         "extension",
+			DefaultEnabled:   false,
+			Dependencies:     []string{},
+			Description:      "Active/Passive 2-node clustering with VRRP v2/v3 virtual IPs, stateful conntrackd flow synchronization, mTLS PKI state push, and SQLite/ZFS/K3s sync.",
+			Author:           "Keepalived / Netfilter / Axonwall Core",
+			SystemdUnits:     []string{"keepalived.service", "conntrackd.service"},
+			Privileges:       []string{"network.routing", "firewall.rules", "system.config.write"},
+			DebianPackages:   []string{"keepalived", "conntrackd"},
+			AlpinePackages:   []string{"keepalived", "conntrack-tools"},
+			ArchPackages:     []string{"keepalived", "conntrack-tools"},
+			RequiredBinaries: []string{"keepalived", "conntrackd"},
+		},
+		{
+			ID:               "fleet-controller",
+			Name:             "Multi-Appliance Fleet & Satellite Hub",
+			Version:          "1.0.0",
+			Category:         "extension",
+			DefaultEnabled:   false,
+			Dependencies:     []string{},
+			Description:      "Centralized hub controller for enrolling, monitoring, pushing DesiredState updates, and orchestrating Edge UKI & remote Axonwall satellites.",
+			Author:           "Axonwall Core",
+			SystemdUnits:     []string{},
+			Privileges:       []string{"system.config.write", "system.monitoring"},
+			DebianPackages:   []string{},
+			AlpinePackages:   []string{},
+			ArchPackages:     []string{},
+			RequiredBinaries: []string{},
+		},
+		{
+			ID:               "etckeeper-audit",
+			Name:             "Etckeeper (/etc Git Audit & Rollback)",
+			Version:          "1.18.22",
+			Category:         "extension",
+			DefaultEnabled:   false,
+			Dependencies:     []string{},
+			Description:      "Automatic Git versioning of /etc configuration mutations with commit diffs, history browser, and pre/post-apply change attribution.",
+			Author:           "Etckeeper / Axonwall Core",
+			SystemdUnits:     []string{},
+			Privileges:       []string{"system.config.write", "system.status.read"},
+			DebianPackages:   []string{"etckeeper", "git"},
+			AlpinePackages:   []string{"etckeeper", "git"},
+			ArchPackages:     []string{"etckeeper", "git"},
+			RequiredBinaries: []string{"etckeeper", "git"},
+		},
+		{
+			ID:               "web-terminal",
+			Name:             "Browser Web Shell & PTY Console",
+			Version:          "1.0.0",
+			Category:         "extension",
+			DefaultEnabled:   false,
+			Dependencies:     []string{},
+			Description:      "Interactive browser-based PTY terminal and hardware sensor console. Disable in high-security deployments to enforce SSH-only operator access.",
+			Author:           "Axonwall Core",
+			SystemdUnits:     []string{},
+			Privileges:       []string{"system.hardware", "system.superuser"},
+			DebianPackages:   []string{},
+			AlpinePackages:   []string{},
+			ArchPackages:     []string{},
+			RequiredBinaries: []string{},
+		},
+		{
+			ID:               "packet-diagnostics",
+			Name:             "Packet Capture & Rule Path Tracer",
+			Version:          "4.99.5",
+			Category:         "extension",
+			DefaultEnabled:   false,
+			Dependencies:     []string{},
+			Description:      "On-demand live tcpdump PCAP capture engine, downloadable capture buffer, and nftables synthetic packet rule-path tracer.",
+			Author:           "Tcpdump / Axonwall Core",
+			SystemdUnits:     []string{},
+			Privileges:       []string{"diagnostics.read", "network.interfaces"},
+			DebianPackages:   []string{"tcpdump"},
+			AlpinePackages:   []string{"tcpdump"},
+			ArchPackages:     []string{"tcpdump"},
+			RequiredBinaries: []string{"tcpdump"},
+		},
 	}
 }
 
@@ -1421,10 +1763,7 @@ func (pm *PluginManager) IsPluginEnabled(pluginID string) bool {
 		if _, err := os.Stat("/etc/axonwall/workstation.disabled"); err == nil {
 			return false
 		}
-		return true
-	}
-	if pluginID == "host-malware-rootkit" {
-		return true
+		return pm.installedMap[pluginID] != ""
 	}
 	if pluginID == "core-k3s" {
 		if pm.installedMap[pluginID] != "" {
@@ -1439,6 +1778,9 @@ func (pm *PluginManager) IsPluginEnabled(pluginID string) bool {
 			}
 		}
 		return false
+	}
+	if pluginID == "docs-portal" {
+		return pm.isDocsBundleInstalled()
 	}
 	return pm.installedMap[pluginID] != ""
 }
@@ -2999,6 +3341,14 @@ func (pm *PluginManager) ListPlugins() []PluginStatus {
 			enabled = true
 		}
 
+		if d.ID == "docs-portal" {
+			installed = pm.isDocsBundleInstalled()
+			bundled = false
+			if !installed {
+				enabled = false
+			}
+		}
+
 		results = append(results, PluginStatus{
 			ID:               d.ID,
 			Name:             d.Name,
@@ -3362,11 +3712,11 @@ func coreRoleOSPackages(osFamily, pluginID string) []string {
 	case "core-firewall":
 		switch osFamily {
 		case "alpine":
-			return []string{"nftables", "suricata", "frr", "kea-dhcp4", "conntrack-tools", "unbound", "wireguard-tools", "strongswan", "openvpn", "keepalived"}
+			return []string{"nftables", "kea-dhcp4", "unbound", "wireguard-tools"}
 		case "arch":
-			return []string{"nftables", "suricata", "frr", "kea", "conntrack-tools", "unbound", "wireguard-tools", "strongswan", "openvpn", "keepalived"}
+			return []string{"nftables", "kea", "unbound", "wireguard-tools"}
 		default:
-			return []string{"nftables", "suricata", "frr", "kea-dhcp4-server", "conntrackd", "unbound", "wireguard-tools", "strongswan", "openvpn", "keepalived"}
+			return []string{"nftables", "kea-dhcp4-server", "unbound", "wireguard-tools"}
 		}
 	case "core-nas":
 		switch osFamily {
@@ -3410,6 +3760,191 @@ var pluginOptionalPackages = map[string]bool{
 	"starship":     true,
 }
 
+func pluginCacheDir() string {
+	if v := strings.TrimSpace(os.Getenv("AXONWALL_PLUGIN_CACHE_DIR")); v != "" {
+		return v
+	}
+	return "/var/lib/axonwall/plugin-cache"
+}
+
+type offlineCacheManifestFile struct {
+	Filename string   `json:"filename"`
+	SHA256   string   `json:"sha256"`
+	Package  string   `json:"package,omitempty"`
+	Provides []string `json:"provides,omitempty"`
+	Depends  []string `json:"depends,omitempty"`
+}
+
+type offlineCacheManifest struct {
+	OSFamily string                     `json:"osFamily"`
+	Version  string                     `json:"version"`
+	Files    []offlineCacheManifestFile `json:"files"`
+}
+
+func matchesOfflinePkgArchive(pkg, filename, osFamily string) bool {
+	if pkg == "" || filename == "" {
+		return false
+	}
+	if osFamily == "debian" {
+		return strings.HasPrefix(filename, pkg+"_") && strings.HasSuffix(filename, ".deb")
+	}
+	if osFamily == "alpine" {
+		// Checking for a leading version digit after '<pkg>-' avoids 'foo' matching 'foo-dev-1.0-r0.apk'.
+		prefix := pkg + "-"
+		if !strings.HasPrefix(filename, prefix) || !strings.HasSuffix(filename, ".apk") {
+			return false
+		}
+		rest := filename[len(prefix):]
+		return len(rest) > 0 && rest[0] >= '0' && rest[0] <= '9'
+	}
+	return false
+}
+
+func entryProvidesPackage(entry offlineCacheManifestFile, pkg, osFamily string) bool {
+	if entry.Package != "" && entry.Package == pkg {
+		return true
+	}
+	for _, prov := range entry.Provides {
+		if prov == pkg {
+			return true
+		}
+	}
+	return matchesOfflinePkgArchive(pkg, entry.Filename, osFamily)
+}
+
+func verifyAndCollectOfflinePackages(cacheDir, osFamily string, pkgs []string) ([]string, bool, error) {
+	if len(pkgs) == 0 || (osFamily != "debian" && osFamily != "alpine") {
+		return nil, false, nil
+	}
+	osDir, err := filepath.Abs(filepath.Join(cacheDir, osFamily))
+	if err != nil {
+		return nil, false, nil
+	}
+	info, err := os.Stat(osDir)
+	if err != nil || !info.IsDir() {
+		return nil, false, nil
+	}
+
+	ext := ".deb"
+	if osFamily == "alpine" {
+		ext = ".apk"
+	}
+
+	manifestPath := filepath.Join(osDir, "manifest.json")
+	var verifiedEntries []offlineCacheManifestFile
+
+	if manifestBytes, err := os.ReadFile(manifestPath); err == nil {
+		var manifest offlineCacheManifest
+		if err := json.Unmarshal(manifestBytes, &manifest); err != nil {
+			return nil, false, fmt.Errorf("invalid offline cache manifest %s: %w", manifestPath, err)
+		}
+		if len(manifest.Files) == 0 {
+			return nil, false, fmt.Errorf("offline cache manifest %s contains no files", manifestPath)
+		}
+		for _, entry := range manifest.Files {
+			name := entry.Filename
+			if name == "" || name == "." || name == ".." || filepath.Base(name) != name || strings.Contains(name, "..") || strings.ContainsAny(name, `/\`) {
+				return nil, false, fmt.Errorf("unsafe filename %q in offline cache manifest %s", name, manifestPath)
+			}
+			wantHex := strings.ToLower(strings.TrimSpace(entry.SHA256))
+			if len(wantHex) != 64 || !sha256HexPattern.MatchString(wantHex) {
+				return nil, false, fmt.Errorf("invalid sha256 digest for %q in offline cache manifest", name)
+			}
+			fullPath := filepath.Join(osDir, name)
+			fi, statErr := os.Lstat(fullPath)
+			if statErr != nil {
+				return nil, false, fmt.Errorf("missing offline cache file %q referenced in manifest: %w", name, statErr)
+			}
+			if !fi.Mode().IsRegular() {
+				return nil, false, fmt.Errorf("offline cache entry %q is not a regular file", name)
+			}
+			raw, err := os.ReadFile(fullPath)
+			if err != nil {
+				return nil, false, fmt.Errorf("failed reading offline cache file %q: %w", name, err)
+			}
+			sum := sha256.Sum256(raw)
+			gotHex := hex.EncodeToString(sum[:])
+			if gotHex != wantHex {
+				return nil, false, fmt.Errorf("sha256 mismatch for offline cache file %q: got %s want %s", name, gotHex, wantHex)
+			}
+			if strings.HasSuffix(name, ext) {
+				verifiedEntries = append(verifiedEntries, entry)
+			}
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, false, fmt.Errorf("failed reading offline cache manifest %s: %w", manifestPath, err)
+	} else {
+		entries, err := os.ReadDir(osDir)
+		if err != nil {
+			return nil, false, nil
+		}
+		for _, e := range entries {
+			if e.IsDir() || !strings.HasSuffix(e.Name(), ext) {
+				continue
+			}
+			fullPath := filepath.Join(osDir, e.Name())
+			if fi, statErr := os.Lstat(fullPath); statErr == nil && fi.Mode().IsRegular() {
+				verifiedEntries = append(verifiedEntries, offlineCacheManifestFile{Filename: e.Name()})
+			}
+		}
+	}
+
+	if len(verifiedEntries) == 0 {
+		return nil, false, nil
+	}
+
+	// Selective closure: match every requested pkg first; return cache-miss if any root pkg is absent,
+	// then traverse declared Depends so installing one plugin never installs unrelated cached packs.
+	selectedMap := make(map[string]bool)
+	queue := make([]offlineCacheManifestFile, 0, len(pkgs))
+	for _, pkg := range pkgs {
+		var matchedForPkg []offlineCacheManifestFile
+		for _, entry := range verifiedEntries {
+			if entryProvidesPackage(entry, pkg, osFamily) {
+				matchedForPkg = append(matchedForPkg, entry)
+			}
+		}
+		if len(matchedForPkg) == 0 {
+			return nil, false, nil
+		}
+		for _, entry := range matchedForPkg {
+			if !selectedMap[entry.Filename] {
+				selectedMap[entry.Filename] = true
+				queue = append(queue, entry)
+			}
+		}
+	}
+
+	for len(queue) > 0 {
+		cur := queue[0]
+		queue = queue[1:]
+		for _, depPkg := range cur.Depends {
+			depPkg = strings.TrimSpace(depPkg)
+			if depPkg == "" {
+				continue
+			}
+			for _, cand := range verifiedEntries {
+				if !selectedMap[cand.Filename] && entryProvidesPackage(cand, depPkg, osFamily) {
+					selectedMap[cand.Filename] = true
+					queue = append(queue, cand)
+				}
+			}
+		}
+	}
+
+	resolvedNames := make([]string, 0, len(selectedMap))
+	for name := range selectedMap {
+		resolvedNames = append(resolvedNames, name)
+	}
+	sort.Strings(resolvedNames)
+
+	resolvedPaths := make([]string, 0, len(resolvedNames))
+	for _, name := range resolvedNames {
+		resolvedPaths = append(resolvedPaths, filepath.Join(osDir, name))
+	}
+	return resolvedPaths, true, nil
+}
+
 func (pm *PluginManager) installOSPackages(pkgs []string, output *strings.Builder) error {
 	if len(pkgs) == 0 {
 		return nil
@@ -3426,6 +3961,35 @@ func (pm *PluginManager) installOSPackages(pkgs []string, output *strings.Builde
 			optionalPkgs = append(optionalPkgs, p)
 		} else {
 			corePkgs = append(corePkgs, p)
+		}
+	}
+
+	if len(corePkgs) > 0 && (pm.osFamily == "debian" || pm.osFamily == "alpine") {
+		cachedPaths, ok, err := verifyAndCollectOfflinePackages(pluginCacheDir(), pm.osFamily, corePkgs)
+		if err != nil {
+			return fmt.Errorf("offline plugin cache verification failed: %w", err)
+		}
+		if ok {
+			if output != nil {
+				output.WriteString(fmt.Sprintf("[offline-cache] Installing %d verified %s package archive(s) from %s\n", len(cachedPaths), pm.osFamily, pluginCacheDir()))
+			}
+			var cmd *exec.Cmd
+			if pm.osFamily == "alpine" {
+				args := append([]string{"add", "--no-network", "--allow-untrusted"}, cachedPaths...)
+				cmd = exec.Command("apk", args...)
+			} else {
+				args := append([]string{"install", "-y", "--no-install-recommends", "-o", "Dpkg::Options::=--force-unsafe-io"}, cachedPaths...)
+				cmd = exec.Command("apt-get", args...)
+				cmd.Env = append(os.Environ(), "DEBIAN_FRONTEND=noninteractive")
+			}
+			out, err := cmd.CombinedOutput()
+			if output != nil {
+				output.WriteString(string(out))
+			}
+			if err != nil {
+				return fmt.Errorf("offline package installation failed: %w", err)
+			}
+			return nil
 		}
 	}
 
@@ -3893,6 +4457,10 @@ func (pm *PluginManager) InstallPlugin(pluginID string) PluginActionResponse {
 		}
 	}
 
+	if pluginID == "docs-portal" {
+		return pm.installDocsPortal()
+	}
+
 	pkgs := packagesForOS(pm.osFamily, *target)
 
 	var output strings.Builder
@@ -4177,6 +4745,68 @@ func (pm *PluginManager) InstallPlugin(pluginID string) PluginActionResponse {
 	}
 }
 
+var protectedCoreOSPackages = map[string]bool{
+	"wireguard-tools": true,
+	"curl":            true,
+	"ca-certificates": true,
+	"jq":              true,
+	"git":             true,
+	"sqlite3":         true,
+	"sqlite":          true,
+	"openssl":         true,
+	"ethtool":         true,
+	"tcpdump":         true,
+	"iproute2":        true,
+	"nftables":        true,
+	"bash":            true,
+	"sudo":            true,
+	"openssh-server":  true,
+	"openssh-client":  true,
+	"python3":         true,
+	"tar":             true,
+	"gzip":            true,
+	"rsync":           true,
+	"zstd":            true,
+	"gettext":         true,
+}
+
+func (pm *PluginManager) filterSafeUninstallPackages(targetID string, pkgs []string) (removable []string, skipped []string) {
+	if len(pkgs) == 0 {
+		return nil, nil
+	}
+	inUseByOther := make(map[string]bool)
+	pm.mu.RLock()
+	defs := listExtensionPluginDefinitions()
+	installedSnapshot := make(map[string]bool, len(pm.installedMap))
+	for id, ts := range pm.installedMap {
+		if ts != "" {
+			installedSnapshot[id] = true
+		}
+	}
+	pm.mu.RUnlock()
+
+	for _, def := range defs {
+		if def.ID == targetID {
+			continue
+		}
+		if !installedSnapshot[def.ID] && !pm.IsPluginEnabled(def.ID) {
+			continue
+		}
+		for _, p := range packagesForOS(pm.osFamily, def) {
+			inUseByOther[p] = true
+		}
+	}
+
+	for _, pkg := range pkgs {
+		if protectedCoreOSPackages[pkg] || inUseByOther[pkg] {
+			skipped = append(skipped, pkg)
+		} else {
+			removable = append(removable, pkg)
+		}
+	}
+	return removable, skipped
+}
+
 func (pm *PluginManager) UninstallPlugin(pluginID string) PluginActionResponse {
 	// Dependency guard: refuse while any other currently-enabled
 	// plugin depends on this one — uninstalling it would break the
@@ -4220,6 +4850,10 @@ func (pm *PluginManager) UninstallPlugin(pluginID string) PluginActionResponse {
 		}
 	}
 
+	if pluginID == "docs-portal" {
+		return pm.uninstallDocsPortal()
+	}
+
 	// A-M33 (round 2): the old code discarded the disable errors, so
 	// an uninstall could report success while the service kept
 	// running. Refuse to uninstall while its units are still active.
@@ -4230,9 +4864,12 @@ func (pm *PluginManager) UninstallPlugin(pluginID string) PluginActionResponse {
 		}
 	}
 
-	pkgs := packagesForOS(pm.osFamily, *target)
+	pkgs, skippedPkgs := pm.filterSafeUninstallPackages(pluginID, packagesForOS(pm.osFamily, *target))
 
 	var output strings.Builder
+	if len(skippedPkgs) > 0 {
+		output.WriteString(fmt.Sprintf("[safe-uninstall] Preserved protected/shared OS package(s): %s\n", strings.Join(skippedPkgs, ", ")))
+	}
 
 	if pm.osFamily == "arch" && len(pkgs) > 0 {
 		if _, err := os.Stat("/var/lib/pacman/db.lck"); err == nil {
@@ -4387,6 +5024,50 @@ func (pm *PluginManager) UninstallPlugin(pluginID string) PluginActionResponse {
 		Message: fmt.Sprintf("Successfully uninstalled plugin %s (%s)", target.Name, pluginID),
 		Output:  output.String(),
 	}
+}
+
+// ResolveDirectoryBootstrapParams returns the LDAP domain and HA node serverID derived from desired state.
+func (pm *PluginManager) ResolveDirectoryBootstrapParams() (string, int) {
+	return pm.resolveDirectoryBootstrapParams()
+}
+
+func (pm *PluginManager) resolveDirectoryBootstrapParams() (string, int) {
+	domain := "axonwall.local"
+	serverID := 1
+	candidates := []string{
+		filepath.Join(pm.baseDataDir, "state.json"),
+		"/etc/axonwall/state.json",
+		"/var/lib/axonwall/state.json",
+	}
+	for _, p := range candidates {
+		raw, err := os.ReadFile(p)
+		if err != nil {
+			continue
+		}
+		var doc struct {
+			System struct {
+				Domain string `json:"domain"`
+			} `json:"system"`
+			Ha struct {
+				Role   string `json:"role"`
+				NodeID int    `json:"nodeId"`
+			} `json:"ha"`
+		}
+		if json.Unmarshal(raw, &doc) != nil {
+			continue
+		}
+		if d := strings.TrimSpace(doc.System.Domain); d != "" {
+			domain = d
+		}
+		if doc.Ha.NodeID > 0 {
+			serverID = doc.Ha.NodeID
+		} else if strings.EqualFold(strings.TrimSpace(doc.Ha.Role), "backup") ||
+			strings.EqualFold(strings.TrimSpace(doc.Ha.Role), "secondary") {
+			serverID = 2
+		}
+		break
+	}
+	return domain, serverID
 }
 
 func (pm *PluginManager) ReconfigurePlugin(pluginID string) PluginActionResponse {
@@ -4634,6 +5315,38 @@ func (pm *PluginManager) ReconfigurePlugin(pluginID string) PluginActionResponse
 			Message: "NetFlow / IPFIX / sFlow collector initialized and started.",
 		}
 	}
+	if pluginID == "ai-copilot" {
+		pm.mu.Lock()
+		delete(pm.disabledMap, pluginID)
+		if pm.installedMap[pluginID] == "" {
+			pm.installedMap[pluginID] = time.Now().UTC().Format(time.RFC3339)
+		}
+		pm.saveState()
+		pm.mu.Unlock()
+		return PluginActionResponse{
+			Success: true,
+			Message: "AI Network Copilot plugin enabled.",
+		}
+	}
+	if pluginID == "docs-portal" {
+		if !pm.isDocsBundleInstalled() {
+			return PluginActionResponse{
+				Success: false,
+				Message: "Offline Documentation Portal is not installed. Run 'Install Plugin' first to download and verify the offline docs bundle.",
+			}
+		}
+		pm.mu.Lock()
+		delete(pm.disabledMap, pluginID)
+		if pm.installedMap[pluginID] == "" {
+			pm.installedMap[pluginID] = time.Now().UTC().Format(time.RFC3339)
+		}
+		pm.saveState()
+		pm.mu.Unlock()
+		return PluginActionResponse{
+			Success: true,
+			Message: "Offline Documentation Portal plugin enabled.",
+		}
+	}
 	if pluginID == "ebpf-threat-harvester" {
 		_ = os.MkdirAll("/var/lib/axonwall/threat-corpus", 0750)
 		// R4-A-M4: enabling the plugin must actually start the
@@ -4660,6 +5373,69 @@ func (pm *PluginManager) ReconfigurePlugin(pluginID string) PluginActionResponse
 		return PluginActionResponse{
 			Success: true,
 			Message: "eBPF Threat-LLM Harvester (Blackbox) CO-RE telemetry spool configured.",
+		}
+	}
+	if pluginID == "directory-ldap" {
+		if pm.dirMgr != nil {
+			domain, serverID := pm.resolveDirectoryBootstrapParams()
+			if err := pm.dirMgr.Bootstrap(domain, serverID); err != nil {
+				return PluginActionResponse{
+					Success: false,
+					Message: fmt.Sprintf("Failed to bootstrap OpenLDAP directory: %v", err),
+				}
+			}
+		}
+		pm.mu.Lock()
+		delete(pm.disabledMap, pluginID)
+		if pm.installedMap[pluginID] == "" {
+			pm.installedMap[pluginID] = time.Now().UTC().Format(time.RFC3339)
+		}
+		pm.saveState()
+		pm.mu.Unlock()
+		return PluginActionResponse{
+			Success: true,
+			Message: "Embedded OpenLDAP & SSSD Identity Directory initialized.",
+		}
+	}
+	if pluginID == "etckeeper-audit" {
+		if _, err := os.Stat("/etc/.git"); os.IsNotExist(err) {
+			ek := NewEtckeeperManager("/etc")
+			if ek.IsInstalled() {
+				if initErr := ek.Init(); initErr != nil {
+					return PluginActionResponse{
+						Success: false,
+						Message: fmt.Sprintf("Failed to initialize etckeeper in /etc: %v", initErr),
+					}
+				}
+			}
+		}
+		pm.mu.Lock()
+		delete(pm.disabledMap, pluginID)
+		if pm.installedMap[pluginID] == "" {
+			pm.installedMap[pluginID] = time.Now().UTC().Format(time.RFC3339)
+		}
+		pm.saveState()
+		pm.mu.Unlock()
+		return PluginActionResponse{
+			Success: true,
+			Message: "Etckeeper (/etc Git audit) plugin enabled.",
+		}
+	}
+	switch pluginID {
+	case "coroot-ebpf-apm", "suricata-ids", "crowdsec-bouncer", "frr-routing", "openvpn", "ipsec-strongswan",
+		"captive-portal", "tls-decryption", "identity-aware-proxy", "enterprise-sso",
+		"firewall-importer", "mcp-ai-control", "custom-kernel-studio", "high-availability",
+		"fleet-controller", "web-terminal", "packet-diagnostics":
+		pm.mu.Lock()
+		delete(pm.disabledMap, pluginID)
+		if pm.installedMap[pluginID] == "" {
+			pm.installedMap[pluginID] = time.Now().UTC().Format(time.RFC3339)
+		}
+		pm.saveState()
+		pm.mu.Unlock()
+		return PluginActionResponse{
+			Success: true,
+			Message: fmt.Sprintf("Enabled plugin %s.", pluginID),
 		}
 	}
 	pm.ensurePluginLDAP(pluginID)

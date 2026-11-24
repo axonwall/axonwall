@@ -2,6 +2,7 @@
 
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
+import { PluginAwareLink } from '@/components/PluginAwareLink';
 import {
   Activity,
   AlertTriangle,
@@ -446,13 +447,14 @@ export default function ThreatHarvesterPage() {
         </div>
 
         <div className="flex flex-wrap items-center gap-2.5">
-          <Link
+          <PluginAwareLink
+            pluginId="docs-portal"
             href="/docs/threat-harvester"
             className="inline-flex items-center gap-2 px-3.5 py-2 rounded-lg text-xs font-semibold bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 transition"
           >
             <BookOpen className="w-4 h-4 text-cyan-400" />
             Blackbox Guide
-          </Link>
+          </PluginAwareLink>
           <button
             type="button"
             onClick={handleToggleOptIn}

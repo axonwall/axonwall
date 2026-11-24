@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
+import Link from 'next/link';
 import {
   Sparkles,
   Bot,
@@ -22,12 +23,25 @@ import {
   ChevronRight,
   ExternalLink,
   Save,
+  Loader2,
+  Power,
 } from 'lucide-react';
 import {
   AI_PROVIDERS_META,
   parseDraftedRules,
 } from '@axonwall/lib/ai';
-import type { AiProviderType, AiConfig, FirewallRule } from '@axonwall/lib/schemas';
+import {
+  enablePluginWithDependencies,
+  disablePluginWithDependents,
+  isPluginEnabled,
+} from '@axonwall/lib/plugins';
+import {
+  AiConfigSchema,
+  type AiProviderType,
+  type AiConfig,
+  type DesiredState,
+  type FirewallRule,
+} from '@axonwall/lib/schemas';
 import { getCurrentDesiredState } from '@/server/agent';
 import { useDesiredStateApply } from '@/lib/use-desired-state-apply';
 import { testAiProviderProbe, generateAiCompletion } from '@/server/ai';
@@ -43,6 +57,11 @@ interface ChatMessage {
 
 export default function AiCopilotPage() {
   const { applyState } = useDesiredStateApply();
+  const [desiredState, setDesiredState] = useState<DesiredState | null>(null);
+  const [loadingPlugin, setLoadingPlugin] = useState(true);
+  const [togglingPlugin, setTogglingPlugin] = useState(false);
+  const [gateError, setGateError] = useState<string | null>(null);
+
   const [activeTab, setActiveTab] = useState<'copilot' | 'threat-explainer' | 'providers'>('copilot');
   const [activeProvider, setActiveProvider] = useState<AiProviderType>('antigravity');
   const [inputPrompt, setInputPrompt] = useState('');
@@ -98,46 +117,112 @@ export default function AiCopilotPage() {
   });
 
   useEffect(() => {
+    setLoadingPlugin(true);
     getCurrentDesiredState()
       .then((state) => {
-        if (state.ai) {
-          setConfig(state.ai);
-          setActiveProvider(state.ai.activeProvider);
-          setTestStatus({
-            antigravity: {
-              text: state.ai.providers.antigravity.apiKey ? 'API Key set (Click Test Probe)' : 'Missing API Key',
-              ok: state.ai.providers.antigravity.apiKey ? null : false,
-            },
-            ollama: {
-              text: `Untested (${state.ai.providers.ollama.endpoint})`,
-              ok: null,
-            },
-            'claude-code': {
-              text: state.ai.providers.claudeCode.apiKey ? 'API Key set (Click Test Probe)' : 'Missing API Key',
-              ok: state.ai.providers.claudeCode.apiKey ? null : false,
-            },
-            codex: {
-              text: state.ai.providers.codex.apiKey ? 'API Key set (Click Test Probe)' : 'Missing API Key',
-              ok: state.ai.providers.codex.apiKey ? null : false,
-            },
-            vllm: {
-              text: `Untested (${state.ai.providers.vllm.endpoint})`,
-              ok: null,
-            },
-          });
-        }
+        setDesiredState(state);
+        const aiCfg = state.ai ?? AiConfigSchema.parse({});
+        setConfig(aiCfg);
+        setActiveProvider(aiCfg.activeProvider);
+        setTestStatus({
+          antigravity: {
+            text: aiCfg.providers.antigravity.apiKey ? 'API Key set (Click Test Probe)' : 'Missing API Key',
+            ok: aiCfg.providers.antigravity.apiKey ? null : false,
+          },
+          ollama: {
+            text: `Untested (${aiCfg.providers.ollama.endpoint})`,
+            ok: null,
+          },
+          'claude-code': {
+            text: aiCfg.providers.claudeCode.apiKey ? 'API Key set (Click Test Probe)' : 'Missing API Key',
+            ok: aiCfg.providers.claudeCode.apiKey ? null : false,
+          },
+          codex: {
+            text: aiCfg.providers.codex.apiKey ? 'API Key set (Click Test Probe)' : 'Missing API Key',
+            ok: aiCfg.providers.codex.apiKey ? null : false,
+          },
+          vllm: {
+            text: `Untested (${aiCfg.providers.vllm.endpoint})`,
+            ok: null,
+          },
+        });
       })
-      .catch(() => {});
+      .catch((err: unknown) => {
+        setGateError(err instanceof Error ? err.message : 'Failed to load AI Network Copilot configuration');
+      })
+      .finally(() => {
+        setLoadingPlugin(false);
+      });
   }, []);
+
+  const handleEnablePlugin = async () => {
+    if (!desiredState) return;
+    setTogglingPlugin(true);
+    setGateError(null);
+    try {
+      const res = enablePluginWithDependencies('ai-copilot', desiredState);
+      const applied = await applyState(res.state);
+      if (applied.success) {
+        setDesiredState(res.state);
+        if (res.state.ai) {
+          setConfig(res.state.ai);
+          setActiveProvider(res.state.ai.activeProvider);
+        }
+        window.dispatchEvent(new Event('axonwall-capabilities-updated'));
+      } else {
+        setGateError(applied.message || 'Failed to enable AI Network Copilot plugin');
+      }
+    } catch (err: unknown) {
+      setGateError(err instanceof Error ? err.message : 'Failed to enable AI Network Copilot plugin');
+    } finally {
+      setTogglingPlugin(false);
+    }
+  };
+
+  const handleDisablePlugin = async () => {
+    setTogglingPlugin(true);
+    setGateError(null);
+    try {
+      const latestState = await getCurrentDesiredState();
+      const res = disablePluginWithDependents('ai-copilot', latestState);
+      const applied = await applyState(res.state);
+      if (applied.success) {
+        setDesiredState(res.state);
+        if (res.state.ai) {
+          setConfig(res.state.ai);
+        }
+        window.dispatchEvent(new Event('axonwall-capabilities-updated'));
+      } else {
+        setStagedNotification({
+          type: 'error',
+          text: applied.message || 'Failed to disable AI Network Copilot plugin',
+        });
+        setTimeout(() => setStagedNotification(null), 4000);
+      }
+    } catch (err: unknown) {
+      setStagedNotification({
+        type: 'error',
+        text: `Failed to disable AI Network Copilot plugin: ${err instanceof Error ? err.message : 'Unknown error'}`,
+      });
+      setTimeout(() => setStagedNotification(null), 4000);
+    } finally {
+      setTogglingPlugin(false);
+    }
+  };
 
   const handleSaveAiConfig = async () => {
     setIsSavingConfig(true);
     try {
       const state = await getCurrentDesiredState();
-      await applyState({
-        ...state,
-        ai: { ...config, activeProvider },
-      });
+      const enabledRes = enablePluginWithDependencies('ai-copilot', state);
+      const nextState: DesiredState = {
+        ...enabledRes.state,
+        ai: { ...config, enabled: true, activeProvider },
+      };
+      await applyState(nextState);
+      setDesiredState(nextState);
+      setConfig(nextState.ai!);
+      window.dispatchEvent(new Event('axonwall-capabilities-updated'));
       setStagedNotification({ type: 'success', text: 'Saved AI Provider configuration to /etc/axonwall/system.yaml' });
       setTimeout(() => setStagedNotification(null), 4000);
     } catch (err: any) {
@@ -293,6 +378,63 @@ export default function AiCopilotPage() {
     }
   };
 
+  if (loadingPlugin) {
+    return (
+      <div className="py-20 flex items-center justify-center text-slate-300 text-sm gap-2">
+        <Loader2 className="w-4 h-4 animate-spin text-purple-400" />
+        Loading AI Network Copilot...
+      </div>
+    );
+  }
+
+  if (!desiredState || !isPluginEnabled('ai-copilot', desiredState)) {
+    return (
+      <div className="min-h-[70vh] flex items-center justify-center p-6">
+        <div className="max-w-lg w-full rounded-xl bg-slate-900 border border-slate-800 p-6 space-y-4">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 rounded-lg bg-purple-500/15 border border-purple-500/30 flex items-center justify-center text-purple-400">
+              <Sparkles className="w-5 h-5" />
+            </div>
+            <div>
+              <h1 className="text-lg font-semibold text-white">AI Network Copilot</h1>
+              <p className="text-xs text-slate-400">
+                Opt-in multi-provider copilot for nftables synthesis, security audits &amp; log analysis
+              </p>
+            </div>
+          </div>
+
+          <p className="text-sm text-slate-300 leading-relaxed">
+            The AI Network Copilot plugin (<code className="font-mono text-purple-300">ai-copilot</code>) is currently
+            disabled so zero outbound LLM requests or local provider probes run until opted in. Supports Antigravity
+            (Gemini), Ollama, Claude Code, Codex (OpenAI), and vLLM via{' '}
+            <code className="font-mono text-purple-300">/etc/axonwall/system.yaml</code>.
+          </p>
+
+          {gateError && (
+            <div className="px-3 py-2 rounded bg-rose-500/10 border border-rose-500/40 text-xs text-rose-300">
+              {gateError}
+            </div>
+          )}
+
+          <div className="flex items-center justify-between pt-2">
+            <Link href="/system/plugins" className="text-xs text-slate-400 hover:text-white underline">
+              Manage in Plugin Store
+            </Link>
+            <button
+              type="button"
+              disabled={togglingPlugin || !desiredState}
+              onClick={() => void handleEnablePlugin()}
+              className="px-4 py-2 rounded-lg bg-purple-600 hover:bg-purple-500 disabled:opacity-40 text-white text-xs font-semibold flex items-center gap-2 cursor-pointer"
+            >
+              <Power className="w-4 h-4" />
+              {togglingPlugin ? 'Enabling...' : 'Enable AI Copilot'}
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="p-8 max-w-7xl mx-auto space-y-8">
       {/* Header */}
@@ -309,7 +451,16 @@ export default function AiCopilotPage() {
           </div>
         </div>
 
-        <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-center gap-3">
+          <button
+            type="button"
+            onClick={() => void handleDisablePlugin()}
+            disabled={togglingPlugin}
+            className="px-3.5 py-2 rounded-xl bg-rose-500/10 hover:bg-rose-500/20 border border-rose-500/30 text-rose-300 text-xs font-semibold flex items-center gap-1.5 transition cursor-pointer disabled:opacity-50"
+          >
+            <Power className="w-3.5 h-3.5" />
+            <span>{togglingPlugin ? 'Disabling...' : 'Disable Plugin'}</span>
+          </button>
           <button
             type="button"
             onClick={handleSaveAiConfig}

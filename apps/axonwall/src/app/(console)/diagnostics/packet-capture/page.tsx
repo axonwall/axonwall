@@ -1,6 +1,7 @@
 'use client';
 
 import { Suspense, useEffect, useState } from 'react';
+import { PluginDisabledGate } from '@/components/PluginDisabledGate';
 import { useSearchParams } from 'next/navigation';
 import {
   Binary,
@@ -399,14 +400,16 @@ function PacketCaptureContent() {
 
 export default function PacketCapturePage() {
   return (
-    <Suspense
-      fallback={
-        <div className="py-20 text-center text-sm text-slate-400">
-          Loading Live Packet Capture...
-        </div>
-      }
-    >
-      <PacketCaptureContent />
-    </Suspense>
+    <PluginDisabledGate pluginId="packet-diagnostics">
+      <Suspense
+        fallback={
+          <div className="py-20 text-center text-sm text-slate-400">
+            Loading Live Packet Capture...
+          </div>
+        }
+      >
+        <PacketCaptureContent />
+      </Suspense>
+    </PluginDisabledGate>
   );
 }

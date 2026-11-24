@@ -388,12 +388,9 @@ ENV_EOF
         fi
         fi # AXONWALL_EDITION == axonwall: end of NGFW secrets
 
-        # 5. Initialize etckeeper if installed
-        if command -v etckeeper >/dev/null 2>&1; then
-            if [ ! -d /etc/.git ]; then
-                etckeeper init || true
-                etckeeper commit "Initial etckeeper commit for Axonwall appliance" || true
-            fi
+        # 5. Snapshot /etc if etckeeper-audit was already initialized on upgrade
+        if command -v etckeeper >/dev/null 2>&1 && [ -d /etc/.git ]; then
+            etckeeper commit "Post-upgrade etckeeper snapshot for Axonwall appliance" || true
         fi
 
         # 5b. Configure VIM as standard editor & vi via update-alternatives, and ZSH as default interactive shell
@@ -495,7 +492,7 @@ ENV_EOF
             minimal) UNITS="axonwalld.service axonwall-controller.service axonwall-ui.service axonwall-console.service axonwall-hub-cert-renew.service axonwall-hub-cert-renew.timer" ;;
             vault) UNITS="axonwall-console.service seaweedfs.service axonwall-vault-firstboot.service axonwall-vault-provision.service axonwall-hub-cert-renew.service axonwall-hub-cert-renew.timer" ;;
             k3s-storage) UNITS="axonwall-console.service k3s.service k3s-agent.service axonwall-k3s-firstboot.service axonwall-k3s-verify.service axonwall-hub-cert-renew.service axonwall-hub-cert-renew.timer" ;;
-            *) UNITS="axonwalld.service axonwall-controller.service axonwall-ui.service axonwall-console.service headscale.service k3s.service axonwall-hub-cert-renew.service axonwall-hub-cert-renew.timer" ;;
+            *) UNITS="axonwalld.service axonwall-controller.service axonwall-ui.service axonwall-console.service axonwall-hub-cert-renew.service axonwall-hub-cert-renew.timer" ;;
         esac
         for unit in ${UNITS}; do
             if [ -f "/etc/systemd/system/${unit}" ] && [ ! -L "/etc/systemd/system/${unit}" ] && [ -f "/lib/systemd/system/${unit}" ]; then
@@ -563,11 +560,11 @@ ENV_EOF
                     fi
                     ;;
                 *)
-                    if ! systemctl enable axonwalld.service axonwall-controller.service axonwall-ui.service headscale.service k3s.service axonwall-console.service axonwall-hub-cert-renew.timer ssh.service chrony.service sysstat.service; then
+                    if ! systemctl enable axonwalld.service axonwall-controller.service axonwall-ui.service axonwall-console.service axonwall-hub-cert-renew.timer ssh.service chrony.service; then
                         echo "Error: failed to enable Axonwall services; dpkg configure failed. Fix systemd and re-run dpkg --configure." >&2
                         exit 1
                     fi
-                    if ! systemctl restart --no-block axonwalld.service axonwall-controller.service axonwall-ui.service headscale.service ssh.service chrony.service sysstat.service; then
+                    if ! systemctl restart --no-block axonwalld.service axonwall-controller.service axonwall-ui.service ssh.service chrony.service; then
                         echo "Error: failed to restart Axonwall services; dpkg configure failed. Fix systemd and re-run dpkg --configure." >&2
                         exit 1
                     fi

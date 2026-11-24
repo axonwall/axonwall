@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
+import { PluginDisabledGate } from '@/components/PluginDisabledGate';
 import { Play, CheckCircle2, XCircle, ArrowRight, Shield, Layers, HelpCircle, AlertTriangle } from 'lucide-react';
 import { simulatePacket, type SimulationResult } from '@axonwall/lib/sim';
 import type { DesiredState, PacketTracerQuery } from '@axonwall/lib/schemas';
@@ -134,7 +135,7 @@ const SAMPLE_SIM_STATE: DesiredState = {
   routes: [],
 };
 
-export default function PacketTracerPage() {
+function PacketTracerPageContent() {
   const [liveState, setLiveState] = useState<DesiredState | null>(null);
   const [liveLoadFailed, setLiveLoadFailed] = useState(false);
   const [useSampleState, setUseSampleState] = useState(false);
@@ -477,5 +478,13 @@ export default function PacketTracerPage() {
         </div>
       </div>
     </div>
+  );
+}
+
+export default function PacketTracerPage() {
+  return (
+    <PluginDisabledGate pluginId="packet-diagnostics">
+      <PacketTracerPageContent />
+    </PluginDisabledGate>
   );
 }

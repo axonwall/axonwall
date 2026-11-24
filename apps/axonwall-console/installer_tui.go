@@ -110,6 +110,57 @@ type InstallerConfig struct {
 	K3sServerURL   string   // control plane URL (e.g. https://10.0.0.1:6443) when K3sRole == "agent" or HA join
 	K3sJoinToken   string   // cluster join token
 	ZfsArcMaxMB    int      // 0 = auto-tuned from host RAM
+	StarterPacks   []string // optional starter pack IDs seeded on first boot (axonwall edition only)
+}
+
+type installerStarterPack struct {
+	ID          string
+	Name        string
+	Description string
+}
+
+var canonicalInstallerStarterPacks = []installerStarterPack{
+	{ID: "enterprise-ngfw", Name: "Enterprise NGFW Pack", Description: "Suricata IDS/IPS + CrowdSec Bouncer + FRRouting + High Availability + OpenLDAP/SSSD + Etckeeper"},
+	{ID: "remote-access-vpn", Name: "Remote Access & PQ VPN Pack", Description: "OpenVPN 2.6 DCO + strongSwan IKEv2 IPsec + Headscale Mesh + Rosenpass Post-Quantum"},
+	{ID: "operator-diagnostics", Name: "Operator Workstation & Diagnostics Pack", Description: "ZSH/Neovim Workstation + Packet Capture/Tracer + Web Terminal + Etckeeper GitOps"},
+	{ID: "ai-observability", Name: "Sovereign AI & Observability Pack", Description: "AI Copilot + MCP Control + Coroot eBPF APM + NetFlow Collector + Topology Studio"},
+}
+
+func normalizeStarterPacks(packs []string) []string {
+	if len(packs) == 0 {
+		return nil
+	}
+	want := make(map[string]bool, len(packs))
+	for _, p := range packs {
+		clean := strings.TrimSpace(p)
+		if clean != "" {
+			want[clean] = true
+		}
+	}
+	var out []string
+	for _, def := range canonicalInstallerStarterPacks {
+		if want[def.ID] {
+			out = append(out, def.ID)
+		}
+	}
+	return out
+}
+
+func toggleStarterPack(packs []string, id string) []string {
+	current := normalizeStarterPacks(packs)
+	var next []string
+	removed := false
+	for _, p := range current {
+		if p == id {
+			removed = true
+			continue
+		}
+		next = append(next, p)
+	}
+	if !removed {
+		next = append(next, id)
+	}
+	return normalizeStarterPacks(next)
 }
 
 // ComputeDefaultZfsArcMaxMB returns the recommended OpenZFS ARC memory cap in MiB for the given total host RAM.
@@ -293,6 +344,9 @@ func cycleEdition(cfg *InstallerConfig) {
 		if isDefaultHostname {
 			cfg.Hostname = "axonwall-minimal"
 		}
+	}
+	if cfg.Edition != "axonwall" {
+		cfg.StarterPacks = nil
 	}
 }
 
@@ -2160,6 +2214,11 @@ func FormatInstallerConfig(cfg InstallerConfig) string {
 		fmt.Sprintf("K3S_JOIN_TOKEN=%s", shellQuote(cfg.K3sJoinToken)),
 		fmt.Sprintf("ZFS_ARC_MAX_MB=%d", cfg.ZfsArcMaxMB),
 	}
+	if edition == "axonwall" {
+		if normalized := normalizeStarterPacks(cfg.StarterPacks); len(normalized) > 0 {
+			lines = append(lines, fmt.Sprintf("INSTALL_STARTER_PACKS=%s", shellQuote(strings.Join(normalized, ","))))
+		}
+	}
 	return strings.Join(lines, "\n") + "\n"
 }
 
@@ -2571,6 +2630,13 @@ func collectHardwareAndStorageProbeLines(cfg InstallerConfig, eval HardwareEvalu
 	var lines []string
 	lines = append(lines, "=== Hardware Self-Evaluation & Selected Installer Profile ===")
 	lines = append(lines, fmt.Sprintf("  Appliance Edition : %s (%s)", strings.ToUpper(cfg.Edition), cfg.OSFamily))
+	if cfg.Edition == "axonwall" {
+		if normalized := normalizeStarterPacks(cfg.StarterPacks); len(normalized) > 0 {
+			lines = append(lines, fmt.Sprintf("  Starter Packs     : %s", strings.Join(normalized, ", ")))
+		} else {
+			lines = append(lines, "  Starter Packs     : (none — Lean Router/NGFW Core only)")
+		}
+	}
 	lines = append(lines, fmt.Sprintf("  Install Mode      : %s", strings.ToUpper(cfg.InstallMode)))
 	lines = append(lines, fmt.Sprintf("  Firmware & RAM    : %s | %d MB RAM | TPM 2.0: %v", eval.FirmwareMode, eval.TotalRAMMB, eval.HasTPM2))
 	lines = append(lines, fmt.Sprintf("  System OS Disks   : %s", eval.SystemDiskSummary))
@@ -3097,11 +3163,11 @@ func printInstallerEditionSelector(edition string, withDescription bool) {
 	minimalBadge := colorDim + "( ) Minimal" + colorReset
 	vaultBadge := colorDim + "( ) Vault S3" + colorReset
 	k3sBadge := colorDim + "( ) K3s+ZFS" + colorReset
-	editionDesc := "Full NGFW, Neovim/ZSH workstation shell, SD-WAN, IDS/IPS, Web UI & Controller"
+	editionDesc := "Lean Router/NGFW Core (nftables, WireGuard, Kea DHCP, Unbound DNS) — opt-in plugins & starter packs"
 	switch edition {
 	case "minimal":
 		minimalBadge = colorEmerald + colorBold + "(●) Minimal" + colorReset
-		editionDesc = "Minimal attack surface: Core Control Plane, Web UI & OpenLDAP/SSSD — plugins on demand"
+		editionDesc = "Zero-role minimal attack surface: Core Web UI, Local RBAC & /bin/bash fallback — all roles on demand"
 	case "vault":
 		vaultBadge = colorBrightCya + colorBold + "(●) Vault S3" + colorReset
 		editionDesc = "Immutable S3 Object-Lock Backup Appliance (SeaweedFS; firewall stack stripped)"
@@ -3114,6 +3180,57 @@ func printInstallerEditionSelector(edition string, withDescription bool) {
 	fmt.Printf(" %s[E] Edition:%s %s  %s  %s  %s\n", colorBold, colorReset, ngfwBadge, minimalBadge, vaultBadge, k3sBadge)
 	if withDescription {
 		fmt.Printf("     %s%s%s\n", colorDim, editionDesc, colorReset)
+	}
+}
+
+func formatStarterPacksSummary(packs []string) string {
+	normalized := normalizeStarterPacks(packs)
+	if len(normalized) == 0 {
+		return "None (Lean Router/NGFW Core only — install packs later via Plugin Store)"
+	}
+	return strings.Join(normalized, ", ")
+}
+
+func runStarterPacksSelector(cfg *InstallerConfig) {
+	if cfg == nil || cfg.Edition != "axonwall" {
+		return
+	}
+	for {
+		clearScreen()
+		fmt.Printf("%s=== Optional Starter Packs (Axonwall NGFW Edition) ===%s\n", colorBold+colorEmerald, colorReset)
+		fmt.Printf("%sSeed curated plugin bundles on first boot. Base install remains Lean Router/NGFW Core.%s\n\n", colorDim, colorReset)
+
+		active := make(map[string]bool)
+		for _, id := range normalizeStarterPacks(cfg.StarterPacks) {
+			active[id] = true
+		}
+
+		for i, pack := range canonicalInstallerStarterPacks {
+			mark := "[ ]"
+			col := colorDim
+			if active[pack.ID] {
+				mark = "[✓]"
+				col = colorEmerald + colorBold
+			}
+			fmt.Printf("  [%d] %s%s %-20s%s — %s%s%s\n", i+1, col, mark, pack.ID, colorReset, colorBold, pack.Name, colorReset)
+			fmt.Printf("      %s%s%s\n\n", colorDim, pack.Description, colorReset)
+		}
+
+		fmt.Printf("%sControls:%s [1-4] Toggle Pack  [C] Clear All  [Enter/Esc/Q] Done\n", colorDim, colorReset)
+		switch readRawKey() {
+		case "1":
+			cfg.StarterPacks = toggleStarterPack(cfg.StarterPacks, canonicalInstallerStarterPacks[0].ID)
+		case "2":
+			cfg.StarterPacks = toggleStarterPack(cfg.StarterPacks, canonicalInstallerStarterPacks[1].ID)
+		case "3":
+			cfg.StarterPacks = toggleStarterPack(cfg.StarterPacks, canonicalInstallerStarterPacks[2].ID)
+		case "4":
+			cfg.StarterPacks = toggleStarterPack(cfg.StarterPacks, canonicalInstallerStarterPacks[3].ID)
+		case "C":
+			cfg.StarterPacks = nil
+		case "ENTER", "ESC", "Q", "EOF":
+			return
+		}
 	}
 }
 
@@ -3451,11 +3568,19 @@ func RunNextGenInstallerTUI(reader *bufio.Reader) {
 					colorBold, colorReset, colorCyan+colorBold, slotGB, colorReset,
 					colorBold, colorReset, colorCyan+colorBold, strings.ToUpper(cfg.RootFSType), colorReset)
 			}
+			if cfg.Edition == "axonwall" {
+				fmt.Printf(" %s[P] Starter Packs:%s %s%s%s\n",
+					colorBold, colorReset, colorEmerald, formatStarterPacksSummary(cfg.StarterPacks), colorReset)
+			}
 			fmt.Println("────────────────────────────────────────────────────────────────────────────────")
+			packControl := ""
+			if cfg.Edition == "axonwall" {
+				packControl = "  [P] Packs"
+			}
 			if cfg.InstallMode == "zbm" || cfg.InstallMode == "btrfs" {
-				fmt.Printf(" %sControls:%s [E] Edition  [↑/↓] Move  [Space/1-4] Arch  [V] Logs  [B] Express  [Enter] Next  [Q] Cancel\n", colorDim, colorReset)
+				fmt.Printf(" %sControls:%s [E] Edition%s  [↑/↓] Move  [Space/1-4] Arch  [V] Logs  [B] Express  [Enter] Next  [Q] Cancel\n", colorDim, colorReset, packControl)
 			} else {
-				fmt.Printf(" %sControls:%s [E] Edition  [↑/↓] Move  [Space/1-4] Arch  [S] Slot Size  [F] ext4/xfs  [V] Logs  [B] Express  [Enter] Next\n", colorDim, colorReset)
+				fmt.Printf(" %sControls:%s [E] Edition%s  [↑/↓] Move  [Space/1-4] Arch  [S] Slot Size  [F] ext4/xfs  [V] Logs  [B] Express  [Enter] Next\n", colorDim, colorReset, packControl)
 			}
 
 			key := readRawKey()
@@ -3465,6 +3590,10 @@ func RunNextGenInstallerTUI(reader *bufio.Reader) {
 			case "E":
 				cycleEdition(&cfg)
 				eval = RefreshHardwareEval(disks, &cfg)
+			case "P":
+				if cfg.Edition == "axonwall" {
+					runStarterPacksSelector(&cfg)
+				}
 			case "UP", "K":
 				if archCursor > 0 {
 					archCursor--
@@ -4200,6 +4329,9 @@ func RunNextGenInstallerTUI(reader *bufio.Reader) {
 
 			fmt.Printf(" %sInstallation Summary — Ready to Image Target Storage:%s\n\n", colorBold, colorReset)
 			fmt.Printf("   • %-24s : %s%s (%s)%s\n", "Appliance Edition", colorEmerald+colorBold, strings.ToUpper(cfg.Edition), cfg.OSFamily, colorReset)
+			if cfg.Edition == "axonwall" {
+				fmt.Printf("   • %-24s : %s%s%s\n", "Starter Packs", colorEmerald, formatStarterPacksSummary(cfg.StarterPacks), colorReset)
+			}
 			fmt.Printf("   • %-24s : %s%s%s\n", "Architecture", colorCyan+colorBold, archSummary, colorReset)
 			fmt.Printf("   • %-24s : %s%s — %s%s\n", "System OS Disk(s)", colorBold, raidMode, strings.Join(cfg.SystemDisks, ", "), colorReset)
 			fmt.Printf("   • %-24s : %s%s%s\n", "OpenZFS Storage Pool", colorGreen+colorBold, zfsSummary, colorReset)

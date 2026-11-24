@@ -66,6 +66,8 @@ BASH_SCRIPTS=(
   packaging/iso/build-iso.sh
   packaging/alpine/build-alpine-iso.sh
   packaging/iso/config/includes.chroot/usr/local/bin/axonwall-cloud-init
+  scripts/build-docs-bundle.sh
+  scripts/build-plugins-bundle.sh
   scripts/ci-preflight.sh
   scripts/release-tagger.sh
 )
@@ -214,6 +216,48 @@ elif [[ "${REQUIRE_BUILD}" == true ]]; then
 else
   echo "[i] Skipping Next.js standalone payload check (apps/axonwall/.next/standalone not built yet)"
 fi
+
+if [[ "${FAIL}" -ne 0 ]]; then
+  echo "============================================================" >&2
+  echo "[!] CI & Packaging Preflight FAILED" >&2
+  echo "============================================================" >&2
+  exit 1
+fi
+
+# ------------------------------------------------------------------------------
+# 7. Lean Core Packaging Diet (zero unintended opt-in bloat in preseed/.deb)
+# ------------------------------------------------------------------------------
+if grep -qE '(^|[[:space:]])(slapd|sssd-ldap)([[:space:]]|\\|$)' packaging/iso/config/includes.installer/preseed-minimal.cfg; then
+  fail "preseed-minimal.cfg must not bundle slapd/sssd-ldap in zero-role minimal edition"
+fi
+for pcfg in packaging/iso/config/includes.installer/preseed.cfg packaging/iso/config/includes.binary/preseed.cfg; do
+  if grep -qE '(^|[[:space:]])(suricata|frr|strongswan|openvpn|keepalived|rkhunter|slapd)([[:space:]]|\\|$)' "$pcfg"; then
+    fail "$pcfg must not pre-install opt-in plugin daemons in Lean Core"
+  fi
+  if grep -qE 'systemctl enable[^;]*headscale' "$pcfg"; then
+    fail "$pcfg must not auto-enable headscale.service in Lean Core"
+  fi
+done
+if grep -qE 'PKG_DEPENDS=.*(slapd|sssd-ldap)' packaging/debian/build-deb.sh; then
+  fail "packaging/debian/build-deb.sh must not require slapd/sssd-ldap in base or minimal editions"
+fi
+if grep -qE 'for svc in .*headscale' packaging/cloud-image/build-qcow2.sh || \
+   grep -qE 'for svc in .*headscale.*axonwall-firstboot' packaging/alpine/build-alpine-iso.sh; then
+  fail "build-qcow2.sh / build-alpine-iso.sh must not auto-enable opt-in headscale service on Lean Core"
+fi
+for bad_pack in enterprise-identity observability-ai workstation-cli; do
+  if grep -qF "${bad_pack}" apps/axonwall-console/installer_tui.go \
+     packaging/iso/config/includes.chroot/usr/local/bin/axonwall-install; then
+    fail "Obsolete starter pack ID '${bad_pack}' found in installer_tui.go or axonwall-install"
+  fi
+done
+for canon_pack in enterprise-ngfw remote-access-vpn operator-diagnostics ai-observability; do
+  if ! grep -qF "${canon_pack}" apps/axonwall-console/installer_tui.go || \
+     ! grep -qF "${canon_pack}" packaging/iso/config/includes.chroot/usr/local/bin/axonwall-install; then
+    fail "Canonical starter pack ID '${canon_pack}' missing from installer_tui.go or axonwall-install"
+  fi
+done
+pass "Lean Core packaging diet, preseed & starter-pack parity guardrails"
 
 if [[ "${FAIL}" -ne 0 ]]; then
   echo "============================================================" >&2

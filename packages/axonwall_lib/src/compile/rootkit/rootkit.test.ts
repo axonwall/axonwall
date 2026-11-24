@@ -22,10 +22,10 @@ import {
 } from '../../index.js';
 
 describe('Host Malware, Rootkit & Ghost-in-the-Ring Kernel Defense Suite', () => {
-  it('registers host-malware-rootkit plugin in BUILTIN_PLUGINS as enabled by default', () => {
+  it('registers host-malware-rootkit plugin in BUILTIN_PLUGINS as opt-in (disabled by default)', () => {
     const manifest = BUILTIN_PLUGINS.find((p) => p.id === 'host-malware-rootkit');
     expect(manifest).toBeDefined();
-    expect(manifest?.defaultEnabled).toBe(true);
+    expect(manifest?.defaultEnabled).toBe(false);
     expect(manifest?.packages?.debian).toEqual(
       expect.arrayContaining([
         'rkhunter',
@@ -42,11 +42,17 @@ describe('Host Malware, Rootkit & Ghost-in-the-Ring Kernel Defense Suite', () =>
         'linux-perf',
       ])
     );
-    expect(isPluginEnabled('host-malware-rootkit', undefined)).toBe(true);
-    expect(isPluginEnabled('host-malware-rootkit', {})).toBe(true);
+    expect(isPluginEnabled('host-malware-rootkit', undefined)).toBe(false);
+    expect(isPluginEnabled('host-malware-rootkit', {})).toBe(false);
 
     const base = DesiredStateSchema.parse({});
-    const disabled = disablePluginWithDependents('host-malware-rootkit', base);
+    expect(isPluginEnabled('host-malware-rootkit', base)).toBe(false);
+
+    const enabled = enablePluginWithDependencies('host-malware-rootkit', base);
+    expect(isPluginEnabled('host-malware-rootkit', enabled.state)).toBe(true);
+    expect(enabled.state.hostDefense?.enabled).toBe(true);
+
+    const disabled = disablePluginWithDependents('host-malware-rootkit', enabled.state);
     expect(isPluginEnabled('host-malware-rootkit', disabled.state)).toBe(false);
 
     const reenabled = enablePluginWithDependencies('host-malware-rootkit', disabled.state);

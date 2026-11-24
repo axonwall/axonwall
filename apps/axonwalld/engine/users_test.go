@@ -174,3 +174,20 @@ func TestResolveApplianceRole(t *testing.T) {
 		}
 	}
 }
+
+func TestValidateLoginShellExists(t *testing.T) {
+	if err := validateLoginShellExists("/bin/sh"); err != nil {
+		t.Errorf("expected /bin/sh to validate, got: %v", err)
+	}
+	if err := validateLoginShellExists("/usr/sbin/nologin"); err != nil {
+		t.Errorf("expected /usr/sbin/nologin to validate, got: %v", err)
+	}
+	if err := validateLoginShellExists("/bin/nonexistent-evil"); err == nil {
+		t.Errorf("expected disallowed shell to fail")
+	}
+	if _, statErr := os.Stat("/usr/bin/zsh"); statErr != nil {
+		if err := validateLoginShellExists("/usr/bin/zsh"); err == nil {
+			t.Errorf("expected missing /usr/bin/zsh to fail fail-closed")
+		}
+	}
+}

@@ -1,13 +1,14 @@
 'use client';
 
 import { useState, useEffect } from 'react';
+import { PluginDisabledGate } from '@/components/PluginDisabledGate';
 import { ShieldCheck, Plus, Trash2, Terminal, CheckCircle2 } from 'lucide-react';
 import { compileIpsec } from '@axonwall/lib/compile/ipsec';
 import { getCurrentDesiredState } from '@/server/agent';
 import { useDesiredStateApply } from '@/lib/use-desired-state-apply';
 import type { DesiredState, IpsecTunnel } from '@axonwall/lib/schemas';
 
-export default function IpsecPage() {
+function IpsecPageContent() {
   const { applyState } = useDesiredStateApply();
   const [fullState, setFullState] = useState<DesiredState | null>(null);
   const [tunnels, setTunnels] = useState<IpsecTunnel[]>([]);
@@ -273,5 +274,13 @@ export default function IpsecPage() {
         </div>
       </div>
     </div>
+  );
+}
+
+export default function IpsecPage() {
+  return (
+    <PluginDisabledGate pluginId="ipsec-strongswan">
+      <IpsecPageContent />
+    </PluginDisabledGate>
   );
 }

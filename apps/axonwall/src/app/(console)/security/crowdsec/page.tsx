@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
+import { PluginDisabledGate } from '@/components/PluginDisabledGate';
 import { Shield, ShieldAlert, CheckCircle2, Terminal, RefreshCw, Trash2, Save } from 'lucide-react';
 import { compileCrowdSec } from '@axonwall/lib/compile/crowdsec';
 import { getCurrentDesiredState } from '@/server/agent';
@@ -15,7 +16,7 @@ interface RemediationDecision {
   action: 'drop' | 'reject';
 }
 
-export default function CrowdSecPage() {
+function CrowdSecPageContent() {
   const { applyState } = useDesiredStateApply();
   const [fullState, setFullState] = useState<DesiredState | null>(null);
   const [enabled, setEnabled] = useState(false);
@@ -226,5 +227,13 @@ export default function CrowdSecPage() {
         </div>
       </div>
     </div>
+  );
+}
+
+export default function CrowdSecPage() {
+  return (
+    <PluginDisabledGate pluginId="crowdsec-bouncer">
+      <CrowdSecPageContent />
+    </PluginDisabledGate>
   );
 }

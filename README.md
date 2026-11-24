@@ -1,12 +1,12 @@
 <div align="center">
 
-# 🛡️ Axonwall (`v0.15.1`)
+# 🛡️ Axonwall (`v0.16.0`)
 
 ### The Sovereign Linux Next-Generation Firewall, OpenZFS NAS, Hypervisor & Autonomous AI SecOps Platform
 
 *Reimagining perimeter & infrastructure security: from legacy FreeBSD `pf` & PHP to **Linux 6.12+ LTS `nftables`**, **Hardened KSPP Universal & Hardware-Locked Kernels**, **Zero-Shell UEFI UKIs**, **Post-Quantum Dual-KEM**, **CO-RE BPF-LSM & Blackbox Threat-LLM Harvesting**, **Enterprise NetFlow / IPFIX / sFlow Analytics**, **OpenZFS**, **Btrfs + Snapper**, **K3s**, **KVM/LXC**, and **Guardrailed MCP AI**.*
 
-[![Release](https://img.shields.io/badge/Release-v0.15.1-10b981.svg)](https://github.com/axonwall/axonwall/releases/tag/v0.15.1)
+[![Release](https://img.shields.io/badge/Release-v0.16.0-10b981.svg)](https://github.com/axonwall/axonwall/releases/tag/v0.16.0)
 [![License](https://img.shields.io/badge/License-GPL--2.0--or--later-blue.svg)](LICENSE)
 [![Kernel](https://img.shields.io/badge/Kernel-Linux_6.12+_LTS-orange.svg)](https://www.kernel.org/)
 [![Engine](https://img.shields.io/badge/Firewall-nftables_1.1+%20%26%20eBPF%2FXDP-red.svg)](https://netfilter.org/projects/nftables/)
@@ -24,7 +24,9 @@
 
 For more than two decades, open-source firewalls relied on FreeBSD (`m0n0wall`, `pfSense®`, `OPNsense®`) and server-rendered PHP scripts. In modern 10G/25G/100G, cloud-native, and AI-assisted environments, that legacy stack creates severe bottlenecks: single-core `pf` state-table contention, multi-year NIC/Wi-Fi 7 driver lag, instant-lockout applies, and zero native container or hypervisor coexistence.
 
-**Axonwall** replaces that legacy stack from the kernel up—unifying **5 modular Core Roles** and **22 first-party Extension Plugins** (27 plugins total, with SHA-256-verified bundled binary archives and on-demand provisioning) over a strictly validated, declarative **14-file YAML control plane** (`/etc/axonwall/*.yaml`) with Junos-style **Commit-Confirm** automatic rollback.
+**Axonwall** replaces that legacy stack from the kernel up—unifying **5 modular Core Roles** and **42 first-party Extension Plugins** (47 plugins total, with SHA-256-verified bundled binary archives and on-demand provisioning) over a strictly validated, declarative **14-file YAML control plane** (`/etc/axonwall/*.yaml`) with Junos-style **Commit-Confirm** automatic rollback.
+
+> **Lean Router/NGFW Core Architecture (`v0.16.0+`):** Fresh standard `axonwall` installations start lean with **only `core-firewall` enabled by default** (`nftables`, Kea DHCPv4/v6, Unbound DNS+RPZ, WireGuard, ACME, QoS, GeoIP, Aliases, static/multi-WAN routing, local POSIX users, health/flow/insight reporting, basic diagnostics, backups, updates, and the Plugin Store), while `axonwall-minimal` starts zero-role (`core-firewall` disabled, local break-glass/POSIX auth only). Every advanced NGFW/routing/VPN/directory/HA/observability/AI module installs on demand individually or via **4 Curated Starter Packs** (`enterprise-ngfw`, `remote-access-vpn`, `operator-diagnostics`, `ai-observability`) or an **Air-Gapped Offline Plugin Cache** (`scripts/build-plugins-bundle.sh`)—while existing `v0.15.x` upgrades automatically preserve active features.
 
 ```
                    ┌──────────────────────────────────────────────────────────────────┐
@@ -48,22 +50,25 @@ For more than two decades, open-source firewalls relied on FreeBSD (`m0n0wall`, 
 
 ---
 
-## 🧩 Five Modular Core Roles & 27 Built-In Plugins
+## 🧩 Five Modular Core Roles & 47 Built-In Plugins
 
-Run Axonwall as a dedicated zero-bloat perimeter NGFW or **Minimal Reduced-Attack-Surface** host, disable `core-firewall` to run a pure Host-Mode ZFS Storage Vault or K3s/KVM hypervisor node, or converge all five roles onto a 2-node High Availability bare-metal cluster:
+Run Axonwall as a lean perimeter router/firewall (`core-firewall` only), deploy a **Minimal Zero-Role Control Plane** (`minimal`, no preinstalled OpenLDAP/SSSD or firewall role until enabled), run a dedicated **Vault** or **K3s-Storage** appliance, or activate additional roles & plugins on demand:
 
 | Core Role ID | Default | Capabilities |
 | :--- | :--- | :--- |
-| **`core-firewall`** | **Enabled** | Stateful `table inet axonwall` firewall, Dual-Stack IPv4/IPv6 + `802.1Q`/`802.1ad` QinQ VLAN, LPM CIDR & TCP SYN-Flood eBPF XDP fast-drop, SNAT/DNAT/Hairpin/1:1 BINAT/NPTv6, Multi-WAN SD-WAN health prober, FRR (BGP/OSPF/BFD), CAKE/FQ-CoDel QoS, Kea DHCPv4/v6 IA_PD + `radvd` SLAAC, Unbound DNS/RPZ sinkhole, mDNS reflector, UPnP/NAT-PMP, Suricata 7+ IDS/IPS, CrowdSec, WireGuard, strongSwan IKEv2, OpenVPN `ovpn-dco`, Keepalived + `conntrackd` HA |
+| **`core-firewall`** | **Enabled** (`axonwall`) / Opt-in (`minimal`) | Stateful `table inet axonwall` firewall, Dual-Stack IPv4/IPv6 + `802.1Q`/`802.1ad` QinQ VLAN, SNAT/DNAT/Hairpin/1:1 BINAT/NPTv6, Multi-WAN SD-WAN health prober, CAKE/FQ-CoDel QoS, Kea DHCPv4/v6 IA_PD + `radvd` SLAAC, Unbound DNS/RPZ sinkhole, GeoIP, Aliases, ACME, WireGuard VPN, local POSIX user administration, health/flows/insight reporting |
 | **`core-nas`** | Opt-in | OpenZFS Stripe/Mirror/RAIDZ1-3/dRAID pools with Special NVMe VDEVs, SLOG/L2ARC/hot-spares, Checkpoints & NVMe TRIM, `/proc/spl/kstat/zfs` ARC/L2ARC/ZIL SPL kstat telemetry, Native AES-256-GCM encrypted datasets & ZVOLs, Samba SMB3 + VSS shadow copies + Time Machine mDNS + WSDD2, NFSv4, iSCSI targets, S.M.A.R.T. tests, `rclone` Cloud Sync, SeaweedFS S3 WORM Vault, and incremental HA `zfs send/recv` |
-| **`core-k3s`** | Opt-in | Embedded single-node or 2-node HA K3s Kubernetes with selectable **Cilium eBPF CNI (`kubeProxyReplacement` + Hubble)** or WireGuard Flannel mesh, **Browser K9s Live Explorer (`/k3s/explorer`)** with Capacity Rings, live Pulse charts, Node Bin-Packing heatmap & barycenter SVG Topology Map, **HA Quorum, OpenEBS Storage & Workloads visualizers**, **Node Roles & Taints Modal (`/k3s/cluster`)**, Embedded Etcd local & S3 snapshots/restore, Linux 6.9+ `UserNamespacesSupport` (`hostUsers: false`) + `BPF_TOKEN` Pod/DaemonSet profiles, OpenEBS ZFS-LocalPV & replicated Mayastor NVMe-oF storage, bundled `kubectl`, `k9s` (`v0.51.0`) & `helm` v3, and non-root `axonwall-kubeconfig --vip` sync |
+| **`core-k3s`** | Opt-in | Embedded single-node or 2-node HA K3s Kubernetes with selectable **Cilium eBPF CNI (`kubeProxyReplacement` + Hubble)** or WireGuard Flannel mesh (`k3s`/`k9s` downloaded on demand outside `k3s-storage`), **Browser K9s Live Explorer (`/k3s/explorer`)** with Capacity Rings, live Pulse charts, Node Bin-Packing heatmap & barycenter SVG Topology Map, **HA Quorum, OpenEBS Storage & Workloads visualizers**, **Node Roles & Taints Modal (`/k3s/cluster`)**, Embedded Etcd local & S3 snapshots/restore, Linux 6.9+ `UserNamespacesSupport` (`hostUsers: false`) + `BPF_TOKEN` Pod/DaemonSet profiles, OpenEBS ZFS-LocalPV & replicated Mayastor NVMe-oF storage |
 | **`core-virt`** | Opt-in | Type-1 KVM/QEMU hypervisor (OVMF UEFI, Secure Boot, `swtpm` TPM 2.0, VirtioFS ZFS directory shares, CPU pinning/NUMA/Hugepages, ZFS zero-copy linked clones, QMP + ZFS live migration, canonical Libvirt Domain XML compiler, per-VM `nftables` security groups, HTML5 `noVNC` console), unprivileged LXC containers with Linux 6.9+ `BPF_TOKEN` delegation, PCIe VFIO & SR-IOV passthrough, VXLAN SDN, Hosted Virtual Edge UKI, and ZFS/S3/PBS backups |
 | **`core-vigilante`** | Opt-in | Autonomous Cyber Defense & SOAR (`vigilante-soc` on K3s): 12 modular security stacks (VigilSOC, OpenSearch, Wazuh, Falco, Zeek, BloodHound, OpenVAS, kCTF, etc.), priority `-10` kernel nftables SOAR auto-containment, ransomware entropy freeze, honeytoken deception mesh, Merkle-chained ZFS forensic vault, and 106-tool Vigilante MCP |
 
-### Built-In Extension Plugins (22) & Bundled Binaries
-- **Default Enabled (3):** `cli-workstation` (Zsh, Starship, Tmux, bundled `vim`/`neovim` `axonwall-config`, `kubectl`, `helm`), `host-malware-rootkit` (8-engine host malware/rootkit hunter + 5-hook CO-RE BPF-LSM & `BPF_TOKEN` Ring-0 mediator), `coroot-ebpf-apm` (zero-instrumentation eBPF L7 service map, TLS uprobes, 99 Hz FlameGraphs & automated RCA).
-- **Opt-In Extensions (19):** `netflow-collector` (NetFlow v5/v9, IPFIX over UDP/TCP/TLS 1.3 mTLS & sFlow v5 collector, dual-stack eBPF self-exporter, pure-Go MMDB GeoIP/ASN, FRR BGP/K3s/conntrack enrichment, ClickHouse SQL pushdown, 95th-pct reports, EWMA baselines & FQL Studio), `topology-studio` (`@xyflow/react` multi-host fabric topology editor with live health probes & phased apply), `netbox` (NetBox v4 DCIM/IPAM Source of Truth on K3s with OpenLDAP SSO), `librenms` (LibreNMS SNMPv2c/v3, LLDP/CDP/FDB & optical DOM discovery hub), `ebpf-threat-harvester` (Axonwall Blackbox Ring-0 TCX/tracepoint/uprobe flight recorder & Dual-Track SFT/RLVR JSONL + Apache Parquet Threat-LLM dataset harvester), `rosenpass` (Hybrid Classic McEliece 460896 + ML-KEM-512 post-quantum WireGuard PSK rotation), `eluvix` (Sovereign AI Model Router, Tokenomics, PromptGuard & reversible PII DLP), `vigilant-octo-waffle` (ArgoCD/Flux K3s GitOps PaaS), `cli-emacs` (bundled Debian Emacs), `cli-emacs-doom` & `cli-emacs-spacemacs` (sharing `cli-emacs` runtime), `headscale`, `tailscale`, `haproxy`, `freeradius`, `snmp`, `nut-ups`, `ntopng`, `cli-diagnostics-nastymap`.
-- **SHA-256 Bundled Binary Supply Chain:** Plugins can stage pinned archives extracted fail-closed into per-plugin `bin/` directories with automatic interactive shell `PATH` integration and on-demand installation from Minimal hosts.
+### Opt-In Extension Plugins (42) & Curated Starter Packs (4)
+- **All 42 Built-In Extensions Default to Opt-In (`defaultEnabled: false`):**
+  - **Perimeter NGFW, Routing & VPN Extensions:** `suricata-ids`, `crowdsec-bouncer`, `frr-routing` (BGP/OSPF/BFD), `openvpn` (`ovpn-dco`), `ipsec-strongswan` (IKEv2), `rosenpass` (Post-Quantum KEM), `headscale`, `tailscale`, `captive-portal`, `tls-decryption`, `identity-aware-proxy`, `haproxy`.
+  - **Identity, Audit, HA, Kernel & Operator Extensions:** `directory-ldap` (OpenLDAP + SSSD + syncrepl HA), `enterprise-sso` (OIDC/Entra/Okta/Google), `high-availability` (Keepalived + `conntrackd`), `etckeeper-audit`, `custom-kernel-studio`, `packet-diagnostics` (`tcpdump` + Packet Tracer), `cli-workstation` (Zsh, Oh My Zsh, Starship, Tmux, `axonwall-config`), `web-terminal`, `firewall-importer`, `docs-portal` (~1.1 MB offline docs bundle; falls back online to `axonwall.com/docs`), `nut-ups`, `freeradius`, `snmp`, `cli-emacs`, `cli-emacs-doom`, `cli-emacs-spacemacs`, `cli-diagnostics-nastymap`.
+  - **AI, eBPF Observability, Fabric & SecOps Extensions:** `ai-copilot` (`/ai`), `mcp-ai-control` (`/system/mcp` + `axonwall-mcp`), `fleet-controller` (`/fleet` + ZTP satellites), `coroot-ebpf-apm` (`/reporting/ebpf`), `netflow-collector` (`/reporting/netflow`), `topology-studio` (`/topology`), `ebpf-threat-harvester` (`/security/threat-harvester`), `host-malware-rootkit` (`/security/rootkit-hunter` + CO-RE BPF-LSM), `netbox`, `librenms`, `eluvix`, `vigilant-octo-waffle`, `ntopng`.
+- **4 Curated Starter Packs (`/system/plugins` & `axonwallctl plugin pack list | install <pack-id>`):** `enterprise-ngfw`, `remote-access-vpn`, `operator-diagnostics`, `ai-observability`.
+- **SHA-256 Bundled Binary Supply Chain & Packaging Diet:** Base `.deb` and ISO images exclude optional plugin daemons, scanners, CLI tools, OpenLDAP/SSSD, and non-`k3s-storage` `k3s`/`k9s` binaries; every plugin installs on demand with OS package hooks and SHA-256 archive verification.
 
 ---
 
@@ -137,7 +142,7 @@ axonwall/
 │   ├── alpine/                       # Lightweight musl/OpenRC Alpine ISO builder (NGFW, Vault & K3s-Storage)
 │   ├── vault/                        # Axonwall Vault Edition immutable SeaweedFS S3 Object-Lock appliance
 │   └── debian/                       # Standalone axonwall_<ver>_amd64.deb packager
-├── scripts/                          # Operational helpers (release-tagger.sh, update-kubeconfig.sh)
+├── scripts/                          # Release, bundle & CI helpers (release-tagger.sh, build-docs-bundle.sh, build-plugins-bundle.sh, ci-preflight.sh, update-kubeconfig.sh)
 ├── docs/                             # Standalone operational guides (HIGH_AVAILABILITY_SETUP.md, PROXMOX_MINI_EDGE.md)
 ├── RELEASE_NOTES.md                  # Full changelog & SHA-256 build artifact release notes
 ├── axonwall.com/                     # Public website, releases portal, 26-guide docs & interactive demo
@@ -147,35 +152,35 @@ axonwall/
 
 ---
 
-## 🛠️ Installation & Quickstart (`v0.15.1`)
+## 🛠️ Installation & Quickstart (`v0.16.0`)
 
 ### Option 1: Bare-Metal / VM Unified UEFI ISO (`axonwall`, `minimal`, `vault`, or `k3s-storage` Edition)
 
 ```bash
-wget https://github.com/axonwall/axonwall/releases/download/v0.15.1/axonwall-debian13-amd64.iso
-wget https://github.com/axonwall/axonwall/releases/download/v0.15.1/axonwall-debian13-amd64.iso.sha256
+wget https://github.com/axonwall/axonwall/releases/download/v0.16.0/axonwall-debian13-amd64.iso
+wget https://github.com/axonwall/axonwall/releases/download/v0.16.0/axonwall-debian13-amd64.iso.sha256
 sha256sum -c axonwall-debian13-amd64.iso.sha256
 
 # Flash to USB drive:
 sudo dd if=axonwall-debian13-amd64.iso of=/dev/sdX bs=4M status=progress conv=fsync
 ```
 
-1. Boot UEFI media and choose **Axonwall NGFW** (`axonwall`), **Minimal Reduced Attack Surface** (`minimal`), **Axonwall Vault S3** (`vault`), or **Barebones K3s + Storage** (`k3s-storage`)—using **Express 1-Click Install** or the **5-Step Custom Wizard** (`ZFSBootMenu`, `Btrfs + Snapper`, `Dual-Root A/B`, or `Rolling`, optional `LUKS2 + TPM 2.0`).
+1. Boot UEFI media and choose **Axonwall NGFW** (`axonwall`), **Minimal Reduced Attack Surface** (`minimal`), **Axonwall Vault S3** (`vault`), or **Barebones K3s + Storage** (`k3s-storage`)—using **Express 1-Click Install** or the **5-Step Custom Wizard** (`ZFSBootMenu`, `Btrfs + Snapper`, `Dual-Root A/B`, or `Rolling`, optional `LUKS2 + TPM 2.0`, plus `[P]` Curated Starter Packs).
 2. Connect to the LAN interface and open the TLS Web Console:
    - **URL:** `https://192.168.1.1:2966`
    - **Default Credentials:** `admin` / `axonwall` (prompted to rotate on first login)
-   - **CLI TUIs:** `axonwall-config` (Neovim 4-pane IDE), `axonwall-tui` (live terminal dashboard + `Btrfs Snapper` tab), `axonwallctl status`, `axonwallctl kernel audit`, `axonwallctl ebpf overview`, `axonwallctl netflow status`, `axonwallctl netflow report --range 7d`, `axonwallctl netflow fleet-query`, `axonwallctl kubeconfig --vip`
+   - **CLI TUIs:** `axonwall-config` (Neovim 4-pane IDE), `axonwall-tui` (live terminal dashboard + `Plugins` / `[p]` Starter Packs + `Btrfs Snapper`), `axonwallctl status`, `axonwallctl plugin pack list`, `axonwallctl plugin cache-status`, `axonwallctl kernel audit`, `axonwallctl ebpf overview`, `axonwallctl netflow status`, `axonwallctl netflow report --range 7d`, `axonwallctl netflow fleet-query`, `axonwallctl kubeconfig --vip`
 
 ### Option 2: Cloud QCOW2 Image, Edge UEFI UKI, or `.deb` Packages
 
-- **KVM / Proxmox Cloud Image:** [`axonwall-debian13-amd64-cloud.qcow2`](https://github.com/axonwall/axonwall/releases/download/v0.15.1/axonwall-debian13-amd64-cloud.qcow2)
-- **Zero-Shell Edge NGFW UKI:** [`axonwall-edge-sku-vm-virtio.efi`](https://github.com/axonwall/axonwall/releases/download/v0.15.1/axonwall-edge-sku-vm-virtio.efi)
+- **KVM / Proxmox Cloud Image:** [`axonwall-debian13-amd64-cloud.qcow2`](https://github.com/axonwall/axonwall/releases/download/v0.16.0/axonwall-debian13-amd64-cloud.qcow2)
+- **Zero-Shell Edge NGFW UKI:** [`axonwall-edge-sku-vm-virtio.efi`](https://github.com/axonwall/axonwall/releases/download/v0.16.0/axonwall-edge-sku-vm-virtio.efi)
 - **Debian 12/13 & Ubuntu 24.04 Packages:**
   ```bash
-  wget https://github.com/axonwall/axonwall/releases/download/v0.15.1/axonwall_0.15.1_amd64.deb
-  sudo apt-get update && sudo apt-get install -y ./axonwall_0.15.1_amd64.deb
+  wget https://github.com/axonwall/axonwall/releases/download/v0.16.0/axonwall_0.16.0_amd64.deb
+  sudo apt-get update && sudo apt-get install -y ./axonwall_0.16.0_amd64.deb
   # Edition packages also published per release:
-  #   axonwall-minimal_0.15.1_amd64.deb | axonwall-vault_0.15.1_amd64.deb | axonwall-k3s-storage_0.15.1_amd64.deb
+  #   axonwall-minimal_0.16.0_amd64.deb | axonwall-vault_0.16.0_amd64.deb | axonwall-k3s-storage_0.16.0_amd64.deb
   ```
 
 ### Option 3: Local Developer Setup

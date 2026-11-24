@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
+import { PluginDisabledGate } from '@/components/PluginDisabledGate';
 import { Users, Wifi, Trash2, Plus, CheckCircle2, Clock, ArrowDown, ArrowUp } from 'lucide-react';
 import { getCurrentDesiredState } from '@/server/agent';
 import { useDesiredStateApply } from '@/lib/use-desired-state-apply';
@@ -16,7 +17,7 @@ interface ActiveSessionView {
   uploadMb: number;
 }
 
-export default function CaptivePortalPage() {
+function CaptivePortalPageContent() {
   const { applyState } = useDesiredStateApply();
   const [fullState, setFullState] = useState<DesiredState | null>(null);
   const [zones, setZones] = useState<CaptivePortalZone[]>([]);
@@ -270,5 +271,13 @@ export default function CaptivePortalPage() {
         )}
       </div>
     </div>
+  );
+}
+
+export default function CaptivePortalPage() {
+  return (
+    <PluginDisabledGate pluginId="captive-portal">
+      <CaptivePortalPageContent />
+    </PluginDisabledGate>
   );
 }

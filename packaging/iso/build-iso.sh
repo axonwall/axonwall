@@ -302,9 +302,9 @@ if [[ "${FLAVOR}" == "axonwall" ]]; then
   cp "${SCRIPT_DIR}/../debian/axonwall-ui.service" config/includes.chroot/etc/systemd/system/
   ln -sf /etc/systemd/system/axonwall-ui.service config/includes.chroot/etc/systemd/system/multi-user.target.wants/axonwall-ui.service
   cp "${SCRIPT_DIR}/../debian/headscale.service" config/includes.chroot/etc/systemd/system/
-  ln -sf /etc/systemd/system/headscale.service config/includes.chroot/etc/systemd/system/multi-user.target.wants/headscale.service
   cp "${SCRIPT_DIR}/../debian/k3s.service" config/includes.chroot/etc/systemd/system/
-  ln -sf /etc/systemd/system/k3s.service config/includes.chroot/etc/systemd/system/multi-user.target.wants/k3s.service
+  rm -f config/includes.chroot/etc/systemd/system/multi-user.target.wants/headscale.service \
+        config/includes.chroot/etc/systemd/system/multi-user.target.wants/k3s.service
 
   mkdir -p config/includes.chroot/etc/headscale
   cp "${SCRIPT_DIR}/../debian/headscale-config.yaml" config/includes.chroot/etc/headscale/config.yaml
@@ -562,57 +562,9 @@ if [[ ! -f config/includes.chroot/usr/local/bin/helm ]]; then
   rm -f "${HELM_TAR}"
 fi
 
-# Fetch kubectl binary for Kubernetes cluster administration
-KUBECTL_VERSION="1.32.3"
-KUBECTL_SHA256="ab209d0c5134b61486a0486585604a616a5bb2fc07df46d304b3c95817b2d79f"
-if [[ ! -f config/includes.chroot/usr/local/bin/kubectl ]]; then
-  echo "[+] Fetching kubectl v${KUBECTL_VERSION}..."
-  curl -fsSL -o config/includes.chroot/usr/local/bin/kubectl "https://dl.k8s.io/release/v${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
-  echo "${KUBECTL_SHA256}  config/includes.chroot/usr/local/bin/kubectl" | sha256sum -c -
-  chmod 0755 config/includes.chroot/usr/local/bin/kubectl
-fi
-
-# Fetch K3s binary for in-house Kubernetes control plane & worker engine (core-k3s plugin)
-# Staged into the plugin dir config/includes.chroot/var/lib/axonwall/core-k3s/bin/,
-# not /usr/local/bin. A pre-existing staged binary is kept only if
-# its sha256 still matches the pin — a stale file from an earlier
-# build is re-downloaded, never packaged unverified.
-K3S_VERSION="v1.32.3+k3s1"
-K3S_URL_VERSION="v1.32.3%2Bk3s1"
-K3S_SHA256="b19216803650b567bf980888dec39035edaf664339c55bc4462f7a003edbef83"
-mkdir -p config/includes.chroot/var/lib/axonwall/core-k3s/bin
-if [[ -f config/includes.chroot/var/lib/axonwall/core-k3s/bin/k3s ]] && echo "${K3S_SHA256}  config/includes.chroot/var/lib/axonwall/core-k3s/bin/k3s" | sha256sum -c - >/dev/null 2>&1; then
-  echo "[+] K3s ${K3S_VERSION} already staged and verified; keeping."
-else
-  echo "[+] Fetching K3s ${K3S_VERSION}..."
-  curl -fsSL -o config/includes.chroot/var/lib/axonwall/core-k3s/bin/k3s "https://github.com/k3s-io/k3s/releases/download/${K3S_URL_VERSION}/k3s"
-  echo "${K3S_SHA256}  config/includes.chroot/var/lib/axonwall/core-k3s/bin/k3s" | sha256sum -c -
-  chmod 0755 config/includes.chroot/var/lib/axonwall/core-k3s/bin/k3s
-fi
-
-# Fetch K9s v0.51.0 interactive Kubernetes terminal UI
-# A pre-existing staged k9s is always re-downloaded and re-extracted:
-# the pinned sha256 covers the tarball, not the extracted binary, so
-# there is no digest a staged binary could be verified against.
-K9S_VERSION="0.51.0"
-K9S_SHA256="c3752ad51a5a4015a113819c4eeb6e55a4d0e4b8e652494797532f6fc8161dd7"
-rm -f config/includes.chroot/var/lib/axonwall/core-k3s/bin/k9s
-echo "[+] Fetching K9s v${K9S_VERSION}..."
-K9S_TAR="$(mktemp -t k9s-XXXXXX.tar.gz)"
-curl -fsSL -o "${K9S_TAR}" "https://github.com/derailed/k9s/releases/download/v${K9S_VERSION}/k9s_Linux_amd64.tar.gz"
-echo "${K9S_SHA256}  ${K9S_TAR}" | sha256sum -c -
-tar -xzf "${K9S_TAR}" -C config/includes.chroot/var/lib/axonwall/core-k3s/bin/ k9s
-chmod 0755 config/includes.chroot/var/lib/axonwall/core-k3s/bin/k9s
-rm -f "${K9S_TAR}"
-
-# k3s multicall symlinks in the plugin bin dir (kubectl, crictl,
-# ctr -> k3s). The daemon recreates them on core-k3s reconfigure if
-# they are ever deleted; nothing is linked into /usr/local/bin.
-for _klink in kubectl crictl ctr; do
-  ln -sf k3s "config/includes.chroot/var/lib/axonwall/core-k3s/bin/${_klink}"
-done
-# Verification record for the staged tree (see the helper above).
-write_core_k3s_bundled_json config/includes.chroot/var/lib/axonwall/core-k3s "${K3S_SHA256:-}" "${K9S_SHA256:-}"
+# Lean Core omits pre-staged kubectl/k3s/k9s (installed on demand when core-k3s is activated).
+rm -rf config/includes.chroot/var/lib/axonwall/core-k3s \
+       config/includes.chroot/usr/local/bin/kubectl
 
 # Stage Vault Edition payload into /usr/share/axonwall/vault/ so the unified
 # main ISO can install EITHER Axonwall NGFW OR Axonwall Vault Edition.
@@ -1132,8 +1084,8 @@ python3-drgn
 linux-perf
 EOF
 elif [[ "${FLAVOR}" == "minimal" ]]; then
-# Minimal Edition package set: reduced attack surface core OS + OpenZFS +
-# Axonwall control plane, Web UI, OpenLDAP/SSSD, and base system tooling.
+# Minimal Edition package set: zero-role control plane + OpenZFS +
+# Axonwall control plane, Web UI, local POSIX auth, and base system tooling.
 cat << 'EOF' > config/package-lists/axonwall.list.chroot
 linux-image-amd64
 live-boot
@@ -1214,12 +1166,6 @@ btrfs-progs
 snapper
 openssh-server
 openssh-client
-slapd
-ldap-utils
-sssd-ldap
-sssd-tools
-libnss-sss
-libpam-sss
 libpam-modules
 chrony
 EOF
@@ -1265,55 +1211,23 @@ nftables
 iproute2
 wireguard-tools
 sqlite3
-suricata
 kea-dhcp4-server
 unbound
 dns-root-data
-frr
-strongswan
-openvpn
 conntrack
-conntrackd
-keepalived
 ethtool
 pciutils
-tcpdump
 curl
 wget
 jq
 ca-certificates
 nodejs
-net-tools
-dnsutils
-bind9-host
-nmap
-kubectl
-mkcert
-zsh
-vim
-neovim
 less
 binutils
 zstd
 xz-utils
 bzip2
 unzip
-btop
-htop
-sysstat
-iotop
-iftop
-slurm
-starship
-zoxide
-zsh-autosuggestions
-zsh-syntax-highlighting
-tmux
-fzf
-ripgrep
-fd-find
-bat
-mtr-tiny
 openssl
 kmod
 procps
@@ -1332,44 +1246,16 @@ zfsutils-linux
 zfs-initramfs
 cloud-init
 cloud-guest-utils
-qemu-system-x86
-qemu-utils
-ovmf
-xorriso
-bridge-utils
-libvirt-clients
-lxc
 cryptsetup
 systemd-cryptsetup
 tpm2-tools
 xfsprogs
 btrfs-progs
 snapper
-samba
-nfs-kernel-server
-open-iscsi
-tgt
-etckeeper
-git
 openssh-server
 openssh-client
-slapd
-ldap-utils
-sssd-ldap
-sssd-tools
-libnss-sss
-libpam-sss
 libpam-modules
 chrony
-rkhunter
-chkrootkit
-yara
-unhide
-lynis
-debsums
-bpftool
-python3-drgn
-linux-perf
 EOF
 fi
 

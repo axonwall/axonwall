@@ -24,6 +24,7 @@ type TaskRecord struct {
 	Status     string `json:"status"` // "running", "stopped", "failed"
 	ExitStatus string `json:"exitStatus"`
 	LogFile    string `json:"logFile"`
+	seq        uint64
 }
 
 type TaskManager struct {
@@ -105,7 +106,7 @@ func (m *TaskManager) pruneRetainedTasksLocked() {
 				continue
 			}
 			if oldest == nil || t.StartTime < oldest.StartTime ||
-				(t.StartTime == oldest.StartTime && t.UPID < oldest.UPID) {
+				(t.StartTime == oldest.StartTime && t.seq < oldest.seq) {
 				oldest = t
 			}
 		}
@@ -123,6 +124,11 @@ func (m *TaskManager) pruneRetainedTasksLocked() {
 
 // GenerateUPID produces a Proxmox-compatible UPID: UPID:<node>:<pid>:<pstart>:<starttime>:<type>:<id>:<user>:
 func (m *TaskManager) GenerateUPID(taskType, targetId, user string) string {
+	upid, _, _ := m.allocateUPID(taskType, targetId, user)
+	return upid
+}
+
+func (m *TaskManager) allocateUPID(taskType, targetId, user string) (string, uint64, int64) {
 	now := time.Now().Unix()
 	pid := os.Getpid()
 	m.mu.Lock()
@@ -144,12 +150,13 @@ func (m *TaskManager) GenerateUPID(taskType, targetId, user string) string {
 		cleanUser = "root@axonwall"
 	}
 
-	return fmt.Sprintf("UPID:%s:%08X:%08X:%08X:%s:%s:%s:",
+	upid := fmt.Sprintf("UPID:%s:%08X:%08X:%08X:%s:%s:%s:",
 		m.node, pid, pstart, now, cleanType, cleanId, cleanUser)
+	return upid, pstart, now
 }
 
 func (m *TaskManager) StartTask(taskType, targetId, user string, fn func(log func(format string, args ...any)) error) string {
-	upid := m.GenerateUPID(taskType, targetId, user)
+	upid, seq, now := m.allocateUPID(taskType, targetId, user)
 	safeUpidFile := strings.ReplaceAll(upid, ":", "_") + ".log"
 	logPath := filepath.Join(m.logDir, safeUpidFile)
 
@@ -165,13 +172,14 @@ func (m *TaskManager) StartTask(taskType, targetId, user string, fn func(log fun
 		UPID:       upid,
 		Node:       m.node,
 		PID:        os.Getpid(),
-		StartTime:  time.Now().Unix(),
+		StartTime:  now,
 		Type:       taskType,
 		TargetID:   targetId,
 		User:       user,
 		Status:     "running",
 		ExitStatus: "RUNNING",
 		LogFile:    logPath,
+		seq:        seq,
 	}
 
 	m.mu.Lock()

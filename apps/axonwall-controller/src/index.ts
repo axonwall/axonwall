@@ -52,6 +52,7 @@ import * as path from 'node:path';
 import { resolveControllerDirs, readAgentToken } from './dev-paths.js';
 import { readCanonicalConfig, writeCanonicalConfig } from './atomic-config.js';
 import { verifyToken } from '@axonwall/lib/ldap';
+import { isPluginEnabled } from '@axonwall/lib/plugins';
 import * as os from 'node:os';
 import * as child_process from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -1658,6 +1659,41 @@ const lastRxTxBytes = new Map<string, {rx: number, tx: number}>();
       return true;
     };
 
+    const requireFleetPluginEnabled = (res: any): boolean => {
+      const envFleet = process.env.AXONWALL_FLEET_ENABLED?.toLowerCase();
+      if (envFleet === 'true' || envFleet === '1') {
+        return true;
+      }
+      const st = loadLocalDesiredState();
+      if (!st || !isPluginEnabled('fleet-controller', st)) {
+        res.writeHead(403, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: "Forbidden: Plugin 'fleet-controller' is not enabled. Enable it in System -> Plugins." }));
+        return false;
+      }
+      return true;
+    };
+
+    const isMcpPluginPermitted = (): { enabled: boolean; reason?: string } => {
+      const status = getMcpServerStatus();
+      if (!status.enabled) {
+        return { enabled: false, reason: status.disabledReason };
+      }
+      const envMcp = process.env.AXONWALL_MCP_ENABLED?.toLowerCase();
+      if (envMcp === 'true' || envMcp === '1') {
+        return { enabled: true };
+      }
+      const st = loadLocalDesiredState();
+      if (st && !isPluginEnabled('mcp-ai-control', st)) {
+        const explicitDisable =
+          st.plugins?.some((p) => p.id === 'mcp-ai-control' && p.enabled === false) ||
+          st.mcp?.enabled === false;
+        if (explicitDisable || status.source !== 'settings_file') {
+          return { enabled: false, reason: "Plugin 'mcp-ai-control' is not enabled." };
+        }
+      }
+      return { enabled: true };
+    };
+
     if (pathname === '/metrics' && req.method === 'GET') {
       // Metrics disclose fleet size, versions and traffic counters: they
       // require the fleet token or a CA-verified client certificate.
@@ -1676,7 +1712,7 @@ const lastRxTxBytes = new Map<string, {rx: number, tx: number}>();
     }
 
     if (pathname === '/api/v1/fleet/flows' && req.method === 'GET') {
-      if (!verifyFleetAuth(req, res)) return;
+      if (!verifyFleetAuth(req, res) || !requireFleetPluginEnabled(res)) return;
       const nodesData: Record<string, { flows: any[]; firewallLogs: any[]; lastSeen: string }> = {};
       for (const [id, sat] of activeSatellites.entries()) {
         nodesData[id] = {
@@ -1691,7 +1727,7 @@ const lastRxTxBytes = new Map<string, {rx: number, tx: number}>();
     }
 
     if (pathname === '/api/v1/fleet/block' && req.method === 'POST') {
-      if (!verifyFleetAuth(req, res)) return;
+      if (!verifyFleetAuth(req, res) || !requireFleetPluginEnabled(res)) return;
       let body = '';
       let aborted = false;
       req.on('data', (chunk: any) => {
@@ -1759,7 +1795,7 @@ const lastRxTxBytes = new Map<string, {rx: number, tx: number}>();
     // validation as /fleet/block; the satellite removes the set
     // element and cancels any pending expiry for it.
     if (pathname === '/api/v1/fleet/unblock' && req.method === 'POST') {
-      if (!verifyFleetAuth(req, res)) return;
+      if (!verifyFleetAuth(req, res) || !requireFleetPluginEnabled(res)) return;
       let body = '';
       let aborted = false;
       req.on('data', (chunk: any) => {
@@ -1804,7 +1840,7 @@ const lastRxTxBytes = new Map<string, {rx: number, tx: number}>();
     }
 
     if (pathname === '/api/v1/fleet/satellites' && req.method === 'GET') {
-      if (!verifyFleetAuth(req, res)) return;
+      if (!verifyFleetAuth(req, res) || !requireFleetPluginEnabled(res)) return;
       res.writeHead(200, { 'Content-Type': 'application/json' });
       // Exclude ws and wgPrivateKey from JSON
       const satellitesData = Array.from(activeSatellites.values()).map(s => {
@@ -1820,7 +1856,7 @@ const lastRxTxBytes = new Map<string, {rx: number, tx: number}>();
     }
 
     if (pathname === '/api/v1/fleet/ha-transition' && req.method === 'POST') {
-      if (!verifyFleetAuth(req, res)) return;
+      if (!verifyFleetAuth(req, res) || !requireFleetPluginEnabled(res)) return;
       let body = '';
       let aborted = false;
       req.on('data', (chunk: any) => {
@@ -1905,7 +1941,7 @@ const lastRxTxBytes = new Map<string, {rx: number, tx: number}>();
     }
 
     if (pathname === '/api/v1/fleet/sync' && req.method === 'POST') {
-      if (!verifyFleetAuth(req, res)) return;
+      if (!verifyFleetAuth(req, res) || !requireFleetPluginEnabled(res)) return;
       let body = '';
       let aborted = false;
       req.on('data', (chunk: any) => {
@@ -1960,15 +1996,15 @@ const lastRxTxBytes = new Map<string, {rx: number, tx: number}>();
     // Security AI / VigilSOC Model Context Protocol (MCP) Endpoint (/api/v1/mcp)
     // ========================================================================
     if (pathname === '/api/v1/mcp' || pathname === '/api/v1/mcp/sse') {
-      const serverStatus = getMcpServerStatus();
-      if (!serverStatus.enabled) {
+      const mcpPermitted = isMcpPluginPermitted();
+      if (!mcpPermitted.enabled) {
         res.writeHead(503, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({
           jsonrpc: '2.0',
           id: null,
           error: {
             code: -32000,
-            message: serverStatus.disabledReason || 'Axonwall MCP server is disabled by administrator policy',
+            message: mcpPermitted.reason || 'Axonwall MCP server is disabled by administrator policy',
           },
         }));
         return;
@@ -2782,6 +2818,10 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
     // the provisioning section below). Declared here so the close
     // handler can clear it.
     let headscaleRecheckTimer: NodeJS.Timeout | null = null;
+    const isHeadscalePluginEnabled = (): boolean => {
+      const st = loadLocalDesiredState();
+      return Boolean(st && isPluginEnabled('headscale', st));
+    };
 
     // B2-H2: liveness probes for this socket. TCP keepalive catches
     // a dead peer at the transport layer; the ws ping/pong pair (the
@@ -2867,9 +2907,11 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
           // every report while a retry is already scheduled.
           if (typeof report.headscaleEnrolled === 'boolean') {
             if (report.headscaleEnrolled === false && state.headscaleEnrolled) {
-              console.log(`[Fleet Manager] Satellite ${satId} reports no Headscale identity; re-provisioning despite the latched enrolled flag`);
               state.headscaleEnrolled = false;
-              if (!headscaleProvisioning && !headscaleRecheckTimer) void requestHeadscaleProvision();
+              if (isHeadscalePluginEnabled() && !headscaleProvisioning && !headscaleRecheckTimer) {
+                console.log(`[Fleet Manager] Satellite ${satId} reports no Headscale identity; re-provisioning despite the latched enrolled flag`);
+                void requestHeadscaleProvision();
+              }
             } else if (report.headscaleEnrolled === true) {
               state.headscaleEnrolled = true;
             }
@@ -3000,16 +3042,19 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
       // ~110 s, and then nothing retried on this socket even after
       // Headscale recovered. Keep a slow re-check until the
       // satellite is enrolled or the socket closes.
-      if (headscaleRecheckTimer) return;
+      if (headscaleRecheckTimer || !isHeadscalePluginEnabled()) return;
       headscaleRecheckTimer = setTimeout(() => {
         headscaleRecheckTimer = null;
-        if (ws.readyState === WebSocket.OPEN && !state.headscaleEnrolled) {
+        if (ws.readyState === WebSocket.OPEN && !state.headscaleEnrolled && isHeadscalePluginEnabled()) {
           void requestHeadscaleProvision();
         }
       }, HEADSCALE_RECHECK_MS);
       headscaleRecheckTimer.unref?.();
     };
     const requestHeadscaleProvision = (): Promise<boolean> => {
+      if (!isHeadscalePluginEnabled()) {
+        return Promise.resolve(false);
+      }
       if (headscaleProvisioning) return headscaleProvisioning;
       headscaleProvisioning = provisionHeadscale().then((ok) => {
         // On failure the flag clears, so the next connect retries
@@ -3025,7 +3070,7 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
       });
       return headscaleProvisioning;
     };
-    if (!state.headscaleEnrolled) {
+    if (!state.headscaleEnrolled && isHeadscalePluginEnabled()) {
       void requestHeadscaleProvision();
     }
 

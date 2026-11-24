@@ -931,7 +931,7 @@ export const ObservabilityConfigSchema = z.object({
     password: z.string().optional(),
   }).default({ enabled: false, url: 'http://127.0.0.1:8123', database: 'axonwall', username: 'admin' }),
   ebpfApm: z.object({
-    enabled: z.boolean().default(true),
+    enabled: z.boolean().default(false),
     serviceMapEnabled: z.boolean().default(true),
     l7ProtocolDissection: z.boolean().default(true),
     tlsUprobesEnabled: z.boolean().default(false),
@@ -943,7 +943,7 @@ export const ObservabilityConfigSchema = z.object({
     xdpSynFloodRateLimitPps: z.number().int().min(0).max(10000000).default(0).optional(),
     zfsArcZilTelemetryEnabled: z.boolean().default(true),
   }).default({
-    enabled: true,
+    enabled: false,
     serviceMapEnabled: true,
     l7ProtocolDissection: true,
     tlsUprobesEnabled: false,
@@ -2557,6 +2557,7 @@ export const PasswordPolicySchema = z.object({
 export type PasswordPolicy = z.infer<typeof PasswordPolicySchema>;
 
 export const IdentityConfigSchema = z.object({
+  ldapEnabled: z.boolean().optional(),
   baseDn: z.string().optional(), // Derived from system.domain on first bootstrap
   disableRootSshWhenAdminExists: z.boolean().default(true),
   passwordPolicy: PasswordPolicySchema.default({

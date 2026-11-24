@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useState, useEffect, useRef } from 'react';
+import { PluginAwareLink } from './PluginAwareLink';
 import {
   Palette,
   Check,
@@ -441,13 +442,13 @@ export const ThemeSwitcher: React.FC<ThemeSwitcherProps> = ({
                     <Globe className="w-3.5 h-3.5 text-emerald-400" />
                     Point to a Theme Repo or URL
                   </span>
-                  <a
+                  <PluginAwareLink
+                    pluginId="docs-portal"
                     href="/docs/themes"
-                    target="_blank"
                     className="text-[10px] text-emerald-400 hover:underline flex items-center gap-0.5"
                   >
                     Format Docs <ExternalLink className="w-2.5 h-2.5" />
-                  </a>
+                  </PluginAwareLink>
                 </div>
                 <p className="text-[11px] text-slate-400">
                   Enter any GitHub repository (e.g. <code className="text-slate-300">https://github.com/winnegansFake/winnegansFake</code>) or a direct URL to a <code className="text-slate-300">themes.json</code> manifest.

@@ -780,13 +780,38 @@ fi
 chown -R root:root /opt/axonwall 2>/dev/null || true
 chmod -R go-w /opt/axonwall 2>/dev/null || true
 
-# Initialize etckeeper if installed
-if command -v etckeeper >/dev/null 2>&1; then
-  if [ ! -d /etc/.git ]; then
-    echo "[Axonwall Firstboot] Initializing etckeeper for /etc configuration tracking..."
-    etckeeper init || true
-    etckeeper commit "Initial etckeeper commit for Axonwall appliance" || true
+# Apply curated starter packs queued by bare-metal installer if present
+if [ -f /etc/axonwall/starter-packs.seed ] && command -v axonwallctl >/dev/null 2>&1; then
+  if [ -x /etc/init.d/axonwalld ] && [ ! -S /run/axonwall/agent-api.sock ]; then
+    /etc/init.d/axonwalld start >/dev/null 2>&1 || true
   fi
+  _wait_sec=0
+  while [ ! -S /run/axonwall/agent-api.sock ] && [ "$_wait_sec" -lt 15 ]; do
+    sleep 1
+    _wait_sec=$((_wait_sec + 1))
+  done
+
+  _failed_packs=""
+  for _pack_id in $(tr ',\n' '  ' < /etc/axonwall/starter-packs.seed); do
+    [ -z "$_pack_id" ] && continue
+    echo "[Axonwall Firstboot] Installing starter pack '${_pack_id}'..."
+    if ! axonwallctl plugin pack install "$_pack_id"; then
+      echo "[Axonwall Firstboot] Warning: starter pack '${_pack_id}' failed; keeping in /etc/axonwall/starter-packs.seed for retry" >&2
+      _failed_packs="${_failed_packs:+${_failed_packs} }${_pack_id}"
+    fi
+  done
+
+  if [ -z "$_failed_packs" ]; then
+    rm -f /etc/axonwall/starter-packs.seed
+  else
+    printf '%s\n' "$_failed_packs" | tr ' ' '\n' > /etc/axonwall/starter-packs.seed
+  fi
+fi
+
+# Commit /etc snapshot only if etckeeper-audit was already initialized
+if command -v etckeeper >/dev/null 2>&1 && [ -d /etc/.git ]; then
+  echo "[Axonwall Firstboot] Recording etckeeper snapshot for /etc..."
+  etckeeper commit "Axonwall firstboot /etc snapshot" || true
 fi
 
 # Ensure SSH host keys are generated and sshd is running

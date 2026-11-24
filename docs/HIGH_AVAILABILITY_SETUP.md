@@ -14,6 +14,12 @@ Axonwall provides enterprise-grade **Active/Passive High Availability (HA)** wit
 | **OpenZFS Storage** | TCP `9876` (`mTLS`) | Incremental `zfs send -w -I` snapshot streaming (`/api/v1/sync/zfs`); Backup keeps pools `readonly=on` until promoted to `MASTER` |
 | **2-Node K3s + OpenEBS** | TCP `9876` / `6443` | Automated K3s cluster token exchange (`/api/v1/sync/k3s-token`) over WireGuard Flannel mesh + `axonwall-replicated-ha` OpenEBS volumes |
 
+> **Lean Core Prerequisites (`v0.16.0+`):** Fresh `axonwall` installations start with only `core-firewall` active. Enable `high-availability` (and `directory-ldap` when replicating OpenLDAP via `syncrepl`) on both cluster nodes via **System → Plugins → Starter Packs (`enterprise-ngfw`)** or:
+> ```bash
+> sudo axonwallctl plugin install high-availability && sudo axonwallctl plugin enable high-availability
+> sudo axonwallctl plugin install directory-ldap && sudo axonwallctl plugin enable directory-ldap
+> ```
+
 ---
 
 ## Topology & Reference IP Plan

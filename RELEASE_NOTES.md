@@ -2,7 +2,31 @@
 
 All notable changes across **Axonwall** appliance editions (`axonwall` Converged NGFW, `minimal` Reduced Attack Surface, `vault` Immutable S3 Backup, and `k3s-storage` Barebones K3s + OpenZFS/OpenEBS), kernel pipelines, Ring-0 eBPF subsystems, and management consoles are documented in this file.
 
-Official build artifacts, SHA-256 checksums, and detached Ed25519 signatures (`.sha256.sig`) are published on [GitHub Releases](https://github.com/axonwall/axonwall/releases) and the [Axonwall Releases Portal](https://axonwall.com/releases).
+Official build artifacts, SHA-256 checksums, and detached RSA-4096 SHA-256 signatures (`.sha256.sig`) are published on [GitHub Releases](https://github.com/axonwall/axonwall/releases) and the [Axonwall Releases Portal](https://axonwall.com/releases).
+
+---
+
+## `v0.16.0` (2026-11-24) — Lean Router/NGFW Core, 47-Plugin On-Demand Architecture, Curated Starter Packs & Air-Gapped Plugin Cache
+
+### Highlights
+- **Lean Router/NGFW Core Default & Zero-Role `minimal` Edition (`packages/axonwall_lib`, `apps/axonwalld`, `apps/axonwall`, `apps/axonwall-controller`, `packaging/`)**:
+  - Standard `axonwall` fresh installs now boot as a **Lean Router/NGFW Core** with **only `core-firewall` enabled by default** (`nftables`, Kea DHCPv4/v6, Unbound DNS + RPZ, WireGuard, ACME, QoS, GeoIP, Aliases, Static & Multi-WAN routing, local POSIX users, `/reporting/{health,flows,insight}`, `/diagnostics`, backups, updates, Services, Plugin Store, and Power).
+  - **`axonwall-minimal`** boots as a zero-role hardened control-plane host (`core-firewall` disabled by default; local break-glass/POSIX authentication only without OpenLDAP/SSSD).
+- **47 Built-In Plugins (`5` Core Roles + `42` Opt-In Extension Plugins) & 4 Curated Starter Packs**:
+  - **On-Demand AI Copilot & Offline Docs**: Added `ai-copilot` (`/ai`) and `docs-portal` (`/docs`, ~1.1 MB RSA-4096 detached SHA-256 signature verified offline tarball bundle built via `scripts/build-docs-bundle.sh` and served via CSP-hardened `/api/docs-bundle`, failing over gracefully to `https://axonwall.com/docs` when uninstalled).
+  - **18 New Opt-In Extension Plugins (`defaultEnabled: false`)**:
+    - *Package-backed (10)*: `suricata-ids`, `crowdsec-bouncer`, `frr-routing`, `openvpn`, `ipsec-strongswan`, `directory-ldap`, `custom-kernel-studio`, `high-availability`, `etckeeper-audit`, `packet-diagnostics`.
+    - *Control-plane / software-only (8)*: `captive-portal`, `tls-decryption`, `identity-aware-proxy`, `enterprise-sso`, `firewall-importer`, `mcp-ai-control`, `fleet-controller`, `web-terminal`.
+  - **Flipped Opt-In Defaults (3) & Manifest Parity**: `cli-workstation`, `host-malware-rootkit`, and `coroot-ebpf-apm` (including `/reporting/ebpf`) now default to disabled on fresh installs, backed by automated TS↔Go manifest parity verification.
+  - **4 Curated Starter Packs (`PLUGIN_STARTER_PACKS`, `getStarterPackPluginIdsWithDeps`, `/system/plugins`, `axonwallctl plugin pack list|install`)**: `enterprise-ngfw`, `remote-access-vpn`, `operator-diagnostics`, and `ai-observability` across Web UI (with category filter pills & impact/dependency confirmation modal), Ink TUI (`[p]` with input locking & fresh state reload), CLI (`--offline-config-only` opt-out; fails closed without `axonwalld`), bare-metal installers (`[P]` / `/etc/axonwall/starter-packs.seed`), and Cloud-Init (`axonwall.starter_packs`).
+- **Air-Gapped Offline Plugin Cache (`scripts/build-plugins-bundle.sh`, `apps/axonwalld/engine/plugins.go`, `axonwallctl`)**:
+  - Builds self-contained Debian `.deb` and Alpine `.apk` offline repositories using an isolated empty dpkg `status` file and rich `package`/`provides`/`depends` metadata in `manifest.json`, enforced fail-closed in `axonwalld` (SHA-256 + `os.Lstat` regular-file verification, empty-manifest rejection, selective dependency closure) and `axonwallctl plugin cache-status`.
+- **Fail-Closed Control Plane, Safe Uninstall & Local POSIX Identity Fallback**:
+  - Added fail-closed plugin checks across `axonwalld` HTTP endpoints & diagnostics, `axonwall-controller` (`mcp-ai-control`, `fleet-controller`, and dormant `headscale` ZTP gating), `getOidcConfig`, and `apps/axonwall` (`<PluginDisabledGate>`, `PluginAwareLink` opt-in defaults, `checkPluginApiGuard`, and `assertPluginEnabled` across 32+ Server Actions), plus DesiredState cleanup on uninstall and a non-blocking batched async `systemctl show` supervisor (`/system/services`).
+  - Added `protectedCoreOSPackages` + shared-plugin uninstall protection in `UninstallPlugin`, runtime `ResolveDirectoryBootstrapParams()` OpenLDAP bootstrap wiring, validated `/bin/bash` admin shell fallback, and local POSIX `UserManager` support (`/v1/system/users*`, `/v1/system/groups`) when `directory-ldap` is disabled.
+- **Packaging Diet & Automatic Upgrade Preservation (`packaging/`, `apps/axonwalld/engine/plugins_upgrade.go`)**:
+  - Removed heavy optional plugin daemons, scanners, CLI tools, OpenLDAP/SSSD, and default `headscale` enablement from base `.deb`/ISO/QCOW2 images while isolating `k3s`/`k9s` pre-staging strictly to `k3s-storage`.
+  - Added idempotent boot-time upgrade preservation (`RunUpgradePreservation` with `.plugin-migration-v016-done` marker, legacy `DesiredState` inference, and `state.json` sync) so pre-existing `v0.15.x` appliances automatically keep active features enabled on upgrade.
 
 ---
 

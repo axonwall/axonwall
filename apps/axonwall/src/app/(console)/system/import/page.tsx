@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useRef } from 'react';
+import { PluginDisabledGate } from '@/components/PluginDisabledGate';
 import {
   UploadCloud,
   CheckCircle2,
@@ -537,7 +538,7 @@ interface RuleEditDraft {
   description: string;
 }
 
-export default function ImportPage() {
+function ImportPageContent() {
   const [selectedVendor, setSelectedVendor] = useState<FirewallVendor | 'auto'>('auto');
   const [detectedVendor, setDetectedVendor] = useState<FirewallVendor | null>(null);
   const [configInput, setConfigInput] = useState(SAMPLE_CONFIGS.pfsense);
@@ -1547,5 +1548,13 @@ export default function ImportPage() {
         </div>
       )}
     </div>
+  );
+}
+
+export default function ImportPage() {
+  return (
+    <PluginDisabledGate pluginId="firewall-importer">
+      <ImportPageContent />
+    </PluginDisabledGate>
   );
 }

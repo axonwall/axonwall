@@ -16,11 +16,13 @@ import { compileNftables } from '@axonwall/lib/compile/nft';
 import {
   BUILTIN_PLUGINS,
   CORE_ROLE_PLUGIN_IDS,
+  PLUGIN_STARTER_PACKS,
   isPluginEnabled,
   resolveCapabilities,
   enablePluginWithDependencies,
   disablePluginWithDependents,
 } from '@axonwall/lib';
+import { enableStarterPack, getStarterPackPluginIdsWithDeps } from '@axonwall/lib/plugins';
 import { getMcpServerStatus, saveMcpSettings, validateVirtWorkloadSafety } from '@axonwall/lib/mcp';
 import { acquireMcpLockFile, desiredStateLockPath } from './mcp/lockfile.js';
 import { readAgentToken, resolveControllerDirs } from './dev-paths.js';
@@ -543,6 +545,8 @@ export function AxonwallTuiApp({
       : 'Ready — Use [1-9,u,0] or [Tab] to switch tabs, [n] Subview, [↑/↓] Select, [Space] Toggle, [a] Apply, [q] Quit.'
   );
   const [cursorIdx, setCursorIdx] = useState<number>(0);
+  const [showStarterPacks, setShowStarterPacks] = useState<boolean>(false);
+  const [starterPackIdx, setStarterPackIdx] = useState<number>(0);
   const [cliOutput, setCliOutput] = useState<string>('');
   const [storageOutput, setStorageOutput] = useState<string>('');
   const [computeOutput, setComputeOutput] = useState<string>('');
@@ -822,42 +826,22 @@ export function AxonwallTuiApp({
   };
 
   const toggleExtensionPluginInState = async (pluginId: string) => {
-    let next = structuredClone(state);
-    const currentlyEnabled = isPluginEnabled(pluginId, next);
+    const currentlyEnabled = isPluginEnabled(pluginId, state);
     const nextEnabled = !currentlyEnabled;
     let depNotice = '';
 
-    if (pluginId === 'vigilant-octo-waffle' || pluginId === 'host-malware-rootkit' || pluginId === 'eluvix' || pluginId === 'netbox' || pluginId === 'librenms' || pluginId === 'topology-studio' || pluginId === 'netflow-collector') {
-      if (nextEnabled) {
-        const depRes = enablePluginWithDependencies(pluginId, next);
-        next = depRes.state;
-        if (depRes.autoEnabledDependencies.length > 0) {
-          depNotice = ` (auto-enabled dependency: ${depRes.autoEnabledDependencies.join(', ')})`;
-        }
-      } else {
-        const depRes = disablePluginWithDependents(pluginId, next);
-        next = depRes.state;
+    let next: DesiredState;
+    if (nextEnabled) {
+      const depRes = enablePluginWithDependencies(pluginId, state);
+      next = depRes.state;
+      if (depRes.autoEnabledDependencies.length > 0) {
+        depNotice = ` (auto-enabled dependency: ${depRes.autoEnabledDependencies.join(', ')})`;
       }
     } else {
-      const filtered = (next.plugins || []).filter((p: any) => p.id !== pluginId);
-      filtered.push({ id: pluginId, enabled: nextEnabled, config: {} });
-      next.plugins = filtered;
-
-      if (pluginId === 'rosenpass') {
-        next.rosenpass = { ...(next.rosenpass || ({} as any)), enabled: nextEnabled };
-      } else if (pluginId === 'haproxy') {
-        next.haproxy = { ...(next.haproxy || ({} as any)), enabled: nextEnabled };
-      } else if (pluginId === 'freeradius') {
-        next.freeradius = { ...(next.freeradius || ({} as any)), enabled: nextEnabled };
-      } else if (pluginId === 'snmp') {
-        next.snmp = { ...(next.snmp || ({} as any)), enabled: nextEnabled };
-      } else if (pluginId === 'nut-ups') {
-        next.ups = { ...(next.ups || ({} as any)), enabled: nextEnabled };
-      } else if (pluginId === 'headscale') {
-        next.headscale = {
-          ...(next.headscale || ({} as any)),
-          enabled: nextEnabled,
-        };
+      const depRes = disablePluginWithDependents(pluginId, state);
+      next = depRes.state;
+      if (depRes.autoDisabledDependents.length > 0) {
+        depNotice = ` (auto-disabled dependent: ${depRes.autoDisabledDependents.join(', ')})`;
       }
     }
 
@@ -890,6 +874,54 @@ export function AxonwallTuiApp({
       `Toggled plugin '${pluginId}' -> ${nextEnabled ? 'ENABLED' : 'DISABLED'}${depNotice}. Press [a] to apply.`
     );
     await refreshAll();
+  };
+
+  const installStarterPackTui = async (packId: string) => {
+    const pack = PLUGIN_STARTER_PACKS.find((p) => p.id === packId);
+    if (!pack) return;
+
+    setBusyAction(`INSTALL PACK ${pack.id}...`);
+    const installedNow: string[] = [];
+    try {
+      const orderedPluginIds = getStarterPackPluginIdsWithDeps(pack.id);
+      for (const pid of orderedPluginIds) {
+        const manifest = BUILTIN_PLUGINS.find((p) => p.id === pid);
+        const hostInfo = hostPlugins[pid];
+        const hasPkgs = Boolean(
+          manifest?.packages &&
+            ((manifest.packages.debian && manifest.packages.debian.length > 0) ||
+              (manifest.packages.alpine && manifest.packages.alpine.length > 0) ||
+              (manifest.packages.arch && manifest.packages.arch.length > 0))
+        );
+        if ((hasPkgs || pid === 'docs-portal' || pid === 'headscale') && !hostInfo?.installed && !hostInfo?.bundled) {
+          setStatusMessage(`⏳ Installing OS packages for '${pid}' (Starter Pack '${pack.id}')...`);
+          const res = await callDaemon('/v1/system/plugins/action', 'POST', { pluginId: pid, action: 'install' }, 300000);
+          if (!res || res.success === false || res.error) {
+            setStatusMessage(
+              `✖ Starter Pack '${pack.id}' stopped installing '${pid}': ${res?.error || res?.message || 'daemon unreachable'}`
+            );
+            await refreshAll();
+            return;
+          }
+          installedNow.push(pid);
+        }
+      }
+
+      const freshState = loadCurrentState();
+      const packRes = enableStarterPack(pack.id, freshState);
+      const saved = saveStateToDisk(packRes.state);
+      if (!saved) {
+        setStatusMessage(`✖ Could not save Starter Pack '${pack.id}' — DesiredState lock held or disk write failed.`);
+        await refreshAll();
+        return;
+      }
+      setState(packRes.state);
+      const pkgNote = installedNow.length > 0 ? ` (installed OS pkgs: ${installedNow.join(', ')})` : '';
+      setStatusMessage(`✔ Enabled Starter Pack '${pack.name}'${pkgNote}. Press [a] to apply.`);
+      await refreshAll();
+    } finally {
+      setBusyAction(null);
+    }
   };
 
   const serviceRows = [
@@ -1187,56 +1219,52 @@ export function AxonwallTuiApp({
       exit();
       return;
     }
+    if (busyAction) {
+      return;
+    }
+    const switchTab = (nextTab: TopTab) => {
+      setActiveTab(nextTab);
+      setCursorIdx(0);
+      setShowStarterPacks(false);
+    };
     if (key.tab) {
       const idx = topTabs.findIndex((t) => t.id === activeTab);
       const nextTab = topTabs[(idx + 1) % topTabs.length]!;
-      setActiveTab(nextTab.id);
-      setCursorIdx(0);
+      switchTab(nextTab.id);
       return;
     }
     if (input === '1') {
-      setActiveTab('dashboard');
-      setCursorIdx(0);
+      switchTab('dashboard');
       return;
     } else if (input === '2') {
-      setActiveTab('interfaces');
-      setCursorIdx(0);
+      switchTab('interfaces');
       return;
     } else if (input === '3') {
-      setActiveTab('firewall');
-      setCursorIdx(0);
+      switchTab('firewall');
       return;
     } else if (input === '4') {
-      setActiveTab('routing');
-      setCursorIdx(0);
+      switchTab('routing');
       return;
     } else if (input === '5') {
-      setActiveTab('services');
-      setCursorIdx(0);
+      switchTab('services');
       return;
     } else if (input === '6') {
-      setActiveTab('storage');
-      setCursorIdx(0);
+      switchTab('storage');
       return;
     } else if (input === '7') {
-      setActiveTab('compute');
-      setCursorIdx(0);
+      switchTab('compute');
       return;
     } else if (input === '8') {
-      setActiveTab('plugins');
-      setCursorIdx(0);
+      switchTab('plugins');
       return;
     } else if (input === '9') {
-      setActiveTab('nastymap');
-      setCursorIdx(0);
+      switchTab('nastymap');
       return;
     } else if (input === 'u' && activeTab !== 'plugins' && activeTab !== 'compute') {
-      setActiveTab('updates');
-      setCursorIdx(0);
+      switchTab('updates');
       return;
     } else if (input === '0') {
-      setActiveTab('cli_ops');
-      setCursorIdx(0);
+      switchTab('cli_ops');
       if (!cliOutput) runCliToolInline(0);
       return;
     }
@@ -1800,7 +1828,39 @@ export function AxonwallTuiApp({
       }
     }
 
-    if (activeTab === 'plugins' && !readOnly && (input === 'i' || input === 'u' || input === 's')) {
+    if (activeTab === 'plugins') {
+      if (input === 'p') {
+        setShowStarterPacks((prev) => !prev);
+        return;
+      }
+      if (showStarterPacks) {
+        if (key.escape) {
+          setShowStarterPacks(false);
+          return;
+        }
+        if (key.upArrow) {
+          setStarterPackIdx((prev) => Math.max(0, prev - 1));
+          return;
+        }
+        if (key.downArrow) {
+          setStarterPackIdx((prev) => Math.min(PLUGIN_STARTER_PACKS.length - 1, prev + 1));
+          return;
+        }
+        if (key.return || input === ' ') {
+          if (readOnly) {
+            setStatusMessage('Read-only operator session: Starter Pack installation is disabled.');
+            return;
+          }
+          const pack = PLUGIN_STARTER_PACKS[starterPackIdx];
+          if (pack) {
+            void installStarterPackTui(pack.id);
+          }
+          return;
+        }
+      }
+    }
+
+    if (activeTab === 'plugins' && !showStarterPacks && !readOnly && (input === 'i' || input === 'u' || input === 's')) {
       const plg = BUILTIN_PLUGINS[cursorIdx % BUILTIN_PLUGINS.length]!;
       if (CORE_ROLE_PLUGIN_IDS.has(plg.id)) {
         setStatusMessage(`Core role '${plg.id}' is built into the appliance image. Use [Space] to enable/disable.`);
@@ -2049,7 +2109,7 @@ export function AxonwallTuiApp({
         );
       } else if (activeTab === 'compute') {
         if (cmpSubView === 'roles') {
-          const roles = ['core-k3s', 'core-virt', 'core-vigilante', 'vigilant-octo-waffle', 'eluvix', 'host-malware-rootkit', 'netbox', 'librenms', 'topology-studio', 'netflow-collector'];
+          const roles = ['core-k3s', 'core-virt', 'core-vigilante', 'vigilant-octo-waffle', 'eluvix', 'host-malware-rootkit', 'netbox', 'librenms', 'topology-studio', 'netflow-collector', 'ai-copilot', 'docs-portal'];
           const roleId = roles[cursorIdx % roles.length]!;
           if (CORE_ROLE_PLUGIN_IDS.has(roleId)) {
             const next = structuredClone(state);
@@ -2682,8 +2742,20 @@ export function AxonwallTuiApp({
                 enabled: isPluginEnabled('netflow-collector', state),
                 detail: 'v5/v9/IPFIX/sFlow v5 collector, Zstd/ClickHouse & FQL analytics',
               },
-            ].map((r, idx) => {
-              const sel = idx === cursorIdx % 10;
+              {
+                id: 'ai-copilot',
+                name: 'AI Network Copilot (5 LLM Engines)',
+                enabled: isPluginEnabled('ai-copilot', state),
+                detail: 'Natural-language nftables drafter, auditor & log explainer (/ai)',
+              },
+              {
+                id: 'docs-portal',
+                name: 'Offline Documentation Portal (26 Guides)',
+                enabled: isPluginEnabled('docs-portal', state),
+                detail: 'On-demand offline docs bundle (~1.2 MB; falls back to axonwall.com/docs)',
+              },
+            ].map((r, idx, roleItems) => {
+              const sel = idx === cursorIdx % roleItems.length;
               return (
                 <Text key={r.id} wrap="truncate-end">
                   <Text color={sel ? 'cyan' : 'gray'} bold>{sel ? '▶ ' : '  '}</Text>
@@ -2776,59 +2848,97 @@ export function AxonwallTuiApp({
 
       {activeTab === 'plugins' && (
         <Box flexDirection="column" borderStyle="single" borderColor="gray" paddingX={1}>
-          <Text bold color="cyan" wrap="truncate-end">
-            Appliance Roles, Extension Plugins & Shell ({pluginsViewport.activeIndex + 1}/{BUILTIN_PLUGINS.length}){' '}
-            <Text color="gray" bold={false}>— [↑/↓] Select · [Space] Toggle · [i] Install · [u] Uninstall · [s] Re-sync · [a] Apply</Text>
-          </Text>
-          <Text color="green" wrap="truncate-end">
-            ★ Oh My Zsh + Starship + Neovim Super Configurator ENABLED BY DEFAULT (git, kubectl, helm, systemd, sudo, tmux, axonwall).
-          </Text>
-          {pluginsViewport.slice.map((p, i) => {
-            const absIdx = pluginsViewport.startIndex + i;
-            const sel = absIdx === pluginsViewport.activeIndex;
-            const isCore = CORE_ROLE_PLUGIN_IDS.has(p.id);
-            const enabled = isCore
-              ? p.id === 'core-firewall'
-                ? caps.firewallEnabled
-                : p.id === 'core-nas'
-                  ? caps.nasEnabled
-                  : p.id === 'core-k3s'
-                    ? caps.k3sEnabled
-                    : p.id === 'core-virt'
-                      ? caps.virtEnabled
-                      : caps.vigilanteEnabled
-              : isPluginEnabled(p.id, state);
-            const hostInfo = hostPlugins[p.id];
-            const pkgStatus = isCore
-              ? 'Core Role'
-              : hostInfo?.bundled
-                ? 'Bundled'
-                : hostInfo?.installed
-                  ? 'Installed'
-                  : p.defaultEnabled
-                    ? 'Default ON'
-                    : 'Extension';
-            return (
-              <Text key={p.id} wrap="truncate-end">
-                <Text color={sel ? 'cyan' : 'gray'} bold>
-                  {sel ? '▶ ' : '  '}
-                </Text>
-                <Text color={enabled ? 'green' : 'gray'} bold>
-                  {enabled ? '[ENABLED]  ' : '[DISABLED] '}
-                </Text>
-                <Text color={hostInfo?.installed || hostInfo?.bundled || isCore ? 'green' : 'yellow'}>
-                  {`[${pkgStatus}]`.padEnd(13, ' ')}
-                </Text>
-                <Text bold={sel} color={sel ? 'white' : 'cyan'}>
-                  {p.id.padEnd(24, ' ')}
-                </Text>
-                <Text color="white">
-                  {p.name}
-                  {p.dependencies && p.dependencies.length > 0 ? ` [req: ${p.dependencies.join(', ')}]` : ''}
+          {showStarterPacks ? (
+            <>
+              <Text bold color="cyan" wrap="truncate-end">
+                Curated Starter Packs ({starterPackIdx + 1}/{PLUGIN_STARTER_PACKS.length}){' '}
+                <Text color="gray" bold={false}>
+                  — [↑/↓] Select · [Enter/Space] Install &amp; Enable Pack · [p/Esc] Back to Plugins · [a] Apply
                 </Text>
               </Text>
-            );
-          })}
+              {PLUGIN_STARTER_PACKS.map((pack, i) => {
+                const sel = i === starterPackIdx;
+                const enabledCount = pack.pluginIds.filter((pid) => isPluginEnabled(pid, state)).length;
+                const allActive = enabledCount === pack.pluginIds.length;
+                return (
+                  <Box key={pack.id} flexDirection="column" marginTop={i === 0 ? 0 : 1}>
+                    <Text wrap="truncate-end">
+                      <Text color={sel ? 'cyan' : 'gray'} bold>
+                        {sel ? '▶ ' : '  '}
+                      </Text>
+                      <Text color={allActive ? 'green' : enabledCount > 0 ? 'yellow' : 'gray'} bold>
+                        {`[${enabledCount}/${pack.pluginIds.length} active] `.padEnd(15, ' ')}
+                      </Text>
+                      <Text bold={sel} color={sel ? 'white' : 'cyan'}>
+                        {pack.id.padEnd(22, ' ')}
+                      </Text>
+                      <Text color="white">{pack.name}</Text>
+                    </Text>
+                    <Text color="gray" wrap="truncate-end">
+                      {'    '}
+                      {pack.tagline} — plugins: {pack.pluginIds.join(', ')}
+                    </Text>
+                  </Box>
+                );
+              })}
+            </>
+          ) : (
+            <>
+              <Text bold color="cyan" wrap="truncate-end">
+                Appliance Roles, Extension Plugins & Shell ({pluginsViewport.activeIndex + 1}/{BUILTIN_PLUGINS.length}){' '}
+                <Text color="gray" bold={false}>— [↑/↓] Select · [Space] Toggle · [i] Install · [u] Uninstall · [s] Re-sync · [p] Starter Packs · [a] Apply</Text>
+              </Text>
+              <Text color="green" wrap="truncate-end">
+                ★ Starter Packs: {PLUGIN_STARTER_PACKS.map((p) => p.id).join(', ')} (Press [p] or CLI: axonwallctl plugin pack list | install &lt;pack-id&gt;)
+              </Text>
+              {pluginsViewport.slice.map((p, i) => {
+                const absIdx = pluginsViewport.startIndex + i;
+                const sel = absIdx === pluginsViewport.activeIndex;
+                const isCore = CORE_ROLE_PLUGIN_IDS.has(p.id);
+                const enabled = isCore
+                  ? p.id === 'core-firewall'
+                    ? caps.firewallEnabled
+                    : p.id === 'core-nas'
+                      ? caps.nasEnabled
+                      : p.id === 'core-k3s'
+                        ? caps.k3sEnabled
+                        : p.id === 'core-virt'
+                          ? caps.virtEnabled
+                          : caps.vigilanteEnabled
+                  : isPluginEnabled(p.id, state);
+                const hostInfo = hostPlugins[p.id];
+                const pkgStatus = isCore
+                  ? 'Core Role'
+                  : hostInfo?.bundled
+                    ? 'Bundled'
+                    : hostInfo?.installed
+                      ? 'Installed'
+                      : p.defaultEnabled
+                        ? 'Default ON'
+                        : 'Extension';
+                return (
+                  <Text key={p.id} wrap="truncate-end">
+                    <Text color={sel ? 'cyan' : 'gray'} bold>
+                      {sel ? '▶ ' : '  '}
+                    </Text>
+                    <Text color={enabled ? 'green' : 'gray'} bold>
+                      {enabled ? '[ENABLED]  ' : '[DISABLED] '}
+                    </Text>
+                    <Text color={hostInfo?.installed || hostInfo?.bundled || isCore ? 'green' : 'yellow'}>
+                      {`[${pkgStatus}]`.padEnd(13, ' ')}
+                    </Text>
+                    <Text bold={sel} color={sel ? 'white' : 'cyan'}>
+                      {p.id.padEnd(24, ' ')}
+                    </Text>
+                    <Text color="white">
+                      {p.name}
+                      {p.dependencies && p.dependencies.length > 0 ? ` [req: ${p.dependencies.join(', ')}]` : ''}
+                    </Text>
+                  </Text>
+                );
+              })}
+            </>
+          )}
         </Box>
       )}
 

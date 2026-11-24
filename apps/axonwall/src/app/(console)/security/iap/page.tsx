@@ -1,12 +1,13 @@
 'use client';
 
 import { useState, useEffect } from 'react';
+import { PluginDisabledGate } from '@/components/PluginDisabledGate';
 import { Shield, Plus, Trash2, CheckCircle2 } from 'lucide-react';
 import { getCurrentDesiredState } from '@/server/agent';
 import { useDesiredStateApply } from '@/lib/use-desired-state-apply';
 import type { DesiredState, ZeroTrustApp } from '@axonwall/lib/schemas';
 
-export default function IAPDashboardPage() {
+function IAPDashboardPageContent() {
   const { applyState } = useDesiredStateApply();
   const [fullState, setFullState] = useState<DesiredState | null>(null);
   const [apps, setApps] = useState<ZeroTrustApp[]>([]);
@@ -234,5 +235,13 @@ export default function IAPDashboardPage() {
         </form>
       </div>
     </div>
+  );
+}
+
+export default function IAPDashboardPage() {
+  return (
+    <PluginDisabledGate pluginId="identity-aware-proxy">
+      <IAPDashboardPageContent />
+    </PluginDisabledGate>
   );
 }

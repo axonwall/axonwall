@@ -257,8 +257,8 @@ for svc in cloud-init-local.service cloud-init.service cloud-config.service clou
   ln -sf "/lib/systemd/system/${svc}" "${TARGET}/etc/systemd/system/multi-user.target.wants/${svc}" 2>/dev/null || true
 done
 
-# Ensure axonwall services are enabled (do not enable stock nftables.service which races axonwalld)
-for svc in axonwalld.service axonwall-firstboot.service axonwall-controller.service axonwall-ui.service headscale.service ssh.service; do
+# Ensure axonwall services are enabled (do not enable stock nftables.service or opt-in headscale.service on Lean Core)
+for svc in axonwalld.service axonwall-firstboot.service axonwall-controller.service axonwall-ui.service ssh.service; do
   if [[ -f "${TARGET}/etc/systemd/system/${svc}" ]]; then
     ln -sf "/etc/systemd/system/${svc}" "${TARGET}/etc/systemd/system/multi-user.target.wants/${svc}" 2>/dev/null || true
   elif [[ -f "${TARGET}/lib/systemd/system/${svc}" || -f "${TARGET}/usr/lib/systemd/system/${svc}" ]]; then

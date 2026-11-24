@@ -79,14 +79,14 @@ func logFileNames(t *testing.T, m *TaskManager) map[string]bool {
 func TestBatch7TaskRetentionCapsRecordsAndLogs(t *testing.T) {
 	m := newBatch7TaskManager(t, 5)
 
-	// Insert 8 quick tasks, then wait for them all to finish.
+	// Insert 8 quick tasks sequentially so completion order cannot shuffle FIFO eviction.
 	var upids []string
 	for i := 0; i < 8; i++ {
 		upids = append(upids, m.StartTask("test", "target", "root@axonwall", func(log func(string, ...any)) error {
 			return nil
 		}))
+		waitForAllTasksFinished(t, m)
 	}
-	waitForAllTasksFinished(t, m)
 
 	// One more insert triggers the prune: 9 retained -> 5.
 	m.StartTask("test", "target", "root@axonwall", func(log func(string, ...any)) error {

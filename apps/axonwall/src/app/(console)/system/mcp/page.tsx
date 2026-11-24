@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useState, useEffect, useCallback } from 'react';
+import { PluginDisabledGate } from '@/components/PluginDisabledGate';
 import {
   Shield,
   KeyRound,
@@ -131,7 +132,7 @@ const ALL_SCOPES: { scope: McpScope; label: string; desc: string; tier: 'read' |
   },
 ];
 
-export default function McpControlPlanePage() {
+function McpControlPlanePageContent() {
   const [data, setData] = useState<McpDashboardData | null>(null);
   const [loading, setLoading] = useState(true);
   const [statusMsg, setStatusMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
@@ -1165,5 +1166,13 @@ export default function McpControlPlanePage() {
         </div>
       )}
     </div>
+  );
+}
+
+export default function McpControlPlanePage() {
+  return (
+    <PluginDisabledGate pluginId="mcp-ai-control">
+      <McpControlPlanePageContent />
+    </PluginDisabledGate>
   );
 }

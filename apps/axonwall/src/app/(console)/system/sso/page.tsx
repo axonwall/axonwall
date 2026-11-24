@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
+import { PluginDisabledGate } from '@/components/PluginDisabledGate';
 import Link from 'next/link';
 import {
   Building2,
@@ -43,7 +44,7 @@ const PRESET_PROVIDERS = [
   },
 ];
 
-export default function SsoSettingsPage() {
+function SsoSettingsPageContent() {
   // C16: an appliance with no SSO configured used to display a fully
   // populated, enabled Entra config belonging to nobody's tenant — and
   // Save applied it, enabling SSO against a wrong issuer. The form now
@@ -390,5 +391,13 @@ export default function SsoSettingsPage() {
       </div>
       </fieldset>
     </div>
+  );
+}
+
+export default function SsoSettingsPage() {
+  return (
+    <PluginDisabledGate pluginId="enterprise-sso">
+      <SsoSettingsPageContent />
+    </PluginDisabledGate>
   );
 }

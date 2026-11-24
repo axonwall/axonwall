@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect, useRef } from 'react';
+import { PluginDisabledGate } from '@/components/PluginDisabledGate';
 import {
   Terminal,
   Cpu,
@@ -40,7 +41,7 @@ const QUICK_COMMANDS = [
   { label: 'memory stats', cmd: 'free -h' },
 ];
 
-export default function TerminalPage() {
+function TerminalPageContent() {
   const [activeTab, setActiveTab] = useState<'terminal' | 'hardware'>('terminal');
   const [commandInput, setCommandInput] = useState('');
   const [isExecuting, setIsExecuting] = useState(false);
@@ -400,5 +401,13 @@ export default function TerminalPage() {
         </div>
       )}
     </div>
+  );
+}
+
+export default function TerminalPage() {
+  return (
+    <PluginDisabledGate pluginId="web-terminal">
+      <TerminalPageContent />
+    </PluginDisabledGate>
   );
 }

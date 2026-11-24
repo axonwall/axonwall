@@ -23,9 +23,14 @@ import {
 } from 'lucide-react';
 import {
   BUILTIN_PLUGINS,
+  PLUGIN_STARTER_PACKS,
+  findPluginById,
+  getDependentPlugins,
+  getStarterPackPluginIdsWithDeps,
   isPluginEnabled,
   enablePluginWithDependencies,
   disablePluginWithDependents,
+  enableStarterPack,
   arePluginDependenciesMet,
   type PluginManifest,
 } from '@axonwall/lib/plugins';
@@ -34,14 +39,97 @@ import { useDesiredStateApply } from '@/lib/use-desired-state-apply';
 import { getExtensionPlugins, executePluginAction, type ExtensionPluginLiveStatus } from '@/server/plugins';
 import {
   type DesiredState,
-  ObservabilityConfigSchema,
   VigilanteConfigSchema,
 } from '@axonwall/lib/schemas';
 
+type PluginFilterGroup =
+  | 'all'
+  | 'active'
+  | 'installed'
+  | 'security'
+  | 'routing'
+  | 'identity'
+  | 'observability'
+  | 'cli'
+  | 'k3s';
+
+const PLUGIN_FILTER_PILLS: Array<{ id: PluginFilterGroup; label: string }> = [
+  { id: 'all', label: 'All' },
+  { id: 'active', label: 'Active' },
+  { id: 'installed', label: 'Installed' },
+  { id: 'security', label: 'Security & IDS' },
+  { id: 'routing', label: 'Routing & VPN' },
+  { id: 'identity', label: 'Identity & HA' },
+  { id: 'observability', label: 'AI & Observability' },
+  { id: 'cli', label: 'CLI & Docs' },
+  { id: 'k3s', label: 'K3s & Fabric' },
+];
+
+const PLUGIN_GROUP_MAP: Record<string, Exclude<PluginFilterGroup, 'all' | 'active' | 'installed'>> = {
+  'suricata-ids': 'security',
+  'crowdsec-bouncer': 'security',
+  'tls-decryption': 'security',
+  'captive-portal': 'security',
+  'identity-aware-proxy': 'security',
+  'host-malware-rootkit': 'security',
+  'ebpf-threat-harvester': 'security',
+  'firewall-importer': 'security',
+  'etckeeper-audit': 'security',
+  'frr-routing': 'routing',
+  openvpn: 'routing',
+  'ipsec-strongswan': 'routing',
+  headscale: 'routing',
+  tailscale: 'routing',
+  rosenpass: 'routing',
+  haproxy: 'routing',
+  'directory-ldap': 'identity',
+  'enterprise-sso': 'identity',
+  freeradius: 'identity',
+  'high-availability': 'identity',
+  'fleet-controller': 'identity',
+  'nut-ups': 'identity',
+  'ai-copilot': 'observability',
+  'mcp-ai-control': 'observability',
+  'coroot-ebpf-apm': 'observability',
+  'netflow-collector': 'observability',
+  ntopng: 'observability',
+  snmp: 'observability',
+  netbox: 'observability',
+  librenms: 'observability',
+  'topology-studio': 'observability',
+  'packet-diagnostics': 'observability',
+  'cli-workstation': 'cli',
+  'cli-emacs': 'cli',
+  'cli-emacs-doom': 'cli',
+  'cli-emacs-spacemacs': 'cli',
+  'cli-diagnostics-nastymap': 'cli',
+  'web-terminal': 'cli',
+  'docs-portal': 'cli',
+  'custom-kernel-studio': 'cli',
+  'vigilant-octo-waffle': 'k3s',
+  eluvix: 'k3s',
+};
+
+function getPluginGroup(plugin: PluginManifest): Exclude<PluginFilterGroup, 'all' | 'active' | 'installed'> {
+  if (PLUGIN_GROUP_MAP[plugin.id]) return PLUGIN_GROUP_MAP[plugin.id];
+  if (plugin.dependencies?.includes('core-k3s')) return 'k3s';
+  return 'observability';
+}
+
+interface PendingConfirmAction {
+  kind: 'pack' | 'disable-role' | 'disable-extension' | 'uninstall';
+  targetId: string;
+  title: string;
+  description: string;
+  affectedPlugins: string[];
+  osPackages: string[];
+}
+
 export default function PluginManagerPage() {
-  const { applyState } = useDesiredStateApply();
+  const { applyState, refreshFingerprint } = useDesiredStateApply();
   const [state, setState] = useState<DesiredState | null>(null);
   const [savingRole, setSavingRole] = useState<string | null>(null);
+  const [packLoading, setPackLoading] = useState<string | null>(null);
   const [statusBanner, setStatusBanner] = useState<{ type: 'success' | 'error'; text: string; output?: string } | null>(null);
   const [activeOutputModal, setActiveOutputModal] = useState<{ title: string; output: string } | null>(null);
 
@@ -51,6 +139,8 @@ export default function PluginManagerPage() {
 
   const [selectedPlugin, setSelectedPlugin] = useState<PluginManifest | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
+  const [selectedGroup, setSelectedGroup] = useState<PluginFilterGroup>('all');
+  const [pendingConfirm, setPendingConfirm] = useState<PendingConfirmAction | null>(null);
 
   const [livePluginsError, setLivePluginsError] = useState<string | null>(null);
 
@@ -303,6 +393,26 @@ export default function PluginManagerPage() {
           text: res.message,
           output: res.output,
         });
+        if (state && ((id === 'docs-portal' && action === 'install') || action === 'uninstall')) {
+          await refreshFingerprint();
+          const latestState = await getCurrentDesiredState();
+          if (action === 'install' || isPluginEnabled(id, latestState)) {
+            const nextRes =
+              action === 'install'
+                ? enablePluginWithDependencies(id, latestState)
+                : disablePluginWithDependents(id, latestState);
+            try {
+              await applyState(nextRes.state);
+              setState(nextRes.state);
+            } catch (syncErr: unknown) {
+              setStatusBanner({
+                type: 'error',
+                text: `${res.message} (failed to sync DesiredState: ${syncErr instanceof Error ? syncErr.message : String(syncErr)})`,
+                output: res.output,
+              });
+            }
+          }
+        }
         if (typeof window !== 'undefined') {
           window.dispatchEvent(new Event('axonwall-capabilities-updated'));
         }
@@ -334,8 +444,7 @@ export default function PluginManagerPage() {
     setStatusBanner(null);
 
     try {
-      let next = structuredClone(state);
-      const isCurrentlyEnabled = isPluginEnabled(id, next);
+      const isCurrentlyEnabled = isPluginEnabled(id, state);
       let depNotice = '';
 
       const needsK3sInstall =
@@ -344,85 +453,23 @@ export default function PluginManagerPage() {
         !isPluginEnabled('core-k3s', state) &&
         !(id === 'librenms' && state.librenms?.mode === 'external');
 
-      if (id === 'vigilant-octo-waffle' || id === 'netbox' || id === 'librenms' || id === 'host-malware-rootkit' || id === 'eluvix' || id === 'topology-studio' || id === 'netflow-collector') {
-        if (!isCurrentlyEnabled) {
-          const depRes = enablePluginWithDependencies(id, next);
-          next = depRes.state;
-          if (depRes.autoEnabledDependencies.length > 0) {
-            depNotice = ` [Auto-enabled required dependency: ${depRes.autoEnabledDependencies.join(', ')}]`;
-          }
-          if (needsK3sInstall) {
-            upsertPluginEntry(next, 'core-k3s', true);
-          }
-        } else {
-          const depRes = disablePluginWithDependents(id, next);
-          next = depRes.state;
+      let next: DesiredState;
+      if (!isCurrentlyEnabled) {
+        const depRes = enablePluginWithDependencies(id, state);
+        next = depRes.state;
+        if (depRes.autoEnabledDependencies.length > 0) {
+          depNotice = ` [Auto-enabled required dependency: ${depRes.autoEnabledDependencies.join(', ')}]`;
         }
-      } else if (id === 'nut-ups') {
-        next.ups = next.ups || {
-          enabled: false,
-          name: 'axonups',
-          driver: 'usbhid-ups',
-          port: 'auto',
-          shutdownBatteryPct: 20,
-          lowBatteryRuntimeSec: 300,
-        };
-        next.ups.enabled = !isCurrentlyEnabled;
-      } else if (id === 'headscale') {
-        next.headscale = next.headscale || {
-          enabled: false,
-          magicDnsDomain: 'tailnet.axonwall.local',
-        };
-        next.headscale.enabled = !isCurrentlyEnabled;
-      } else if (id === 'rosenpass') {
-        next.rosenpass = next.rosenpass || {
-          enabled: false,
-          listenPort: 9999,
-          listenAddresses: ['0.0.0.0:9999', '[::]:9999'],
-          wgDevice: 'wg0',
-          verbosity: 'Quiet',
-          rekeyIntervalSeconds: 120,
-          failClosedBootGuard: true,
-          memfdSecret: true,
-          publicKeyPath: '/etc/rosenpass/pq.pk',
-          secretKeyPath: '/etc/rosenpass/pq.sk',
-          peers: [],
-        };
-        next.rosenpass.enabled = !isCurrentlyEnabled;
-      } else if (id === 'haproxy') {
-        next.haproxy = next.haproxy || {
-          enabled: false,
-          mode: 'http',
-          frontends: [],
-          backends: [],
-        };
-        next.haproxy.enabled = !isCurrentlyEnabled;
-      } else if (id === 'freeradius') {
-        next.freeradius = next.freeradius || {
-          enabled: false,
-          authPort: 1812,
-          acctPort: 1813,
-          clients: [],
-          ldapSync: true,
-        };
-        next.freeradius.enabled = !isCurrentlyEnabled;
-      } else if (id === 'snmp') {
-        next.snmp = next.snmp || {
-          enabled: false,
-          community: 'public',
-          sysLocation: 'Axonwall Gateway',
-          sysContact: 'admin@local',
-          listenPort: 161,
-        };
-        next.snmp.enabled = !isCurrentlyEnabled;
-      } else if (id === 'coroot-ebpf-apm') {
-        next.observability = next.observability || ObservabilityConfigSchema.parse({});
-        next.observability.ebpfApm = {
-          ...next.observability.ebpfApm,
-          enabled: !isCurrentlyEnabled,
-        };
+        if (needsK3sInstall) {
+          upsertPluginEntry(next, 'core-k3s', true);
+        }
+      } else {
+        const depRes = disablePluginWithDependents(id, state);
+        next = depRes.state;
+        if (depRes.autoDisabledDependents.length > 0) {
+          depNotice = ` [Also disabled dependent plugin(s): ${depRes.autoDisabledDependents.join(', ')}]`;
+        }
       }
-      upsertPluginEntry(next, id, !isCurrentlyEnabled);
 
       if (needsK3sInstall) {
         const k3sInstallRes = await executePluginAction('core-k3s', 'install');
@@ -434,6 +481,7 @@ export default function PluginManagerPage() {
           });
           return;
         }
+        await refreshFingerprint();
       }
 
       const actionRes = await executePluginAction(id, !isCurrentlyEnabled ? 'enable' : 'disable');
@@ -445,6 +493,7 @@ export default function PluginManagerPage() {
         return;
       }
 
+      await refreshFingerprint();
       let res: { message: string };
       try {
         res = await applyState(next);
@@ -476,11 +525,217 @@ export default function PluginManagerPage() {
     }
   };
 
-  const filteredExtensions = extensionPlugins.filter(
-    (p) =>
-      p.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      p.description.toLowerCase().includes(searchQuery.toLowerCase())
+  const pluginRequiresPackageInstall = (plugin: PluginManifest, live?: ExtensionPluginLiveStatus): boolean => {
+    if (plugin.id === 'docs-portal' || plugin.id === 'headscale') return true;
+    const hasManifestPkgs = Boolean(
+      plugin.packages &&
+        ((plugin.packages.debian && plugin.packages.debian.length > 0) ||
+          (plugin.packages.alpine && plugin.packages.alpine.length > 0) ||
+          (plugin.packages.arch && plugin.packages.arch.length > 0))
+    );
+    return hasManifestPkgs || Boolean(live?.packages && live.packages.length > 0);
+  };
+
+  const installAndEnablePack = async (packId: string) => {
+    const pack = PLUGIN_STARTER_PACKS.find((p) => p.id === packId);
+    if (!pack || !state) return;
+    setPackLoading(packId);
+    setStatusBanner(null);
+
+    try {
+      const installedNow: string[] = [];
+      for (const pid of getStarterPackPluginIdsWithDeps(pack.id)) {
+        const manifest = BUILTIN_PLUGINS.find((p) => p.id === pid);
+        const live = livePlugins[pid];
+        if (manifest && pluginRequiresPackageInstall(manifest, live) && !live?.installed && !live?.bundled) {
+          const installRes = await executePluginAction(pid, 'install');
+          if (!installRes.success) {
+            setStatusBanner({
+              type: 'error',
+              text: `Starter pack '${pack.name}' stopped while installing '${pid}': ${installRes.message}`,
+              output: installRes.output,
+            });
+            refreshLivePlugins();
+            return;
+          }
+          installedNow.push(pid);
+        }
+      }
+
+      await refreshFingerprint();
+      const latestState = await getCurrentDesiredState();
+      const packRes = enableStarterPack(packId, latestState);
+      const applyRes = await applyState(packRes.state);
+      setState(packRes.state);
+      refreshLivePlugins();
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new Event('axonwall-capabilities-updated'));
+      }
+      const installSummary =
+        installedNow.length > 0 ? `Installed OS packages for ${installedNow.join(', ')}. ` : '';
+      setStatusBanner({
+        type: 'success',
+        text: `${installSummary}Enabled ${pack.name} (${packRes.enabledPlugins.length} plugins). (${applyRes.message})`,
+      });
+    } catch (err: any) {
+      if (err?.message?.includes('Failed to find Server Action')) {
+        window.location.reload();
+        return;
+      }
+      setStatusBanner({
+        type: 'error',
+        text: err?.message || `Failed to install starter pack ${packId}`,
+      });
+    } finally {
+      setPackLoading(null);
+    }
+  };
+
+  const matchesFilterGroup = (plugin: PluginManifest, group: PluginFilterGroup): boolean => {
+    if (group === 'all') return true;
+    const live = livePlugins[plugin.id];
+    const isInstalledOrBundled = Boolean(live?.installed || live?.bundled || !pluginRequiresPackageInstall(plugin, live));
+    if (group === 'active') return isPluginEnabled(plugin.id, state);
+    if (group === 'installed') return isInstalledOrBundled;
+    return getPluginGroup(plugin) === group;
+  };
+
+  const groupCounts = PLUGIN_FILTER_PILLS.reduce<Record<PluginFilterGroup, number>>(
+    (acc, pill) => {
+      acc[pill.id] = extensionPlugins.filter((p) => matchesFilterGroup(p, pill.id)).length;
+      return acc;
+    },
+    {
+      all: 0,
+      active: 0,
+      installed: 0,
+      security: 0,
+      routing: 0,
+      identity: 0,
+      observability: 0,
+      cli: 0,
+      k3s: 0,
+    }
   );
+
+  const filteredExtensions = extensionPlugins.filter((p) => {
+    if (!matchesFilterGroup(p, selectedGroup)) return false;
+    const q = searchQuery.trim().toLowerCase();
+    if (!q) return true;
+    const osPkgs = p.packages?.[osFamily] ?? [];
+    return (
+      p.id.toLowerCase().includes(q) ||
+      p.name.toLowerCase().includes(q) ||
+      p.description.toLowerCase().includes(q) ||
+      osPkgs.some((pkg) => pkg.toLowerCase().includes(q))
+    );
+  });
+
+  const requestInstallPack = (packId: string) => {
+    const pack = PLUGIN_STARTER_PACKS.find((p) => p.id === packId);
+    if (!pack || !state) return;
+    const pendingPkgs = new Set<string>();
+    for (const pid of pack.pluginIds) {
+      const manifest = findPluginById(pid);
+      const live = livePlugins[pid];
+      if (manifest && pluginRequiresPackageInstall(manifest, live) && !live?.installed && !live?.bundled) {
+        for (const pkg of manifest.packages?.[osFamily] ?? []) {
+          pendingPkgs.add(pkg);
+        }
+      }
+    }
+    const inactivePlugins = pack.pluginIds.filter((pid) => !isPluginEnabled(pid, state));
+    setPendingConfirm({
+      kind: 'pack',
+      targetId: pack.id,
+      title: `Install & Enable Starter Pack: ${pack.name}`,
+      description: `${pack.tagline} Enabling this pack activates ${inactivePlugins.length} plugin(s) and reconciles DesiredState.`,
+      affectedPlugins: pack.pluginIds,
+      osPackages: Array.from(pendingPkgs),
+    });
+  };
+
+  const requestToggleCoreRole = (id: string) => {
+    if (!state) return;
+    if (!isCoreRoleEnabled(id)) {
+      void toggleCoreRole(id);
+      return;
+    }
+    const enabledDeps = getDependentPlugins(id)
+      .map((d) => d.id)
+      .filter((depId) => isPluginEnabled(depId, state));
+    setPendingConfirm({
+      kind: 'disable-role',
+      targetId: id,
+      title: `Disable Core Role: ${id}`,
+      description:
+        enabledDeps.length > 0
+          ? `Disabling '${id}' will also cascade-disable ${enabledDeps.length} dependent plugin(s) and stop associated core services.`
+          : `Disabling Core Role '${id}' removes its firewall/storage/orchestration capabilities from the active appliance profile.`,
+      affectedPlugins: enabledDeps,
+      osPackages: findPluginById(id)?.packages?.[osFamily] ?? [],
+    });
+  };
+
+  const requestToggleExtensionPlugin = (id: string) => {
+    if (!state) return;
+    if (!isPluginEnabled(id, state)) {
+      void toggleExtensionPlugin(id);
+      return;
+    }
+    const enabledDeps = getDependentPlugins(id)
+      .map((d) => d.id)
+      .filter((depId) => isPluginEnabled(depId, state));
+    if (enabledDeps.length === 0) {
+      void toggleExtensionPlugin(id);
+      return;
+    }
+    setPendingConfirm({
+      kind: 'disable-extension',
+      targetId: id,
+      title: `Disable Extension Plugin: ${id}`,
+      description: `Other enabled plugins depend on '${id}'. Disabling it will cascade-disable those dependents as well.`,
+      affectedPlugins: enabledDeps,
+      osPackages: [],
+    });
+  };
+
+  const requestUninstallPlugin = (id: string) => {
+    const manifest = findPluginById(id);
+    const enabledDeps = state
+      ? getDependentPlugins(id)
+          .map((d) => d.id)
+          .filter((depId) => isPluginEnabled(depId, state))
+      : [];
+    const selfEnabled = state ? isPluginEnabled(id, state) : false;
+    const osPkgs = manifest?.packages?.[osFamily] ?? [];
+    setPendingConfirm({
+      kind: 'uninstall',
+      targetId: id,
+      title: `Uninstall Extension Plugin: ${manifest?.name || id}`,
+      description:
+        selfEnabled || enabledDeps.length > 0
+          ? `This will uninstall '${id}' OS packages from the host.${selfEnabled ? ' The plugin is currently enabled.' : ''}`
+          : `Remove '${id}' OS packages (${osFamily}) from the host.`,
+      affectedPlugins: enabledDeps,
+      osPackages: osPkgs,
+    });
+  };
+
+  const executeConfirmedAction = async () => {
+    if (!pendingConfirm) return;
+    const current = pendingConfirm;
+    setPendingConfirm(null);
+    if (current.kind === 'pack') {
+      await installAndEnablePack(current.targetId);
+    } else if (current.kind === 'disable-role') {
+      await toggleCoreRole(current.targetId);
+    } else if (current.kind === 'disable-extension') {
+      await toggleExtensionPlugin(current.targetId);
+    } else if (current.kind === 'uninstall') {
+      await handlePluginAction(current.targetId, 'uninstall');
+    }
+  };
 
   const getRoleIcon = (id: string) => {
     if (id === 'core-firewall') return Flame;
@@ -653,7 +908,7 @@ export default function PluginManagerPage() {
 
                   <button
                     disabled={isSaving}
-                    onClick={() => toggleCoreRole(plugin.id)}
+                    onClick={() => requestToggleCoreRole(plugin.id)}
                     className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold transition flex items-center gap-1.5 ${
                       enabled
                         ? 'bg-rose-500/10 text-rose-400 border border-rose-500/20 hover:bg-rose-500/20'
@@ -678,9 +933,89 @@ export default function PluginManagerPage() {
         </div>
       </div>
 
+      {/* Curated Starter Packs */}
+      <div className="space-y-4 pt-2">
+        <div>
+          <h2 className="text-base font-bold text-white tracking-tight">Curated Starter Packs</h2>
+          <p className="text-xs text-slate-400">
+            Install and enable multi-plugin bundles in one click on top of the Lean Router/NGFW Core.
+          </p>
+        </div>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          {PLUGIN_STARTER_PACKS.map((pack) => {
+            const allEnabled = Boolean(state && pack.pluginIds.every((pid) => isPluginEnabled(pid, state)));
+            const isPackWorking = packLoading === pack.id;
+            return (
+              <div
+                key={pack.id}
+                className="p-5 rounded-2xl bg-slate-900 border border-slate-800 hover:border-slate-700 transition flex flex-col justify-between space-y-3"
+              >
+                <div className="space-y-2">
+                  <div className="flex items-start justify-between gap-2">
+                    <div>
+                      <h3 className="text-sm font-semibold text-white">{pack.name}</h3>
+                      <p className="text-[11px] text-emerald-400 font-medium">{pack.tagline}</p>
+                    </div>
+                    <span
+                      className={`px-2 py-0.5 rounded text-[10px] font-semibold border ${
+                        allEnabled
+                          ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30'
+                          : 'bg-slate-800 text-slate-400 border-slate-700'
+                      }`}
+                    >
+                      {allEnabled ? 'All Active' : `${pack.pluginIds.length} Plugins`}
+                    </span>
+                  </div>
+                  <p className="text-xs text-slate-400 leading-relaxed">{pack.description}</p>
+                  <div className="flex flex-wrap gap-1.5 pt-1">
+                    {pack.pluginIds.map((pid) => {
+                      const active = isPluginEnabled(pid, state);
+                      return (
+                        <span
+                          key={pid}
+                          className={`px-2 py-0.5 rounded text-[10px] font-mono border ${
+                            active
+                              ? 'bg-emerald-500/10 text-emerald-300 border-emerald-500/30'
+                              : 'bg-slate-950 text-slate-400 border-slate-800'
+                          }`}
+                        >
+                          {pid}
+                        </span>
+                      );
+                    })}
+                  </div>
+                </div>
+                <div className="flex justify-end pt-2 border-t border-slate-800/80">
+                  <button
+                    type="button"
+                    disabled={isPackWorking || !state || allEnabled}
+                    onClick={() => requestInstallPack(pack.id)}
+                    className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-white transition flex items-center gap-1.5"
+                  >
+                    {isPackWorking ? (
+                      <>
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" /> Installing Pack...
+                      </>
+                    ) : allEnabled ? (
+                      <>
+                        <CheckCircle2 className="w-3.5 h-3.5" /> Enabled
+                      </>
+                    ) : (
+                      <>
+                        <Download className="w-3.5 h-3.5" /> Install & Enable Pack
+                      </>
+                    )}
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
       {/* Add-on Extensions Grid */}
       <div className="space-y-4 pt-2">
-        <div className="flex items-center justify-between">
+        <div className="flex items-center justify-between gap-4 flex-wrap">
           <div>
             <h2 className="text-base font-bold text-white tracking-tight">Sandboxed Extension Plugins</h2>
             <p className="text-xs text-slate-400">
@@ -695,6 +1030,49 @@ export default function PluginManagerPage() {
           </button>
         </div>
 
+        {/* Category Filter Pills */}
+        <div className="flex flex-wrap items-center gap-2">
+          {PLUGIN_FILTER_PILLS.map((pill) => {
+            const activePill = selectedGroup === pill.id;
+            return (
+              <button
+                key={pill.id}
+                type="button"
+                onClick={() => setSelectedGroup(pill.id)}
+                className={`px-3 py-1.5 rounded-lg text-xs font-medium border transition flex items-center gap-1.5 cursor-pointer ${
+                  activePill
+                    ? 'bg-emerald-500/15 border-emerald-500/40 text-emerald-300'
+                    : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-white hover:border-slate-700'
+                }`}
+              >
+                <span>{pill.label}</span>
+                <span
+                  className={`px-1.5 py-0.2 rounded text-[10px] font-mono ${
+                    activePill ? 'bg-emerald-500/20 text-emerald-200' : 'bg-slate-800 text-slate-500'
+                  }`}
+                >
+                  {groupCounts[pill.id]}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+
+        {filteredExtensions.length === 0 ? (
+          <div className="p-8 rounded-2xl bg-slate-900/60 border border-slate-800 text-center space-y-2">
+            <p className="text-sm font-medium text-slate-300">No extension plugins match the current filter.</p>
+            <button
+              type="button"
+              onClick={() => {
+                setSelectedGroup('all');
+                setSearchQuery('');
+              }}
+              className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs text-slate-200 transition"
+            >
+              Reset filters
+            </button>
+          </div>
+        ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
           {filteredExtensions.map((plugin) => {
             const live = livePlugins[plugin.id];
@@ -703,6 +1081,7 @@ export default function PluginManagerPage() {
             const isLoading = pluginActionLoading === plugin.id;
             const isEnabled = isPluginEnabled(plugin.id, state);
             const isSaving = savingRole === plugin.id;
+            const needsPackage = pluginRequiresPackageInstall(plugin, live);
 
             return (
               <div
@@ -720,14 +1099,22 @@ export default function PluginManagerPage() {
                         className={`px-2.5 py-1 rounded-md text-[11px] font-semibold border ${
                           isBundled
                             ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30'
-                            : isInstalled
-                              ? 'bg-sky-500/10 text-sky-400 border-sky-500/20'
-                              : 'bg-slate-800 text-slate-400 border-slate-700'
+                            : !needsPackage
+                              ? 'bg-indigo-500/10 text-indigo-300 border-indigo-500/20'
+                              : isInstalled
+                                ? 'bg-sky-500/10 text-sky-400 border-sky-500/20'
+                                : 'bg-slate-800 text-slate-400 border-slate-700'
                         }`}
                       >
-                        {isBundled ? 'Bundled (OS)' : isInstalled ? 'Installed' : 'Available'}
+                        {isBundled
+                          ? 'Bundled (OS)'
+                          : !needsPackage
+                            ? 'Built-in Module'
+                            : isInstalled
+                              ? 'Installed'
+                              : 'Available'}
                       </span>
-                      {(isInstalled || isBundled) && (
+                      {(isInstalled || isBundled || !needsPackage) && (
                         <span
                           className={`px-2 py-0.5 rounded text-[10px] font-semibold border ${
                             isEnabled
@@ -789,6 +1176,36 @@ export default function PluginManagerPage() {
                         bundled: {b}
                       </span>
                     ))}
+                    {(() => {
+                      const osPkgs = plugin.packages?.[osFamily] ?? [];
+                      if (osPkgs.length === 0 && !needsPackage) {
+                        return (
+                          <span className="px-2 py-0.5 rounded bg-indigo-950/40 border border-indigo-800/50 text-[10px] font-mono text-indigo-300">
+                            Config / UI only
+                          </span>
+                        );
+                      }
+                      const visiblePkgs = osPkgs.slice(0, 5);
+                      const remaining = osPkgs.length - visiblePkgs.length;
+                      return (
+                        <>
+                          {visiblePkgs.map((pkg) => (
+                            <span
+                              key={`pkg-${pkg}`}
+                              title={`${osFamily} OS package: ${pkg}`}
+                              className="px-2 py-0.5 rounded bg-violet-950/40 border border-violet-800/60 text-[10px] font-mono text-violet-300"
+                            >
+                              pkg: {pkg}
+                            </span>
+                          ))}
+                          {remaining > 0 && (
+                            <span className="px-2 py-0.5 rounded bg-slate-800 border border-slate-700 text-[10px] font-mono text-slate-400">
+                              +{remaining} pkg{remaining === 1 ? '' : 's'}
+                            </span>
+                          )}
+                        </>
+                      );
+                    })()}
                   </div>
                 </div>
 
@@ -811,10 +1228,10 @@ export default function PluginManagerPage() {
                   </div>
 
                   <div className="flex items-center gap-2">
-                    {(isInstalled || isBundled || plugin.id === 'vigilant-octo-waffle' || plugin.id === 'netbox' || plugin.id === 'librenms' || plugin.id === 'topology-studio' || plugin.id === 'netflow-collector') && (
+                    {(isInstalled || isBundled || !needsPackage) && (
                       <button
                         disabled={isSaving}
-                        onClick={() => toggleExtensionPlugin(plugin.id)}
+                        onClick={() => requestToggleExtensionPlugin(plugin.id)}
                         className={`px-2.5 py-1.5 rounded-lg text-xs font-semibold transition flex items-center gap-1.5 ${
                           isEnabled
                             ? 'bg-rose-500/10 text-rose-400 border border-rose-500/20 hover:bg-rose-500/20'
@@ -841,47 +1258,49 @@ export default function PluginManagerPage() {
                       </button>
                     )}
 
-                    {isInstalled ? (
-                      <button
-                        disabled={isLoading || isBundled}
-                        onClick={() => handlePluginAction(plugin.id, 'uninstall')}
-                        title={isBundled ? 'Cannot uninstall packages bundled into the rootfs image' : 'Uninstall extension package'}
-                        className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition flex items-center gap-1.5 ${
-                          isBundled
-                            ? 'bg-slate-800/50 text-slate-500 border border-slate-800 cursor-not-allowed'
-                            : 'bg-rose-500/10 text-rose-400 border border-rose-500/20 hover:bg-rose-500/20'
-                        }`}
-                      >
-                        {isLoading ? (
-                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                        ) : (
-                          <Trash2 className="w-3.5 h-3.5" />
-                        )}
-                        {isBundled ? 'Bundled' : 'Uninstall'}
-                      </button>
-                    ) : (
-                      <button
-                        disabled={isLoading}
-                        onClick={() => handlePluginAction(plugin.id, 'install')}
-                        className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-emerald-600 hover:bg-emerald-500 text-white shadow-lg shadow-emerald-950/40 transition flex items-center gap-1.5"
-                      >
-                        {isLoading ? (
-                          <>
-                            <Loader2 className="w-3.5 h-3.5 animate-spin" /> Installing...
-                          </>
-                        ) : (
-                          <>
-                            <Download className="w-3.5 h-3.5" /> Install Plugin
-                          </>
-                        )}
-                      </button>
-                    )}
+                    {(needsPackage || isInstalled || isBundled) &&
+                      (isInstalled ? (
+                        <button
+                          disabled={isLoading || isBundled}
+                          onClick={() => requestUninstallPlugin(plugin.id)}
+                          title={isBundled ? 'Cannot uninstall packages bundled into the rootfs image' : 'Uninstall extension package'}
+                          className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition flex items-center gap-1.5 ${
+                            isBundled
+                              ? 'bg-slate-800/50 text-slate-500 border border-slate-800 cursor-not-allowed'
+                              : 'bg-rose-500/10 text-rose-400 border border-rose-500/20 hover:bg-rose-500/20'
+                          }`}
+                        >
+                          {isLoading ? (
+                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                          ) : (
+                            <Trash2 className="w-3.5 h-3.5" />
+                          )}
+                          {isBundled ? 'Bundled' : 'Uninstall'}
+                        </button>
+                      ) : (
+                        <button
+                          disabled={isLoading}
+                          onClick={() => handlePluginAction(plugin.id, 'install')}
+                          className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-emerald-600 hover:bg-emerald-500 text-white shadow-lg shadow-emerald-950/40 transition flex items-center gap-1.5"
+                        >
+                          {isLoading ? (
+                            <>
+                              <Loader2 className="w-3.5 h-3.5 animate-spin" /> Installing...
+                            </>
+                          ) : (
+                            <>
+                              <Download className="w-3.5 h-3.5" /> Install Plugin
+                            </>
+                          )}
+                        </button>
+                      ))}
                   </div>
                 </div>
               </div>
             );
           })}
         </div>
+        )}
       </div>
 
       {/* Manifest Modal */}
@@ -1057,6 +1476,108 @@ export default function PluginManagerPage() {
               </button>
             </div>
           )}
+        </div>
+      )}
+
+      {/* Impact / Dependency Confirmation Modal */}
+      {pendingConfirm && (
+        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl max-w-lg w-full p-6 space-y-4 shadow-2xl">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+              <h2 className="text-base font-bold text-white flex items-center gap-2">
+                <AlertTriangle
+                  className={`w-4 h-4 ${pendingConfirm.kind === 'pack' ? 'text-emerald-400' : 'text-amber-400'}`}
+                />
+                {pendingConfirm.title}
+              </h2>
+              <button
+                type="button"
+                onClick={() => setPendingConfirm(null)}
+                className="text-slate-400 hover:text-white"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <p className="text-xs text-slate-300 leading-relaxed">{pendingConfirm.description}</p>
+
+            {pendingConfirm.affectedPlugins.length > 0 && (
+              <div className="space-y-1.5">
+                <div className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">
+                  {pendingConfirm.kind === 'pack'
+                    ? 'Plugins Included in Pack'
+                    : 'Dependent Plugins Affected'}
+                </div>
+                <div className="flex flex-wrap gap-1.5">
+                  {pendingConfirm.affectedPlugins.map((pid) => (
+                    <span
+                      key={pid}
+                      className={`px-2 py-0.5 rounded text-[11px] font-mono border ${
+                        pendingConfirm.kind === 'pack'
+                          ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300'
+                          : 'bg-amber-500/15 border-amber-500/30 text-amber-300'
+                      }`}
+                    >
+                      {pid}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            <div className="space-y-1.5">
+              <div className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">
+                {pendingConfirm.kind === 'pack'
+                  ? `OS Packages to Install (${osFamily})`
+                  : pendingConfirm.kind === 'uninstall'
+                    ? `OS Packages to Remove (${osFamily})`
+                    : `Associated OS Packages (${osFamily})`}
+              </div>
+              {pendingConfirm.osPackages.length > 0 ? (
+                <div className="flex flex-wrap gap-1.5">
+                  {pendingConfirm.osPackages.map((pkg) => (
+                    <span
+                      key={pkg}
+                      className="px-2 py-0.5 rounded bg-violet-950/40 border border-violet-800/60 text-[11px] font-mono text-violet-300"
+                    >
+                      {pkg}
+                    </span>
+                  ))}
+                </div>
+              ) : (
+                <p className="text-[11px] text-slate-400 font-mono">
+                  {pendingConfirm.kind === 'pack'
+                    ? '0 new OS packages required (plugins already installed or config/UI only).'
+                    : 'No external OS packages targeted.'}
+                </p>
+              )}
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-3 border-t border-slate-800">
+              <button
+                type="button"
+                onClick={() => setPendingConfirm(null)}
+                className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg text-xs font-semibold transition"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => void executeConfirmedAction()}
+                className={`px-4 py-2 rounded-lg text-xs font-semibold text-white transition ${
+                  pendingConfirm.kind === 'pack'
+                    ? 'bg-emerald-600 hover:bg-emerald-500'
+                    : 'bg-rose-600 hover:bg-rose-500'
+                }`}
+              >
+                {pendingConfirm.kind === 'pack'
+                  ? 'Confirm Install & Enable'
+                  : pendingConfirm.kind === 'uninstall'
+                    ? 'Confirm Uninstall'
+                    : 'Confirm Disable'}
+              </button>
+            </div>
+          </div>
         </div>
       )}
 

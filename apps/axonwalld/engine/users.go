@@ -29,6 +29,25 @@ var allowedLoginShells = map[string]bool{
 	"/usr/local/bin/axonwall-opshell": true,
 }
 
+func validateLoginShellExists(shell string) error {
+	clean := strings.TrimSpace(shell)
+	if clean == "" || strings.ContainsAny(clean, "\n\r\x00") || !allowedLoginShells[clean] {
+		return fmt.Errorf("disallowed login shell: %s", shell)
+	}
+	// Non-interactive lock shells do not need an executable check beyond allowlist.
+	if clean == "/usr/sbin/nologin" || clean == "/bin/false" {
+		return nil
+	}
+	info, err := os.Stat(clean)
+	if err != nil || info.IsDir() {
+		if clean == "/usr/bin/zsh" || clean == "/bin/zsh" {
+			return fmt.Errorf("login shell %s is not installed on host (enable/install cli-workstation plugin or select /bin/bash)", clean)
+		}
+		return fmt.Errorf("login shell %s is not installed on host", clean)
+	}
+	return nil
+}
+
 type LocalUser struct {
 	Username       string   `json:"username"`
 	UID            int      `json:"uid"`
@@ -571,8 +590,8 @@ func (m *UserManager) CreateUser(req CreateUserRequest) error {
 			shell = "/bin/sh"
 		}
 	}
-	if !allowedLoginShells[shell] {
-		return fmt.Errorf("disallowed login shell: %s", shell)
+	if err := validateLoginShellExists(shell); err != nil {
+		return err
 	}
 
 	// Determine groups to attach
@@ -667,8 +686,10 @@ func (m *UserManager) UpdateUser(username string, req UpdateUserRequest) error {
 	if req.Comment != nil && strings.ContainsAny(*req.Comment, ":\n\r\x00") {
 		return fmt.Errorf("invalid characters in user comment")
 	}
-	if req.Shell != nil && !allowedLoginShells[strings.TrimSpace(*req.Shell)] {
-		return fmt.Errorf("disallowed login shell: %s", *req.Shell)
+	if req.Shell != nil {
+		if err := validateLoginShellExists(*req.Shell); err != nil {
+			return err
+		}
 	}
 	if req.Comment != nil || req.Shell != nil || req.Groups != nil || req.ApplianceRole != nil {
 		if usermodPath, err := exec.LookPath("usermod"); err == nil {

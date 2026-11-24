@@ -1,6 +1,7 @@
 import { getSession } from './auth';
 import { isPasswordChangeEnforced } from './auth-guard';
 import { callAgentApi } from './agent-client';
+import { assertPluginEnabled } from './plugin-guard';
 import fs from 'fs';
 import path from 'path';
 import { spawn } from 'child_process';
@@ -162,6 +163,7 @@ export async function runLivePacketCapture({
   if (isPasswordChangeEnforced(session)) {
     throw new Error('Password change required before performing this action');
   }
+  await assertPluginEnabled('packet-diagnostics');
 
   // Sanitize interface
   const trimmedIface = (iface || 'any').trim();

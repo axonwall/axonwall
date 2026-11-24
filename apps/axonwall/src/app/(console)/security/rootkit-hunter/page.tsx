@@ -2,6 +2,7 @@
 
 import React, { useState, useEffect, useMemo } from 'react';
 import Link from 'next/link';
+import { PluginAwareLink } from '@/components/PluginAwareLink';
 import {
   getCurrentDesiredState,
   getHostRootkitAuditStatus,
@@ -245,13 +246,14 @@ export default function RootkitHunterPage() {
         </div>
 
         <div className="flex flex-wrap items-center gap-2.5">
-          <Link
+          <PluginAwareLink
+            pluginId="docs-portal"
             href="/docs/ghost-in-the-ring-rootkits"
             className="inline-flex items-center gap-2 px-3.5 py-2 rounded-lg text-xs font-semibold bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 transition"
           >
             <BookOpen className="w-4 h-4 text-cyan-400" />
             Ghost in the Ring Guide
-          </Link>
+          </PluginAwareLink>
           <button
             type="button"
             onClick={() => setSimulateAttack((prev) => !prev)}

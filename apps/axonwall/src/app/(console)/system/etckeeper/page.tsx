@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useState, useEffect, useMemo } from 'react';
+import { PluginDisabledGate } from '@/components/PluginDisabledGate';
 import Link from 'next/link';
 import {
   GitBranch,
@@ -89,7 +90,7 @@ function UnifiedDiffViewer({ diff, title }: { diff: string; title?: string }) {
   );
 }
 
-export default function EtckeeperPage() {
+function EtckeeperPageContent() {
   const [activeTab, setActiveTab] = useState<'logs' | 'config'>('logs');
   const [status, setStatus] = useState<EtckeeperStatus | null>(null);
   const [history, setHistory] = useState<EtckeeperCommitLog[]>([]);
@@ -1015,5 +1016,13 @@ export default function EtckeeperPage() {
         </div>
       )}
     </div>
+  );
+}
+
+export default function EtckeeperPage() {
+  return (
+    <PluginDisabledGate pluginId="etckeeper-audit">
+      <EtckeeperPageContent />
+    </PluginDisabledGate>
   );
 }

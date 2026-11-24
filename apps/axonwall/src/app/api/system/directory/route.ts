@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSession } from '@/server/auth';
 import { assertActionPermitted } from '@/server/auth-guard';
+import { checkPluginApiGuard } from '@/server/plugin-guard';
 import {
   getDirectoryStatus,
   updateDirectoryPasswordPolicy,
@@ -11,6 +12,8 @@ export async function GET() {
   try {
     const session = await getSession();
     assertActionPermitted(session);
+    const guard = await checkPluginApiGuard('directory-ldap');
+    if (guard) return guard;
 
     const status = await getDirectoryStatus();
     return NextResponse.json({ status });
@@ -24,6 +27,8 @@ export async function PUT(req: NextRequest) {
   try {
     const session = await getSession();
     assertActionPermitted(session, 'admin');
+    const guard = await checkPluginApiGuard('directory-ldap');
+    if (guard) return guard;
 
     const body = await req.json();
     const result = await updateDirectoryPasswordPolicy(body);
@@ -38,6 +43,8 @@ export async function POST() {
   try {
     const session = await getSession();
     assertActionPermitted(session, 'admin');
+    const guard = await checkPluginApiGuard('directory-ldap');
+    if (guard) return guard;
 
     const result = await migrateLocalUsersToLdap();
     return NextResponse.json(result);

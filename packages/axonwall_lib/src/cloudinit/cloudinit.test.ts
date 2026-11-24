@@ -11,6 +11,8 @@ import {
   cloudInitStorageToInstallerChoices,
   formatInstallerChoicesEnv,
   formatInstallerSecretFiles,
+  applyCloudInitStarterPacks,
+  inferCloudInitPackages,
   CloudInitStorageSchema,
   REDACTED_KEY32_PLACEHOLDER,
   REDACTED_SECRET_PLACEHOLDER,
@@ -450,5 +452,49 @@ axonwall:
     });
     expect(exported.axonwall?.edition).toBe('minimal');
     expect(exported.users?.[0]?.shell).toBe('/bin/bash');
+
+    const leanExported = buildCloudInitFromSystem({
+      desiredState: DesiredStateSchema.parse({}),
+      edition: 'axonwall',
+      osUsers: [{ name: 'admin', sshAuthorizedKeys: [] }],
+    });
+    expect(leanExported.users?.[0]?.shell).toBe('/bin/bash');
+  });
+
+  it('parses starter_packs, formats INSTALL_STARTER_PACKS, and infers pack OS packages', () => {
+    const yamlText = `#cloud-config
+hostname: ngfw-ent-01
+axonwall:
+  edition: axonwall
+  starter_packs:
+    - enterprise-ngfw
+    - operator-diagnostics
+`;
+    const parsed = parseCloudInitYaml(yamlText);
+    expect(parsed.axonwall?.starter_packs).toEqual(['enterprise-ngfw', 'operator-diagnostics']);
+
+    const choices = cloudInitStorageToInstallerChoices(
+      CloudInitStorageSchema.parse({}),
+      parsed.axonwall
+    );
+    expect(choices.INSTALL_STARTER_PACKS).toBe('enterprise-ngfw,operator-diagnostics');
+    expect(formatInstallerChoicesEnv(choices)).toContain(
+      "INSTALL_STARTER_PACKS='enterprise-ngfw,operator-diagnostics'"
+    );
+
+    const leanPkgs = inferCloudInitPackages(DesiredStateSchema.parse({ version: 1 }));
+    expect(leanPkgs).not.toContain('suricata');
+    expect(leanPkgs).not.toContain('slapd');
+
+    const upgraded = applyCloudInitStarterPacks(
+      DesiredStateSchema.parse({ version: 1 }),
+      parsed.axonwall?.starter_packs
+    );
+    const entPkgs = inferCloudInitPackages(upgraded);
+    expect(entPkgs).toContain('suricata');
+    expect(entPkgs).toContain('frr');
+    expect(entPkgs).toContain('slapd');
+    expect(entPkgs).toContain('etckeeper');
+    expect(entPkgs).toContain('zsh');
   });
 });

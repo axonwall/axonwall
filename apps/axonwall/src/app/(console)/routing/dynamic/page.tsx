@@ -1,13 +1,14 @@
 'use client';
 
 import { useState, useEffect } from 'react';
+import { PluginDisabledGate } from '@/components/PluginDisabledGate';
 import { Route, Terminal, Shield, CheckCircle2, AlertTriangle, XCircle } from 'lucide-react';
 import { compileFrr } from '@axonwall/lib/compile/frr';
 import { getCurrentDesiredState, getSystemServicesStatus } from '@/server/agent';
 import { useDesiredStateApply } from '@/lib/use-desired-state-apply';
 import type { DesiredState, FrrConfig } from '@axonwall/lib/schemas';
 
-export default function DynamicRoutingPage() {
+function DynamicRoutingPageContent() {
   const { applyState } = useDesiredStateApply();
   const [fullState, setFullState] = useState<DesiredState | null>(null);
   const [bgpEnabled, setBgpEnabled] = useState(false);
@@ -322,5 +323,13 @@ export default function DynamicRoutingPage() {
         </div>
       </div>
     </div>
+  );
+}
+
+export default function DynamicRoutingPage() {
+  return (
+    <PluginDisabledGate pluginId="frr-routing">
+      <DynamicRoutingPageContent />
+    </PluginDisabledGate>
   );
 }

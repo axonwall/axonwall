@@ -96,8 +96,9 @@ loginShell: /usr/local/bin/axonwall-opshell
 }
 
 func TestDefaultShellForRole(t *testing.T) {
-	if DefaultShellForRole("admin") != "/usr/bin/zsh" {
-		t.Errorf("expected /usr/bin/zsh for admin")
+	wantAdmin := defaultInteractiveAdminShell()
+	if DefaultShellForRole("admin") != wantAdmin {
+		t.Errorf("expected %q for admin, got %q", wantAdmin, DefaultShellForRole("admin"))
 	}
 	if DefaultShellForRole("operator") != "/usr/local/bin/axonwall-opshell" {
 		t.Errorf("expected /usr/local/bin/axonwall-opshell for operator")
@@ -105,8 +106,14 @@ func TestDefaultShellForRole(t *testing.T) {
 	if DefaultShellForRole("readonly") != "/usr/sbin/nologin" {
 		t.Errorf("expected /usr/sbin/nologin for readonly")
 	}
-	if DefaultShellForRole("os_only") != "/usr/bin/zsh" {
-		t.Errorf("expected /usr/bin/zsh for os_only")
+	if DefaultShellForRole("os_only") != wantAdmin {
+		t.Errorf("expected %q for os_only, got %q", wantAdmin, DefaultShellForRole("os_only"))
+	}
+
+	// Verify Lean Core / Minimal fallback when zsh binaries are absent
+	gotNoZsh := defaultInteractiveAdminShellWithStat(func(p string) bool { return p == "/bin/bash" })
+	if gotNoZsh != "/bin/bash" {
+		t.Errorf("expected /bin/bash fallback when zsh absent, got %q", gotNoZsh)
 	}
 }
 

@@ -206,7 +206,7 @@ if [[ "${EDITION}" == "k3s-storage" ]]; then
     chrony-openrc
   )
 elif [[ "${EDITION}" == "minimal" ]]; then
-  # Reduced attack surface Minimal edition (core control plane + Web UI + OpenLDAP + OpenZFS base)
+  # Zero-role control plane Minimal edition (control plane + Web UI + local POSIX auth + OpenZFS base)
   CORE_PKGS=(
     alpine-base
     alpine-conf
@@ -244,14 +244,6 @@ elif [[ "${EDITION}" == "minimal" ]]; then
     grub-bios
     grub-efi
     openssh
-    openldap
-    openldap-openrc
-    openldap-back-mdb
-    openldap-overlay-syncprov
-    openldap-overlay-ppolicy
-    openldap-overlay-unique
-    openldap-overlay-accesslog
-    openldap-clients
     sudo
     shadow
     chrony
@@ -273,10 +265,8 @@ CORE_PKGS=(
   ifupdown-ng
   dhcpcd
   wireguard-tools
-  keepalived
   conntrack-tools
   ethtool
-  tcpdump
   unbound
   kea-dhcp4
   nodejs
@@ -300,15 +290,6 @@ CORE_PKGS=(
   grub-bios
   grub-efi
   openssh
-  # OpenLDAP SSO Identity Directory, HA Multi-Provider Syncrepl & NTP Clock Sync
-  openldap
-  openldap-openrc
-  openldap-back-mdb
-  openldap-overlay-syncprov
-  openldap-overlay-ppolicy
-  openldap-overlay-unique
-  openldap-overlay-accesslog
-  openldap-clients
   sudo
   shadow
   chrony
@@ -317,34 +298,11 @@ CORE_PKGS=(
 
 if [[ "$MINIMAL" -eq 0 ]]; then
   CORE_PKGS+=(
-    frr
-    strongswan
-    openvpn
-    suricata
     zfs
     "zfs-${ALPINE_KERNEL_FLAVOR}"
     zfs-openrc
-    samba
-    nfs-utils
-    open-iscsi
     smartmontools
-    etckeeper
-    git
-    nmap
-    bind-tools
-    net-tools
-    htop
-    btop
-    iftop
-    sysstat
-    vim
-    neovim
-    zsh
     python3
-    kubectl
-    helm
-    starship
-    tmux
     less
     binutils
     zstd
@@ -821,16 +779,9 @@ elif [[ "${EDITION}" == "axonwall" ]]; then
   fi
 fi
 
-# Bundle statically-linked K9s v0.51.0 binary across axonwall and k3s-storage Alpine editions
-# Staged into the plugin dir, not /usr/local/bin. The old
-# prebuilt-copy branch (copy an already-present k9s from the Debian
-# chroot tree with NO checksum verification) is deleted, not fixed
-# in place: the pinned sha256 covers the tarball, not the extracted
-# binary, so a copied binary cannot be verified against it — the
-# only verified path is download + verify + extract, every build.
-# (The overlay is rebuilt from scratch each run, so there is no
-# cache to preserve here.)
-if [[ "${EDITION}" == "axonwall" || "${EDITION}" == "k3s-storage" ]]; then
+# Bundle statically-linked K9s v0.51.0 binary in k3s-storage Alpine edition
+# Staged into the core-k3s plugin dir; standard axonwall downloads k3s/k9s on demand when core-k3s is activated.
+if [[ "${EDITION}" == "k3s-storage" ]]; then
   K9S_VERSION="0.51.0"
   K9S_SHA256="c3752ad51a5a4015a113819c4eeb6e55a4d0e4b8e652494797532f6fc8161dd7"
   mkdir -p "${OVL}/var/lib/axonwall/core-k3s/bin"
@@ -1000,7 +951,7 @@ else
   for svc in axonwall-network-setup modules sysctl hostname bootmisc syslog networking; do
     ln -sf "/etc/init.d/${svc}" "${OVL}/etc/runlevels/boot/${svc}"
   done
-  for svc in chronyd crond sshd headscale axonwall-firstboot axonwalld axonwall-controller axonwall-ui local; do
+  for svc in chronyd crond sshd axonwall-firstboot axonwalld axonwall-controller axonwall-ui local; do
     ln -sf "/etc/init.d/${svc}" "${OVL}/etc/runlevels/default/${svc}"
   done
 fi

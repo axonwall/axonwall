@@ -17,6 +17,7 @@ import {
 import { getSession } from './auth';
 import { assertActionPermitted } from './auth-guard';
 import { callAgentApi, callAgentApiResponse } from './agent-client';
+import { assertPluginEnabled } from './plugin-guard';
 
 export interface DaemonKernelStudioState {
   hardware: DetectedHardwareProfile;
@@ -337,6 +338,7 @@ function collectFallbackKernelStudioState(): DaemonKernelStudioState {
 export async function getKernelStudioTelemetry(): Promise<KernelStudioPayload> {
   const session = await getSession();
   assertActionPermitted(session, 'readonly');
+  await assertPluginEnabled('custom-kernel-studio');
 
   const daemonRes = await callAgentApi<DaemonKernelStudioState>('/v1/system/kernel/studio', 'GET', undefined, 6000);
   const daemonConnected = Boolean(daemonRes && daemonRes.hardware);
@@ -374,6 +376,7 @@ export async function getKernelStudioTelemetry(): Promise<KernelStudioPayload> {
 export async function previewCustomKernelSpec(rawSpec: unknown): Promise<CompiledKernelBundle> {
   const session = await getSession();
   assertActionPermitted(session, 'readonly');
+  await assertPluginEnabled('custom-kernel-studio');
   const spec = CustomKernelBuildSpecSchema.parse(rawSpec);
   const daemonRes = await callAgentApi<DaemonKernelStudioState>('/v1/system/kernel/studio', 'GET', undefined, 4000);
   const hw = daemonRes && daemonRes.hardware ? daemonRes.hardware : collectFallbackKernelStudioState().hardware;
@@ -383,6 +386,7 @@ export async function previewCustomKernelSpec(rawSpec: unknown): Promise<Compile
 export async function triggerCustomKernelBuild(rawSpec: unknown, configOnly = false) {
   const session = await getSession();
   assertActionPermitted(session, 'admin');
+  await assertPluginEnabled('custom-kernel-studio');
   const spec = CustomKernelBuildSpecSchema.parse(rawSpec);
 
   const daemonRes = await callAgentApi<DaemonKernelStudioState>('/v1/system/kernel/studio', 'GET', undefined, 4000);
@@ -429,6 +433,7 @@ export async function triggerCustomKernelBuild(rawSpec: unknown, configOnly = fa
 export async function installBuiltKernelArtifact(artifactName: string) {
   const session = await getSession();
   assertActionPermitted(session, 'admin');
+  await assertPluginEnabled('custom-kernel-studio');
 
   if (!artifactName || !/^linux-image-[a-zA-Z0-9._+-]+\.deb$/.test(artifactName.trim())) {
     return { success: false, message: 'Invalid kernel package filename.' };
@@ -458,6 +463,7 @@ export async function installBuiltKernelArtifact(artifactName: string) {
 export async function getKernelTaskProgress(upid: string) {
   const session = await getSession();
   assertActionPermitted(session, 'readonly');
+  await assertPluginEnabled('custom-kernel-studio');
   if (!upid || !upid.startsWith('UPID:')) {
     return null;
   }

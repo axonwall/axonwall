@@ -68,16 +68,16 @@ type AgentServer struct {
 	// cannot stop a callback that already started, so without this a
 	// stale callback could fire into a newer bundle's apply window
 	// and roll back the wrong bundle.
-	rollbackGen      uint64
-	nodeId           string
-	startTime        time.Time
-	iapManager       *engine.IAPManager
-	haEngine         *HAEngine
-	sdwanProber      *SDWanProber
-	pcapManager      *engine.PacketCaptureManager
-	watchdog         *engine.WatchdogEngine
-	nasManager       *engine.NasManager
-	k3sManager       *engine.K3sManager
+	rollbackGen            uint64
+	nodeId                 string
+	startTime              time.Time
+	iapManager             *engine.IAPManager
+	haEngine               *HAEngine
+	sdwanProber            *SDWanProber
+	pcapManager            *engine.PacketCaptureManager
+	watchdog               *engine.WatchdogEngine
+	nasManager             *engine.NasManager
+	k3sManager             *engine.K3sManager
 	virtManager            *engine.VirtManager
 	vigilanteManager       *engine.VigilanteManager
 	threatHarvesterManager *engine.ThreatHarvesterManager
@@ -87,7 +87,14 @@ type AgentServer struct {
 	netflowManager         *engine.NetFlowManager
 	etckeeperManager       *engine.EtckeeperManager
 	directoryManager       *engine.DirectoryManager
+	pluginManager          *engine.PluginManager
 	ddnsManager            *engine.DdnsManager
+}
+
+func (s *AgentServer) SetPluginManager(pm *engine.PluginManager) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.pluginManager = pm
 }
 
 func (s *AgentServer) SetVirtManager(vm *engine.VirtManager) {
@@ -1938,6 +1945,15 @@ func (s *AgentServer) ExecuteDiagnostic(ctx context.Context, req *pb.DiagnosticR
 
 	// Special handling for Packet Capture diagnostic (Type 5 or target prefixed with pcap:)
 	if int32(req.Type) == 5 || strings.HasPrefix(target, "pcap:") {
+		s.mu.Lock()
+		pm := s.pluginManager
+		s.mu.Unlock()
+		if pm != nil && !pm.IsPluginEnabled("packet-diagnostics") {
+			return &pb.DiagnosticResponse{
+				Success: false,
+				Output:  "Packet Diagnostics plugin (packet-diagnostics) is disabled. Enable it in System -> Plugin Store & Roles first.",
+			}, nil
+		}
 		filter := strings.TrimPrefix(target, "pcap:")
 		if filter == "all" || filter == "any" {
 			filter = ""
@@ -3113,13 +3129,16 @@ func main() {
 	etcDir := axonwallEtcDir()
 	vigilanteManager := engine.NewVigilanteManager(filepath.Join(stateDir, "vigilante"))
 	etckeeperManager := engine.NewEtckeeperManager("/etc")
-	if runtimeMode == engine.ModeAppliance && etckeeperManager.IsInstalled() {
-		_ = etckeeperManager.Init()
-	}
 	userManager := engine.NewUserManager(etckeeperManager)
 	directoryManager := engine.NewDirectoryManager(userManager, etckeeperManager)
 	pluginManager := engine.NewPluginManager(stateDir)
 	pluginManager.SetDirectoryManager(directoryManager)
+	if runtimeMode == engine.ModeAppliance {
+		pluginManager.RunUpgradePreservation(etcDir)
+	}
+	if runtimeMode == engine.ModeAppliance && pluginManager.IsPluginEnabled("etckeeper-audit") && etckeeperManager.IsInstalled() {
+		_ = etckeeperManager.Init()
+	}
 	// Shell PATH: repair plugin snippets after a reboot, a zshenv wipe,
 	// or a crashed lifecycle call. Soft-fail: log + continue.
 	if err := engine.RebuildPluginShellPaths(pluginManager); err != nil {
@@ -3128,17 +3147,19 @@ func main() {
 	mcpTrafficManager := engine.NewMcpTrafficManager()
 	haEngine.SetDirectoryManager(directoryManager)
 
-	if runtimeMode == engine.ModeAppliance {
-		go func() {
-			if err := directoryManager.Bootstrap("axonwall.local", 1); err != nil {
+	if runtimeMode == engine.ModeAppliance && pluginManager.IsPluginEnabled("directory-ldap") {
+		domain, serverID := pluginManager.ResolveDirectoryBootstrapParams()
+		go func(dom string, sid int) {
+			if err := directoryManager.Bootstrap(dom, sid); err != nil {
 				log.Printf("[Directory] Warning during initial OpenLDAP bootstrap: %v", err)
 			}
-		}()
+		}(domain, serverID)
 	} else {
-		log.Printf("[Agent] Mode %s: skipping automatic OpenLDAP/sshd directory bootstrap", runtimeMode)
+		log.Printf("[Agent] Skipping automatic OpenLDAP/sshd directory bootstrap (mode=%s, directory-ldap=%v)", runtimeMode, pluginManager.IsPluginEnabled("directory-ldap"))
 	}
 
 	agentServer := NewAgentServer(*bundleDir, iapManager, haEngine, sdwanProber, pcapManager, watchdog, nasManager, k3sManager, vigilanteManager, etckeeperManager, directoryManager)
+	agentServer.SetPluginManager(pluginManager)
 	agentServer.SetVirtManager(virtManager)
 	netboxManager := engine.NewNetBoxManager(filepath.Join(etcDir, "netbox"), k3sManager, virtManager)
 	agentServer.SetNetBoxManager(netboxManager)
@@ -3281,6 +3302,20 @@ func main() {
 	} else {
 		chownSocketToAPIGroup(apiSocketPath, 0660)
 		mux := http.NewServeMux()
+		requirePluginEnabled := func(w http.ResponseWriter, pluginID string) bool {
+			if pluginManager != nil && !pluginManager.IsPluginEnabled(pluginID) {
+				msg := fmt.Sprintf("Plugin '%s' is disabled. Enable it in System -> Plugin Store & Roles first.", pluginID)
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusForbidden)
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"success": false,
+					"error":   msg,
+					"message": msg,
+				})
+				return false
+			}
+			return true
+		}
 		mux.HandleFunc("/v1/status", func(w http.ResponseWriter, r *http.Request) {
 			resp, err := agentServer.GetStatus(r.Context(), &pb.GetStatusRequest{})
 			if err != nil {
@@ -3853,6 +3888,9 @@ func main() {
 				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 				return
 			}
+			if !requirePluginEnabled(w, "custom-kernel-studio") {
+				return
+			}
 			upid := strings.TrimSpace(r.URL.Query().Get("upid"))
 			state := kernelStudioMgr.InspectStudioState(watchdog, taskManager, upid)
 			w.Header().Set("Content-Type", "application/json")
@@ -3861,6 +3899,9 @@ func main() {
 		mux.HandleFunc("/v1/system/kernel/build", func(w http.ResponseWriter, r *http.Request) {
 			if r.Method != http.MethodPost {
 				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			if !requirePluginEnabled(w, "custom-kernel-studio") {
 				return
 			}
 			var req engine.KernelBuildRequest
@@ -3884,6 +3925,9 @@ func main() {
 		mux.HandleFunc("/v1/system/kernel/install", func(w http.ResponseWriter, r *http.Request) {
 			if r.Method != http.MethodPost {
 				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			if !requirePluginEnabled(w, "custom-kernel-studio") {
 				return
 			}
 			var req struct {
@@ -3910,6 +3954,9 @@ func main() {
 		mux.HandleFunc("/v1/terminal/exec", func(w http.ResponseWriter, r *http.Request) {
 			if r.Method != http.MethodPost {
 				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			if !requirePluginEnabled(w, "web-terminal") {
 				return
 			}
 			var req engine.TerminalExecRequest
@@ -4242,6 +4289,9 @@ func main() {
 			})
 		})
 		mux.HandleFunc("/v1/ha/sync-trust", func(w http.ResponseWriter, r *http.Request) {
+			if !requirePluginEnabled(w, "high-availability") {
+				return
+			}
 			w.Header().Set("Content-Type", "application/json")
 			if haEngine == nil {
 				_ = json.NewEncoder(w).Encode(map[string]any{"pkiEnrolled": false})
@@ -5373,7 +5423,6 @@ func main() {
 			_ = json.NewEncoder(w).Encode(res)
 		})
 
-
 		// Vigilante Cyber Defense / SOAR APIs
 		mux.HandleFunc("/v1/vigilante/soar/block-ip", func(w http.ResponseWriter, r *http.Request) {
 			if r.Method != http.MethodPost {
@@ -5483,6 +5532,9 @@ func main() {
 
 		// Etckeeper /etc change tracking & configuration APIs
 		mux.HandleFunc("/v1/system/etckeeper/status", func(w http.ResponseWriter, r *http.Request) {
+			if !requirePluginEnabled(w, "etckeeper-audit") {
+				return
+			}
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(etckeeperManager.GetStatus())
 		})
@@ -5490,6 +5542,9 @@ func main() {
 		mux.HandleFunc("/v1/system/etckeeper/init", func(w http.ResponseWriter, r *http.Request) {
 			if r.Method != http.MethodPost {
 				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			if !requirePluginEnabled(w, "etckeeper-audit") {
 				return
 			}
 			if err := etckeeperManager.Init(); err != nil {
@@ -5506,6 +5561,9 @@ func main() {
 		})
 
 		mux.HandleFunc("/v1/system/etckeeper/config", func(w http.ResponseWriter, r *http.Request) {
+			if !requirePluginEnabled(w, "etckeeper-audit") {
+				return
+			}
 			switch r.Method {
 			case http.MethodGet:
 				w.Header().Set("Content-Type", "application/json")
@@ -5532,10 +5590,12 @@ func main() {
 			}
 		})
 
-
 		mux.HandleFunc("/v1/system/etckeeper/commit", func(w http.ResponseWriter, r *http.Request) {
 			if r.Method != http.MethodPost {
 				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			if !requirePluginEnabled(w, "etckeeper-audit") {
 				return
 			}
 			var req struct {
@@ -5558,6 +5618,9 @@ func main() {
 		})
 
 		mux.HandleFunc("/v1/system/etckeeper/history", func(w http.ResponseWriter, r *http.Request) {
+			if !requirePluginEnabled(w, "etckeeper-audit") {
+				return
+			}
 			limit := 50
 			if rawLimit := strings.TrimSpace(r.URL.Query().Get("limit")); rawLimit != "" {
 				if parsed, err := strconv.Atoi(rawLimit); err == nil && parsed > 0 && parsed <= 200 {
@@ -5577,6 +5640,9 @@ func main() {
 		})
 
 		mux.HandleFunc("/v1/system/etckeeper/diff", func(w http.ResponseWriter, r *http.Request) {
+			if !requirePluginEnabled(w, "etckeeper-audit") {
+				return
+			}
 			commitHash := r.URL.Query().Get("commit")
 			diff, err := etckeeperManager.GetDiff(commitHash)
 			if err != nil {
@@ -5601,9 +5667,18 @@ func main() {
 		}
 
 		mux.HandleFunc("/v1/system/users", func(w http.ResponseWriter, r *http.Request) {
+			ldapEnabled := pluginManager != nil && pluginManager.IsPluginEnabled("directory-ldap")
 			switch r.Method {
 			case http.MethodGet:
-				users, err := directoryManager.ListUsers()
+				var (
+					users []engine.LocalUser
+					err   error
+				)
+				if ldapEnabled {
+					users, err = directoryManager.ListUsers()
+				} else {
+					users, err = userManager.ParsePasswd()
+				}
 				if err != nil {
 					writeDirError(w, err.Error(), http.StatusInternalServerError)
 					return
@@ -5616,14 +5691,20 @@ func main() {
 					writeDirError(w, fmt.Sprintf("invalid json payload: %v", err), http.StatusBadRequest)
 					return
 				}
-				if err := directoryManager.CreateUser(req); err != nil {
+				var err error
+				if ldapEnabled {
+					err = directoryManager.CreateUser(req)
+				} else {
+					err = userManager.CreateUser(req)
+				}
+				if err != nil {
 					writeDirError(w, err.Error(), http.StatusBadRequest)
 					return
 				}
 				w.Header().Set("Content-Type", "application/json")
 				_ = json.NewEncoder(w).Encode(map[string]any{
 					"success": true,
-					"message": fmt.Sprintf("Created directory user %s successfully", req.Username),
+					"message": fmt.Sprintf("Created user %s successfully", req.Username),
 				})
 			default:
 				writeDirError(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -5640,7 +5721,12 @@ func main() {
 				writeDirError(w, fmt.Sprintf("invalid json payload: %v", err), http.StatusBadRequest)
 				return
 			}
-			resp := directoryManager.Authenticate(req)
+			var resp engine.AuthUserResponse
+			if pluginManager != nil && pluginManager.IsPluginEnabled("directory-ldap") {
+				resp = directoryManager.Authenticate(req)
+			} else {
+				resp = userManager.Authenticate(req)
+			}
 			w.Header().Set("Content-Type", "application/json")
 			if !resp.Success {
 				w.WriteHeader(http.StatusUnauthorized)
@@ -5662,13 +5748,27 @@ func main() {
 				writeDirError(w, fmt.Sprintf("invalid json payload: %v", err), http.StatusBadRequest)
 				return
 			}
-			if err := directoryManager.ChangeOwnPassword(req.Username, req.CurrentPassword, req.NewPassword); err != nil {
+			var chErr error
+			if pluginManager != nil && pluginManager.IsPluginEnabled("directory-ldap") {
+				chErr = directoryManager.ChangeOwnPassword(req.Username, req.CurrentPassword, req.NewPassword)
+			} else {
+				authResp := userManager.Authenticate(engine.AuthUserRequest{
+					Username: req.Username,
+					Password: req.CurrentPassword,
+				})
+				if !authResp.Success {
+					chErr = fmt.Errorf("invalid credentials: %s", authResp.Message)
+				} else {
+					chErr = userManager.SetPassword(req.Username, req.NewPassword)
+				}
+			}
+			if chErr != nil {
 				status := http.StatusBadRequest
-				msg := strings.ToLower(err.Error())
+				msg := strings.ToLower(chErr.Error())
 				if strings.Contains(msg, "invalid credentials") || strings.Contains(msg, "verification failed") || strings.Contains(msg, "locked") {
 					status = http.StatusUnauthorized
 				}
-				writeDirError(w, err.Error(), status)
+				writeDirError(w, chErr.Error(), status)
 				return
 			}
 			w.Header().Set("Content-Type", "application/json")
@@ -5685,6 +5785,7 @@ func main() {
 				writeDirError(w, "Username required in path", http.StatusBadRequest)
 				return
 			}
+			ldapEnabled := pluginManager != nil && pluginManager.IsPluginEnabled("directory-ldap")
 
 			switch r.Method {
 			case http.MethodPut:
@@ -5693,25 +5794,37 @@ func main() {
 					writeDirError(w, fmt.Sprintf("invalid json payload: %v", err), http.StatusBadRequest)
 					return
 				}
-				if err := directoryManager.UpdateUser(username, req); err != nil {
+				var err error
+				if ldapEnabled {
+					err = directoryManager.UpdateUser(username, req)
+				} else {
+					err = userManager.UpdateUser(username, req)
+				}
+				if err != nil {
 					writeDirError(w, err.Error(), http.StatusBadRequest)
 					return
 				}
 				w.Header().Set("Content-Type", "application/json")
 				_ = json.NewEncoder(w).Encode(map[string]any{
 					"success": true,
-					"message": fmt.Sprintf("Updated directory user %s successfully", username),
+					"message": fmt.Sprintf("Updated user %s successfully", username),
 				})
 			case http.MethodDelete:
 				removeHome := r.URL.Query().Get("removeHome") == "true"
-				if err := directoryManager.DeleteUser(username, removeHome); err != nil {
+				var err error
+				if ldapEnabled {
+					err = directoryManager.DeleteUser(username, removeHome)
+				} else {
+					err = userManager.DeleteUser(username, removeHome)
+				}
+				if err != nil {
 					writeDirError(w, err.Error(), http.StatusBadRequest)
 					return
 				}
 				w.Header().Set("Content-Type", "application/json")
 				_ = json.NewEncoder(w).Encode(map[string]any{
 					"success": true,
-					"message": fmt.Sprintf("Deleted directory user %s successfully", username),
+					"message": fmt.Sprintf("Deleted user %s successfully", username),
 				})
 			default:
 				writeDirError(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -5719,9 +5832,18 @@ func main() {
 		})
 
 		mux.HandleFunc("/v1/system/groups", func(w http.ResponseWriter, r *http.Request) {
+			ldapEnabled := pluginManager != nil && pluginManager.IsPluginEnabled("directory-ldap")
 			switch r.Method {
 			case http.MethodGet:
-				groups, err := directoryManager.ListGroups()
+				var (
+					groups []engine.LocalGroup
+					err    error
+				)
+				if ldapEnabled {
+					groups, err = directoryManager.ListGroups()
+				} else {
+					groups, err = userManager.ParseGroups()
+				}
 				if err != nil {
 					writeDirError(w, err.Error(), http.StatusInternalServerError)
 					return
@@ -5736,14 +5858,20 @@ func main() {
 					writeDirError(w, fmt.Sprintf("invalid json payload: %v", err), http.StatusBadRequest)
 					return
 				}
-				if _, err := directoryManager.EnsureLDAPGroupExists(req.Name, 0); err != nil {
+				var err error
+				if ldapEnabled {
+					_, err = directoryManager.EnsureLDAPGroupExists(req.Name, 0)
+				} else {
+					err = userManager.EnsureGroupExists(req.Name)
+				}
+				if err != nil {
 					writeDirError(w, err.Error(), http.StatusBadRequest)
 					return
 				}
 				w.Header().Set("Content-Type", "application/json")
 				_ = json.NewEncoder(w).Encode(map[string]any{
 					"success": true,
-					"message": fmt.Sprintf("Directory group %s ensured successfully", req.Name),
+					"message": fmt.Sprintf("Group %s ensured successfully", req.Name),
 				})
 			default:
 				writeDirError(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -5751,11 +5879,17 @@ func main() {
 		})
 
 		mux.HandleFunc("/v1/system/directory/status", func(w http.ResponseWriter, r *http.Request) {
+			if !requirePluginEnabled(w, "directory-ldap") {
+				return
+			}
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(directoryManager.GetStatus())
 		})
 
 		mux.HandleFunc("/v1/system/directory/policy", func(w http.ResponseWriter, r *http.Request) {
+			if !requirePluginEnabled(w, "directory-ldap") {
+				return
+			}
 			if r.Method != http.MethodPut && r.Method != http.MethodPost {
 				writeDirError(w, "Method not allowed", http.StatusMethodNotAllowed)
 				return
@@ -5778,6 +5912,9 @@ func main() {
 		})
 
 		mux.HandleFunc("/v1/system/directory/migrate", func(w http.ResponseWriter, r *http.Request) {
+			if !requirePluginEnabled(w, "directory-ldap") {
+				return
+			}
 			if r.Method != http.MethodPost {
 				writeDirError(w, "Method not allowed", http.StatusMethodNotAllowed)
 				return
@@ -5853,6 +5990,13 @@ func main() {
 		}
 
 		checkMcpEnabled := func(w http.ResponseWriter) bool {
+			if pluginManager != nil && !pluginManager.IsPluginEnabled("mcp-ai-control") {
+				writeMcpJSON(w, http.StatusForbidden, map[string]any{
+					"success": false,
+					"error":   "MCP Security AI Control plugin (mcp-ai-control) is disabled. Enable it in System -> Plugin Store & Roles first.",
+				})
+				return false
+			}
 			if enabled, reason := engine.IsMcpSubsystemEnabled(); !enabled {
 				writeMcpJSON(w, http.StatusServiceUnavailable, map[string]any{
 					"success": false,
@@ -6075,6 +6219,9 @@ func main() {
 				return
 			}
 			if !checkMcpEnabled(w) {
+				return
+			}
+			if !requirePluginEnabled(w, "packet-diagnostics") {
 				return
 			}
 			var req struct {
@@ -6584,7 +6731,6 @@ func main() {
 			}
 		})
 
-
 		mux.HandleFunc("/v1/ebpf/xdp/syn-limit", func(w http.ResponseWriter, r *http.Request) {
 			switch r.Method {
 			case http.MethodGet:
@@ -6617,7 +6763,6 @@ func main() {
 				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			}
 		})
-
 
 		mux.HandleFunc("/v1/ebpf/tokens", func(w http.ResponseWriter, r *http.Request) {
 			tokMgr := engine.GetDefaultBpfTokenManager()
@@ -6673,7 +6818,6 @@ func main() {
 				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			}
 		})
-
 
 		mux.HandleFunc("/v1/ebpf/tokens/render-k3s", func(w http.ResponseWriter, r *http.Request) {
 			if r.Method != http.MethodPost {

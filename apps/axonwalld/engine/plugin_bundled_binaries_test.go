@@ -1396,8 +1396,11 @@ func TestPluginShellSnippetLifecycle_Workstation(t *testing.T) {
 	if err := pm.ensureWorkstationNvimSymlinks(); err != nil {
 		t.Fatalf("ensureWorkstationNvimSymlinks: %v", err)
 	}
-	// cli-workstation is enabled by default (no
-	// /etc/axonwall/workstation.disabled in this sandbox).
+	// cli-workstation is opt-in on Lean Core: enable it in installedMap
+	// for the shell snippet lifecycle test.
+	pm.mu.Lock()
+	pm.installedMap["cli-workstation"] = "2026-11-24T00:00:00Z"
+	pm.mu.Unlock()
 	if !pm.IsPluginEnabled("cli-workstation") {
 		t.Fatalf("precondition failed: cli-workstation should read enabled")
 	}

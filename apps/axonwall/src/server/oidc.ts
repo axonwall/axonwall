@@ -1,4 +1,5 @@
 import { createRemoteJWKSet, jwtVerify, type JWTPayload } from 'jose';
+import { isPluginEnabled } from '@axonwall/lib/plugins';
 import { getDesiredStateInternal } from './desired-state-internal';
 
 /**
@@ -31,9 +32,19 @@ export interface OidcConfig {
 }
 
 export async function getOidcConfig(): Promise<OidcConfig | null> {
+  let desiredState: Awaited<ReturnType<typeof getDesiredStateInternal>> | null = null;
+  try {
+    desiredState = await getDesiredStateInternal();
+  } catch {
+    desiredState = null;
+  }
+
   const envIssuerUrl = process.env.OIDC_ISSUER_URL?.trim();
   const envClientId = process.env.OIDC_CLIENT_ID?.trim();
   if (envIssuerUrl && envClientId) {
+    if (!desiredState || !isPluginEnabled('enterprise-sso', desiredState)) {
+      return null;
+    }
     return {
       issuerUrl: envIssuerUrl.replace(/\/+$/, ''),
       clientId: envClientId,
@@ -42,9 +53,8 @@ export async function getOidcConfig(): Promise<OidcConfig | null> {
     };
   }
 
-  try {
-    const state = await getDesiredStateInternal();
-    const sso = state?.sso;
+  if (desiredState && isPluginEnabled('enterprise-sso', desiredState)) {
+    const sso = desiredState.sso;
     if (
       sso?.enabled &&
       sso.provider === 'oidc' &&
@@ -61,8 +71,6 @@ export async function getOidcConfig(): Promise<OidcConfig | null> {
         roleMappings: Array.isArray(sso.roleMappings) ? sso.roleMappings : undefined,
       };
     }
-  } catch {
-    // DesiredState unreadable -> treat SSO as unconfigured rather than throwing.
   }
 
   return null;

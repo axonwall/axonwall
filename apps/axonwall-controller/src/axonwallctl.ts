@@ -18,10 +18,14 @@ import { synthesizeDefaultDhcpSubnet } from '@axonwall/lib/compile/kea';
 import { DesiredStateSchema, VigilanteConfigSchema, inferInterfaceRole, type DesiredState } from '@axonwall/lib/schemas';
 import {
   BUILTIN_PLUGINS,
+  PLUGIN_STARTER_PACKS,
+  findStarterPackById,
+  getStarterPackPluginIdsWithDeps,
   resolveCapabilities,
   isPluginEnabled,
   enablePluginWithDependencies,
   disablePluginWithDependents,
+  enableStarterPack,
 } from '@axonwall/lib/plugins';
 import { getMcpServerStatus, saveMcpSettings, validateVirtWorkloadSafety, type SaveMcpSettingsResult } from '@axonwall/lib/mcp';
 import { importFirewallConfig, mergeFirewallConfigs, type FirewallVendor } from '@axonwall/lib/import';
@@ -29,6 +33,7 @@ import { isValidDevice } from '@axonwall/lib/util';
 import { acquireMcpLockFile, desiredStateLockPath } from './mcp/lockfile.js';
 import { writeCanonicalConfig, writeFileAtomicSync } from './atomic-config.js';
 import {
+  applyCloudInitStarterPacks,
   parseCloudInitYaml,
   parseCloudInitNetworkConfig,
   serializeYaml,
@@ -1776,6 +1781,43 @@ async function cmdCloudInit(userArgs: string[]) {
     }
   }
 
+  // Reconcile axonwall.starter_packs declarations onto mergedDesiredState & starter-packs.seed
+  const requestedPacks = Array.isArray(cloudConfig.axonwall?.starter_packs)
+    ? cloudConfig.axonwall.starter_packs
+    : [];
+  const validStarterPacks: string[] = [];
+  for (const rawPack of requestedPacks) {
+    const trimmed = String(rawPack || '').trim();
+    if (!trimmed) continue;
+    if (findStarterPackById(trimmed)) {
+      if (!validStarterPacks.includes(trimmed)) validStarterPacks.push(trimmed);
+    } else {
+      console.warn(`[!] Ignoring unknown cloud-init starter pack '${trimmed}'.`);
+    }
+  }
+  if (validStarterPacks.length > 0) {
+    console.log(`[+] Staging cloud-init starter packs: ${validStarterPacks.join(', ')}`);
+    const baseState = DesiredStateSchema.parse(mergedDesiredState);
+    const withPacks = applyCloudInitStarterPacks(baseState, validStarterPacks);
+    for (const key of Object.keys(withPacks) as Array<keyof typeof withPacks>) {
+      if (JSON.stringify(withPacks[key]) !== JSON.stringify(baseState[key])) {
+        mergedDesiredState[key] = withPacks[key];
+      }
+    }
+    if (!isDryRun) {
+      const seedContent = validStarterPacks.join('\n') + '\n';
+      for (const baseDir of [ETC_DIR, PERSIST_YAML_DIR]) {
+        try {
+          fs.mkdirSync(baseDir, { recursive: true, mode: 0o775 });
+          const seedPath = path.join(baseDir, 'starter-packs.seed');
+          fs.writeFileSync(seedPath, seedContent, { mode: 0o660 });
+          try { fs.chmodSync(seedPath, 0o660); } catch {}
+        } catch {}
+      }
+      fixSharedConfigOwnership();
+    }
+  }
+
   if (Object.keys(mergedDesiredState).length > 0) {
     console.log(`[+] Staging declarative desired_state from cloud-config into /etc/axonwall/conf.d/99-cloudinit.yaml...`);
     if (!isDryRun) {
@@ -1953,6 +1995,29 @@ async function setCoreRolePlugin(pluginId: string, enable: boolean) {
   await cmdApply(true);
 }
 
+function persistDesiredStateAtomic(state: DesiredState): void {
+  const yamlFiles = serializeDesiredStateToYamlFiles(state);
+  for (const dir of [ETC_DIR, PERSIST_YAML_DIR]) {
+    try {
+      fs.mkdirSync(path.join(dir, 'conf.d'), { recursive: true, mode: 0o775 });
+      for (const [filename, content] of Object.entries(yamlFiles)) {
+        writeFileAtomicSync(path.join(dir, filename), content, 0o660);
+      }
+      const ciOverride = path.join(dir, 'conf.d', '99-cloudinit.yaml');
+      if (fs.existsSync(ciOverride)) {
+        fs.rmSync(ciOverride, { force: true });
+      }
+    } catch {}
+  }
+  writeCanonicalConfig({
+    canonicalPath: STATE_JSON_PATH,
+    mirrorPaths: [path.join(PERSIST_YAML_DIR, 'state.json'), path.join(ETC_DIR, 'state.json')],
+    serialized: JSON.stringify(state, null, 2),
+    mode: 0o660,
+    label: 'state.json',
+  });
+}
+
 async function setExtensionPlugin(pluginId: string, enable: boolean) {
   const manifest = BUILTIN_PLUGINS.find((p) => p.id === pluginId && p.category !== 'core_role');
   if (!manifest) {
@@ -1968,67 +2033,6 @@ async function setExtensionPlugin(pluginId: string, enable: boolean) {
     releaseLock = acquireMcpLockFile(desiredStateLockPath());
     state = cmdValidate(true);
 
-    const existingEntry = (state.plugins || []).find((p: any) => p.id === pluginId);
-    const nextPlugins = (state.plugins || []).filter((p: any) => p.id !== pluginId);
-    nextPlugins.push({ id: pluginId, enabled: enable, config: existingEntry?.config ?? {} });
-    state.plugins = nextPlugins;
-
-    if (pluginId === 'rosenpass') {
-      state.rosenpass = {
-        ...(state.rosenpass || {
-          listenPort: 9999,
-          listenAddresses: ['0.0.0.0:9999', '[::]:9999'],
-          wgDevice: 'wg0',
-          verbosity: 'Quiet',
-          rekeyIntervalSeconds: 120,
-          failClosedBootGuard: true,
-          memfdSecret: true,
-          publicKeyPath: '/etc/rosenpass/pq.pk',
-          secretKeyPath: '/etc/rosenpass/pq.sk',
-          peers: [],
-        }),
-        enabled: enable,
-      };
-    } else if (pluginId === 'haproxy') {
-      state.haproxy = {
-        ...(state.haproxy || { mode: 'http', frontends: [], backends: [] }),
-        enabled: enable,
-      };
-    } else if (pluginId === 'freeradius') {
-      state.freeradius = {
-        ...(state.freeradius || { authPort: 1812, acctPort: 1813, clients: [], ldapSync: true }),
-        enabled: enable,
-      };
-    } else if (pluginId === 'snmp') {
-      state.snmp = {
-        ...(state.snmp || {
-          community: 'public',
-          sysLocation: 'Server Room',
-          sysContact: 'admin@axonwall.local',
-          listenPort: 161,
-        }),
-        enabled: enable,
-      };
-    } else if (pluginId === 'nut-ups') {
-      state.ups = {
-        ...(state.ups || {
-          name: 'ups',
-          driver: 'usbhid-ups',
-          port: 'auto',
-          shutdownBatteryPct: 20,
-          lowBatteryRuntimeSec: 300,
-        }),
-        enabled: enable,
-      };
-    } else if (pluginId === 'headscale') {
-      state.headscale = {
-        ...(state.headscale || {
-          magicDnsDomain: 'mesh.axonwall.local',
-        }),
-        enabled: enable,
-      };
-    }
-
     if (enable) {
       const depRes = enablePluginWithDependencies(pluginId, state);
       Object.assign(state, depRes.state);
@@ -2040,28 +2044,14 @@ async function setExtensionPlugin(pluginId: string, enable: boolean) {
     } else {
       const depRes = disablePluginWithDependents(pluginId, state);
       Object.assign(state, depRes.state);
+      if (depRes.autoDisabledDependents.length > 0) {
+        console.log(
+          `${cYellow}[!] Auto-disabled dependent plugin(s): ${depRes.autoDisabledDependents.join(', ')}${cReset}`
+        );
+      }
     }
 
-    const yamlFiles = serializeDesiredStateToYamlFiles(state);
-    for (const dir of [ETC_DIR, PERSIST_YAML_DIR]) {
-      try {
-        fs.mkdirSync(path.join(dir, 'conf.d'), { recursive: true, mode: 0o775 });
-        for (const [filename, content] of Object.entries(yamlFiles)) {
-          writeFileAtomicSync(path.join(dir, filename), content, 0o660);
-        }
-        const ciOverride = path.join(dir, 'conf.d', '99-cloudinit.yaml');
-        if (fs.existsSync(ciOverride)) {
-          fs.rmSync(ciOverride, { force: true });
-        }
-      } catch {}
-    }
-    writeCanonicalConfig({
-      canonicalPath: STATE_JSON_PATH,
-      mirrorPaths: [path.join(PERSIST_YAML_DIR, 'state.json'), path.join(ETC_DIR, 'state.json')],
-      serialized: JSON.stringify(state, null, 2),
-      mode: 0o660,
-      label: 'state.json',
-    });
+    persistDesiredStateAtomic(state);
   } finally {
     try { releaseLock?.(); } catch {}
   }
@@ -2242,6 +2232,29 @@ async function cmdPlugin(args: string[]) {
         );
         if (res.success) {
           console.log(`${cGreen}[✓] ${res.message}${cReset}`);
+          let syncApply = false;
+          let autoDisabledDependents: string[] = [];
+          let releaseLock: (() => void) | null = null;
+          try {
+            releaseLock = acquireMcpLockFile(desiredStateLockPath());
+            const state = cmdValidate(true);
+            if (isPluginEnabled(pluginId, state)) {
+              const depRes = disablePluginWithDependents(pluginId, state);
+              persistDesiredStateAtomic(depRes.state);
+              autoDisabledDependents = depRes.autoDisabledDependents;
+              syncApply = true;
+            }
+          } finally {
+            try { releaseLock?.(); } catch {}
+          }
+          if (syncApply) {
+            await cmdApply(true);
+            const depNote =
+              autoDisabledDependents.length > 0
+                ? ` (also disabled dependents: ${autoDisabledDependents.join(', ')})`
+                : '';
+            console.log(`${cGreen}[✓] Disabled '${pluginId}' in DesiredState${depNote}.${cReset}`);
+          }
         } else {
           console.error(`${cRed}[!] ${res.message}${cReset}`);
           if (res.output) console.error(res.output);
@@ -2280,9 +2293,208 @@ async function cmdPlugin(args: string[]) {
       }
       break;
     }
+    case 'pack':
+    case 'packs': {
+      const packAction = (args[1] || 'list').toLowerCase();
+      const packArgs = args.slice(2);
+      const offlineConfigOnly = packArgs.includes('--offline-config-only');
+      const packId = packArgs.find((a) => !a.startsWith('-'));
+      if (packAction === 'list' || packAction === 'ls') {
+        console.log(`\n${cCyan}${cBold}=== Axonwall Curated Starter Packs ===${cReset}\n`);
+        for (const pack of PLUGIN_STARTER_PACKS) {
+          console.log(`  ${cBold}${pack.id.padEnd(24)}${cReset} ${pack.name}`);
+          console.log(`    ${cCyan}${pack.tagline}${cReset}`);
+          console.log(`    Plugins: ${pack.pluginIds.join(', ')}\n`);
+        }
+        break;
+      }
+      if (packAction === 'install' || packAction === 'enable' || packAction === 'add') {
+        const pack = packId ? findStarterPackById(packId) : undefined;
+        if (!pack) {
+          console.error(
+            `${cRed}Usage: axonwallctl plugin pack install <pack-id> [--offline-config-only]${cReset}\nAvailable packs: ${PLUGIN_STARTER_PACKS.map((p) => p.id).join(', ')}`
+          );
+          process.exit(1);
+        }
+        const orderedPluginIds = getStarterPackPluginIdsWithDeps(pack.id);
+        console.log(`[+] Installing Starter Pack '${pack.id}' (${pack.name}: ${orderedPluginIds.join(', ')})...`);
+        for (const pid of orderedPluginIds) {
+          const manifest = BUILTIN_PLUGINS.find((p) => p.id === pid);
+          const hasPkgs = Boolean(
+            manifest?.packages &&
+              ((manifest.packages.debian && manifest.packages.debian.length > 0) ||
+                (manifest.packages.alpine && manifest.packages.alpine.length > 0) ||
+                (manifest.packages.arch && manifest.packages.arch.length > 0))
+          );
+          if (!hasPkgs && pid !== 'docs-portal' && pid !== 'headscale') continue;
+          try {
+            const res = await sendAgentSocketRequest<{ success: boolean; message: string; output?: string }>(
+              '/v1/system/plugins/action',
+              'POST',
+              { pluginId: pid, action: 'install' },
+              300000
+            );
+            if (!res.success) {
+              console.error(`${cRed}[!] Failed installing '${pid}': ${res.message}${cReset}`);
+              if (res.output) console.error(res.output);
+              process.exit(1);
+            }
+            console.log(`${cGreen}[✓] Installed '${pid}': ${res.message}${cReset}`);
+          } catch (err: any) {
+            if (offlineConfigOnly) {
+              console.log(
+                `${cYellow}[!] Daemon offline (--offline-config-only); skipping package install for '${pid}' (${err?.message || err})${cReset}`
+              );
+            } else {
+              console.error(
+                `${cRed}[!] Cannot install OS packages for '${pid}': axonwalld is unreachable (${err?.message || err}). Start axonwalld or pass --offline-config-only to stage config without installing packages.${cReset}`
+              );
+              process.exit(1);
+            }
+          }
+        }
+
+        let releaseLock: (() => void) | null = null;
+        try {
+          releaseLock = acquireMcpLockFile(desiredStateLockPath());
+          const state = cmdValidate(true);
+          const res = enableStarterPack(pack.id, state);
+          persistDesiredStateAtomic(res.state);
+        } finally {
+          try { releaseLock?.(); } catch {}
+        }
+        await cmdApply(true);
+        console.log(`${cGreen}[✓] Starter Pack '${pack.id}' enabled (${orderedPluginIds.join(', ')}).${cReset}`);
+        break;
+      }
+      console.error(`${cRed}Usage: axonwallctl plugin pack <list|install <pack-id> [--offline-config-only]>${cReset}`);
+      process.exit(1);
+    }
+    case 'cache-status':
+    case 'cache': {
+      const cacheRoot = (process.env.AXONWALL_PLUGIN_CACHE_DIR || '/var/lib/axonwall/plugin-cache').trim();
+      console.log(`\n${cCyan}${cBold}=== Axonwall Offline Plugin Cache (${cacheRoot}) ===${cReset}\n`);
+
+      let anyTampered = false;
+      for (const osFam of ['debian', 'alpine'] as const) {
+        const osDir = path.join(cacheRoot, osFam);
+        const ext = osFam === 'alpine' ? '.apk' : '.deb';
+        if (!fs.existsSync(osDir) || !fs.statSync(osDir).isDirectory()) {
+          console.log(`  ${osFam.padEnd(8)} : ${cDim}NOT PRESENT${cReset} (${osDir})`);
+          continue;
+        }
+
+        const entries = fs.readdirSync(osDir);
+        const archiveFiles = entries.filter((f) => f.endsWith(ext)).sort();
+        const manifestPath = path.join(osDir, 'manifest.json');
+        let manifestBadge = `${cYellow}NO MANIFEST${cReset}`;
+        let verifiedFiles: string[] = archiveFiles;
+
+        if (fs.existsSync(manifestPath)) {
+          try {
+            const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8')) as {
+              version?: string;
+              generatedAt?: string;
+              files?: Array<{ filename: string; sha256: string }>;
+            };
+            if (!Array.isArray(manifest.files) || manifest.files.length === 0) {
+              anyTampered = true;
+              manifestBadge = `${cRed}TAMPERED${cReset} (empty manifest.files)`;
+              verifiedFiles = [];
+            } else {
+              let mismatches = 0;
+              const validList: string[] = [];
+              for (const entry of manifest.files) {
+                const name = entry?.filename || '';
+                const expectedSha = typeof entry?.sha256 === 'string' ? entry.sha256.trim().toLowerCase() : '';
+                if (!name || path.basename(name) !== name || name.includes('..') || !/^[0-9a-f]{64}$/.test(expectedSha)) {
+                  mismatches++;
+                  continue;
+                }
+                const target = path.join(osDir, name);
+                let st: fs.Stats | null = null;
+                try {
+                  st = fs.lstatSync(target);
+                } catch {
+                  st = null;
+                }
+                if (!st || !st.isFile()) {
+                  mismatches++;
+                  continue;
+                }
+                const got = crypto.createHash('sha256').update(fs.readFileSync(target)).digest('hex');
+                if (got !== expectedSha) {
+                  mismatches++;
+                  continue;
+                }
+                if (name.endsWith(ext)) validList.push(name);
+              }
+              if (mismatches === 0) {
+                manifestBadge = `${cGreen}VERIFIED${cReset} (v${manifest.version || 'unknown'}, ${manifest.files.length} manifest entries)`;
+                verifiedFiles = validList;
+              } else {
+                anyTampered = true;
+                manifestBadge = `${cRed}TAMPERED${cReset} (${mismatches} mismatch/missing entry)`;
+                verifiedFiles = [];
+              }
+            }
+          } catch (err: any) {
+            anyTampered = true;
+            manifestBadge = `${cRed}TAMPERED${cReset} (invalid manifest.json: ${err?.message || err})`;
+            verifiedFiles = [];
+          }
+        }
+
+        const matchesOfflineArchive = (pkg: string, fname: string): boolean => {
+          if (osFam === 'debian') {
+            return fname.startsWith(`${pkg}_`) && fname.endsWith('.deb');
+          }
+          const prefix = `${pkg}-`;
+          if (!fname.startsWith(prefix) || !fname.endsWith('.apk')) return false;
+          const rest = fname.slice(prefix.length);
+          return rest.length > 0 && rest[0]! >= '0' && rest[0]! <= '9';
+        };
+
+        const satisfiedPacks: string[] = [];
+        const partialPacks: string[] = [];
+        for (const pack of PLUGIN_STARTER_PACKS) {
+          const reqPkgs = new Set<string>();
+          for (const pid of getStarterPackPluginIdsWithDeps(pack.id)) {
+            const manifest = BUILTIN_PLUGINS.find((p) => p.id === pid);
+            for (const pkg of manifest?.packages?.[osFam] ?? []) {
+              reqPkgs.add(pkg);
+            }
+          }
+          if (reqPkgs.size === 0) {
+            satisfiedPacks.push(pack.id);
+            continue;
+          }
+          let missingCount = 0;
+          for (const pkg of reqPkgs) {
+            if (!verifiedFiles.some((f) => matchesOfflineArchive(pkg, f))) {
+              missingCount++;
+            }
+          }
+          if (missingCount === 0) satisfiedPacks.push(pack.id);
+          else if (missingCount < reqPkgs.size) partialPacks.push(`${pack.id} (-${missingCount})`);
+        }
+
+        console.log(`  ${osFam.padEnd(8)} : ${manifestBadge} | ${archiveFiles.length} ${ext} archives on disk`);
+        console.log(
+          `    Starter Packs ready : ${
+            satisfiedPacks.length > 0 ? `${cGreen}${satisfiedPacks.join(', ')}${cReset}` : `${cDim}none${cReset}`
+          }${partialPacks.length > 0 ? ` | Partial: ${cYellow}${partialPacks.join(', ')}${cReset}` : ''}`
+        );
+      }
+      console.log('');
+      if (anyTampered) {
+        process.exit(1);
+      }
+      break;
+    }
     default:
       console.error(`${cRed}Unknown plugin subcommand: ${subcmd}${cReset}`);
-      console.log(`Usage: axonwallctl plugin <list|enable|disable|install|remove|re-sync> [plugin-id]`);
+      console.log(`Usage: axonwallctl plugin <list|enable|disable|install|remove|re-sync|pack|cache-status> [plugin-id]`);
       process.exit(1);
   }
 }
@@ -3760,7 +3972,11 @@ _axonwallctl_completions() {
       return 0
       ;;
     plugin|plugins)
-      COMPREPLY=( $(compgen -W "list enable disable install remove re-sync" -- "\${cur}") )
+      COMPREPLY=( $(compgen -W "list enable disable install remove re-sync pack" -- "\${cur}") )
+      return 0
+      ;;
+    pack|packs)
+      COMPREPLY=( $(compgen -W "list install" -- "\${cur}") )
       return 0
       ;;
     enable|disable|install|remove|re-sync)
@@ -4034,7 +4250,7 @@ ${cBold}COMMANDS:${cReset}
                       Options: [--pkg-upgrade|--apt|--pacman|--apk] [--version <ver>] [--slot <A|B>]
                       (--version defaults to the installed version; the updater is always invoked with an explicit --version)
   kernel <cmd> [args] Detect hardware/modules, audit running kernel KSPP posture, or export stripped .config (detect, audit, config)
-  plugin <cmd> [id]   Manage core roles & extension plugins (list, enable, disable, install, remove, re-sync)
+  plugin <cmd> [id]   Manage core roles, plugins & packs (list, enable, disable, install, remove, re-sync, pack)
   ebpf <cmd> [args]      Inspect Ring-0 XDP dataplane, LPM CIDR blocks, SYN-flood PPS & Linux 6.9+ BPF_TOKEN delegation
   harvester <cmd> [args] Manage Blackbox eBPF Threat-LLM Harvester (status, episodes, simulate, export, ship)
   nas <cmd> [args]    Manage OpenZFS pools, Special VDEVs, snapshots, rollback, scrub, TRIM, checkpoints, AES-256-GCM keys & SMART

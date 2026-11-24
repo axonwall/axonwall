@@ -1,6 +1,8 @@
 'use client';
 
 import React, { useEffect, useMemo, useState } from 'react';
+import { PluginDisabledGate } from '@/components/PluginDisabledGate';
+import { PluginAwareLink } from '@/components/PluginAwareLink';
 import {
   Activity,
   AlertTriangle,
@@ -117,7 +119,7 @@ function formatBytes(bytes: number): string {
   return `${val.toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
 }
 
-export default function CustomKernelStudioPage() {
+function CustomKernelStudioPageContent() {
   const [studio, setStudio] = useState<StudioPayload | null>(null);
   const [spec, setSpec] = useState<CustomKernelBuildSpec | null>(null);
   const [compiled, setCompiled] = useState<CompiledKernelBundle | null>(null);
@@ -361,13 +363,14 @@ export default function CustomKernelStudioPage() {
             <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
             Re-Probe Hardware
           </button>
-          <a
+          <PluginAwareLink
+            pluginId="docs-portal"
             href="/docs/custom-kernel"
             className="inline-flex items-center gap-2 px-3.5 py-2 rounded-lg bg-slate-900 hover:bg-slate-800 text-sky-400 text-xs font-medium border border-slate-700 transition"
           >
             <ShieldCheck className="w-3.5 h-3.5" />
             Hardening Guide
-          </a>
+          </PluginAwareLink>
         </div>
       </div>
 
@@ -1097,5 +1100,13 @@ export default function CustomKernelStudioPage() {
         </div>
       )}
     </div>
+  );
+}
+
+export default function CustomKernelStudioPage() {
+  return (
+    <PluginDisabledGate pluginId="custom-kernel-studio">
+      <CustomKernelStudioPageContent />
+    </PluginDisabledGate>
   );
 }

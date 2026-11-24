@@ -3,6 +3,7 @@
 import { getSession } from './auth';
 import { assertActionPermitted } from './auth-guard';
 import { callAgentApi, callAgentApiResponse } from './agent-client';
+import { assertPluginEnabled } from './plugin-guard';
 import type {
   LocalUser,
   LocalGroup,
@@ -146,6 +147,7 @@ export interface DirectoryStatus {
 export async function getDirectoryStatus(): Promise<DirectoryStatus | null> {
   const session = await getSession();
   assertActionPermitted(session, 'admin');
+  await assertPluginEnabled('directory-ldap');
 
   const res = await callAgentApi<DirectoryStatus>('/v1/system/directory/status', 'GET');
   return res || null;
@@ -156,6 +158,7 @@ export async function updateDirectoryPasswordPolicy(
 ): Promise<{ success: boolean; message: string; policy: PasswordPolicyConfig }> {
   const session = await getSession();
   assertActionPermitted(session, 'admin');
+  await assertPluginEnabled('directory-ldap');
 
   const res = await callAgentApiResponse<{ success?: boolean; message?: string; policy?: PasswordPolicyConfig }>(
     '/v1/system/directory/policy',
@@ -179,6 +182,7 @@ export async function migrateLocalUsersToLdap(): Promise<{
 }> {
   const session = await getSession();
   assertActionPermitted(session, 'admin');
+  await assertPluginEnabled('directory-ldap');
 
   const res = await callAgentApiResponse<{ success?: boolean; migrated?: string[]; message?: string }>(
     '/v1/system/directory/migrate',

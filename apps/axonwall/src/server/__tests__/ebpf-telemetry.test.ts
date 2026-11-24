@@ -22,6 +22,10 @@ vi.mock('../auth', () => ({
   })),
 }));
 
+vi.mock('../plugin-guard', () => ({
+  assertPluginEnabled: vi.fn(async () => {}),
+}));
+
 import {
   buildBpfDependencyGraph,
   buildFlowHeatmapMatrix,

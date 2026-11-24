@@ -9,10 +9,10 @@ import { BUILTIN_PLUGINS, isPluginEnabled, DesiredStateSchema } from '@axonwall/
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, '../../..');
 
-test('cli-workstation plugin (ZSH, Oh My Zsh, VIM, Starship) is enabled by default and can be disabled to reduce attack surface', () => {
+test('cli-workstation plugin (ZSH, Oh My Zsh, VIM, Starship) is opt-in (defaultEnabled: false) and can be explicitly enabled', () => {
   const manifest = BUILTIN_PLUGINS.find((p) => p.id === 'cli-workstation');
   assert.ok(manifest, 'cli-workstation plugin must exist in BUILTIN_PLUGINS');
-  assert.equal(manifest.defaultEnabled, true, 'cli-workstation must have defaultEnabled: true');
+  assert.equal(manifest.defaultEnabled, false, 'cli-workstation must have defaultEnabled: false in Lean Core');
   assert.ok(manifest.name.includes('Oh My Zsh'), 'cli-workstation name should mention Oh My Zsh');
 
   const defaultState = DesiredStateSchema.parse({
@@ -23,21 +23,21 @@ test('cli-workstation plugin (ZSH, Oh My Zsh, VIM, Starship) is enabled by defau
   });
   assert.equal(
     isPluginEnabled('cli-workstation', defaultState),
-    true,
-    'cli-workstation must be enabled by default on fresh state'
+    false,
+    'cli-workstation must be disabled by default on fresh Lean Core state'
   );
 
-  const hardenedState = DesiredStateSchema.parse({
+  const enabledState = DesiredStateSchema.parse({
     version: 1,
     interfaces: [{ name: 'wan', device: 'eth0', type: 'dhcp', enabled: true }],
     aliases: [],
     rules: [],
-    plugins: [{ id: 'cli-workstation', enabled: false, config: {} }],
+    plugins: [{ id: 'cli-workstation', enabled: true, config: {} }],
   });
   assert.equal(
-    isPluginEnabled('cli-workstation', hardenedState),
-    false,
-    'cli-workstation must be disabled when operator explicitly sets enabled: false'
+    isPluginEnabled('cli-workstation', enabledState),
+    true,
+    'cli-workstation must be enabled when operator explicitly sets enabled: true'
   );
 });
 

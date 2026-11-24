@@ -61,6 +61,7 @@ packaging/edge-uki/.cache/
 # Debian package & custom kernel build artifacts
 packaging/debian/output/
 packaging/debian/build/
+packaging/docs/output/
 packaging/kernel/output/
 packaging/kernel/build/
 *.deb

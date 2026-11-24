@@ -1,6 +1,8 @@
 'use client';
 
 import React, { useState, useEffect, useRef } from 'react';
+import { PluginDisabledGate } from '@/components/PluginDisabledGate';
+import { PluginAwareLink } from '@/components/PluginAwareLink';
 import Link from 'next/link';
 import {
   Activity,
@@ -334,7 +336,7 @@ kubectl logs -n kube-system -l app.kubernetes.io/name=tetragon -c export-stdout 
   },
 ];
 
-export default function EbpfObservabilityConsolePage() {
+function EbpfObservabilityConsolePageContent() {
   const [activeTab, setActiveTab] = useState<
     | 'live-visuals'
     | 'pillars'
@@ -987,13 +989,14 @@ export default function EbpfObservabilityConsolePage() {
           >
             Plugin Store (<code className="text-emerald-400 font-mono">coroot-ebpf-apm</code>)
           </Link>
-          <Link
+          <PluginAwareLink
+            pluginId="docs-portal"
             href="/docs/observability"
             className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-xs font-semibold text-white shadow-lg shadow-emerald-950/50 transition"
           >
             Architecture Guide
             <ArrowUpRight className="w-3.5 h-3.5" />
-          </Link>
+          </PluginAwareLink>
         </div>
       </div>
 
@@ -1685,13 +1688,14 @@ export default function EbpfObservabilityConsolePage() {
                   BPF-LSM security. Unmeasured checks stay honestly labeled <code className="font-mono">UNKNOWN</code>.
                 </p>
               </div>
-              <Link
+              <PluginAwareLink
+                pluginId="ai-copilot"
                 href="/ai"
                 className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-purple-600/20 hover:bg-purple-600/30 border border-purple-500/30 text-xs font-semibold text-purple-300 transition"
               >
                 <Sparkles className="w-3.5 h-3.5" />
                 Escalate Findings to Eluvix AI Copilot
-              </Link>
+              </PluginAwareLink>
             </div>
 
             {rcaTelemetryChartData.length > 0 && (
@@ -2438,5 +2442,13 @@ export default function EbpfObservabilityConsolePage() {
         </div>
       )}
     </div>
+  );
+}
+
+export default function EbpfObservabilityConsolePage() {
+  return (
+    <PluginDisabledGate pluginId="coroot-ebpf-apm">
+      <EbpfObservabilityConsolePageContent />
+    </PluginDisabledGate>
   );
 }

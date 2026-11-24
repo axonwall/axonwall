@@ -23,7 +23,8 @@ export async function GET() {
     info: {
       title: 'Axonwall Firewall REST API',
       version: '0.15.1',
-      description: 'Declarative REST API for managing Axonwall Linux nftables firewalls, routing, services, and commit-confirm apply pipeline.',
+      description:
+        'Declarative REST API for managing Axonwall Linux nftables firewalls, routing, services, and commit-confirm apply pipeline. Optional extension endpoints fail closed (HTTP 403) when their backing plugin is disabled in DesiredState, while core POSIX user administration (/api/system/users) remains available without directory-ldap.',
     },
     servers: [
       {

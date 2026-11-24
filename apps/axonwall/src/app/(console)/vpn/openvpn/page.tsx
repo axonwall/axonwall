@@ -1,13 +1,14 @@
 'use client';
 
 import { useState, useEffect } from 'react';
+import { PluginDisabledGate } from '@/components/PluginDisabledGate';
 import { KeyRound, Terminal, Download, Cpu, CheckCircle2, Copy, Plus, Trash2 } from 'lucide-react';
 import { compileOpenVpn, generateClientOvpnProfile } from '@axonwall/lib/compile/openvpn';
 import { getCurrentDesiredState } from '@/server/agent';
 import { useDesiredStateApply } from '@/lib/use-desired-state-apply';
 import type { DesiredState, OpenVpnServer } from '@axonwall/lib/schemas';
 
-export default function OpenVpnPage() {
+function OpenVpnPageContent() {
   const { applyState } = useDesiredStateApply();
   const [fullState, setFullState] = useState<DesiredState | null>(null);
   const [servers, setServers] = useState<OpenVpnServer[]>([]);
@@ -324,5 +325,13 @@ export default function OpenVpnPage() {
         </div>
       </div>
     </div>
+  );
+}
+
+export default function OpenVpnPage() {
+  return (
+    <PluginDisabledGate pluginId="openvpn">
+      <OpenVpnPageContent />
+    </PluginDisabledGate>
   );
 }

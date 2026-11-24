@@ -27,17 +27,17 @@ import type { LocalUser, LocalGroup, ApplianceRole } from '@axonwall/lib/schemas
 import type { DirectoryStatus, PasswordPolicyConfig } from '@/server/users';
 import Link from 'next/link';
 
-function defaultShellForRole(role: ApplianceRole): string {
+function defaultShellForRole(role: ApplianceRole, zshInstalled = false): string {
   switch (role) {
     case 'admin':
-      return '/usr/bin/zsh';
+      return zshInstalled ? '/usr/bin/zsh' : '/bin/bash';
     case 'operator':
       return '/usr/local/bin/axonwall-opshell';
     case 'readonly':
     case 'vpn_user':
       return '/usr/sbin/nologin';
     default:
-      return '/usr/bin/zsh';
+      return zshInstalled ? '/usr/bin/zsh' : '/bin/bash';
   }
 }
 
@@ -45,6 +45,8 @@ export default function LocalUsersPage() {
   const [users, setUsers] = useState<LocalUser[]>([]);
   const [groups, setGroups] = useState<LocalGroup[]>([]);
   const [dirStatus, setDirStatus] = useState<DirectoryStatus | null>(null);
+  const [ldapEnabled, setLdapEnabled] = useState(false);
+  const [zshInstalled, setZshInstalled] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
@@ -93,11 +95,19 @@ export default function LocalUsersPage() {
       const data = await res.json();
       setUsers(data.users || []);
       setGroups(data.groups || []);
-      if (data.directoryStatus) {
+      const isLdap = Boolean(data.ldapEnabled ?? data.directoryStatus);
+      setLdapEnabled(isLdap);
+      setZshInstalled(Boolean(data.zshInstalled));
+      if (!isLdap && activeTab === 'policy') {
+        setActiveTab('human');
+      }
+      if (isLdap && data.directoryStatus) {
         setDirStatus(data.directoryStatus);
         if (data.directoryStatus.passwordPolicy) {
           setPolicyForm(data.directoryStatus.passwordPolicy);
         }
+      } else {
+        setDirStatus(null);
       }
     } catch (err: any) {
       setError(err.message || 'Failed to fetch directory users and groups');
@@ -113,7 +123,7 @@ export default function LocalUsersPage() {
   const handleRoleChange = (role: ApplianceRole) => {
     setFormRole(role);
     if (!editingUser) {
-      setFormShell(defaultShellForRole(role));
+      setFormShell(defaultShellForRole(role, zshInstalled));
     }
   };
 
@@ -175,7 +185,7 @@ export default function LocalUsersPage() {
     setFormUsername(user.username);
     setFormComment(user.comment || '');
     setFormPassword('');
-    setFormShell(user.shell || defaultShellForRole(user.applianceRole || 'os_only'));
+    setFormShell(user.shell || defaultShellForRole(user.applianceRole || 'os_only', zshInstalled));
     setFormRole(user.applianceRole || 'os_only');
     setFormGroups(user.groups || []);
     setFormSSHKeys((user.sshKeys || []).join('\n'));
@@ -434,8 +444,28 @@ export default function LocalUsersPage() {
         </div>
       )}
 
-      {/* OpenLDAP Directory & HA Replication Status Banner */}
-      {dirStatus && (
+      {/* OpenLDAP Directory & HA Replication Status Banner (or Local POSIX notice) */}
+      {!ldapEnabled && !isLoading && (
+        <div className="bg-slate-900/70 border border-slate-800 rounded-xl p-4 flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-3 text-xs text-slate-300">
+            <Info className="w-4 h-4 text-cyan-400 shrink-0" />
+            <span>
+              <strong>Local POSIX Identity Mode:</strong> Managing local{' '}
+              <code className="font-mono text-cyan-300">/etc/passwd</code> &amp;{' '}
+              <code className="font-mono text-cyan-300">/etc/group</code> accounts. Enable the optional{' '}
+              <code className="font-mono text-cyan-300">directory-ldap</code> plugin for centralized OpenLDAP, SSSD, ppolicy &amp; syncrepl HA replication.
+            </span>
+          </div>
+          <Link
+            href="/system/plugins"
+            className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-medium text-cyan-300 transition shrink-0"
+          >
+            Enable in Plugin Store
+          </Link>
+        </div>
+      )}
+
+      {ldapEnabled && dirStatus && (
         <div className="bg-slate-900/70 border border-slate-800 rounded-xl p-4 space-y-3">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="flex items-center gap-3">
@@ -579,18 +609,20 @@ export default function LocalUsersPage() {
               {groups.length}
             </span>
           </button>
-          <button
-            type="button"
-            onClick={() => setActiveTab('policy')}
-            className={`px-4 py-2 rounded-lg text-sm font-medium transition cursor-pointer flex items-center gap-2 ${
-              activeTab === 'policy'
-                ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/30'
-                : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60'
-            }`}
-          >
-            <Lock className="w-4 h-4" />
-            <span>Password & SSH Policy</span>
-          </button>
+          {ldapEnabled && (
+            <button
+              type="button"
+              onClick={() => setActiveTab('policy')}
+              className={`px-4 py-2 rounded-lg text-sm font-medium transition cursor-pointer flex items-center gap-2 ${
+                activeTab === 'policy'
+                  ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/30'
+                  : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60'
+              }`}
+            >
+              <Lock className="w-4 h-4" />
+              <span>Password & SSH Policy</span>
+            </button>
+          )}
           <button
             type="button"
             onClick={() => setActiveTab('system')}
@@ -913,7 +945,7 @@ export default function LocalUsersPage() {
       )}
 
       {/* Tab 4: OpenLDAP Password & SSH Security Policy */}
-      {activeTab === 'policy' && (
+      {ldapEnabled && activeTab === 'policy' && (
         <form
           onSubmit={handleSavePolicy}
           className="bg-slate-900/50 border border-slate-800 rounded-xl p-6 space-y-6 shadow-sm"
@@ -1132,7 +1164,7 @@ export default function LocalUsersPage() {
                       <span>Administrator</span>
                     </div>
                     <p className="text-[11px] text-slate-400 mt-1 leading-snug">
-                      Full access + sudo + /usr/bin/zsh shell (Starship).
+                      Full access + sudo + {zshInstalled ? '/usr/bin/zsh shell (Starship)' : '/bin/bash shell'}.
                     </p>
                   </label>
 
@@ -1272,9 +1304,18 @@ export default function LocalUsersPage() {
                     onChange={(e) => setFormShell(e.target.value)}
                     className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-sm text-white focus:outline-none focus:ring-1 focus:ring-cyan-500 font-mono"
                   >
-                    <option value="/usr/bin/zsh">/usr/bin/zsh (Modern ZSH + Starship — Default Shell)</option>
-                    <option value="/usr/local/bin/axonwall-opshell">/usr/local/bin/axonwall-opshell (Restricted Operator Menu & Ink TUI)</option>
-                    <option value="/bin/bash">/bin/bash (GNU Bourne-Again Shell)</option>
+                    <option
+                      value="/usr/bin/zsh"
+                      disabled={!zshInstalled && formShell !== '/usr/bin/zsh'}
+                    >
+                      {zshInstalled
+                        ? '/usr/bin/zsh (Modern ZSH + Starship — Default Shell)'
+                        : '/usr/bin/zsh (Requires cli-workstation plugin)'}
+                    </option>
+                    <option value="/usr/local/bin/axonwall-opshell">/usr/local/bin/axonwall-opshell (Restricted Operator Menu &amp; Ink TUI)</option>
+                    <option value="/bin/bash">
+                      {zshInstalled ? '/bin/bash (GNU Bourne-Again Shell)' : '/bin/bash (GNU Bourne-Again Shell — Default Shell)'}
+                    </option>
                     <option value="/bin/sh">/bin/sh (POSIX Bourne Shell)</option>
                     <option value="/usr/sbin/nologin">/usr/sbin/nologin (Web Console Only / No SSH Shell)</option>
                     <option value="/bin/false">/bin/false (Disabled Shell)</option>

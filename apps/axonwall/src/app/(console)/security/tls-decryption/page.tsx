@@ -1,12 +1,13 @@
 'use client';
 
 import React, { useState, useEffect } from 'react';
+import { PluginDisabledGate } from '@/components/PluginDisabledGate';
 import { Shield, Download, AlertTriangle, Key, CheckCircle2, Plus, Trash2 } from 'lucide-react';
 import { getCurrentDesiredState } from '@/server/agent';
 import { useDesiredStateApply } from '@/lib/use-desired-state-apply';
 import type { DesiredState } from '@axonwall/lib/schemas';
 
-export default function TlsDecryptionPage() {
+function TlsDecryptionPageContent() {
   const { applyState } = useDesiredStateApply();
   const [fullState, setFullState] = useState<DesiredState | null>(null);
   const [enabled, setEnabled] = useState(false);
@@ -185,5 +186,13 @@ export default function TlsDecryptionPage() {
         </div>
       </div>
     </div>
+  );
+}
+
+export default function TlsDecryptionPage() {
+  return (
+    <PluginDisabledGate pluginId="tls-decryption">
+      <TlsDecryptionPageContent />
+    </PluginDisabledGate>
   );
 }

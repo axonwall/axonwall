@@ -9,6 +9,7 @@ import {
   LibreNmsConfigSchema,
   TopologyConfigSchema,
   NetFlowConfigSchema,
+  AiConfigSchema,
   NasConfigSchema,
   VirtConfigSchema,
   HaProxyPluginConfigSchema,
@@ -18,11 +19,30 @@ import {
   NutUpsConfigSchema,
   HeadscaleConfigSchema,
   ObservabilityConfigSchema,
+  SuricataConfigSchema,
+  CrowdSecConfigSchema,
+  FrrConfigSchema,
+  OpenVpnConfigSchema,
+  IpsecConfigSchema,
+  CaptivePortalConfigSchema,
+  TlsDecryptionSchema,
+  ZeroTrustConfigSchema,
+  IdentityConfigSchema,
+  SsoConfigSchema,
+  HighAvailabilityConfigSchema,
+  SatelliteFleetConfigSchema,
+  McpServerConfigSchema,
   type PluginManifest,
   type DesiredState,
   type CoreCapabilities,
 } from '../schemas/index.js';
-export type { PluginManifest };
+import {
+  PLUGIN_STARTER_PACKS,
+  findStarterPackById,
+  type PluginStarterPack,
+} from './starter-packs.js';
+export type { PluginManifest, PluginStarterPack };
+export { PLUGIN_STARTER_PACKS, findStarterPackById };
 
 export const CORE_ROLE_PLUGIN_IDS = new Set([
   'core-firewall',
@@ -35,17 +55,18 @@ export const CORE_ROLE_PLUGIN_IDS = new Set([
 export const BUILTIN_PLUGINS: PluginManifest[] = [
   {
     id: 'core-firewall',
-    name: 'Axonwall Enterprise NGFW & Router Engine',
+    name: 'Axonwall Lean NGFW & Router Core',
     version: '0.3.1',
     category: 'core_role',
-    description: 'Stateful nftables firewall, NAT/PAT, Multi-WAN SD-WAN, BGP/OSPF (FRR), Suricata IDS/IPS, CrowdSec, VPN concentrator, and Kea DHCP.',
+    description:
+      'Stateful Linux nftables firewall, NAT/PAT, Multi-WAN failover, aliases, GeoIP, traffic shaping (QoS), Kea DHCPv4, Unbound DNS + RPZ sinkhole, ACME TLS, and WireGuard VPN.',
     author: 'Axonwall Core',
-    systemdUnits: ['nftables.service', 'suricata.service', 'frr.service', 'kea-dhcp4-server.service', 'conntrackd.service'],
+    systemdUnits: ['nftables.service', 'kea-dhcp4-server.service', 'unbound.service'],
     privileges: ['firewall.rules', 'network.routing', 'vpn.admin'],
     packages: {
-      debian: ['nftables', 'suricata', 'frr', 'kea-dhcp4-server', 'conntrackd', 'unbound'],
-      alpine: ['nftables', 'suricata', 'frr', 'kea-dhcp4', 'conntrack-tools', 'unbound'],
-      arch: ['nftables', 'suricata', 'frr', 'kea', 'conntrack-tools', 'unbound'],
+      debian: ['nftables', 'kea-dhcp4-server', 'unbound', 'wireguard-tools'],
+      alpine: ['nftables', 'kea-dhcp4', 'unbound', 'wireguard-tools'],
+      arch: ['nftables', 'kea', 'unbound', 'wireguard-tools'],
     },
     nftHooks: [
       { table: 'inet axonwall', chain: 'forward', priority: 0 },
@@ -318,11 +339,6 @@ export const BUILTIN_PLUGINS: PluginManifest[] = [
     author: 'Juan Font / Axonwall Core',
     systemdUnits: ['headscale.service'],
     privileges: ['vpn.admin', 'network.interfaces'],
-    packages: {
-      debian: ['wireguard-tools', 'sqlite3'],
-      alpine: ['wireguard-tools', 'sqlite'],
-      arch: ['headscale', 'wireguard-tools', 'sqlite'],
-    },
     cliBinaries: ['headscale', 'wg'],
     menuEntry: {
       title: 'Mesh VPN (Headscale)',
@@ -340,9 +356,9 @@ export const BUILTIN_PLUGINS: PluginManifest[] = [
     systemdUnits: ['tailscaled.service'],
     privileges: ['vpn.tailscale', 'network.interfaces'],
     packages: {
-      debian: ['wireguard-tools', 'ca-certificates', 'curl'],
-      alpine: ['tailscale', 'wireguard-tools'],
-      arch: ['tailscale', 'wireguard-tools', 'ca-certificates', 'curl'],
+      debian: ['tailscale'],
+      alpine: ['tailscale'],
+      arch: ['tailscale'],
     },
     cliBinaries: ['tailscale', 'tailscaled'],
     menuEntry: {
@@ -361,9 +377,9 @@ export const BUILTIN_PLUGINS: PluginManifest[] = [
     systemdUnits: ['ntopng.service'],
     privileges: ['reporting.flows', 'system.monitoring'],
     packages: {
-      debian: ['tcpdump', 'ethtool'],
-      alpine: ['tcpdump', 'ethtool'],
-      arch: ['tcpdump', 'ethtool'],
+      debian: ['ntopng'],
+      alpine: ['ntopng'],
+      arch: ['ntopng'],
     },
     cliBinaries: ['ntopng', 'tcpdump'],
     menuEntry: {
@@ -377,9 +393,9 @@ export const BUILTIN_PLUGINS: PluginManifest[] = [
     name: 'Modern Operator Shell & Editor (ZSH, Oh My Zsh, Starship, VIM & Neovim Super Configurator)',
     version: '1.2.0',
     category: 'extension',
-    defaultEnabled: true,
+    defaultEnabled: false,
     description:
-      'Enabled by default: first-class shell environment with ZSH, Oh My Zsh (https://ohmyz.sh), Starship cyber-emerald prompt, Neovim Super Configurator (axonwall-config / nui — zero-chrome Lua form TUI with full Vim motions), VIM syntax defaults, Tmux multiplexer, and deep stack autocompletions (kubectl, helm, k3s, zfs/zpool, nftables, wireguard, rosenpass, virsh, lxc, axonwallctl, axonwall-tui, axonwall-config). Can be disabled to minimize attack surface.',
+      'Opt-in operator shell environment with ZSH, Oh My Zsh (https://ohmyz.sh), Starship cyber-emerald prompt, Neovim Super Configurator (axonwall-config / nui — zero-chrome Lua form TUI with full Vim motions), VIM syntax defaults, Tmux multiplexer, and deep stack autocompletions (kubectl, helm, k3s, zfs/zpool, nftables, wireguard, rosenpass, virsh, lxc, axonwallctl, axonwall-tui, axonwall-config).',
     author: 'Axonwall Core',
     systemdUnits: [],
     privileges: ['system.users', 'system.hardware'],
@@ -722,7 +738,7 @@ export const BUILTIN_PLUGINS: PluginManifest[] = [
     privileges: ['system.monitoring', 'network.interfaces'],
     packages: {
       debian: ['nmap', 'dnsutils', 'net-tools', 'btop', 'htop', 'iftop', 'iotop', 'slurm', 'sysstat'],
-      alpine: ['nmap', 'bind-tools', 'net-tools', 'btop', 'htop', 'iftop', 'sysstat'],
+      alpine: ['nmap', 'bind-tools', 'net-tools', 'btop', 'htop', 'iftop', 'iotop', 'sysstat'],
       arch: ['nmap', 'bind', 'net-tools', 'btop', 'htop', 'iftop', 'iotop-c', 'sysstat'],
     },
     cliBinaries: ['nmap', 'dig', 'netstat', 'btop', 'htop', 'iftop', 'iostat', 'mpstat'],
@@ -836,7 +852,7 @@ export const BUILTIN_PLUGINS: PluginManifest[] = [
     name: 'Host Malware, Rootkit & Ghost-in-the-Ring Kernel Hunter',
     version: '1.0.0',
     category: 'extension',
-    defaultEnabled: true,
+    defaultEnabled: false,
     description:
       'Defense-in-depth host malware, rootkit, and Ring-0 implant suite combining classic scanners (rkhunter, chkrootkit, ClamAV, AIDE, Lynis, YARA, unhide, debsums) with Ghost-in-the-Ring telemetry: io_uring SQPOLL/FIXED_FILE implant hunting (Curing/RingReaper), drgn /proc/kcore prog_idr XArray vs sys_bpf diffing for self-hiding eBPF rootkits (TripleCross/Boopkit/Symbiote), Silicon PMU LBR/BRS branch tracing, and preventive BPF_LSM + sysctl kernel lockdown.',
     author: 'Tekromancy / Axonwall Core',
@@ -960,7 +976,7 @@ export const BUILTIN_PLUGINS: PluginManifest[] = [
     name: 'Coroot eBPF APM, L7 RED Dissector, Continuous Profiler & Automated RCA',
     version: '1.14.0',
     category: 'extension',
-    defaultEnabled: true,
+    defaultEnabled: false,
     description:
       'Zero-instrumentation eBPF APM & Root-Cause Analysis engine (inspired by coroot/coroot & coroot-node-agent): automatic Service Dependency Map, L7 protocol RED metrics (HTTP, gRPC, PostgreSQL, MySQL, Redis, Kafka, ClickHouse, DNS), optional OpenSSL/Go TLS uprobes, 99 Hz perf_event continuous CPU & Disk I/O FlameGraph profiling, and 35+ deterministic SLO/RCA health inspections.',
     author: 'Coroot / Axonwall Core',
@@ -1128,6 +1144,406 @@ export const BUILTIN_PLUGINS: PluginManifest[] = [
       icon: 'Activity',
     },
   },
+  {
+    id: 'ai-copilot',
+    name: 'AI Network Copilot',
+    version: '1.0.0',
+    category: 'extension',
+    defaultEnabled: false,
+    description:
+      'Multi-provider AI Network Copilot supporting Antigravity (Gemini), Ollama, Claude Code, Codex (OpenAI), and vLLM for interactive nftables rule synthesis, configuration security auditing, and Suricata/syslog threat log explanation.',
+    author: 'Axonwall Core',
+    systemdUnits: [],
+    privileges: ['firewall.rules', 'system.config.write'],
+    menuEntry: {
+      title: 'AI Copilot',
+      path: '/ai',
+      icon: 'Sparkles',
+    },
+  },
+  {
+    id: 'docs-portal',
+    name: 'Offline Documentation Portal (26 Guides)',
+    version: '1.0.0',
+    category: 'extension',
+    defaultEnabled: false,
+    description:
+      'On-demand offline copy of all 26 Axonwall documentation guides (~1.2 MB compressed) installed into /var/lib/axonwall/docs-portal. Not shipped in base images; falls back to https://axonwall.com/docs when not installed.',
+    author: 'Axonwall Core',
+    systemdUnits: [],
+    privileges: ['system.status.read'],
+    menuEntry: {
+      title: 'Documentation',
+      path: '/docs',
+      icon: 'BookOpen',
+    },
+  },
+  {
+    id: 'suricata-ids',
+    name: 'Suricata IDS/IPS Engine',
+    version: '7.0.8',
+    category: 'extension',
+    defaultEnabled: false,
+    description:
+      'High-speed multi-threaded Suricata 7 IDS/IPS engine with NFQUEUE inline bypass/fail-open protection, Emerging Threats Open rulesets, and Eve JSON alerts.',
+    author: 'OISF / Axonwall Core',
+    systemdUnits: ['suricata.service'],
+    privileges: ['firewall.rules', 'security.forensics'],
+    packages: {
+      debian: ['suricata'],
+      alpine: ['suricata'],
+      arch: ['suricata'],
+    },
+    cliBinaries: ['suricata', 'suricatasc'],
+    menuEntry: {
+      title: 'Suricata IDS/IPS',
+      path: '/security/ids',
+      icon: 'ShieldAlert',
+    },
+  },
+  {
+    id: 'crowdsec-bouncer',
+    name: 'CrowdSec Collaborative IPS & nftables Bouncer',
+    version: '1.6.4',
+    category: 'extension',
+    defaultEnabled: false,
+    description:
+      'CrowdSec behavior analysis engine and real-time nftables remediation bouncer fed by Suricata, SSH, and web logs.',
+    author: 'CrowdSec / Axonwall Core',
+    systemdUnits: ['crowdsec.service', 'crowdsec-firewall-bouncer.service'],
+    privileges: ['firewall.rules', 'system.monitoring'],
+    packages: {
+      debian: ['crowdsec', 'crowdsec-firewall-bouncer-nftables'],
+      alpine: ['crowdsec'],
+      arch: ['crowdsec'],
+    },
+    cliBinaries: ['cscli'],
+    menuEntry: {
+      title: 'CrowdSec Bouncer',
+      path: '/security/crowdsec',
+      icon: 'Radio',
+    },
+  },
+  {
+    id: 'frr-routing',
+    name: 'FRRouting Dynamic Routing (BGP / OSPF / BFD)',
+    version: '10.2.0',
+    category: 'extension',
+    defaultEnabled: false,
+    description:
+      'Enterprise BGPv4/MP-BGP, OSPFv2/OSPFv3, and BFD control plane via FRRouting, including automated K3s ServiceLB BGP peer stitching.',
+    author: 'FRRouting / Axonwall Core',
+    systemdUnits: ['frr.service'],
+    privileges: ['network.routing'],
+    packages: {
+      debian: ['frr'],
+      alpine: ['frr'],
+      arch: ['frr'],
+    },
+    cliBinaries: ['vtysh'],
+    menuEntry: {
+      title: 'Dynamic Routing (FRR)',
+      path: '/routing/dynamic',
+      icon: 'Compass',
+    },
+  },
+  {
+    id: 'openvpn',
+    name: 'OpenVPN 2.6 Data Channel Offload (DCO) Server',
+    version: '2.6.12',
+    category: 'extension',
+    defaultEnabled: false,
+    description:
+      'Kernel-accelerated OpenVPN 2.6 DCO server with per-client CSO overrides, automated PKI profile export, and TLS authentication.',
+    author: 'OpenVPN / Axonwall Core',
+    systemdUnits: ['openvpn-server@axonwall.service'],
+    privileges: ['vpn.admin', 'network.interfaces'],
+    packages: {
+      debian: ['openvpn'],
+      alpine: ['openvpn'],
+      arch: ['openvpn'],
+    },
+    cliBinaries: ['openvpn'],
+    menuEntry: {
+      title: 'OpenVPN (DCO)',
+      path: '/vpn/openvpn',
+      icon: 'KeyRound',
+    },
+  },
+  {
+    id: 'ipsec-strongswan',
+    name: 'strongSwan IKEv2 / IPsec Site-to-Site & Roadwarrior',
+    version: '5.9.14',
+    category: 'extension',
+    defaultEnabled: false,
+    description:
+      'Hardware-accelerated strongSwan swanctl IKEv2 IPsec tunnel orchestrator with VTI routed tunnels, DPD, and PSK/X.509 authentication.',
+    author: 'strongSwan / Axonwall Core',
+    systemdUnits: ['strongswan-starter.service'],
+    privileges: ['vpn.admin', 'network.routing'],
+    packages: {
+      debian: ['strongswan', 'strongswan-swanctl'],
+      alpine: ['strongswan'],
+      arch: ['strongswan'],
+    },
+    cliBinaries: ['swanctl'],
+    menuEntry: {
+      title: 'IPsec (strongSwan)',
+      path: '/vpn/ipsec',
+      icon: 'ShieldCheck',
+    },
+  },
+  {
+    id: 'captive-portal',
+    name: 'Captive Portal & Guest Network Gateway',
+    version: '1.0.0',
+    category: 'extension',
+    defaultEnabled: false,
+    description:
+      'Zone-scoped captive portal authentication gateway with per-client session/idle timeouts, MAC/IP bypass lists, and bandwidth quotas.',
+    author: 'Axonwall Core',
+    systemdUnits: [],
+    privileges: ['firewall.rules', 'system.users'],
+    menuEntry: {
+      title: 'Captive Portal',
+      path: '/security/captive-portal',
+      icon: 'Users',
+    },
+  },
+  {
+    id: 'tls-decryption',
+    name: 'TLS Inspection & MITM Decryption Proxy',
+    version: '1.0.0',
+    category: 'extension',
+    defaultEnabled: false,
+    description:
+      'Transparent TLS inspection proxy for deep Suricata L7 inspection with configurable internal CA signing and healthcare/banking bypass allowlists.',
+    author: 'Axonwall Core',
+    systemdUnits: [],
+    privileges: ['security.certificates', 'firewall.rules'],
+    menuEntry: {
+      title: 'TLS Decryption',
+      path: '/security/tls-decryption',
+      icon: 'Eye',
+    },
+  },
+  {
+    id: 'identity-aware-proxy',
+    name: 'Zero-Trust Identity-Aware Proxy (IAP)',
+    version: '1.0.0',
+    category: 'extension',
+    defaultEnabled: false,
+    description:
+      'Session-verified Zero-Trust reverse proxy exposing internal web applications behind Axonwall RBAC roles and SSO policies.',
+    author: 'Axonwall Core',
+    systemdUnits: [],
+    privileges: ['system.users', 'firewall.rules'],
+    menuEntry: {
+      title: 'Identity-Aware Proxy',
+      path: '/security/iap',
+      icon: 'Lock',
+    },
+  },
+  {
+    id: 'directory-ldap',
+    name: 'Embedded OpenLDAP & SSSD Identity Directory',
+    version: '2.5.18',
+    category: 'extension',
+    defaultEnabled: false,
+    description:
+      'Embedded OpenLDAP (slapd) + SSSD identity provider federating Linux/SSH, console RBAC, HA Syncrepl replication, FreeRADIUS, NetBox, LibreNMS, and VOW.',
+    author: 'OpenLDAP / SSSD / Axonwall Core',
+    systemdUnits: ['slapd.service', 'sssd.service'],
+    privileges: ['system.users', 'system.config.write'],
+    packages: {
+      debian: ['slapd', 'ldap-utils', 'sssd-ldap', 'sssd-tools', 'libnss-sss', 'libpam-sss'],
+      alpine: ['openldap', 'sssd'],
+      arch: ['openldap', 'sssd'],
+    },
+    cliBinaries: ['slapd', 'ldapsearch', 'sssctl'],
+    menuEntry: {
+      title: 'OpenLDAP Directory',
+      path: '/system/users',
+      icon: 'Users',
+    },
+  },
+  {
+    id: 'enterprise-sso',
+    name: 'Enterprise OIDC SSO (Okta / Entra ID / Google)',
+    version: '1.0.0',
+    category: 'extension',
+    defaultEnabled: false,
+    description:
+      'OpenID Connect single sign-on integration mapping identity provider groups directly onto Axonwall RBAC roles.',
+    author: 'Axonwall Core',
+    systemdUnits: [],
+    privileges: ['system.users', 'system.config.write'],
+    menuEntry: {
+      title: 'Enterprise SSO',
+      path: '/system/sso',
+      icon: 'Building2',
+    },
+  },
+  {
+    id: 'firewall-importer',
+    name: 'Firewall Migration Studio (7-Platform Importer)',
+    version: '1.0.0',
+    category: 'extension',
+    defaultEnabled: false,
+    description:
+      'On-demand configuration importer translating OPNsense, pfSense, VyOS, MikroTik, Cisco ASA, iptables, and firewalld backups into Axonwall DesiredState.',
+    author: 'Axonwall Core',
+    systemdUnits: [],
+    privileges: ['system.config.write', 'firewall.rules'],
+    menuEntry: {
+      title: 'Firewall Importer',
+      path: '/system/import',
+      icon: 'FileText',
+    },
+  },
+  {
+    id: 'mcp-ai-control',
+    name: 'MCP Security AI Control Plane & Tactical Leases',
+    version: '1.0.0',
+    category: 'extension',
+    defaultEnabled: false,
+    description:
+      'Model Context Protocol (MCP) server, scoped API keys, time-bounded tactical firewall leases, and cryptographic audit chain for autonomous AI operators.',
+    author: 'Axonwall Core',
+    systemdUnits: [],
+    privileges: ['firewall.rules', 'system.config.write'],
+    menuEntry: {
+      title: 'MCP Security AI Control',
+      path: '/system/mcp',
+      icon: 'KeyRound',
+    },
+  },
+  {
+    id: 'custom-kernel-studio',
+    name: 'Custom Hardened Kernel Builder & Studio (KSPP)',
+    version: '1.0.0',
+    category: 'extension',
+    defaultEnabled: false,
+    description:
+      'In-appliance Linux kernel compiler studio generating KSPP-hardened, eBPF/XDP-tuned, or minimal UKI kernels directly from curated profiles.',
+    author: 'Axonwall Core',
+    systemdUnits: [],
+    privileges: ['system.hardware', 'system.config.write'],
+    packages: {
+      debian: ['build-essential', 'bc', 'bison', 'flex', 'libssl-dev', 'libelf-dev', 'dwarves', 'zstd'],
+      alpine: ['alpine-sdk', 'bc', 'bison', 'flex', 'openssl-dev', 'elfutils-dev'],
+      arch: ['base-devel', 'bc', 'pahole'],
+    },
+    cliBinaries: ['make', 'pahole'],
+    menuEntry: {
+      title: 'Custom Kernel Studio',
+      path: '/system/kernel',
+      icon: 'Cpu',
+    },
+  },
+  {
+    id: 'high-availability',
+    name: '2-Host High Availability (Keepalived + conntrackd)',
+    version: '1.0.0',
+    category: 'extension',
+    defaultEnabled: false,
+    description:
+      'Active/Passive 2-node clustering with VRRP v2/v3 virtual IPs, stateful conntrackd flow synchronization, mTLS PKI state push, and SQLite/ZFS/K3s sync.',
+    author: 'Keepalived / Netfilter / Axonwall Core',
+    systemdUnits: ['keepalived.service', 'conntrackd.service'],
+    privileges: ['network.routing', 'firewall.rules', 'system.config.write'],
+    packages: {
+      debian: ['keepalived', 'conntrackd'],
+      alpine: ['keepalived', 'conntrack-tools'],
+      arch: ['keepalived', 'conntrack-tools'],
+    },
+    cliBinaries: ['keepalived', 'conntrackd'],
+    menuEntry: {
+      title: 'High Availability (HA)',
+      path: '/ha',
+      icon: 'ArrowRightLeft',
+    },
+  },
+  {
+    id: 'fleet-controller',
+    name: 'Multi-Appliance Fleet & Satellite Hub',
+    version: '1.0.0',
+    category: 'extension',
+    defaultEnabled: false,
+    description:
+      'Centralized hub controller for enrolling, monitoring, pushing DesiredState updates, and orchestrating Edge UKI & remote Axonwall satellites.',
+    author: 'Axonwall Core',
+    systemdUnits: [],
+    privileges: ['system.config.write', 'system.monitoring'],
+    menuEntry: {
+      title: 'Fleet & Satellites',
+      path: '/fleet',
+      icon: 'Wifi',
+    },
+  },
+  {
+    id: 'etckeeper-audit',
+    name: 'Etckeeper (/etc Git Audit & Rollback)',
+    version: '1.18.22',
+    category: 'extension',
+    defaultEnabled: false,
+    description:
+      'Automatic Git versioning of /etc configuration mutations with commit diffs, history browser, and pre/post-apply change attribution.',
+    author: 'Etckeeper / Axonwall Core',
+    systemdUnits: [],
+    privileges: ['system.config.write', 'system.status.read'],
+    packages: {
+      debian: ['etckeeper', 'git'],
+      alpine: ['etckeeper', 'git'],
+      arch: ['etckeeper', 'git'],
+    },
+    cliBinaries: ['etckeeper', 'git'],
+    menuEntry: {
+      title: 'Etckeeper (/etc Audit & Diffs)',
+      path: '/system/etckeeper',
+      icon: 'GitBranch',
+    },
+  },
+  {
+    id: 'web-terminal',
+    name: 'Browser Web Shell & PTY Console',
+    version: '1.0.0',
+    category: 'extension',
+    defaultEnabled: false,
+    description:
+      'Interactive browser-based PTY terminal and hardware sensor console. Disable in high-security deployments to enforce SSH-only operator access.',
+    author: 'Axonwall Core',
+    systemdUnits: [],
+    privileges: ['system.hardware', 'system.superuser'],
+    menuEntry: {
+      title: 'Web Shell & Sensors',
+      path: '/system/terminal',
+      icon: 'Terminal',
+    },
+  },
+  {
+    id: 'packet-diagnostics',
+    name: 'Packet Capture & Rule Path Tracer',
+    version: '4.99.5',
+    category: 'extension',
+    defaultEnabled: false,
+    description:
+      'On-demand live tcpdump PCAP capture engine, downloadable capture buffer, and nftables synthetic packet rule-path tracer.',
+    author: 'Tcpdump / Axonwall Core',
+    systemdUnits: [],
+    privileges: ['diagnostics.read', 'network.interfaces'],
+    packages: {
+      debian: ['tcpdump'],
+      alpine: ['tcpdump'],
+      arch: ['tcpdump'],
+    },
+    cliBinaries: ['tcpdump'],
+    menuEntry: {
+      title: 'Live Packet Capture',
+      path: '/diagnostics/packet-capture',
+      icon: 'Binary',
+    },
+  },
 ];
 
 export function resolveCapabilities(state?: Partial<DesiredState>): CoreCapabilities {
@@ -1272,12 +1688,7 @@ function isServiceExtensionEnabled(
 
 export function isPluginEnabled(pluginId: string, state?: Partial<DesiredState> | null): boolean {
   if (!state) {
-    return (
-      pluginId === 'core-firewall' ||
-      pluginId === 'cli-workstation' ||
-      pluginId === 'host-malware-rootkit' ||
-      pluginId === 'coroot-ebpf-apm'
-    );
+    return pluginId === 'core-firewall';
   }
 
   // Enforce plugin dependencies first (e.g., vigilant-octo-waffle requires core-k3s)
@@ -1314,20 +1725,12 @@ export function isPluginEnabled(pluginId: string, state?: Partial<DesiredState> 
     );
   }
 
-  // Modern Operator Shell & Editor (ZSH, Oh My Zsh, Starship, VIM) is enabled by default
   if (pluginId === 'cli-workstation') {
-    const entry = state.plugins?.find((p) => p.id === 'cli-workstation');
-    return entry ? entry.enabled !== false : true;
+    return Boolean(state.plugins?.some((p) => p.id === 'cli-workstation' && p.enabled));
   }
 
-  // Host Malware, Rootkit & Ghost-in-the-Ring Kernel Hunter is enabled by default
   if (pluginId === 'host-malware-rootkit') {
-    const entry = state.plugins?.find((p) => p.id === 'host-malware-rootkit');
-    if (entry?.enabled === false) return false;
-    if (state.hostDefense?.enabled !== undefined) {
-      return state.hostDefense.enabled;
-    }
-    return true;
+    return isServiceExtensionEnabled(state.hostDefense?.enabled, state.plugins, 'host-malware-rootkit');
   }
 
   // Axonwall Blackbox: Extreme eBPF Threat-LLM Harvester is strictly opt-in
@@ -1335,7 +1738,7 @@ export function isPluginEnabled(pluginId: string, state?: Partial<DesiredState> 
     return isServiceExtensionEnabled(state.threatHarvester?.enabled, state.plugins, 'ebpf-threat-harvester');
   }
 
-  // Check specific service/extension plugins
+  // Check specific service/extension plugins (auto-preserving pre-existing DesiredState configs)
   if (pluginId === 'vigilant-octo-waffle') {
     return isServiceExtensionEnabled(state.vow?.enabled, state.plugins, 'vigilant-octo-waffle');
   }
@@ -1353,6 +1756,9 @@ export function isPluginEnabled(pluginId: string, state?: Partial<DesiredState> 
   }
   if (pluginId === 'netflow-collector') {
     return isServiceExtensionEnabled(state.netflow?.enabled, state.plugins, 'netflow-collector');
+  }
+  if (pluginId === 'ai-copilot') {
+    return isServiceExtensionEnabled(state.ai?.enabled, state.plugins, 'ai-copilot');
   }
   if (pluginId === 'nut-ups') {
     return isServiceExtensionEnabled(state.ups?.enabled, state.plugins, 'nut-ups');
@@ -1373,12 +1779,55 @@ export function isPluginEnabled(pluginId: string, state?: Partial<DesiredState> 
     return isServiceExtensionEnabled(state.snmp?.enabled, state.plugins, 'snmp');
   }
   if (pluginId === 'coroot-ebpf-apm') {
-    const pluginEntry = state.plugins?.find((p) => p.id === 'coroot-ebpf-apm');
-    if (pluginEntry?.enabled === false) return false;
-    if (state.observability?.ebpfApm?.enabled !== undefined) {
-      return state.observability.ebpfApm.enabled;
-    }
-    return true;
+    return isServiceExtensionEnabled(state.observability?.ebpfApm?.enabled, state.plugins, 'coroot-ebpf-apm');
+  }
+  if (pluginId === 'suricata-ids') {
+    return isServiceExtensionEnabled(state.suricata?.enabled, state.plugins, 'suricata-ids');
+  }
+  if (pluginId === 'crowdsec-bouncer') {
+    return isServiceExtensionEnabled(state.crowdsec?.enabled, state.plugins, 'crowdsec-bouncer');
+  }
+  if (pluginId === 'frr-routing') {
+    return isServiceExtensionEnabled(state.frr?.enabled, state.plugins, 'frr-routing');
+  }
+  if (pluginId === 'openvpn') {
+    return isServiceExtensionEnabled(state.openvpn?.enabled, state.plugins, 'openvpn');
+  }
+  if (pluginId === 'ipsec-strongswan') {
+    return isServiceExtensionEnabled(state.ipsec?.enabled, state.plugins, 'ipsec-strongswan');
+  }
+  if (pluginId === 'captive-portal') {
+    return isServiceExtensionEnabled(state.captivePortal?.enabled, state.plugins, 'captive-portal');
+  }
+  if (pluginId === 'tls-decryption') {
+    return isServiceExtensionEnabled(
+      state.tlsDecryption?.enabled ?? state.suricata?.tlsDecryption?.enabled,
+      state.plugins,
+      'tls-decryption',
+    );
+  }
+  if (pluginId === 'identity-aware-proxy') {
+    return isServiceExtensionEnabled(state.zeroTrust?.enabled, state.plugins, 'identity-aware-proxy');
+  }
+  if (pluginId === 'directory-ldap') {
+    return isServiceExtensionEnabled(state.identity?.ldapEnabled, state.plugins, 'directory-ldap');
+  }
+  if (pluginId === 'enterprise-sso') {
+    return isServiceExtensionEnabled(state.sso?.enabled, state.plugins, 'enterprise-sso');
+  }
+  if (pluginId === 'high-availability') {
+    return isServiceExtensionEnabled(state.ha?.enabled, state.plugins, 'high-availability');
+  }
+  if (pluginId === 'fleet-controller') {
+    const hasNodes = (state.fleet?.nodes?.length ?? 0) > 0;
+    return isServiceExtensionEnabled(
+      state.fleet?.enabled ?? (hasNodes ? true : undefined),
+      state.plugins,
+      'fleet-controller',
+    );
+  }
+  if (pluginId === 'mcp-ai-control') {
+    return isServiceExtensionEnabled(state.mcp?.enabled, state.plugins, 'mcp-ai-control');
   }
 
   // Generic extension plugin check
@@ -1484,6 +1933,10 @@ export function enablePluginWithDependencies(
       next.netflow = next.netflow
         ? { ...next.netflow, enabled: true }
         : NetFlowConfigSchema.parse({ enabled: true });
+    } else if (id === 'ai-copilot') {
+      next.ai = next.ai
+        ? { ...next.ai, enabled: true }
+        : AiConfigSchema.parse({ enabled: true });
     } else if (id === 'haproxy') {
       next.haproxy = next.haproxy
         ? { ...next.haproxy, enabled: true }
@@ -1517,6 +1970,52 @@ export function enablePluginWithDependencies(
           enabled: true,
         },
       };
+    } else if (id === 'suricata-ids') {
+      next.suricata = next.suricata
+        ? { ...next.suricata, enabled: true }
+        : SuricataConfigSchema.parse({ enabled: true });
+    } else if (id === 'crowdsec-bouncer') {
+      next.crowdsec = next.crowdsec
+        ? { ...next.crowdsec, enabled: true }
+        : CrowdSecConfigSchema.parse({ enabled: true });
+    } else if (id === 'frr-routing') {
+      next.frr = next.frr ? { ...next.frr, enabled: true } : FrrConfigSchema.parse({ enabled: true });
+    } else if (id === 'openvpn') {
+      next.openvpn = next.openvpn
+        ? { ...next.openvpn, enabled: true }
+        : OpenVpnConfigSchema.parse({ enabled: true });
+    } else if (id === 'ipsec-strongswan') {
+      next.ipsec = next.ipsec
+        ? { ...next.ipsec, enabled: true }
+        : IpsecConfigSchema.parse({ enabled: true });
+    } else if (id === 'captive-portal') {
+      next.captivePortal = next.captivePortal
+        ? { ...next.captivePortal, enabled: true }
+        : CaptivePortalConfigSchema.parse({ enabled: true });
+    } else if (id === 'tls-decryption') {
+      next.tlsDecryption = next.tlsDecryption
+        ? { ...next.tlsDecryption, enabled: true }
+        : TlsDecryptionSchema.parse({ enabled: true });
+    } else if (id === 'identity-aware-proxy') {
+      next.zeroTrust = next.zeroTrust
+        ? { ...next.zeroTrust, enabled: true }
+        : ZeroTrustConfigSchema.parse({ enabled: true });
+    } else if (id === 'directory-ldap') {
+      next.identity = next.identity
+        ? { ...next.identity, ldapEnabled: true }
+        : IdentityConfigSchema.parse({ ldapEnabled: true });
+    } else if (id === 'enterprise-sso') {
+      next.sso = next.sso ? { ...next.sso, enabled: true } : SsoConfigSchema.parse({ enabled: true });
+    } else if (id === 'high-availability') {
+      next.ha = next.ha
+        ? { ...next.ha, enabled: true }
+        : HighAvailabilityConfigSchema.parse({ enabled: true });
+    } else if (id === 'fleet-controller') {
+      next.fleet = next.fleet
+        ? { ...next.fleet, enabled: true }
+        : SatelliteFleetConfigSchema.parse({ enabled: true });
+    } else if (id === 'mcp-ai-control') {
+      next.mcp = next.mcp ? { ...next.mcp, enabled: true } : McpServerConfigSchema.parse({ enabled: true });
     }
 
     const plugins = next.plugins || [];
@@ -1625,6 +2124,10 @@ export function disablePluginWithDependents(
       if (next.netflow) {
         next.netflow.enabled = false;
       }
+    } else if (id === 'ai-copilot') {
+      if (next.ai) {
+        next.ai.enabled = false;
+      }
     } else if (id === 'haproxy') {
       if (next.haproxy) {
         next.haproxy.enabled = false;
@@ -1653,6 +2156,33 @@ export function disablePluginWithDependents(
       if (next.observability?.ebpfApm) {
         next.observability.ebpfApm.enabled = false;
       }
+    } else if (id === 'suricata-ids') {
+      if (next.suricata) next.suricata.enabled = false;
+    } else if (id === 'crowdsec-bouncer') {
+      if (next.crowdsec) next.crowdsec.enabled = false;
+    } else if (id === 'frr-routing') {
+      if (next.frr) next.frr.enabled = false;
+    } else if (id === 'openvpn') {
+      if (next.openvpn) next.openvpn.enabled = false;
+    } else if (id === 'ipsec-strongswan') {
+      if (next.ipsec) next.ipsec.enabled = false;
+    } else if (id === 'captive-portal') {
+      if (next.captivePortal) next.captivePortal.enabled = false;
+    } else if (id === 'tls-decryption') {
+      if (next.tlsDecryption) next.tlsDecryption.enabled = false;
+      if (next.suricata?.tlsDecryption) next.suricata.tlsDecryption.enabled = false;
+    } else if (id === 'identity-aware-proxy') {
+      if (next.zeroTrust) next.zeroTrust.enabled = false;
+    } else if (id === 'directory-ldap') {
+      if (next.identity) next.identity.ldapEnabled = false;
+    } else if (id === 'enterprise-sso') {
+      if (next.sso) next.sso.enabled = false;
+    } else if (id === 'high-availability') {
+      if (next.ha) next.ha.enabled = false;
+    } else if (id === 'fleet-controller') {
+      if (next.fleet) next.fleet.enabled = false;
+    } else if (id === 'mcp-ai-control') {
+      if (next.mcp) next.mcp.enabled = false;
     }
 
     const plugins = next.plugins || [];
@@ -1667,5 +2197,62 @@ export function disablePluginWithDependents(
 
   disableSingle(pluginId, false);
   return { state: next, autoDisabledDependents };
+}
+
+/**
+ * Returns ordered, deduplicated plugin IDs for a Starter Pack including transitive dependencies
+ * (dependencies appear before dependents).
+ */
+export function getStarterPackPluginIdsWithDeps(packId: string): string[] {
+  const pack = findStarterPackById(packId);
+  if (!pack) {
+    throw new Error(`Unknown starter pack '${packId}'`);
+  }
+  const seen = new Set<string>();
+  const visiting = new Set<string>();
+  const ordered: string[] = [];
+
+  const visit = (id: string) => {
+    if (seen.has(id) || visiting.has(id)) return;
+    visiting.add(id);
+    for (const dep of getPluginDependencies(id)) {
+      visit(dep);
+    }
+    visiting.delete(id);
+    seen.add(id);
+    ordered.push(id);
+  };
+
+  for (const pid of pack.pluginIds) {
+    visit(pid);
+  }
+  return ordered;
+}
+
+/**
+ * Enables all plugins in a curated Starter Pack (and any transitive dependencies) in DesiredState.
+ */
+export function enableStarterPack(
+  packId: string,
+  inputState: DesiredState,
+): { state: DesiredState; enabledPlugins: string[]; autoEnabledDependencies: string[] } {
+  const pack = findStarterPackById(packId);
+  if (!pack) {
+    throw new Error(`Unknown starter pack '${packId}'`);
+  }
+  let current = structuredClone(inputState);
+  const autoDeps = new Set<string>();
+  for (const id of pack.pluginIds) {
+    const res = enablePluginWithDependencies(id, current);
+    current = res.state;
+    for (const dep of res.autoEnabledDependencies) {
+      autoDeps.add(dep);
+    }
+  }
+  return {
+    state: current,
+    enabledPlugins: [...pack.pluginIds],
+    autoEnabledDependencies: Array.from(autoDeps),
+  };
 }
 

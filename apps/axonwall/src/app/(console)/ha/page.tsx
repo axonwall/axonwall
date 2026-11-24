@@ -1,6 +1,8 @@
 'use client';
 
 import React, { useState, useEffect } from 'react';
+import { PluginDisabledGate } from '@/components/PluginDisabledGate';
+import { PluginAwareLink } from '@/components/PluginAwareLink';
 import Link from 'next/link';
 import {
   ShieldAlert,
@@ -21,7 +23,7 @@ import {
 import { getCurrentDesiredState, getHASyncTrustStatus, getSystemServicesStatus, type HASyncTrustStatus, type SystemServiceInfo } from '@/server/agent';
 import { useDesiredStateApply } from '@/lib/use-desired-state-apply';
 
-export default function HighAvailabilityPage() {
+function HighAvailabilityPageContent() {
   const { applyState } = useDesiredStateApply();
   const [enabled, setEnabled] = useState(false);
   const [role, setRole] = useState<'primary' | 'secondary'>('primary');
@@ -385,13 +387,14 @@ export default function HighAvailabilityPage() {
         </div>
 
         <div className="flex flex-wrap items-center gap-3">
-          <Link
+          <PluginAwareLink
+            pluginId="docs-portal"
             href="/docs/high-availability#two-host-setup"
             className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-slate-900 hover:bg-slate-800 text-slate-200 border border-slate-700 text-xs font-semibold transition"
           >
             <BookOpen className="w-4 h-4 text-emerald-400" />
             <span>2-Host Setup Guide</span>
-          </Link>
+          </PluginAwareLink>
 
           {enabled ? (
             <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 shadow-sm">
@@ -910,5 +913,13 @@ export default function HighAvailabilityPage() {
         </div>
       </div>
     </div>
+  );
+}
+
+export default function HighAvailabilityPage() {
+  return (
+    <PluginDisabledGate pluginId="high-availability">
+      <HighAvailabilityPageContent />
+    </PluginDisabledGate>
   );
 }

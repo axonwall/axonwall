@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getSession } from '@/server/auth';
 import { isPasswordChangeEnforced } from '@/server/auth-guard';
 import { getCaptureFile } from '@/server/pcap';
+import { checkPluginApiGuard } from '@/server/plugin-guard';
 import fs from 'fs';
 
 export async function GET(request: NextRequest) {
@@ -12,6 +13,8 @@ export async function GET(request: NextRequest) {
   if (isPasswordChangeEnforced(session)) {
     return new NextResponse('Forbidden: Password change required', { status: 403 });
   }
+  const guard = await checkPluginApiGuard('packet-diagnostics');
+  if (guard) return guard;
 
   const { searchParams } = new URL(request.url);
   const rawId = searchParams.get('id');

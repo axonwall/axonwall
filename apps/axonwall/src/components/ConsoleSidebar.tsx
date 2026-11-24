@@ -70,6 +70,7 @@ export interface NavSection {
   icon: any;
   href?: string;
   capability?: 'firewall' | 'nas' | 'k3s' | 'virt' | 'vigilante';
+  pluginId?: string;
   items?: SubItem[];
 }
 
@@ -86,19 +87,19 @@ export const NAV_SECTIONS: NavSection[] = [
     icon: Settings,
     items: [
       { name: 'Configuration & Revisions', href: '/system', icon: Settings },
-      { name: 'Etckeeper (/etc Audit & Diffs)', href: '/system/etckeeper', icon: GitBranch, badge: 'Git' },
+      { name: 'Etckeeper (/etc Audit & Diffs)', href: '/system/etckeeper', icon: GitBranch, badge: 'Git', pluginId: 'etckeeper-audit' },
       { name: 'Local Users & Groups', href: '/system/users', icon: Users },
-      { name: 'Enterprise SSO', href: '/system/sso', icon: Building2 },
-      { name: 'High Availability (HA)', href: '/ha', icon: ArrowRightLeft },
+      { name: 'Enterprise SSO', href: '/system/sso', icon: Building2, pluginId: 'enterprise-sso' },
+      { name: 'High Availability (HA)', href: '/ha', icon: ArrowRightLeft, pluginId: 'high-availability' },
       { name: 'Backup & Recovery', href: '/system/backup', icon: HardDrive },
       { name: 'A/B System Updates', href: '/system/updates', icon: RefreshCw },
-      { name: 'Custom Kernel Studio', href: '/system/kernel', icon: Cpu, badge: 'KSPP' },
+      { name: 'Custom Kernel Studio', href: '/system/kernel', icon: Cpu, badge: 'KSPP', pluginId: 'custom-kernel-studio' },
       { name: 'Service Supervisor', href: '/system/services', icon: Server },
       { name: 'Plugin Store & Roles', href: '/system/plugins', icon: Boxes, badge: 'Core' },
-      { name: 'MCP Security AI Control', href: '/system/mcp', icon: KeyRound, badge: 'AuthZ' },
+      { name: 'MCP Security AI Control', href: '/system/mcp', icon: KeyRound, badge: 'AuthZ', pluginId: 'mcp-ai-control' },
       { name: 'UPS Battery (NUT)', href: '/system/ups', icon: BatteryCharging, pluginId: 'nut-ups' },
-      { name: 'Firewall Importer', href: '/system/import', icon: FileText },
-      { name: 'Web Shell & Sensors', href: '/system/terminal', icon: Terminal },
+      { name: 'Firewall Importer', href: '/system/import', icon: FileText, pluginId: 'firewall-importer' },
+      { name: 'Web Shell & Sensors', href: '/system/terminal', icon: Terminal, pluginId: 'web-terminal' },
       { name: 'Power & Reboot', href: '/system/power', icon: Power },
     ],
   },
@@ -130,11 +131,11 @@ export const NAV_SECTIONS: NavSection[] = [
     icon: ShieldAlert,
     capability: 'firewall',
     items: [
-      { name: 'Suricata IDS/IPS', href: '/security/ids', icon: ShieldAlert },
-      { name: 'CrowdSec Bouncer', href: '/security/crowdsec', icon: Radio },
+      { name: 'Suricata IDS/IPS', href: '/security/ids', icon: ShieldAlert, pluginId: 'suricata-ids' },
+      { name: 'CrowdSec Bouncer', href: '/security/crowdsec', icon: Radio, pluginId: 'crowdsec-bouncer' },
       { name: 'DNS Sinkhole (RPZ)', href: '/security/dns-blocklist', icon: Ban },
-      { name: 'TLS Decryption', href: '/security/tls-decryption', icon: Eye },
-      { name: 'Identity-Aware Proxy', href: '/security/iap', icon: Lock },
+      { name: 'TLS Decryption', href: '/security/tls-decryption', icon: Eye, pluginId: 'tls-decryption' },
+      { name: 'Identity-Aware Proxy', href: '/security/iap', icon: Lock, pluginId: 'identity-aware-proxy' },
       { name: 'Rootkit & Kernel Hunter', href: '/security/rootkit-hunter', icon: ShieldAlert, badge: 'Ring-0', pluginId: 'host-malware-rootkit' },
       { name: 'Blackbox Threat Harvester', href: '/security/threat-harvester', icon: Binary, badge: 'eBPF+LLM', pluginId: 'ebpf-threat-harvester' },
     ],
@@ -147,7 +148,7 @@ export const NAV_SECTIONS: NavSection[] = [
     items: [
       { name: 'Routing Overview', href: '/routing', icon: Route },
       { name: 'Gateways & Multi-WAN', href: '/routing/gateways', icon: Compass },
-      { name: 'Dynamic Routing (FRR)', href: '/routing/dynamic', icon: Compass },
+      { name: 'Dynamic Routing (FRR)', href: '/routing/dynamic', icon: Compass, pluginId: 'frr-routing' },
     ],
   },
   {
@@ -158,7 +159,7 @@ export const NAV_SECTIONS: NavSection[] = [
     items: [
       { name: 'DHCP Server (Kea)', href: '/services/dhcp', icon: Server },
       { name: "ACME / Let's Encrypt", href: '/security/acme', icon: Lock },
-      { name: 'Captive Portal', href: '/security/captive-portal', icon: Users },
+      { name: 'Captive Portal', href: '/security/captive-portal', icon: Users, pluginId: 'captive-portal' },
     ],
   },
   {
@@ -170,8 +171,8 @@ export const NAV_SECTIONS: NavSection[] = [
       { name: 'WireGuard VPN', href: '/vpn/wireguard', icon: KeyRound },
       { name: 'Post-Quantum (Rosenpass)', href: '/vpn/rosenpass', icon: ShieldCheck, badge: 'PQ-KEM', pluginId: 'rosenpass' },
       { name: 'Mesh VPN (Headscale)', href: '/vpn/mesh', icon: Network, pluginId: 'headscale' },
-      { name: 'IPsec (strongSwan)', href: '/vpn/ipsec', icon: ShieldCheck },
-      { name: 'OpenVPN (DCO)', href: '/vpn/openvpn', icon: KeyRound },
+      { name: 'IPsec (strongSwan)', href: '/vpn/ipsec', icon: ShieldCheck, pluginId: 'ipsec-strongswan' },
+      { name: 'OpenVPN (DCO)', href: '/vpn/openvpn', icon: KeyRound, pluginId: 'openvpn' },
     ],
   },
   {
@@ -236,7 +237,7 @@ export const NAV_SECTIONS: NavSection[] = [
     icon: Activity,
     items: [
       { name: 'System Telemetry', href: '/reporting/health', icon: Activity },
-      { name: 'eBPF & K3s Observability', href: '/reporting/ebpf', icon: Cpu, badge: 'eBPF' },
+      { name: 'eBPF & K3s Observability', href: '/reporting/ebpf', icon: Cpu, badge: 'eBPF', pluginId: 'coroot-ebpf-apm' },
       { name: 'Insight Flow Analytics', href: '/reporting/insight', icon: Compass },
       { name: 'NetFlow Collector', href: '/reporting/netflow', icon: Activity, badge: 'IPFIX', pluginId: 'netflow-collector' },
       { name: 'Live Flow Monitor', href: '/reporting/flows', icon: Binary },
@@ -248,8 +249,8 @@ export const NAV_SECTIONS: NavSection[] = [
     icon: Wrench,
     items: [
       { name: 'Network Diagnostics', href: '/diagnostics', icon: Activity },
-      { name: 'Live Packet Capture', href: '/diagnostics/packet-capture', icon: Binary },
-      { name: 'Packet Tracer', href: '/diagnostics/packet-tracer', icon: Layers },
+      { name: 'Live Packet Capture', href: '/diagnostics/packet-capture', icon: Binary, pluginId: 'packet-diagnostics' },
+      { name: 'Packet Tracer', href: '/diagnostics/packet-tracer', icon: Layers, pluginId: 'packet-diagnostics' },
     ],
   },
   {
@@ -257,15 +258,16 @@ export const NAV_SECTIONS: NavSection[] = [
     name: 'Cloud & AI',
     icon: Sparkles,
     items: [
-      { name: 'AI Copilot', href: '/ai', icon: Sparkles },
+      { name: 'AI Copilot', href: '/ai', icon: Sparkles, pluginId: 'ai-copilot' },
       { name: 'Eluvix AI Router & DLP', href: '/ai/eluvix', icon: Sparkles, badge: 'Tokenomics', pluginId: 'eluvix' },
-      { name: 'Fleet & Satellites', href: '/fleet', icon: Wifi },
+      { name: 'Fleet & Satellites', href: '/fleet', icon: Wifi, pluginId: 'fleet-controller' },
     ],
   },
   {
     id: 'docs',
     name: 'Documentation',
     icon: BookOpen,
+    pluginId: 'docs-portal',
     items: [
       { name: 'Docs Home & Quickstart', href: '/docs', icon: BookOpen },
       { name: 'Architecture & nftables', href: '/docs/architecture', icon: Cpu },
@@ -361,6 +363,7 @@ export function ConsoleSidebar() {
       if (sec.capability === 'k3s' && !capabilities.k3sEnabled) return false;
       if (sec.capability === 'virt' && !capabilities.virtEnabled) return false;
       if (sec.capability === 'vigilante' && !capabilities.vigilanteEnabled) return false;
+      if (sec.pluginId && !isPluginEnabled(sec.pluginId, desiredState)) return false;
       return true;
     })
       .map((sec) => {

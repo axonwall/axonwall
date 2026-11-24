@@ -5,6 +5,7 @@ import { applyDesiredState } from '../../../../server/agent';
 import { parseConfirmTimeoutSeconds } from '../../../../server/confirm-timeout';
 import { getSession } from '../../../../server/auth';
 import { isPasswordChangeEnforced } from '../../../../server/auth-guard';
+import { checkPluginApiGuard } from '../../../../server/plugin-guard';
 
 export async function POST(req: Request) {
   try {
@@ -18,6 +19,8 @@ export async function POST(req: Request) {
     if (!session.roles?.includes('admin') && !session.roles?.includes('operator')) {
       return NextResponse.json({ error: 'Forbidden: Operator or Admin role required' }, { status: 403 });
     }
+    const pluginGuard = await checkPluginApiGuard('firewall-importer');
+    if (pluginGuard) return pluginGuard;
 
     // Limit incoming request size to 10MB to prevent memory exhaustion
     const contentLength = Number(req.headers.get('content-length') || '0');

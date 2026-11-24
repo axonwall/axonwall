@@ -38,7 +38,7 @@ if ((!isProduction || process.env.AXONWALL_DEV === '1') && !fs.existsSync('/etc/
   } catch {}
 }
 
-const cspHeader = `
+const buildCspHeader = (frameAncestors) => `
   default-src 'self';
   script-src 'self' 'unsafe-eval' 'unsafe-inline';
   style-src 'self' 'unsafe-inline';
@@ -47,9 +47,27 @@ const cspHeader = `
   object-src 'none';
   base-uri 'self';
   form-action 'self';
-  frame-ancestors 'none';
+  frame-ancestors ${frameAncestors};
   ${isProduction ? 'upgrade-insecure-requests;' : ''}
-`;
+`.replace(/\n/g, '');
+
+const buildSecurityHeaders = (frameAncestors, xFrameOptions) => {
+  const headers = [
+    { key: 'Content-Security-Policy', value: buildCspHeader(frameAncestors) },
+    { key: 'X-Content-Type-Options', value: 'nosniff' },
+    { key: 'X-Frame-Options', value: xFrameOptions },
+    { key: 'X-XSS-Protection', value: '1; mode=block' },
+    { key: 'Referrer-Policy', value: 'strict-origin-when-cross-origin' },
+    { key: 'Permissions-Policy', value: 'camera=(), microphone=(), geolocation=()' },
+  ];
+  if (isProduction) {
+    headers.push({
+      key: 'Strict-Transport-Security',
+      value: 'max-age=31536000; includeSubDomains',
+    });
+  }
+  return headers;
+};
 
 const nextConfig = {
   output: 'standalone',
@@ -74,42 +92,14 @@ const nextConfig = {
     return config;
   },
   async headers() {
-    const securityHeaders = [
-      {
-        key: 'Content-Security-Policy',
-        value: cspHeader.replace(/\n/g, ''),
-      },
-      {
-        key: 'X-Content-Type-Options',
-        value: 'nosniff',
-      },
-      {
-        key: 'X-Frame-Options',
-        value: 'DENY',
-      },
-      {
-        key: 'X-XSS-Protection',
-        value: '1; mode=block',
-      },
-      {
-        key: 'Referrer-Policy',
-        value: 'strict-origin-when-cross-origin',
-      },
-      {
-        key: 'Permissions-Policy',
-        value: 'camera=(), microphone=(), geolocation=()',
-      },
-    ];
-    if (isProduction) {
-      securityHeaders.push({
-        key: 'Strict-Transport-Security',
-        value: 'max-age=31536000; includeSubDomains',
-      });
-    }
     return [
       {
-        source: '/(.*)',
-        headers: securityHeaders,
+        source: '/((?!api/docs-bundle(?:/|$)).*)',
+        headers: buildSecurityHeaders("'none'", 'DENY'),
+      },
+      {
+        source: '/api/docs-bundle/:path*',
+        headers: buildSecurityHeaders("'self'", 'SAMEORIGIN'),
       },
     ];
   },

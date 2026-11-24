@@ -147,21 +147,30 @@ func (d *DirectoryManager) savePersistedPolicy(p PasswordPolicyConfig) {
 func DefaultShellForRole(role string) string {
 	switch role {
 	case "admin":
-		return "/usr/bin/zsh"
+		return defaultInteractiveAdminShell()
 	case "operator":
 		return "/usr/local/bin/axonwall-opshell"
 	case "readonly", "vpn_user":
 		return "/usr/sbin/nologin"
 	default:
-		return "/usr/bin/zsh"
+		return defaultInteractiveAdminShell()
 	}
 }
 
 func defaultInteractiveAdminShell() string {
-	if _, err := os.Stat("/usr/bin/zsh"); err == nil {
-		return "/usr/bin/zsh"
+	return defaultInteractiveAdminShellWithStat(func(p string) bool {
+		info, err := os.Stat(p)
+		return err == nil && !info.IsDir()
+	})
+}
+
+func defaultInteractiveAdminShellWithStat(exists func(string) bool) string {
+	for _, cand := range []string{"/usr/bin/zsh", "/bin/zsh", "/bin/bash"} {
+		if exists(cand) {
+			return cand
+		}
 	}
-	return "/bin/bash"
+	return "/bin/sh"
 }
 
 func resolveLocalNSSShell(requestedShell, role string) string {
@@ -1019,8 +1028,8 @@ func (d *DirectoryManager) CreateUser(req CreateUserRequest) error {
 	if shell == "" {
 		shell = DefaultShellForRole(role)
 	}
-	if strings.ContainsAny(shell, "\n\r\x00") || !allowedLoginShells[shell] {
-		return fmt.Errorf("invalid or disallowed login shell '%s'", shell)
+	if err := validateLoginShellExists(shell); err != nil {
+		return err
 	}
 
 	comment := strings.TrimSpace(req.Comment)
@@ -1195,8 +1204,8 @@ func (d *DirectoryManager) UpdateUser(username string, req UpdateUserRequest) er
 
 	if req.Shell != nil && strings.TrimSpace(*req.Shell) != "" {
 		sh := strings.TrimSpace(*req.Shell)
-		if strings.ContainsAny(sh, "\n\r\x00") || !allowedLoginShells[sh] {
-			return fmt.Errorf("invalid or disallowed login shell '%s'", sh)
+		if err := validateLoginShellExists(sh); err != nil {
+			return err
 		}
 		mods = append(mods, fmt.Sprintf("replace: loginShell\nloginShell: %s", sh))
 	} else if req.ApplianceRole != nil && req.Shell == nil {

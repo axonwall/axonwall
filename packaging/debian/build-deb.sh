@@ -98,18 +98,18 @@ case "${EDITION}" in
     PKG_DESC_LONG=$' Lean K3s + OpenZFS + OpenEBS storage host.\n No firewall daemon, web console, or controller — the NGFW payload\n is absent, not disabled.'
     ;;
   minimal)
-    PKG_DEPENDS="nftables (>= 1.1.0), iproute2, conntrack, nodejs (>= 20.0.0), openssh-server, openssh-client, slapd, ldap-utils, sssd-ldap, sssd-tools, libnss-sss, libpam-sss, libpam-modules, chrony, openssl, curl, wget, jq, ca-certificates, rsync, python3, sqlite3, ethtool, pciutils, kmod, procps, iputils-ping, nano, less, binutils, zstd, xz-utils, bzip2, unzip"
+    PKG_DEPENDS="nftables (>= 1.1.0), iproute2, conntrack, nodejs (>= 20.0.0), openssh-server, openssh-client, libpam-modules, chrony, openssl, curl, wget, jq, ca-certificates, rsync, python3, sqlite3, ethtool, pciutils, kmod, procps, iputils-ping, nano, less, binutils, zstd, xz-utils, bzip2, unzip"
     PKG_RECOMMENDS="zfsutils-linux, zfs-initramfs, mdadm, gdisk, parted, smartmontools, xfsprogs, cryptsetup, tpm2-tools, cloud-init, cloud-guest-utils, plymouth, plymouth-label"
     PKG_CONFLICTS="axonwall, axonwall-vault, axonwall-k3s-storage"
-    PKG_DESC="Axonwall Minimal Edition — Reduced Attack Surface Core Appliance"
-    PKG_DESC_LONG=$' Hardened minimal bootable Axonwall host containing only the core\n control plane, Web UI, OpenLDAP/SSSD directory stack, and base OS tooling.\n Roles and plugins can be installed on demand after deployment.'
+    PKG_DESC="Axonwall Minimal Edition — Zero-Role Control Plane Appliance"
+    PKG_DESC_LONG=$' Hardened zero-role Axonwall host containing only the core control\n plane, Web UI, local POSIX auth, and base OS tooling.\n Roles and plugins can be installed on demand after deployment.'
     ;;
   *)
-    PKG_DEPENDS="nftables (>= 1.1.0), iproute2, wireguard-tools, keepalived, conntrack, conntrackd, nodejs (>= 20.0.0), openssh-server, openssh-client, slapd, ldap-utils, sssd-ldap, sssd-tools, libnss-sss, libpam-sss, libpam-modules, chrony, openssl, curl, wget, jq, ca-certificates, rsync, python3, sqlite3, ethtool, pciutils, tcpdump, kmod, procps, iputils-ping, nano, less, binutils, zstd, xz-utils, bzip2, unzip, zsh, zsh-autosuggestions, zsh-syntax-highlighting, vim, neovim, tmux, fzf, ripgrep, fd-find, bat, mtr-tiny, btop, htop, sysstat, iotop, iftop, slurm, net-tools, dnsutils, bind9-host, nmap, kubectl, mkcert"
-    PKG_RECOMMENDS="starship, zoxide, unbound, kea-dhcp4-server, frr, suricata, strongswan, openvpn, etckeeper, git, qemu-system-x86, qemu-utils, ovmf, xorriso, bridge-utils, libvirt-clients, lxc, zfsutils-linux, zfs-initramfs, mdadm, gdisk, parted, smartmontools, xfsprogs, cryptsetup, tpm2-tools, samba, nfs-kernel-server, open-iscsi, tgt, cloud-init, cloud-guest-utils, rkhunter, chkrootkit, yara, unhide, lynis, debsums, bpftool, python3-drgn, linux-perf, plymouth, plymouth-label"
+    PKG_DEPENDS="nftables (>= 1.1.0), iproute2, wireguard-tools, kea-dhcp4-server, unbound, dns-root-data, conntrack, nodejs (>= 20.0.0), openssh-server, openssh-client, libpam-modules, chrony, openssl, curl, wget, jq, ca-certificates, rsync, python3, sqlite3, ethtool, pciutils, kmod, procps, iputils-ping, nano, less, binutils, zstd, xz-utils, bzip2, unzip"
+    PKG_RECOMMENDS="zfsutils-linux, zfs-initramfs, mdadm, gdisk, parted, smartmontools, xfsprogs, cryptsetup, tpm2-tools, cloud-init, cloud-guest-utils, plymouth, plymouth-label"
     PKG_CONFLICTS="axonwall-minimal, axonwall-vault, axonwall-k3s-storage"
-    PKG_DESC="Modern Linux Router & Next-Gen Firewall"
-    PKG_DESC_LONG=$' Axonwall replaces legacy BSD/PHP firewalls with a\n modern reactive architecture built on Linux nftables, Next.js, OpenLDAP,\n and a privileged Go daemon with commit-confirm transaction safety.'
+    PKG_DESC="Modern Linux Router & Lean Next-Gen Firewall"
+    PKG_DESC_LONG=$' Axonwall Lean Router/NGFW Core built on Linux nftables, Kea DHCP,\n Unbound DNS, WireGuard, Next.js Web Console, and a privileged Go\n daemon with commit-confirm transaction safety and on-demand plugins.'
     ;;
 esac
 cat << EOF > "${WORK_DIR}/DEBIAN/control"
@@ -346,9 +346,9 @@ write_core_k3s_bundled_json() {
   chmod 0644 "${_dir}/bundled.json"
 }
 
-if [[ "${EDITION}" == "axonwall" || "${EDITION}" == "k3s-storage" ]]; then
+if [[ "${EDITION}" == "k3s-storage" ]]; then
 mkdir -p "${WORK_DIR}/var/lib/axonwall/core-k3s/bin"
-# Fetch K3s binary if absent (ensures .deb updates via axonwall-update include k3s)
+# Fetch K3s binary if absent (pre-staged in k3s-storage only; standard axonwall downloads k3s on demand when core-k3s is installed)
 K3S_VERSION="v1.32.3+k3s1"
 K3S_URL_VERSION="v1.32.3%2Bk3s1"
 K3S_SHA256="b19216803650b567bf980888dec39035edaf664339c55bc4462f7a003edbef83"
@@ -383,11 +383,8 @@ if [[ ! -f "${WORK_DIR}/usr/sbin/weed" ]]; then
 fi
 fi
 
-# D-M9: k9s ships only where k3s ships (axonwall + k3s-storage).
-# The vault edition has no k3s cluster, so it gets no k9s either:
-# before this move the k9s block was not edition-gated and the vault
-# .deb shipped a 126 MiB k9s for a cluster that does not exist.
-if [[ "${EDITION}" == "axonwall" || "${EDITION}" == "k3s-storage" ]]; then
+# K9s ships pre-staged only in k3s-storage; standard axonwall downloads it on demand with core-k3s.
+if [[ "${EDITION}" == "k3s-storage" ]]; then
 # Fetch K9s v0.51.0 binary if absent (ensures .deb installs & axonwall-update include k9s CLI)
 K9S_VERSION="0.51.0"
 K9S_SHA256="c3752ad51a5a4015a113819c4eeb6e55a4d0e4b8e652494797532f6fc8161dd7"

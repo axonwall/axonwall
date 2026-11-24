@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
+import { PluginAwareLink } from '@/components/PluginAwareLink';
 import {
   Activity,
   AlertTriangle,
@@ -368,7 +369,10 @@ export default function LibreNmsStudioPage() {
               : `${status?.portCount ?? 0} ports · ${status?.linkCount ?? 0} links`}
           </div>
           <div className="text-[11px] text-slate-400 mt-1">
-            Feeds physical verification in <Link href="/topology" className="text-sky-400 hover:underline">Topology Studio</Link>
+            Feeds physical verification in{' '}
+            <PluginAwareLink pluginId="topology-studio" href="/topology" className="text-sky-400 hover:underline">
+              Topology Studio
+            </PluginAwareLink>
           </div>
         </div>
 

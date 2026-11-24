@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useState, useEffect } from 'react';
+import { PluginDisabledGate } from '@/components/PluginDisabledGate';
 import {
   Card,
   CardContent,
@@ -19,7 +20,7 @@ import { getRecentThreatAlerts,
 import { useDesiredStateApply } from '@/lib/use-desired-state-apply';
 import type { DesiredState } from '@axonwall/lib/schemas';
 
-export default function IdsIpsPage() {
+function IdsIpsPageContent() {
   const { applyState } = useDesiredStateApply();
   const [fullState, setFullState] = useState<DesiredState | null>(null);
   const [alerts, setAlerts] = useState<ThreatAlert[]>([]);
@@ -269,5 +270,13 @@ export default function IdsIpsPage() {
         </CardContent>
       </Card>
     </div>
+  );
+}
+
+export default function IdsIpsPage() {
+  return (
+    <PluginDisabledGate pluginId="suricata-ids">
+      <IdsIpsPageContent />
+    </PluginDisabledGate>
   );
 }
