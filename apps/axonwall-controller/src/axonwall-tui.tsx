@@ -827,7 +827,7 @@ export function AxonwallTuiApp({
     const nextEnabled = !currentlyEnabled;
     let depNotice = '';
 
-    if (pluginId === 'vigilant-octo-waffle' || pluginId === 'host-malware-rootkit' || pluginId === 'eluvix' || pluginId === 'netbox' || pluginId === 'librenms' || pluginId === 'topology-studio') {
+    if (pluginId === 'vigilant-octo-waffle' || pluginId === 'host-malware-rootkit' || pluginId === 'eluvix' || pluginId === 'netbox' || pluginId === 'librenms' || pluginId === 'topology-studio' || pluginId === 'netflow-collector') {
       if (nextEnabled) {
         const depRes = enablePluginWithDependencies(pluginId, next);
         next = depRes.state;
@@ -2049,7 +2049,7 @@ export function AxonwallTuiApp({
         );
       } else if (activeTab === 'compute') {
         if (cmpSubView === 'roles') {
-          const roles = ['core-k3s', 'core-virt', 'core-vigilante', 'vigilant-octo-waffle', 'eluvix', 'host-malware-rootkit', 'netbox', 'librenms', 'topology-studio'];
+          const roles = ['core-k3s', 'core-virt', 'core-vigilante', 'vigilant-octo-waffle', 'eluvix', 'host-malware-rootkit', 'netbox', 'librenms', 'topology-studio', 'netflow-collector'];
           const roleId = roles[cursorIdx % roles.length]!;
           if (CORE_ROLE_PLUGIN_IDS.has(roleId)) {
             const next = structuredClone(state);
@@ -2676,8 +2676,14 @@ export function AxonwallTuiApp({
                 enabled: isPluginEnabled('topology-studio', state),
                 detail: 'Interactive multi-host, cable, K3s & Triad topology canvas',
               },
+              {
+                id: 'netflow-collector',
+                name: 'NetFlow, IPFIX & sFlow Collector',
+                enabled: isPluginEnabled('netflow-collector', state),
+                detail: 'v5/v9/IPFIX/sFlow v5 collector, Zstd/ClickHouse & FQL analytics',
+              },
             ].map((r, idx) => {
-              const sel = idx === cursorIdx % 9;
+              const sel = idx === cursorIdx % 10;
               return (
                 <Text key={r.id} wrap="truncate-end">
                   <Text color={sel ? 'cyan' : 'gray'} bold>{sel ? '▶ ' : '  '}</Text>

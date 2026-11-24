@@ -41,33 +41,58 @@ export function buildProbeSnapshotForEval(
         }
       : undefined,
     peers: fabric?.peers ?? [],
-    librenms: fabric?.librenms
-      ? {
-          available: fabric.librenms.available,
-          devices: fabric.librenms.devices,
-          ports: fabric.librenms.ports.map((p) => ({
-            deviceHost: p.deviceHost || '',
-            ifName: p.ifName,
-            ifOperStatus: p.ifOperStatus,
-            ifAdminStatus: p.ifAdminStatus,
-            ifMtu: p.ifMtu,
-            ifVlan: p.ifVlan,
-            inRateBps: p.inRateBps,
-            outRateBps: p.outRateBps,
-            inErrors: p.inErrors,
-            outErrors: p.outErrors,
-          })),
-          links: fabric.librenms.links.map((l) => ({
-            localDevice: l.localDevice || '',
-            localPort: l.localPort,
-            remoteDevice: l.remoteDevice,
-            remotePort: l.remotePort,
-            protocol: l.protocol,
-            active: l.active,
-          })),
-          alerts: fabric.librenms.alerts,
+    librenms: (() => {
+      const basePorts = (fabric?.librenms?.ports ?? []).map((p) => ({
+        deviceHost: p.deviceHost || '',
+        ifName: p.ifName,
+        ifOperStatus: p.ifOperStatus,
+        ifAdminStatus: p.ifAdminStatus,
+        ifMtu: p.ifMtu,
+        ifVlan: p.ifVlan,
+        inRateBps: p.inRateBps,
+        outRateBps: p.outRateBps,
+        inErrors: p.inErrors,
+        outErrors: p.outErrors,
+      }));
+      if (fabric?.netflow?.available && fabric.netflow.interfaces?.length) {
+        for (const nf of fabric.netflow.interfaces) {
+          const devHost =
+            nf.exporterIp === '127.0.0.1' || nf.exporterIp === '::1' ? localHostId : nf.exporterIp;
+          const exists = basePorts.some(
+            (bp) => bp.deviceHost === devHost && bp.ifName === nf.device,
+          );
+          if (!exists) {
+            basePorts.push({
+              deviceHost: devHost,
+              ifName: nf.device,
+              ifOperStatus: 'up',
+              ifAdminStatus: 'up',
+              ifMtu: undefined,
+              ifVlan: undefined,
+              inRateBps: nf.rxBps,
+              outRateBps: nf.txBps,
+              inErrors: undefined,
+              outErrors: undefined,
+            });
+          }
         }
-      : undefined,
+      }
+      if (!fabric?.librenms && basePorts.length === 0) return undefined;
+      return {
+        available: Boolean(fabric?.librenms?.available || fabric?.netflow?.available),
+        devices: fabric?.librenms?.devices ?? [],
+        ports: basePorts,
+        links: (fabric?.librenms?.links ?? []).map((l) => ({
+          localDevice: l.localDevice || '',
+          localPort: l.localPort,
+          remoteDevice: l.remoteDevice,
+          remotePort: l.remotePort,
+          protocol: l.protocol,
+          active: l.active,
+        })),
+        alerts: fabric?.librenms?.alerts ?? [],
+      };
+    })(),
   };
 }
 

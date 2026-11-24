@@ -1,6 +1,7 @@
 'use client';
 
-import { useState } from 'react';
+import { Suspense, useEffect, useState } from 'react';
+import { useSearchParams } from 'next/navigation';
 import {
   Binary,
   Play,
@@ -29,9 +30,18 @@ const BPF_PRESETS = [
   { label: 'SSH (Port 22)', filter: 'tcp port 22' },
 ];
 
-export default function PacketCapturePage() {
-  const [iface, setIface] = useState('any');
-  const [filter, setFilter] = useState('');
+function PacketCaptureContent() {
+  const searchParams = useSearchParams();
+  const initialBpf = searchParams.get('bpf') || '';
+  const initialIface = searchParams.get('iface') || 'any';
+  const [iface, setIface] = useState(initialIface);
+  const [filter, setFilter] = useState(initialBpf);
+  useEffect(() => {
+    const b = searchParams.get('bpf');
+    const i = searchParams.get('iface');
+    if (b !== null) setFilter(b);
+    if (i !== null && i.trim()) setIface(i.trim());
+  }, [searchParams]);
   const [count, setCount] = useState(50);
   const [isCapturing, setIsCapturing] = useState(false);
   const [result, setResult] = useState<CaptureResult | null>(null);
@@ -384,5 +394,19 @@ export default function PacketCapturePage() {
         </div>
       )}
     </div>
+  );
+}
+
+export default function PacketCapturePage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="py-20 text-center text-sm text-slate-400">
+          Loading Live Packet Capture...
+        </div>
+      }
+    >
+      <PacketCaptureContent />
+    </Suspense>
   );
 }

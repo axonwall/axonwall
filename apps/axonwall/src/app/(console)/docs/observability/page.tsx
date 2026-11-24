@@ -373,6 +373,17 @@ observability:
     xdpDualStackVlanEnabled: true
     zfsArcZilTelemetryEnabled: true`}
         />
+      <div className="rounded-xl border border-slate-800 bg-slate-900/70 p-4 text-sm text-slate-300 space-y-2">
+        <p>
+          For full multi-protocol NetFlow v5/v9, IPFIX (RFC 7011 over UDP, TCP, and TLS 1.3 mTLS), and sFlow v5 collection,
+          dual-stack IPv4/IPv6 eBPF self-export with kernel TCP RTT/retransmit NPM telemetry, SO_REUSEPORT scaling, raw UDP fan-out replication,
+          pure-Go MaxMind <code>.mmdb</code> GeoIP/ASN, FRR BGP AS-Path &amp; live K3s Pod/Service attribution, conntrack NAT/CGNAT forensics,
+          Zstd + ClickHouse SQL pushdown, 95th-percentile scheduled reports, adaptive EWMA Z-score baselines, fleet-wide federated queries,
+          and Prometheus <code className="font-mono text-emerald-400">/api/v1/netflow/metrics</code>, enable <code className="font-mono text-sky-400">netflow-collector</code> via{' '}
+          <code className="font-mono text-slate-200">/etc/axonwall/netflow.yaml</code> or visit{' '}
+          <Link href="/reporting/netflow" className="text-sky-400 hover:underline">/reporting/netflow</Link>.
+        </p>
+      </div>
       </section>
 
       {/* Linux 6.9+ BPF_TOKEN_CREATE Delegation & Dual-Stack XDP */}

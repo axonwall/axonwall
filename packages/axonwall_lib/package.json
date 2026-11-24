@@ -223,6 +223,10 @@
       "types": "./dist/compile/sdwan/index.d.ts",
       "default": "./dist/compile/sdwan/index.js"
     },
+    "./compile/netflow": {
+      "types": "./dist/compile/netflow/index.d.ts",
+      "default": "./dist/compile/netflow/index.js"
+    },
     "./import/proxmox": {
       "types": "./dist/import/proxmox/index.d.ts",
       "default": "./dist/import/proxmox/index.js"

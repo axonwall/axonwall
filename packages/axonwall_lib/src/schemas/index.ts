@@ -3019,6 +3019,311 @@ export const TopologyConfigSchema = z.object({
 });
 export type TopologyConfig = z.infer<typeof TopologyConfigSchema>;
 
+export const NetFlowListenerProtocolSchema = z.enum(['auto', 'netflow', 'ipfix', 'sflow']);
+export type NetFlowListenerProtocol = z.infer<typeof NetFlowListenerProtocolSchema>;
+
+export const NetFlowTlsConfigSchema = z.object({
+  useHaPki: z.boolean().default(true),
+  requireClientCert: z.boolean().default(true),
+  certPath: z.string().default(''),
+  keyPath: z.string().default(''),
+  caPath: z.string().default(''),
+});
+export type NetFlowTlsConfig = z.infer<typeof NetFlowTlsConfigSchema>;
+
+export const NetFlowListenerSchema = z.object({
+  id: z.string().min(1),
+  name: z.string().min(1),
+  enabled: z.boolean().default(true),
+  protocol: NetFlowListenerProtocolSchema.default('auto'),
+  transport: z.enum(['udp', 'tcp', 'tls']).default('udp'),
+  bindAddress: z.string().min(1).default('0.0.0.0'),
+  port: z.number().int().min(1).max(65535).default(2055),
+  socketRecvBufferKB: z.number().int().min(64).max(131072).default(8192),
+  workers: z.number().int().min(1).max(32).default(4),
+  allowedExporters: z.array(z.string()).default([]),
+  dropUnknownTemplates: z.boolean().default(false),
+  tls: NetFlowTlsConfigSchema.optional(),
+});
+export type NetFlowListener = z.infer<typeof NetFlowListenerSchema>;
+
+export const NetFlowExporterVendorSchema = z.enum([
+  'axonwall',
+  'cisco',
+  'juniper',
+  'arista',
+  'mikrotik',
+  'paloalto',
+  'fortinet',
+  'ubiquiti',
+  'linux',
+  'other',
+]);
+export type NetFlowExporterVendor = z.infer<typeof NetFlowExporterVendorSchema>;
+
+export const NetFlowExporterProfileSchema = z.object({
+  id: z.string().min(1),
+  ip: z.string().min(1),
+  name: z.string().min(1),
+  site: z.string().optional(),
+  vendor: NetFlowExporterVendorSchema.default('other'),
+  samplingRateOverride: z.number().int().min(0).max(1000000).default(0),
+  ifIndexAliases: z.record(z.string(), z.string()).default({}),
+  enabled: z.boolean().default(true),
+  expectedFpsMin: z.number().min(0).default(0),
+});
+export type NetFlowExporterProfile = z.infer<typeof NetFlowExporterProfileSchema>;
+
+export const NetFlowSelfExportTargetSchema = z.object({
+  id: z.string().min(1),
+  name: z.string().min(1),
+  enabled: z.boolean().default(true),
+  version: z.enum(['ipfix', 'netflow9']).default('ipfix'),
+  host: z.string().min(1).default('127.0.0.1'),
+  port: z.number().int().min(1).max(65535).default(2055),
+  transport: z.enum(['udp', 'tcp', 'tls']).default('udp'),
+  interfaces: z.array(z.string()).default([]),
+  activeTimeoutSec: z.number().int().min(5).max(3600).default(60),
+  inactiveTimeoutSec: z.number().int().min(5).max(600).default(15),
+  templateRefreshSec: z.number().int().min(30).max(3600).default(300),
+  samplingRate: z.number().int().min(1).max(100000).default(1),
+  observationDomainId: z.number().int().min(1).max(4294967295).default(1),
+  tls: NetFlowTlsConfigSchema.optional(),
+});
+export type NetFlowSelfExportTarget = z.infer<typeof NetFlowSelfExportTargetSchema>;
+
+export const NetFlowReplicatorProtocolSchema = z.enum(['netflow5', 'netflow9', 'ipfix', 'sflow5']);
+
+export const NetFlowReplicatorTargetSchema = z.object({
+  id: z.string().min(1),
+  name: z.string().min(1),
+  enabled: z.boolean().default(true),
+  destinationHost: z.string().min(1),
+  destinationPort: z.number().int().min(1).max(65535).default(2055),
+  spoofSourceIp: z.boolean().default(false),
+  filterExporters: z.array(z.string()).default([]),
+  filterProtocols: z.array(NetFlowReplicatorProtocolSchema).default([]),
+  rateLimitPps: z.number().int().min(0).default(0),
+});
+export type NetFlowReplicatorTarget = z.infer<typeof NetFlowReplicatorTargetSchema>;
+
+export const NetFlowStorageClickHouseSchema = z.object({
+  enabled: z.boolean().default(false),
+  url: z.string().default('http://127.0.0.1:8123'),
+  database: z.string().default('axonwall'),
+  table: z.string().default('netflow_flows'),
+  username: z.string().default('admin'),
+  password: z.string().optional(),
+  batchSize: z.number().int().min(100).max(100000).default(5000),
+  ttlDays: z.number().int().min(1).max(3650).default(30),
+});
+
+export const NetFlowStorageConfigSchema = z.object({
+  mode: z.enum(['local', 'clickhouse', 'hybrid']).default('local'),
+  dataDir: z.string().default('/var/lib/axonwall/netflow'),
+  retentionHours: z.number().int().min(1).max(8760).default(168),
+  maxDiskMB: z.number().int().min(64).max(1048576).default(4096),
+  hotRingSize: z.number().int().min(1000).max(500000).default(50000),
+  flushIntervalSec: z.number().int().min(5).max(300).default(15),
+  compression: z.enum(['zstd', 'gzip', 'none']).default('zstd'),
+  rollupIntervals: z.array(z.enum(['1m', '5m', '1h'])).default(['1m', '5m', '1h']),
+  clickhouse: NetFlowStorageClickHouseSchema.prefault({}),
+});
+export type NetFlowStorageConfig = z.infer<typeof NetFlowStorageConfigSchema>;
+
+export const NetFlowEnrichmentConfigSchema = z.object({
+  reverseDns: z.boolean().default(true),
+  dnsCacheTtlSec: z.number().int().min(60).max(86400).default(3600),
+  keaDhcpLeases: z.boolean().default(true),
+  unboundOverrides: z.boolean().default(true),
+  librenmsIfNames: z.boolean().default(true),
+  netboxInventory: z.boolean().default(true),
+  k3sPodServiceTagging: z.boolean().default(true),
+  frrBgpLookup: z.boolean().default(true),
+  natConntrackCorrelation: z.boolean().default(true),
+  geoipAsn: z.boolean().default(true),
+  geoipCityDbPath: z.string().default('/var/lib/axonwall/geoip/GeoLite2-City.mmdb'),
+  geoipAsnDbPath: z.string().default('/var/lib/axonwall/geoip/GeoLite2-ASN.mmdb'),
+  geoipAutoUpdate: z.boolean().default(false),
+  geoipUpdateIntervalHours: z.number().int().min(1).max(720).default(168),
+  geoipCityDownloadUrl: z.string().default(''),
+  geoipAsnDownloadUrl: z.string().default(''),
+  threatIntelMatch: z.boolean().default(true),
+  customPortApps: z.record(z.string(), z.string()).default({}),
+  internalCidrs: z
+    .array(z.string())
+    .default(['10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16', 'fc00::/7']),
+});
+export type NetFlowEnrichmentConfig = z.infer<typeof NetFlowEnrichmentConfigSchema>;
+
+export const NetFlowAlertRuleKindSchema = z.enum([
+  'volumetric_bps',
+  'volumetric_pps',
+  'port_scan',
+  'host_sweep',
+  'exfiltration',
+  'c2_beacon',
+  'syn_flood',
+  'threat_ioc',
+  'exporter_silent',
+  'baseline_zscore',
+  'first_seen_pair',
+  'custom_fql',
+]);
+export type NetFlowAlertRuleKind = z.infer<typeof NetFlowAlertRuleKindSchema>;
+
+export const NetFlowReportingConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  intervalHours: z.number().int().min(1).max(720).default(24),
+  format: z.enum(['json', 'csv', 'markdown']).default('markdown'),
+  groupBy: z.enum(['interface', 'exporter', 'vlan', 'subnet']).default('interface'),
+  rangeDays: z.number().int().min(1).max(90).default(7),
+  retentionCount: z.number().int().min(1).max(365).default(30),
+  webhookUrl: z.string().default(''),
+});
+export type NetFlowReportingConfig = z.infer<typeof NetFlowReportingConfigSchema>;
+
+export const NetFlowAlertActionSchema = z.enum([
+  'alert_log',
+  'webhook',
+  'vigilante_soar',
+  'xdp_block',
+]);
+export type NetFlowAlertAction = z.infer<typeof NetFlowAlertActionSchema>;
+
+export const NetFlowAlertRuleSchema = z.object({
+  id: z.string().min(1),
+  name: z.string().min(1),
+  enabled: z.boolean().default(true),
+  kind: NetFlowAlertRuleKindSchema.default('volumetric_bps'),
+  severity: z.enum(['info', 'warning', 'high', 'critical']).default('high'),
+  fqlFilter: z.string().optional(),
+  threshold: z.number().min(0).default(0),
+  windowSec: z.number().int().min(10).max(3600).default(60),
+  cooldownSec: z.number().int().min(30).max(86400).default(300),
+  actions: z.array(NetFlowAlertActionSchema).default(['alert_log']),
+  xdpBlockTtlSec: z.number().int().min(60).max(86400).default(900),
+  webhookUrl: z.string().optional(),
+});
+export type NetFlowAlertRule = z.infer<typeof NetFlowAlertRuleSchema>;
+
+export const NetFlowSavedViewSchema = z.object({
+  id: z.string().min(1),
+  name: z.string().min(1),
+  fql: z.string().default(''),
+  range: z.string().default('1h'),
+  groupBy: z.string().default('protocol'),
+});
+export type NetFlowSavedView = z.infer<typeof NetFlowSavedViewSchema>;
+
+const DEFAULT_NETFLOW_LISTENERS: NetFlowListener[] = [
+  {
+    id: 'default-auto-2055',
+    name: 'Primary Multi-Protocol (v5/v9/IPFIX/sFlow)',
+    enabled: true,
+    protocol: 'auto',
+    transport: 'udp',
+    bindAddress: '0.0.0.0',
+    port: 2055,
+    socketRecvBufferKB: 8192,
+    workers: 4,
+    allowedExporters: [],
+    dropUnknownTemplates: false,
+  },
+];
+
+const DEFAULT_NETFLOW_SELF_TARGETS: NetFlowSelfExportTarget[] = [
+  {
+    id: 'local-loopback-ipfix',
+    name: 'Local Axonwall Collector (Loopback IPFIX)',
+    enabled: true,
+    version: 'ipfix',
+    host: '127.0.0.1',
+    port: 2055,
+    transport: 'udp',
+    interfaces: [],
+    activeTimeoutSec: 60,
+    inactiveTimeoutSec: 15,
+    templateRefreshSec: 300,
+    samplingRate: 1,
+    observationDomainId: 1,
+  },
+];
+
+const DEFAULT_NETFLOW_ALERT_RULES: NetFlowAlertRule[] = [
+  {
+    id: 'builtin-port-scan',
+    name: 'Port Scan (Unique Dst Ports / Source)',
+    enabled: true,
+    kind: 'port_scan',
+    severity: 'high',
+    threshold: 40,
+    windowSec: 60,
+    cooldownSec: 300,
+    actions: ['alert_log'],
+    xdpBlockTtlSec: 900,
+  },
+  {
+    id: 'builtin-volumetric-spike',
+    name: 'Volumetric Spike (>= 500 Mbps per Source)',
+    enabled: true,
+    kind: 'volumetric_bps',
+    severity: 'warning',
+    threshold: 500_000_000,
+    windowSec: 60,
+    cooldownSec: 300,
+    actions: ['alert_log'],
+    xdpBlockTtlSec: 900,
+  },
+  {
+    id: 'builtin-threat-ioc',
+    name: 'Threat Intel / Blocklist IOC Match',
+    enabled: true,
+    kind: 'threat_ioc',
+    severity: 'critical',
+    threshold: 1,
+    windowSec: 60,
+    cooldownSec: 300,
+    actions: ['alert_log'],
+    xdpBlockTtlSec: 900,
+  },
+];
+
+export const NetFlowConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  listeners: z.array(NetFlowListenerSchema).default(DEFAULT_NETFLOW_LISTENERS),
+  exporterProfiles: z.array(NetFlowExporterProfileSchema).default([]),
+  selfExport: z
+    .object({
+      enabled: z.boolean().default(true),
+      targets: z.array(NetFlowSelfExportTargetSchema).default(DEFAULT_NETFLOW_SELF_TARGETS),
+    })
+    .default({ enabled: true, targets: DEFAULT_NETFLOW_SELF_TARGETS }),
+  replicator: z
+    .object({
+      enabled: z.boolean().default(false),
+      targets: z.array(NetFlowReplicatorTargetSchema).default([]),
+    })
+    .default({ enabled: false, targets: [] }),
+  storage: NetFlowStorageConfigSchema.prefault({}),
+  enrichment: NetFlowEnrichmentConfigSchema.prefault({}),
+  alerting: z
+    .object({
+      enabled: z.boolean().default(true),
+      rules: z.array(NetFlowAlertRuleSchema).default(DEFAULT_NETFLOW_ALERT_RULES),
+    })
+    .default({ enabled: true, rules: DEFAULT_NETFLOW_ALERT_RULES }),
+  topologyOverlay: z
+    .object({
+      enabled: z.boolean().default(true),
+      windowSec: z.number().int().min(10).max(600).default(60),
+    })
+    .default({ enabled: true, windowSec: 60 }),
+  reporting: NetFlowReportingConfigSchema.prefault({}),
+  savedViews: z.array(NetFlowSavedViewSchema).default([]),
+});
+export type NetFlowConfig = z.infer<typeof NetFlowConfigSchema>;
+
 export const HostedEdgeConfigSchema = z.object({
   enabled: z.boolean().default(false),
   placement: z.enum(['hosted', 'dedicated']).default('hosted'),
@@ -3125,6 +3430,7 @@ export const DesiredStateSchema = z.object({
   netbox: NetBoxConfigSchema.optional(),
   librenms: LibreNmsConfigSchema.optional(),
   topology: TopologyConfigSchema.optional(),
+  netflow: NetFlowConfigSchema.optional(),
   mcp: McpServerConfigSchema.optional(),
 });
 export type DesiredState = z.infer<typeof DesiredStateSchema>;

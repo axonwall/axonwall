@@ -213,6 +213,7 @@ type TopologyFabricSnapshot struct {
 	Peers     []PeerHostProbeResult     `json:"peers"`
 	LibreNMS  *LibreNMSTopologySnapshot `json:"librenms,omitempty"`
 	NetBox    *NetBoxInventorySnapshot  `json:"netbox,omitempty"`
+	NetFlow   *NetFlowTopologyOverlay   `json:"netflow,omitempty"`
 	Config    *TopologyConfigPayload    `json:"config,omitempty"`
 }
 
@@ -267,6 +268,7 @@ type TopologyManager struct {
 	hardwareManager *HardwareManager
 	netboxManager   *NetBoxManager
 	librenmsManager *LibreNMSManager
+	netflowManager  *NetFlowManager
 	sysfsNetDir     string
 	kubectlRunner   func(ctx context.Context, args ...string) ([]byte, error)
 	lldpRunner      func(ctx context.Context) ([]byte, error)
@@ -293,6 +295,12 @@ func NewTopologyManager(
 		sysfsNetDir:     "/sys/class/net",
 		haTlsLoader:     LoadHAPKITLSConfig,
 	}
+}
+
+func (m *TopologyManager) SetNetFlowManager(nf *NetFlowManager) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.netflowManager = nf
 }
 
 func (m *TopologyManager) ApplyConfig(rawJSON []byte) error {
@@ -970,6 +978,21 @@ func (m *TopologyManager) ProbeLocal(ctx context.Context) *LocalTopologyProbe {
 	return probe
 }
 
+func (m *TopologyManager) BuildPeerHTTPClient(peer TopologyPeerHostPayload) (*http.Client, error) {
+	return m.buildPeerHTTPClient(peer)
+}
+
+func (m *TopologyManager) ListEnabledPeersWithTokens() ([]TopologyPeerHostPayload, map[string]string) {
+	bundle, tokens := m.loadBundleAndPeerTokens()
+	var peers []TopologyPeerHostPayload
+	for _, p := range bundle.Config.Peers {
+		if p.Enabled {
+			peers = append(peers, p)
+		}
+	}
+	return peers, tokens
+}
+
 func (m *TopologyManager) buildPeerHTTPClient(peer TopologyPeerHostPayload) (*http.Client, error) {
 	tlsCfg := &tls.Config{MinVersion: tls.VersionTLS12}
 	if peer.UseHaMtls && m.haTlsLoader != nil {
@@ -1034,6 +1057,17 @@ func (m *TopologyManager) ProbeFabric(ctx context.Context) *TopologyFabricSnapsh
 		go func() {
 			defer wg.Done()
 			snap.NetBox = m.netboxManager.ExportInventory(ctx)
+		}()
+	}
+
+	m.mu.Lock()
+	nfm := m.netflowManager
+	m.mu.Unlock()
+	if nfm != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			snap.NetFlow = nfm.GetTopologyOverlay()
 		}()
 	}
 

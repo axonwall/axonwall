@@ -14,7 +14,8 @@ export type AxonwallYamlDomainFile =
   | 'k3s.yaml'
   | 'virt.yaml'
   | 'vigilante.yaml'
-  | 'topology.yaml';
+  | 'topology.yaml'
+  | 'netflow.yaml';
 
 export interface DomainYamlDefinition {
   filename: AxonwallYamlDomainFile;
@@ -114,6 +115,13 @@ export const AXONWALL_YAML_DOMAINS: DomainYamlDefinition[] = [
     description:
       'Controls visual fabric node layout, planned and installed physical cables, remote peer Axonwall hosts (Vault/Storage/Edge), opt-in non-WAN LLDP neighbor discovery, and What-If scenarios.',
     keys: ['topology'],
+  },
+  {
+    filename: 'netflow.yaml',
+    title: 'Axonwall NetFlow / IPFIX / sFlow Collector & Analytics Studio',
+    description:
+      'Controls multi-protocol flow listeners (NetFlow v5/v9, IPFIX, sFlow v5), native kernel/eBPF self-exporter, UDP fan-out replicator, compressed chunk & ClickHouse storage, multi-source enrichment, anomaly detection, and XDP auto-mitigation.',
+    keys: ['netflow'],
   },
 ];
 

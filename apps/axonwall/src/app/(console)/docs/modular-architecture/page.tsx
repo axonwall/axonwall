@@ -302,6 +302,12 @@ export default function ModularArchitectureDocPage() {
                 <td className="p-2.5">Interactive <code className="font-mono">@xyflow/react</code> multi-host/WAN/K3s/cable fabric studio with strict Green/Yellow/Red health probes, WAN-excluded <code className="font-mono">lldpd</code>, phased transactional apply &amp; NetBox/LibreNMS Triad sync</td>
               </tr>
               <tr>
+                <td className="p-2.5 font-mono text-sky-400 font-semibold">netflow-collector</td>
+                <td className="p-2.5 text-slate-400">Opt-In</td>
+                <td className="p-2.5 font-mono text-slate-400">netflow.yaml</td>
+                <td className="p-2.5">High-speed NetFlow v5/v9, IPFIX &amp; sFlow v5 collector with eBPF self-export, UDP fan-out replicator, compressed Zstd/ClickHouse analytics, DNS/SNMP/GeoIP/K3s/Threat enrichment, FQL query engine &amp; SOAR/XDP auto-mitigation</td>
+              </tr>
+              <tr>
                 <td className="p-2.5 font-mono text-sky-400 font-semibold">snmp</td>
                 <td className="p-2.5 text-slate-400">Opt-In</td>
                 <td className="p-2.5 font-mono text-slate-400">system.yaml</td>

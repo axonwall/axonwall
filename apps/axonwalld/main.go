@@ -84,6 +84,7 @@ type AgentServer struct {
 	netboxManager          *engine.NetBoxManager
 	librenmsManager        *engine.LibreNMSManager
 	topologyManager        *engine.TopologyManager
+	netflowManager         *engine.NetFlowManager
 	etckeeperManager       *engine.EtckeeperManager
 	directoryManager       *engine.DirectoryManager
 	ddnsManager            *engine.DdnsManager
@@ -117,6 +118,12 @@ func (s *AgentServer) SetTopologyManager(tm *engine.TopologyManager) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.topologyManager = tm
+}
+
+func (s *AgentServer) SetNetFlowManager(nfm *engine.NetFlowManager) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.netflowManager = nfm
 }
 
 // isSnapshotEligibleName reports whether a config file name is covered
@@ -1175,6 +1182,15 @@ func (s *AgentServer) ApplyBundle(ctx context.Context, req *pb.ApplyBundleReques
 			})
 		}
 
+		if filepath.Base(cleanPath) == "netflow_config.json" && s.netflowManager != nil {
+			content := []byte(f.Content)
+			nfm := s.netflowManager
+			pendingApplies = append(pendingApplies, pendingSubsystemApply{
+				name:  "NetFlow Collector config",
+				apply: func() error { return nfm.ApplyConfig(content) },
+			})
+		}
+
 		if filepath.Base(cleanPath) == "netdev_config.json" {
 			content := []byte(f.Content)
 			pendingApplies = append(pendingApplies, pendingSubsystemApply{
@@ -1606,6 +1622,9 @@ func (s *AgentServer) reapplyRestoredSubsystems() error {
 	}
 	if s.topologyManager != nil {
 		apply("topology_config.json", func(b []byte) error { return s.topologyManager.ApplyConfig(b) })
+	}
+	if s.netflowManager != nil {
+		apply("netflow_config.json", func(b []byte) error { return s.netflowManager.ApplyConfig(b) })
 	}
 	if s.vigilanteManager != nil {
 		apply("vigilante_config.json", func(b []byte) error { return s.vigilanteManager.ApplyConfig(b) })
@@ -3201,6 +3220,32 @@ func main() {
 	// R4-A-M4: wire the harvester into the plugin manager so the
 	// ebpf-threat-harvester toggle actually starts/stops it.
 	pluginManager.SetThreatHarvesterManager(threatHarvesterManager)
+
+	netflowManager := engine.NewNetFlowManager(filepath.Join(etcDir, "netflow"), ebpfManager, vigilanteManager, k3sManager, netboxManager, librenmsManager)
+	agentServer.SetNetFlowManager(netflowManager)
+	topologyManager.SetNetFlowManager(netflowManager)
+	netflowManager.SetTopologyManager(topologyManager)
+	pluginManager.SetNetFlowManager(netflowManager)
+	go func() {
+		loadedNetFlow := false
+		for _, cand := range []string{
+			filepath.Join(etcDir, "managed", "netflow_config.json"),
+			filepath.Join(etcDir, "netflow_config.json"),
+		} {
+			if data, err := os.ReadFile(cand); err == nil && len(data) > 0 {
+				loadedNetFlow = true
+				if err := netflowManager.ApplyConfig(data); err != nil {
+					log.Printf("[Agent] Startup NetFlow Collector config warning (%s): %v", cand, err)
+				}
+				break
+			}
+		}
+		if pluginManager.IsPluginEnabled("netflow-collector") && (!loadedNetFlow || !netflowManager.GetStatus().Running) {
+			if err := netflowManager.SetEnabled(true); err != nil {
+				log.Printf("[Agent] Warning: netflow-collector plugin is enabled but failed to start: %v", err)
+			}
+		}
+	}()
 	go func() {
 		for _, cand := range []string{
 			filepath.Join(etcDir, "managed", "threat_harvester_config.json"),
@@ -5043,6 +5088,211 @@ func main() {
 			}
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(res)
+		})
+
+		// NetFlow / IPFIX / sFlow Collector & Analytics APIs
+		mux.HandleFunc("/v1/netflow/status", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodGet {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(netflowManager.GetStatus())
+		})
+
+		mux.HandleFunc("/v1/netflow/query", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			var req engine.FlowQueryRequest
+			if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+				http.Error(w, fmt.Sprintf("invalid json payload: %v", err), http.StatusBadRequest)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(netflowManager.QueryFlows(req))
+		})
+
+		mux.HandleFunc("/v1/netflow/stream", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodGet {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			netflowManager.StreamSSE(w, r)
+		})
+
+		mux.HandleFunc("/v1/netflow/exporters", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodGet {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"timestamp": time.Now().UTC().Format(time.RFC3339),
+				"exporters": netflowManager.GetExporters(),
+			})
+		})
+
+		mux.HandleFunc("/v1/netflow/templates", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodGet {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"timestamp": time.Now().UTC().Format(time.RFC3339),
+				"templates": netflowManager.GetTemplates(),
+			})
+		})
+
+		mux.HandleFunc("/v1/netflow/alerts", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodGet {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"timestamp": time.Now().UTC().Format(time.RFC3339),
+				"alerts":    netflowManager.ListAlerts(),
+			})
+		})
+
+		mux.HandleFunc("/v1/netflow/alerts/ack", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			var req struct {
+				ID string `json:"id"`
+			}
+			if err := json.NewDecoder(io.LimitReader(r.Body, 64*1024)).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+				http.Error(w, fmt.Sprintf("invalid json payload: %v", err), http.StatusBadRequest)
+				return
+			}
+			ok := netflowManager.AckAlert(req.ID)
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"success": ok})
+		})
+
+		mux.HandleFunc("/v1/netflow/test-inject", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			var req struct {
+				Protocol string `json:"protocol"`
+				Count    int    `json:"count"`
+			}
+			if err := json.NewDecoder(io.LimitReader(r.Body, 64*1024)).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+				http.Error(w, fmt.Sprintf("invalid json payload: %v", err), http.StatusBadRequest)
+				return
+			}
+			n, err := netflowManager.InjectTestBurst(req.Protocol, req.Count)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "injected": n})
+		})
+
+		mux.HandleFunc("/v1/netflow/metrics", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodGet {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+			netflowManager.WritePrometheusMetrics(w)
+		})
+
+		mux.HandleFunc("/v1/netflow/reports", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodGet {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			q := r.URL.Query()
+			days, _ := strconv.Atoi(q.Get("rangeDays"))
+			if days <= 0 {
+				days = 7
+			}
+			req := engine.NetFlowReportRequest{
+				RangeDays: days,
+				GroupBy:   q.Get("groupBy"),
+				Format:    q.Get("format"),
+			}
+			if req.Format == "" {
+				req.Format = "json"
+			}
+			rep := netflowManager.GetReport(req)
+			if q.Get("raw") == "1" && (req.Format == "csv" || req.Format == "markdown") {
+				if req.Format == "csv" {
+					w.Header().Set("Content-Type", "text/csv; charset=utf-8")
+				} else {
+					w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
+				}
+				_, _ = w.Write([]byte(rep.Rendered))
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(rep)
+		})
+
+		mux.HandleFunc("/v1/netflow/reports/generate", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			var req engine.NetFlowReportRequest
+			if err := json.NewDecoder(io.LimitReader(r.Body, 64*1024)).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+				http.Error(w, fmt.Sprintf("invalid json payload: %v", err), http.StatusBadRequest)
+				return
+			}
+			rep, savedPath, err := netflowManager.GenerateAndSaveReport(req)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "savedPath": savedPath, "report": rep})
+		})
+
+		mux.HandleFunc("/v1/netflow/baselines", func(w http.ResponseWriter, r *http.Request) {
+			switch r.Method {
+			case http.MethodGet:
+				limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+				entries := netflowManager.GetBaselines(limit)
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"timestamp": time.Now().UTC().Format(time.RFC3339),
+					"count":     len(entries),
+					"entries":   entries,
+				})
+			case http.MethodDelete:
+				if err := netflowManager.ResetBaselines(); err != nil {
+					http.Error(w, err.Error(), http.StatusInternalServerError)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]any{"success": true})
+			default:
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			}
+		})
+
+		mux.HandleFunc("/v1/netflow/geoip/update", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			err := netflowManager.TriggerGeoIPUpdate(r.Context())
+			w.Header().Set("Content-Type", "application/json")
+			if err != nil {
+				w.WriteHeader(http.StatusBadGateway)
+				_ = json.NewEncoder(w).Encode(map[string]any{"success": false, "error": err.Error()})
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "status": netflowManager.GetStatus()})
 		})
 
 		mux.HandleFunc("/v1/topology/sync/netbox", func(w http.ResponseWriter, r *http.Request) {

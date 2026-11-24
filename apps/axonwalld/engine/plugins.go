@@ -244,6 +244,7 @@ type PluginManager struct {
 	// when the daemon has not wired one (unit tests, tooling) — the
 	// toggle then fails closed instead of claiming success.
 	harvester *ThreatHarvesterManager
+	netflow   *NetFlowManager
 }
 
 func (pm *PluginManager) SetDirectoryManager(dm *DirectoryManager) {
@@ -258,6 +259,27 @@ func (pm *PluginManager) SetThreatHarvesterManager(thm *ThreatHarvesterManager) 
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 	pm.harvester = thm
+}
+
+// SetNetFlowManager wires the live NetFlowManager so enabling/disabling netflow-collector starts/stops collection immediately.
+func (pm *PluginManager) SetNetFlowManager(nfm *NetFlowManager) {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	pm.netflow = nfm
+}
+
+func (pm *PluginManager) netflowManager() *NetFlowManager {
+	pm.mu.RLock()
+	defer pm.mu.RUnlock()
+	return pm.netflow
+}
+
+func (pm *PluginManager) setNetFlowEnabled(enabled bool) error {
+	nfm := pm.netflowManager()
+	if nfm == nil {
+		return nil
+	}
+	return nfm.SetEnabled(enabled)
 }
 
 // harvesterManager returns the wired harvester manager, if any.
@@ -1317,6 +1339,22 @@ func GetExtensionPluginDefinitions() []PluginDefinition {
 			Author:           "Axonwall Core",
 			SystemdUnits:     []string{},
 			Privileges:       []string{"network.interfaces", "system.config.write"},
+			DebianPackages:   []string{},
+			AlpinePackages:   []string{},
+			ArchPackages:     []string{},
+			RequiredBinaries: []string{},
+		},
+		{
+			ID:               "netflow-collector",
+			Name:             "NetFlow, IPFIX & sFlow Collector Studio",
+			Version:          "1.0.0",
+			Category:         "extension",
+			DefaultEnabled:   false,
+			Dependencies:     []string{},
+			Description:      "High-speed native NetFlow v5/v9, IPFIX (RFC 7011), and sFlow v5 collector with eBPF/conntrack self-export, UDP fan-out replication, compressed Zstd/ClickHouse analytics, multi-source DNS/SNMP/GeoIP/K3s/Threat enrichment, FQL query engine, and real-time anomaly SOAR/XDP mitigation.",
+			Author:           "Axonwall Core",
+			SystemdUnits:     []string{},
+			Privileges:       []string{"reporting.flows", "system.config.write"},
 			DebianPackages:   []string{},
 			AlpinePackages:   []string{},
 			ArchPackages:     []string{},
@@ -3114,6 +3152,11 @@ func (pm *PluginManager) DisablePlugin(pluginID string) PluginActionResponse {
 	if pluginID == "topology-studio" {
 		_ = removeFileIfExists("/etc/lldpd.d/axonwall.conf")
 	}
+	if pluginID == "netflow-collector" {
+		if err := pm.setNetFlowEnabled(false); err != nil {
+			log.Printf("[PluginManager] Warning: disabling netflow-collector did not stop collector cleanly: %v", err)
+		}
+	}
 
 	pm.mu.Lock()
 	pm.disabledMap[pluginID] = true
@@ -4075,6 +4118,20 @@ func (pm *PluginManager) InstallPlugin(pluginID string) PluginActionResponse {
 	if pluginID == "topology-studio" {
 		_ = os.MkdirAll("/etc/axonwall/topology", 0750)
 	}
+	if pluginID == "netflow-collector" {
+		_ = os.MkdirAll("/etc/axonwall/netflow", 0750)
+		_ = os.MkdirAll("/var/lib/axonwall/netflow", 0750)
+		if err := pm.setNetFlowEnabled(true); err != nil {
+			pm.mu.Lock()
+			pm.disabledMap[pluginID] = true
+			pm.saveState()
+			pm.mu.Unlock()
+			return PluginActionResponse{
+				Success: false,
+				Message: fmt.Sprintf("Failed to start NetFlow collector for plugin %s: %v", pluginID, err),
+			}
+		}
+	}
 	if pluginID == "ebpf-threat-harvester" {
 		_ = os.MkdirAll("/var/lib/axonwall/threat-corpus", 0750)
 		// R4-A-M4: installing the plugin must actually start the
@@ -4304,6 +4361,11 @@ func (pm *PluginManager) UninstallPlugin(pluginID string) PluginActionResponse {
 	}
 	if pluginID == "topology-studio" {
 		_ = removeFileIfExists("/etc/lldpd.d/axonwall.conf")
+	}
+	if pluginID == "netflow-collector" {
+		if err := pm.setNetFlowEnabled(false); err != nil {
+			log.Printf("[PluginManager] Warning: disabling netflow-collector did not stop collector cleanly: %v", err)
+		}
 	}
 
 	pm.mu.Lock()
@@ -4545,6 +4607,31 @@ func (pm *PluginManager) ReconfigurePlugin(pluginID string) PluginActionResponse
 		return PluginActionResponse{
 			Success: true,
 			Message: "Topology Studio multi-host fabric directory provisioned.",
+		}
+	}
+	if pluginID == "netflow-collector" {
+		_ = os.MkdirAll("/etc/axonwall/netflow", 0750)
+		_ = os.MkdirAll("/var/lib/axonwall/netflow", 0750)
+		if err := pm.setNetFlowEnabled(true); err != nil {
+			pm.mu.Lock()
+			pm.disabledMap[pluginID] = true
+			pm.saveState()
+			pm.mu.Unlock()
+			return PluginActionResponse{
+				Success: false,
+				Message: fmt.Sprintf("Failed to start NetFlow collector for plugin %s: %v", pluginID, err),
+			}
+		}
+		pm.mu.Lock()
+		delete(pm.disabledMap, pluginID)
+		if pm.installedMap[pluginID] == "" {
+			pm.installedMap[pluginID] = time.Now().UTC().Format(time.RFC3339)
+		}
+		pm.saveState()
+		pm.mu.Unlock()
+		return PluginActionResponse{
+			Success: true,
+			Message: "NetFlow / IPFIX / sFlow collector initialized and started.",
 		}
 	}
 	if pluginID == "ebpf-threat-harvester" {

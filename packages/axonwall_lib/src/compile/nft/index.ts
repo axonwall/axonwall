@@ -13,7 +13,7 @@ import {
   isValidPortSpec,
 } from '../../schemas/index.js';
 import { sanitizeIdentifier, isValidDevice, isValidIPv4, isValidIPv6, isValidCIDR, isValidMAC, isValidPortRange } from '../../util/index.js';
-import { resolveCapabilities } from '../../plugins/index.js';
+import { isPluginEnabled, resolveCapabilities } from '../../plugins/index.js';
 import { compileSuricata } from '../suricata/index.js';
 import { compileCrowdSec } from '../crowdsec/index.js';
 import { compileGeoIp, COUNTRY_CIDR_TABLE } from '../geoip/index.js';
@@ -29,6 +29,7 @@ import { compileVowBundle } from '../vow/index.js';
 import { compileNetBoxBundle } from '../netbox/index.js';
 import { compileLibreNmsBundle } from '../librenms/index.js';
 import { compileTopologyBundle } from '../topology/index.js';
+import { compileNetFlowBundle } from '../netflow/index.js';
 import { compileHaProxy } from '../haproxy/index.js';
 import { compileFreeRadiusClients } from '../freeradius/index.js';
 import { compileSnmpd } from '../snmp/index.js';
@@ -37,6 +38,27 @@ import { compileTrafficShaper } from '../tc/index.js';
 import { compileIpsec } from '../ipsec/index.js';
 import { compileOpenVpn } from '../openvpn/index.js';
 import { compileVirtBundle } from '../virt/index.js';
+
+function buildNetFlowInputRules(state: DesiredState, lanExpr?: string): string[] {
+  if (!isPluginEnabled('netflow-collector', state) && !state.netflow?.enabled) {
+    return [];
+  }
+  const out: string[] = [];
+  for (const l of state.netflow?.listeners ?? []) {
+    if (!l.enabled) continue;
+    const bind = (l.bindAddress || '').trim();
+    if (bind === '127.0.0.1' || bind === '::1') continue;
+    const proto = l.transport === 'udp' ? 'udp' : 'tcp';
+    if (l.transport === 'tls') {
+      out.push(`    ${proto} dport ${l.port} accept comment "netflow-tls-${sanitizeIdentifier(l.id)}"`);
+    } else if (!lanExpr) {
+      out.push(`    ${proto} dport ${l.port} accept comment "netflow-${sanitizeIdentifier(l.id)}"`);
+    } else {
+      out.push(`    iifname ${lanExpr} ${proto} dport ${l.port} accept comment "netflow-${sanitizeIdentifier(l.id)}"`);
+    }
+  }
+  return out;
+}
 
 export interface CompileResult {
   nftScript: string;
@@ -647,6 +669,20 @@ export function compileNftables(state: DesiredState): CompileResult {
     });
   }
 
+  // Emit NetFlow / IPFIX / sFlow Collector & Analytics Studio configuration
+  const netflowRequested =
+    state.netflow?.enabled !== undefined
+      ? state.netflow.enabled
+      : Boolean(state.plugins?.some((p) => p.id === 'netflow-collector' && p.enabled));
+  if (state.netflow || netflowRequested || state.observability?.flowExport?.enabled) {
+    const netflowCompiled = compileNetFlowBundle(state);
+    files.push({
+      path: '/etc/axonwall/managed/netflow_config.json',
+      content: JSON.stringify(netflowCompiled, null, 2),
+      fileMode: 0o600,
+    });
+  }
+
   // Emit Axonwall Blackbox (ebpf-threat-harvester) configuration when opted-in
   const threatHarvesterPlugin = state.plugins?.find((p) => p.id === 'ebpf-threat-harvester');
   if (state.threatHarvester || threatHarvesterPlugin?.enabled) {
@@ -1002,6 +1038,9 @@ export function compileNftables(state: DesiredState): CompileResult {
     if (capabilities.virtEnabled) {
       lines.push('    iifname "vmbr*" accept comment "virt-bridge-input"');
     }
+
+    // NetFlow / IPFIX / sFlow collector listeners in Host Mode
+    lines.push(...buildNetFlowInputRules(state));
 
     lines.push('  }');
     lines.push('');
@@ -1443,6 +1482,12 @@ export function compileNftables(state: DesiredState): CompileResult {
   // Headscale listener (WireGuard hole punching)
   if (state.headscale?.enabled) {
     lines.push(`    udp dport 41641 accept comment "headscale-mesh"`);
+  }
+
+  // NetFlow / IPFIX / sFlow collector listeners (LAN/mesh for UDP/TCP; global for authenticated TLS 1.3 mTLS)
+  const nfLanExpr = lanDevicesSet.length === 0 ? undefined : lanDevicesSet.length === 1 ? lanDevicesSet[0]! : `{ ${lanDevicesSet.join(', ')} }`;
+  if (nfLanExpr || (state.netflow?.listeners ?? []).some((l) => l.enabled && l.transport === 'tls')) {
+    lines.push(...buildNetFlowInputRules(state, nfLanExpr || '__no_lan__').filter((r) => !r.includes('__no_lan__')));
   }
 
   // Interface dispatcher for input

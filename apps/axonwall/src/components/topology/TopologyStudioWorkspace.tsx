@@ -90,7 +90,7 @@ function upsertById<T extends { id: string }>(items: T[], next: T): T[] {
   return copy;
 }
 
-function TopologyStudioCanvas() {
+function TopologyStudioCanvas({ focusQuery }: { focusQuery?: string }) {
   const { fitView, setCenter } = useReactFlow();
   const { applyState } = useDesiredStateApply();
 
@@ -297,11 +297,36 @@ function TopologyStudioCanvas() {
     setRfNodes(derivedRfNodes);
     if (!initialFitDone.current && derivedRfNodes.length > 0) {
       initialFitDone.current = true;
+      const needle = focusQuery?.trim().toLowerCase();
+      if (needle) {
+        const target = hydrated.nodes.find((n) => {
+          if (
+            n.id.toLowerCase() === needle ||
+            n.label.toLowerCase().includes(needle) ||
+            (n.hostRef && n.hostRef.toLowerCase().includes(needle))
+          ) {
+            return true;
+          }
+          if (n.metadata && JSON.stringify(n.metadata).toLowerCase().includes(needle)) {
+            return true;
+          }
+          return n.ports?.some((p) => p.subnetCidr && p.subnetCidr.split('/')[0]?.toLowerCase() === needle);
+        });
+        if (target) {
+          setSelectedNodeId(target.id);
+          setSelectedEdgeId(null);
+          setRightPanel('inspector');
+          setTimeout(() => {
+            void fitView({ nodes: [{ id: target.id }], padding: 0.3, duration: 350, maxZoom: 1.4 });
+          }, 80);
+          return;
+        }
+      }
       setTimeout(() => {
         void fitView({ padding: 0.14, duration: 250 });
       }, 60);
     }
-  }, [derivedRfNodes, fitView]);
+  }, [derivedRfNodes, fitView, focusQuery, hydrated.nodes]);
 
   const rfEdges: TopologyFlowEdge[] = useMemo(
     () =>
@@ -1116,10 +1141,10 @@ function TopologyStudioCanvas() {
   );
 }
 
-export function TopologyStudioWorkspace() {
+export function TopologyStudioWorkspace({ focusQuery }: { focusQuery?: string }) {
   return (
     <ReactFlowProvider>
-      <TopologyStudioCanvas />
+      <TopologyStudioCanvas focusQuery={focusQuery} />
     </ReactFlowProvider>
   );
 }

@@ -601,6 +601,25 @@ function redactDesiredStateForSession(state: DesiredState, session: UserSession)
       if (peer?.apiToken) peer.apiToken = MASK;
     }
   }
+  if (redacted.netflow) {
+    if (redacted.netflow.storage?.clickhouse?.password) {
+      redacted.netflow.storage.clickhouse.password = MASK;
+    }
+    if (redacted.netflow.reporting?.webhookUrl) {
+      redacted.netflow.reporting.webhookUrl = MASK;
+    }
+    if (redacted.netflow.enrichment?.geoipCityDownloadUrl) {
+      redacted.netflow.enrichment.geoipCityDownloadUrl = MASK;
+    }
+    if (redacted.netflow.enrichment?.geoipAsnDownloadUrl) {
+      redacted.netflow.enrichment.geoipAsnDownloadUrl = MASK;
+    }
+    if (Array.isArray(redacted.netflow.alerting?.rules)) {
+      for (const rule of redacted.netflow.alerting.rules) {
+        if (rule?.webhookUrl) rule.webhookUrl = MASK;
+      }
+    }
+  }
 
   return redacted as DesiredState;
 }
@@ -986,7 +1005,12 @@ export async function applyDesiredState(
         normalizedState.librenms.snmpDefaults?.community === '********' ||
         normalizedState.librenms.snmpDefaults?.v3AuthPass === '********' ||
         normalizedState.librenms.snmpDefaults?.v3CryptoPass === '********')) ||
-    Boolean(normalizedState.topology?.peers?.some((p) => p.apiToken === '********'));
+    Boolean(normalizedState.topology?.peers?.some((p) => p.apiToken === '********')) ||
+    normalizedState.netflow?.storage?.clickhouse?.password === '********' ||
+    normalizedState.netflow?.reporting?.webhookUrl === '********' ||
+    normalizedState.netflow?.enrichment?.geoipCityDownloadUrl === '********' ||
+    normalizedState.netflow?.enrichment?.geoipAsnDownloadUrl === '********' ||
+    Boolean(normalizedState.netflow?.alerting?.rules?.some((r) => r.webhookUrl === '********'));
   if (needsExistingForMask) {
     const existing = await getDesiredStateInternal().catch(() => null);
     if (normalizedState.netbox) {
@@ -1024,6 +1048,28 @@ export async function applyDesiredState(
       normalizedState.topology.peers = normalizedState.topology.peers.map((p) =>
         p.apiToken === '********' ? { ...p, apiToken: existingPeers.get(p.id)?.apiToken } : p,
       );
+    }
+    if (normalizedState.netflow) {
+      if (normalizedState.netflow.storage?.clickhouse?.password === '********') {
+        normalizedState.netflow.storage.clickhouse.password = existing?.netflow?.storage?.clickhouse?.password;
+      }
+      if (normalizedState.netflow.reporting?.webhookUrl === '********') {
+        normalizedState.netflow.reporting.webhookUrl = existing?.netflow?.reporting?.webhookUrl ?? '';
+      }
+      if (normalizedState.netflow.enrichment?.geoipCityDownloadUrl === '********') {
+        normalizedState.netflow.enrichment.geoipCityDownloadUrl =
+          existing?.netflow?.enrichment?.geoipCityDownloadUrl ?? '';
+      }
+      if (normalizedState.netflow.enrichment?.geoipAsnDownloadUrl === '********') {
+        normalizedState.netflow.enrichment.geoipAsnDownloadUrl =
+          existing?.netflow?.enrichment?.geoipAsnDownloadUrl ?? '';
+      }
+      if (normalizedState.netflow.alerting?.rules?.length) {
+        const existingRules = new Map((existing?.netflow?.alerting?.rules ?? []).map((r) => [r.id, r]));
+        normalizedState.netflow.alerting.rules = normalizedState.netflow.alerting.rules.map((r) =>
+          r.webhookUrl === '********' ? { ...r, webhookUrl: existingRules.get(r.id)?.webhookUrl } : r,
+        );
+      }
     }
   }
   const { devMode: _devMode, ...result } = await runDesiredStateApplyPipeline(
@@ -8078,6 +8124,7 @@ export interface TopologyFabricSnapshot {
     vlans: number[];
     error?: string;
   };
+  netflow?: NetFlowTopologyOverlaySnapshot;
   error?: string;
 }
 
@@ -8313,4 +8360,619 @@ export async function syncTopologyLibreNmsAction(options: {
       error: (errData?.error as string) || (res.kind === 'http_error' ? res.message : 'axonwalld unreachable'),
     }
   );
+}
+
+// =========================================================================
+// NetFlow / IPFIX / sFlow Collector & Analytics Actions
+// =========================================================================
+
+export interface NetFlowTopologyOverlaySnapshot {
+  available: boolean;
+  timestamp: string;
+  windowSec: number;
+  totalBps: number;
+  totalFlows: number;
+  interfaces: Array<{
+    exporterIp: string;
+    device: string;
+    rxBps: number;
+    txBps: number;
+    flows: number;
+  }>;
+}
+
+export interface NetFlowListenerStatusSnapshot {
+  id: string;
+  name: string;
+  protocol: string;
+  transport: string;
+  address: string;
+  listening: boolean;
+  packetsReceived: number;
+  decodeErrors: number;
+  droppedUnknownTemplates: number;
+  lastError?: string;
+}
+
+export interface NetFlowStatusSnapshot {
+  daemonDown?: boolean;
+  enabled: boolean;
+  running: boolean;
+  timestamp: string;
+  listeners: NetFlowListenerStatusSnapshot[];
+  packetsReceived: number;
+  flowsIngested: number;
+  bytesIngested: number;
+  replicatedPackets: number;
+  selfExportedFlows: number;
+  decodeErrors: number;
+  hotRingCount: number;
+  hotRingCapacity: number;
+  diskChunksCount: number;
+  diskUsageMb: number;
+  storageMode: string;
+  clickHouseConnected: boolean;
+  exportersCount: number;
+  templatesCount: number;
+  activeAlertsCount: number;
+  geoipCityLoaded?: boolean;
+  geoipAsnLoaded?: boolean;
+  geoipUpdatedAt?: string;
+  baselineEntities?: number;
+  bgpPrefixes?: number;
+  k3sWorkloads?: number;
+  lastError?: string;
+}
+
+export interface NetFlowQueryRecordSnapshot {
+  id: string;
+  timestamp: string;
+  flowStartMs?: number;
+  flowEndMs?: number;
+  version: 'netflow5' | 'netflow9' | 'ipfix' | 'sflow5';
+  exporterIp: string;
+  exporterName?: string;
+  srcIp: string;
+  dstIp: string;
+  srcPort: number;
+  dstPort: number;
+  protocol: number;
+  protocolName: string;
+  appName?: string;
+  srcHost?: string;
+  dstHost?: string;
+  srcAsn?: number;
+  srcOrg?: string;
+  dstAsn?: number;
+  dstOrg?: string;
+  srcCountry?: string;
+  dstCountry?: string;
+  srcCity?: string;
+  dstCity?: string;
+  srcLat?: number;
+  srcLon?: number;
+  dstLat?: number;
+  dstLon?: number;
+  peerAs?: number;
+  asPath?: number[];
+  bgpNextHop?: string;
+  direction?: 'internal' | 'ingress' | 'egress' | 'transit';
+  inIfIndex?: number;
+  outIfIndex?: number;
+  inIfName?: string;
+  outIfName?: string;
+  vlanId?: number;
+  bytes: number;
+  packets: number;
+  bps: number;
+  pps?: number;
+  tcpFlags?: number;
+  tcpFlagsStr?: string;
+  tos?: number;
+  dscp?: number;
+  postNatSrcIp?: string;
+  postNatDstIp?: string;
+  postNatSrcPort?: number;
+  postNatDstPort?: number;
+  srcMac?: string;
+  dstMac?: string;
+  k3sNamespace?: string;
+  k3sWorkload?: string;
+  k3sPodName?: string;
+  k3sServiceName?: string;
+  rttMs?: number;
+  retransmits?: number;
+  hostId?: string;
+  hostName?: string;
+  threatMatch?: string;
+  samplingRate?: number;
+}
+
+export interface NetFlowSessionRecordSnapshot {
+  id: string;
+  initiatorIp: string;
+  initiatorHost?: string;
+  responderIp: string;
+  responderHost?: string;
+  initiatorPort: number;
+  responderPort: number;
+  protocol: number;
+  protocolName: string;
+  appName?: string;
+  direction?: string;
+  firstSeenMs: number;
+  lastSeenMs: number;
+  durationMs: number;
+  bytesFwd: number;
+  bytesRev: number;
+  packetsFwd: number;
+  packetsRev: number;
+  flowsCount: number;
+  asymmetryRatio: number;
+  unansweredSyn?: boolean;
+  avgRttMs?: number;
+  totalRetransmits?: number;
+  threatMatch?: string;
+}
+
+export interface NetFlowHeatmapMatrixSnapshot {
+  rowLabels: string[];
+  colLabels: string[];
+  values: number[][];
+  maxValue: number;
+}
+
+export interface NetFlowGeoArcSnapshot {
+  srcCountry: string;
+  dstCountry: string;
+  srcCity?: string;
+  dstCity?: string;
+  srcLat: number;
+  srcLon: number;
+  dstLat: number;
+  dstLon: number;
+  bytes: number;
+  flows: number;
+  threat?: boolean;
+}
+
+export interface NetFlowFleetPeerErrorSnapshot {
+  peerId: string;
+  peerName: string;
+  error: string;
+}
+
+export interface NetFlowTopEntrySnapshot {
+  key: string;
+  label?: string;
+  meta?: string;
+  bytes: number;
+  packets: number;
+  flows: number;
+  bps: number;
+}
+
+export interface NetFlowQueryResponseSnapshot {
+  daemonDown?: boolean;
+  timestamp: string;
+  engine?: string;
+  fqlError?: string;
+  totalMatchedFlows: number;
+  totalBytes: number;
+  totalPackets: number;
+  avgBps: number;
+  uniqueSources: number;
+  uniqueDestinations: number;
+  seriesKeys: string[];
+  timeseries: Array<{
+    timestampMs: number;
+    timeLabel: string;
+    totalBytes: number;
+    totalPackets: number;
+    flowsCount: number;
+    bps: number;
+    pps: number;
+    series: Record<string, number>;
+  }>;
+  topSources: NetFlowTopEntrySnapshot[];
+  topDestinations: NetFlowTopEntrySnapshot[];
+  topApps: NetFlowTopEntrySnapshot[];
+  topProtocols: NetFlowTopEntrySnapshot[];
+  topCountries: NetFlowTopEntrySnapshot[];
+  topAsns: NetFlowTopEntrySnapshot[];
+  topExporters: NetFlowTopEntrySnapshot[];
+  topInterfaces: NetFlowTopEntrySnapshot[];
+  topVlans: NetFlowTopEntrySnapshot[];
+  topConversations: Array<{
+    srcIp: string;
+    srcHost?: string;
+    dstIp: string;
+    dstHost?: string;
+    dstPort: number;
+    protocolName: string;
+    appName?: string;
+    direction?: string;
+    bytes: number;
+    packets: number;
+    flows: number;
+    bps: number;
+    threatMatch?: string;
+  }>;
+  sankeyLinks: Array<{
+    source: string;
+    target: string;
+    bytes: number;
+    stage: 'src-to-app' | 'app-to-dst';
+  }>;
+  flows: NetFlowQueryRecordSnapshot[];
+  sessions?: NetFlowSessionRecordSnapshot[];
+  hostHeatmap?: NetFlowHeatmapMatrixSnapshot;
+  portTimeHeatmap?: NetFlowHeatmapMatrixSnapshot;
+  geoArcs?: NetFlowGeoArcSnapshot[];
+  peerErrors?: NetFlowFleetPeerErrorSnapshot[];
+}
+
+export interface NetFlowPercentileRowSnapshot {
+  groupKey: string;
+  p95Bps: number;
+  p99Bps: number;
+  peakBps: number;
+  avgBps: number;
+  totalBytes: number;
+  totalFlows: number;
+  sampleCount: number;
+}
+
+export interface NetFlowReportResponseSnapshot {
+  daemonDown?: boolean;
+  generatedAt: string;
+  rangeDays: number;
+  startMs: number;
+  endMs: number;
+  groupBy: string;
+  bucketSeconds: number;
+  rows: NetFlowPercentileRowSnapshot[];
+  savedSnapshots?: string[];
+  rendered?: string;
+}
+
+export interface NetFlowBaselineSummarySnapshot {
+  entity: string;
+  dayOfWeek: number;
+  hourOfDay: number;
+  samples: number;
+  ewmaBps: number;
+  stddevBps: number;
+  ewmaPps: number;
+  stddevPps: number;
+  lastSeenSec: number;
+}
+
+export interface NetFlowExporterSnapshot {
+  exporterIp: string;
+  name: string;
+  vendor: string;
+  site?: string;
+  lastSeen: string;
+  lastSeenUnixMs: number;
+  status: 'green' | 'yellow' | 'red';
+  versions: string[];
+  packetsReceived: number;
+  flowsReceived: number;
+  bytesAccounted: number;
+  samplingRate: number;
+  templatesCount: number;
+  fpsEstimate: number;
+  bpsEstimate: number;
+  interfaces?: Array<{
+    exporterIp: string;
+    ifIndex: number;
+    ifName?: string;
+    inOctets: number;
+    outOctets: number;
+    inErrors: number;
+    outErrors: number;
+    updatedAt: string;
+  }>;
+}
+
+export interface NetFlowTemplateSnapshot {
+  exporterIp: string;
+  sourceId: number;
+  version: string;
+  templateId: number;
+  isOptions: boolean;
+  scopeCount?: number;
+  fieldCount: number;
+  totalBytes: number;
+  updatedAt: string;
+  lastUsedAt: string;
+  packetsUsing: number;
+  fields: Array<{
+    enterpriseId?: number;
+    fieldType: number;
+    fieldName: string;
+    length: number;
+    isScope?: boolean;
+  }>;
+}
+
+export interface NetFlowAlertSnapshot {
+  id: string;
+  timestamp: string;
+  ruleId: string;
+  ruleName: string;
+  kind: string;
+  severity: string;
+  culpritIp: string;
+  exporterIp?: string;
+  metricValue: number;
+  threshold: number;
+  summary: string;
+  actionsTaken: string[];
+  acknowledged: boolean;
+}
+
+export async function getNetFlowStatusAction(): Promise<NetFlowStatusSnapshot> {
+  const session = await getSession();
+  assertActionPermitted(session);
+
+  const res = await callAgentApiDetailed<NetFlowStatusSnapshot>('/v1/netflow/status', 'GET', undefined, 5_000);
+  if (res.kind === 'ok' && res.data) {
+    return {
+      ...res.data,
+      daemonDown: false,
+      listeners: Array.isArray(res.data.listeners) ? res.data.listeners : [],
+    };
+  }
+  return {
+    daemonDown: true,
+    enabled: false,
+    running: false,
+    timestamp: new Date().toISOString(),
+    listeners: [],
+    packetsReceived: 0,
+    flowsIngested: 0,
+    bytesIngested: 0,
+    replicatedPackets: 0,
+    selfExportedFlows: 0,
+    decodeErrors: 0,
+    hotRingCount: 0,
+    hotRingCapacity: 50000,
+    diskChunksCount: 0,
+    diskUsageMb: 0,
+    storageMode: 'local',
+    clickHouseConnected: false,
+    exportersCount: 0,
+    templatesCount: 0,
+    activeAlertsCount: 0,
+    lastError: res.kind === 'http_error' ? res.message : 'axonwalld daemon unreachable.',
+  };
+}
+
+export async function queryNetFlowAction(options?: {
+  rangeMinutes?: number;
+  startMs?: number;
+  endMs?: number;
+  fql?: string;
+  groupBy?: string;
+  limit?: number;
+  offset?: number;
+  sortBy?: string;
+  biflow?: boolean;
+  scope?: 'local' | 'fleet';
+  peerIds?: string[];
+}): Promise<NetFlowQueryResponseSnapshot> {
+  const session = await getSession();
+  assertActionPermitted(session);
+
+  const res = await callAgentApiDetailed<NetFlowQueryResponseSnapshot>(
+    '/v1/netflow/query',
+    'POST',
+    {
+      rangeMinutes: options?.rangeMinutes ?? 60,
+      startMs: options?.startMs,
+      endMs: options?.endMs,
+      fql: options?.fql ?? '',
+      groupBy: options?.groupBy ?? 'protocol',
+      limit: options?.limit ?? 200,
+      offset: options?.offset ?? 0,
+      sortBy: options?.sortBy ?? 'time',
+      biflow: options?.biflow ?? false,
+      scope: options?.scope ?? 'local',
+      peerIds: options?.peerIds,
+    },
+    10_000,
+  );
+  if (res.kind === 'ok' && res.data) {
+    return {
+      ...res.data,
+      daemonDown: false,
+      seriesKeys: Array.isArray(res.data.seriesKeys) ? res.data.seriesKeys : [],
+      timeseries: Array.isArray(res.data.timeseries) ? res.data.timeseries : [],
+      topSources: Array.isArray(res.data.topSources) ? res.data.topSources : [],
+      topDestinations: Array.isArray(res.data.topDestinations) ? res.data.topDestinations : [],
+      topApps: Array.isArray(res.data.topApps) ? res.data.topApps : [],
+      topProtocols: Array.isArray(res.data.topProtocols) ? res.data.topProtocols : [],
+      topCountries: Array.isArray(res.data.topCountries) ? res.data.topCountries : [],
+      topAsns: Array.isArray(res.data.topAsns) ? res.data.topAsns : [],
+      topExporters: Array.isArray(res.data.topExporters) ? res.data.topExporters : [],
+      topInterfaces: Array.isArray(res.data.topInterfaces) ? res.data.topInterfaces : [],
+      topVlans: Array.isArray(res.data.topVlans) ? res.data.topVlans : [],
+      topConversations: Array.isArray(res.data.topConversations) ? res.data.topConversations : [],
+      sankeyLinks: Array.isArray(res.data.sankeyLinks) ? res.data.sankeyLinks : [],
+      flows: Array.isArray(res.data.flows) ? res.data.flows : [],
+    };
+  }
+  return {
+    daemonDown: true,
+    timestamp: new Date().toISOString(),
+    totalMatchedFlows: 0,
+    totalBytes: 0,
+    totalPackets: 0,
+    avgBps: 0,
+    uniqueSources: 0,
+    uniqueDestinations: 0,
+    seriesKeys: [],
+    timeseries: [],
+    topSources: [],
+    topDestinations: [],
+    topApps: [],
+    topProtocols: [],
+    topCountries: [],
+    topAsns: [],
+    topExporters: [],
+    topInterfaces: [],
+    topVlans: [],
+    topConversations: [],
+    sankeyLinks: [],
+    flows: [],
+    fqlError: res.kind === 'http_error' ? res.message : 'axonwalld daemon unreachable.',
+  };
+}
+
+export async function getNetFlowExportersAction(): Promise<NetFlowExporterSnapshot[]> {
+  const session = await getSession();
+  assertActionPermitted(session);
+  const res = await callAgentApiDetailed<{ exporters?: NetFlowExporterSnapshot[] }>('/v1/netflow/exporters', 'GET', undefined, 5_000);
+  if (res.kind === 'ok' && Array.isArray(res.data?.exporters)) {
+    return res.data.exporters;
+  }
+  return [];
+}
+
+export async function getNetFlowTemplatesAction(): Promise<NetFlowTemplateSnapshot[]> {
+  const session = await getSession();
+  assertActionPermitted(session);
+  const res = await callAgentApiDetailed<{ templates?: NetFlowTemplateSnapshot[] }>('/v1/netflow/templates', 'GET', undefined, 5_000);
+  if (res.kind === 'ok' && Array.isArray(res.data?.templates)) {
+    return res.data.templates;
+  }
+  return [];
+}
+
+export async function getNetFlowAlertsAction(): Promise<NetFlowAlertSnapshot[]> {
+  const session = await getSession();
+  assertActionPermitted(session);
+  const res = await callAgentApiDetailed<{ alerts?: NetFlowAlertSnapshot[] }>('/v1/netflow/alerts', 'GET', undefined, 5_000);
+  if (res.kind === 'ok' && Array.isArray(res.data?.alerts)) {
+    return res.data.alerts;
+  }
+  return [];
+}
+
+export async function ackNetFlowAlertAction(id: string): Promise<{ success: boolean }> {
+  const session = await getSession();
+  assertActionPermitted(session, 'admin');
+  const res = await callAgentApiDetailed<{ success?: boolean }>('/v1/netflow/alerts/ack', 'POST', { id }, 5_000);
+  return { success: res.kind === 'ok' && Boolean(res.data?.success) };
+}
+
+export async function injectNetFlowTestBurstAction(protocol = 'ipfix', count = 12): Promise<{ success: boolean; injected: number; error?: string }> {
+  const session = await getSession();
+  await enforceRateLimit(15, 60000);
+  assertActionPermitted(session, 'admin');
+  const res = await callAgentApiDetailed<{ success?: boolean; injected?: number }>('/v1/netflow/test-inject', 'POST', { protocol, count }, 8_000);
+  if (res.kind === 'ok' && res.data) {
+    return { success: Boolean(res.data.success), injected: res.data.injected ?? 0 };
+  }
+  return {
+    success: false,
+    injected: 0,
+    error: res.kind === 'http_error' ? res.message : 'axonwalld daemon unreachable.',
+  };
+}
+
+export async function getNetFlowReportAction(options?: {
+  rangeDays?: number;
+  groupBy?: string;
+  format?: 'json' | 'csv' | 'markdown';
+}): Promise<NetFlowReportResponseSnapshot> {
+  const session = await getSession();
+  assertActionPermitted(session);
+  const qs = new URLSearchParams({
+    rangeDays: String(options?.rangeDays ?? 7),
+    groupBy: options?.groupBy ?? 'interface',
+    format: options?.format ?? 'json',
+  });
+  const res = await callAgentApiDetailed<NetFlowReportResponseSnapshot>(`/v1/netflow/reports?${qs.toString()}`, 'GET', undefined, 8_000);
+  if (res.kind === 'ok' && res.data) {
+    return {
+      ...res.data,
+      daemonDown: false,
+      rows: Array.isArray(res.data.rows) ? res.data.rows : [],
+    };
+  }
+  return {
+    daemonDown: true,
+    generatedAt: new Date().toISOString(),
+    rangeDays: options?.rangeDays ?? 7,
+    startMs: 0,
+    endMs: 0,
+    groupBy: options?.groupBy ?? 'interface',
+    bucketSeconds: 300,
+    rows: [],
+  };
+}
+
+export async function generateNetFlowReportAction(options?: {
+  rangeDays?: number;
+  groupBy?: string;
+  format?: 'json' | 'csv' | 'markdown';
+}): Promise<{ success: boolean; savedPath?: string; report?: NetFlowReportResponseSnapshot }> {
+  const session = await getSession();
+  assertActionPermitted(session, 'admin');
+  const res = await callAgentApiDetailed<{ success?: boolean; savedPath?: string; report?: NetFlowReportResponseSnapshot }>(
+    '/v1/netflow/reports/generate',
+    'POST',
+    {
+      rangeDays: options?.rangeDays ?? 7,
+      groupBy: options?.groupBy ?? 'interface',
+      format: options?.format ?? 'markdown',
+    },
+    10_000,
+  );
+  if (res.kind === 'ok' && res.data) {
+    return {
+      success: Boolean(res.data.success),
+      savedPath: res.data.savedPath,
+      report: res.data.report,
+    };
+  }
+  return { success: false };
+}
+
+export async function getNetFlowBaselinesAction(limit = 50): Promise<NetFlowBaselineSummarySnapshot[]> {
+  const session = await getSession();
+  assertActionPermitted(session);
+  const res = await callAgentApiDetailed<{ entries?: NetFlowBaselineSummarySnapshot[] }>(
+    `/v1/netflow/baselines?limit=${Math.max(1, limit)}`,
+    'GET',
+    undefined,
+    5_000,
+  );
+  if (res.kind === 'ok' && Array.isArray(res.data?.entries)) {
+    return res.data.entries;
+  }
+  return [];
+}
+
+export async function resetNetFlowBaselinesAction(): Promise<{ success: boolean }> {
+  const session = await getSession();
+  assertActionPermitted(session, 'admin');
+  const res = await callAgentApiDetailed<{ success?: boolean }>('/v1/netflow/baselines', 'DELETE', undefined, 5_000);
+  return { success: res.kind === 'ok' && Boolean(res.data?.success) };
+}
+
+export async function triggerNetFlowGeoIPUpdateAction(): Promise<{ success: boolean; error?: string }> {
+  const session = await getSession();
+  assertActionPermitted(session, 'admin');
+  const res = await callAgentApiDetailed<{ success?: boolean; error?: string }>('/v1/netflow/geoip/update', 'POST', undefined, 50_000);
+  if (res.kind === 'ok') {
+    return { success: Boolean(res.data?.success), error: res.data?.error };
+  }
+  return {
+    success: false,
+    error: res.kind === 'http_error' ? res.message : 'axonwalld daemon unreachable.',
+  };
 }

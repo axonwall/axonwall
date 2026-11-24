@@ -1,7 +1,8 @@
 'use client';
 
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { Suspense, useCallback, useEffect, useState } from 'react';
 import Link from 'next/link';
+import { useSearchParams } from 'next/navigation';
 import { GitBranch, Loader2, Power } from 'lucide-react';
 import { enablePluginWithDependencies, isPluginEnabled } from '@axonwall/lib/plugins';
 import type { DesiredState } from '@axonwall/lib/schemas';
@@ -9,7 +10,9 @@ import { getCurrentDesiredState } from '@/server/agent';
 import { useDesiredStateApply } from '@/lib/use-desired-state-apply';
 import { TopologyStudioWorkspace } from '@/components/topology/TopologyStudioWorkspace';
 
-export default function TopologyStudioPage() {
+function TopologyStudioContent() {
+  const searchParams = useSearchParams();
+  const focusQuery = searchParams.get('focus') || undefined;
   const { applyState } = useDesiredStateApply();
   const [state, setState] = useState<DesiredState | null>(null);
   const [loading, setLoading] = useState(true);
@@ -107,7 +110,22 @@ export default function TopologyStudioPage() {
 
   return (
     <div className="h-[calc(100vh-4rem)] w-full overflow-hidden">
-      <TopologyStudioWorkspace />
+      <TopologyStudioWorkspace focusQuery={focusQuery} />
     </div>
+  );
+}
+
+export default function TopologyStudioPage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="h-[calc(100vh-4rem)] flex items-center justify-center bg-slate-950 text-slate-300 text-sm gap-2">
+          <Loader2 className="w-4 h-4 animate-spin text-sky-400" />
+          Loading Topology Studio...
+        </div>
+      }
+    >
+      <TopologyStudioContent />
+    </Suspense>
   );
 }

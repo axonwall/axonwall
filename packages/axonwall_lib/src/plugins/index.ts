@@ -8,6 +8,7 @@ import {
   NetBoxConfigSchema,
   LibreNmsConfigSchema,
   TopologyConfigSchema,
+  NetFlowConfigSchema,
   NasConfigSchema,
   VirtConfigSchema,
   HaProxyPluginConfigSchema,
@@ -1109,6 +1110,24 @@ export const BUILTIN_PLUGINS: PluginManifest[] = [
       icon: 'GitBranch',
     },
   },
+  {
+    id: 'netflow-collector',
+    name: 'NetFlow, IPFIX & sFlow Collector Studio',
+    version: '1.0.0',
+    category: 'extension',
+    defaultEnabled: false,
+    dependencies: [],
+    description:
+      'High-speed native NetFlow v5/v9, IPFIX (RFC 7011), and sFlow v5 collector with eBPF/conntrack self-export, UDP fan-out replication, compressed Zstd/ClickHouse analytics, multi-source DNS/SNMP/GeoIP/K3s/Threat enrichment, FQL query engine, and real-time anomaly SOAR/XDP mitigation.',
+    author: 'Axonwall Core',
+    systemdUnits: [],
+    privileges: ['reporting.flows', 'system.config.write'],
+    menuEntry: {
+      title: 'NetFlow Collector',
+      path: '/reporting/netflow',
+      icon: 'Activity',
+    },
+  },
 ];
 
 export function resolveCapabilities(state?: Partial<DesiredState>): CoreCapabilities {
@@ -1332,6 +1351,9 @@ export function isPluginEnabled(pluginId: string, state?: Partial<DesiredState> 
   if (pluginId === 'topology-studio') {
     return isServiceExtensionEnabled(state.topology?.enabled, state.plugins, 'topology-studio');
   }
+  if (pluginId === 'netflow-collector') {
+    return isServiceExtensionEnabled(state.netflow?.enabled, state.plugins, 'netflow-collector');
+  }
   if (pluginId === 'nut-ups') {
     return isServiceExtensionEnabled(state.ups?.enabled, state.plugins, 'nut-ups');
   }
@@ -1458,6 +1480,10 @@ export function enablePluginWithDependencies(
       next.topology = next.topology
         ? { ...next.topology, enabled: true }
         : TopologyConfigSchema.parse({ enabled: true });
+    } else if (id === 'netflow-collector') {
+      next.netflow = next.netflow
+        ? { ...next.netflow, enabled: true }
+        : NetFlowConfigSchema.parse({ enabled: true });
     } else if (id === 'haproxy') {
       next.haproxy = next.haproxy
         ? { ...next.haproxy, enabled: true }
@@ -1594,6 +1620,10 @@ export function disablePluginWithDependents(
     } else if (id === 'topology-studio') {
       if (next.topology) {
         next.topology.enabled = false;
+      }
+    } else if (id === 'netflow-collector') {
+      if (next.netflow) {
+        next.netflow.enabled = false;
       }
     } else if (id === 'haproxy') {
       if (next.haproxy) {

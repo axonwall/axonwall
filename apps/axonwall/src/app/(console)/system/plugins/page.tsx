@@ -344,7 +344,7 @@ export default function PluginManagerPage() {
         !isPluginEnabled('core-k3s', state) &&
         !(id === 'librenms' && state.librenms?.mode === 'external');
 
-      if (id === 'vigilant-octo-waffle' || id === 'netbox' || id === 'librenms' || id === 'host-malware-rootkit' || id === 'eluvix' || id === 'topology-studio') {
+      if (id === 'vigilant-octo-waffle' || id === 'netbox' || id === 'librenms' || id === 'host-malware-rootkit' || id === 'eluvix' || id === 'topology-studio' || id === 'netflow-collector') {
         if (!isCurrentlyEnabled) {
           const depRes = enablePluginWithDependencies(id, next);
           next = depRes.state;
@@ -811,7 +811,7 @@ export default function PluginManagerPage() {
                   </div>
 
                   <div className="flex items-center gap-2">
-                    {(isInstalled || isBundled || plugin.id === 'vigilant-octo-waffle' || plugin.id === 'netbox' || plugin.id === 'librenms' || plugin.id === 'topology-studio') && (
+                    {(isInstalled || isBundled || plugin.id === 'vigilant-octo-waffle' || plugin.id === 'netbox' || plugin.id === 'librenms' || plugin.id === 'topology-studio' || plugin.id === 'netflow-collector') && (
                       <button
                         disabled={isSaving}
                         onClick={() => toggleExtensionPlugin(plugin.id)}

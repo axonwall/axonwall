@@ -1124,6 +1124,7 @@ function cmdSaveJson(fileArg?: string) {
       'netbox',
       'librenms',
       'topology',
+      'netflow',
     ];
     for (const k of objectKeys) {
       if (Array.isArray(parsedJson[k]) && parsedJson[k].length === 0) {
@@ -2929,6 +2930,52 @@ function parseCliArgs(args: string[], valueFlags: string[] = []): { positionals:
   return { positionals, flags };
 }
 
+async function cmdNetFlow(args: string[]) {
+  const { positionals, flags } = parseCliArgs(args);
+  const sub = (positionals[0] || 'status').toLowerCase();
+  const asJson = Boolean(flags.json);
+
+  switch (sub) {
+    case 'report': {
+      const rangeRaw = String(flags.range || '7d').replace(/d$/i, '');
+      const rangeDays = Math.max(1, Number(rangeRaw) || 7);
+      const groupBy = String(flags.group || 'interface');
+      const format = String(flags.format || (asJson ? 'json' : 'markdown'));
+      const rep = await sendAgentSocketRequest<any>(
+        `/v1/netflow/reports?rangeDays=${rangeDays}&groupBy=${encodeURIComponent(groupBy)}&format=${encodeURIComponent(format)}`,
+        'GET',
+      );
+      if (asJson || format === 'json') {
+        console.log(JSON.stringify(rep, null, 2));
+      } else {
+        console.log(rep?.rendered || JSON.stringify(rep, null, 2));
+      }
+      return;
+    }
+
+    case 'fleet-query':
+    case 'query': {
+      const fql = positionals.slice(1).join(' ') || String(flags.fql || '');
+      const scope = sub === 'fleet-query' ? 'fleet' : String(flags.scope || 'local');
+      const limit = Number(flags.limit) || 50;
+      const res = await sendAgentSocketRequest<any>('/v1/netflow/query', 'POST', {
+        rangeMinutes: Number(flags.minutes) || 60,
+        fql,
+        scope,
+        limit,
+        biflow: Boolean(flags.biflow),
+      });
+      console.log(JSON.stringify(res, null, 2));
+      return;
+    }
+
+    default: {
+      const st = await sendAgentSocketRequest<any>('/v1/netflow/status', 'GET');
+      console.log(JSON.stringify(st, null, 2));
+    }
+  }
+}
+
 async function cmdEbpf(args: string[]) {
   const { positionals, flags } = parseCliArgs(args);
   const sub = (positionals[0] || 'overview').toLowerCase();
@@ -4060,6 +4107,9 @@ async function main() {
     case 'threat-harvester':
     case 'blackbox':
       await cmdHarvester(args.slice(1));
+      break;
+    case 'netflow':
+      await cmdNetFlow(args.slice(1));
       break;
     case 'nas':
     case 'zfs':

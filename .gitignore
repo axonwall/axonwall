@@ -65,3 +65,5 @@ packaging/kernel/output/
 packaging/kernel/build/
 *.deb
 *.deb.sha256
+
+.hosts
