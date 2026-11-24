@@ -24,7 +24,7 @@ spec:
           mountPath: /etc/axonwall
   containers:
     - name: router
-      image: ghcr.io/axonwall/axonwalld:v0.15.1
+      image: ghcr.io/axonwall/axonwalld:v0.16.0
       securityContext:
         capabilities:
           add:
