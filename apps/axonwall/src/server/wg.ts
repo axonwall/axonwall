@@ -112,9 +112,10 @@ export async function generateWireGuardProfile(options?: { expectedFingerprint?:
     persistentKeepalive: 25,
     enabled: true,
   };
+  let regRes: { jobId?: string; pendingConfirm: boolean };
   try {
     // W-M2 & C-M8: register via narrowly scoped operator-safe helper with expectedFingerprint.
-    await registerWireGuardPeerInternal({
+    regRes = await registerWireGuardPeerInternal({
       newPeer,
       expectedFingerprint: options?.expectedFingerprint,
       actorUsername: username,
@@ -150,6 +151,8 @@ PersistentKeepalive = 25
     publicKey,
     assignedIp,
     configStr,
-    qrDataUrl
+    qrDataUrl,
+    pendingConfirm: regRes.pendingConfirm,
+    jobId: regRes.jobId,
   };
 }

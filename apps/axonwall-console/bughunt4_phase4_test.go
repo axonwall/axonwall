@@ -92,3 +92,79 @@ func TestBugHunt4_ValidatePartitionLayoutFitRejectsOverflow(t *testing.T) {
 		t.Fatalf("expected 32 GiB disk to fit, got %v", err)
 	}
 }
+
+func TestUpdateStateJSONPrunesCollidingExtraInterfaces(t *testing.T) {
+	root := t.TempDir()
+	etcDir := filepath.Join(root, "etc")
+	varDir := filepath.Join(root, "var")
+	_ = os.MkdirAll(etcDir, 0755)
+	_ = os.MkdirAll(varDir, 0755)
+
+	// Seed 8-NIC state (wan..opt6 on enp3s0..enp10s0, mixed ordering).
+	seed := map[string]any{
+		"version": 1,
+		"system":  map[string]any{"hostname": "ckpt"},
+		"interfaces": []map[string]any{
+			{"name": "wan", "role": "wan", "device": "enp3s0", "type": "dhcp", "enabled": true},
+			{"name": "lan", "role": "lan", "device": "enp4s0", "type": "static", "ipv4Address": "192.168.1.1/24", "enabled": true},
+			{"name": "opt1", "role": "lan", "device": "enp5s0", "type": "dhcp", "enabled": true},
+			{"name": "opt2", "role": "lan", "device": "enp6s0", "type": "dhcp", "enabled": true},
+			{"name": "opt3", "role": "lan", "device": "enp7s0", "type": "dhcp", "enabled": true},
+			{"name": "opt4", "role": "lan", "device": "enp8s0", "type": "dhcp", "enabled": true},
+			{"name": "opt5", "role": "lan", "device": "enp9s0", "type": "dhcp", "enabled": true},
+			{"name": "opt6", "role": "lan", "device": "enp10s0", "type": "dhcp", "enabled": true},
+		},
+	}
+	raw, _ := json.Marshal(seed)
+	_ = os.WriteFile(filepath.Join(varDir, "state.json"), raw, 0660)
+
+	// Reassign top row ports 1-4 (enp3s0, enp5s0, enp7s0, enp9s0) as wan/lan/opt1/opt2.
+	// Previously opt3 (enp7s0) and opt5 (enp9s0) stayed in state.json colliding with opt1 and opt2!
+	cfg := NetworkConfig{
+		WanDevice:  "enp3s0",
+		WanMode:    "dhcp",
+		LanDevice:  "enp5s0",
+		LanMode:    "static",
+		LanIP:      "10.60.0.1/24",
+		LanDHCP:    true,
+		Opt1Device: "enp7s0",
+		Opt1Mode:   "dhcp",
+		Opt2Device: "enp9s0",
+		Opt2Mode:   "dhcp",
+	}
+	updateStateJSONWithPaths(cfg, etcDir, varDir, filepath.Join(root, "state.json.lock"))
+
+	updatedBytes, err := os.ReadFile(filepath.Join(varDir, "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var updated struct {
+		Interfaces []struct {
+			Name   string `json:"name"`
+			Device string `json:"device"`
+		} `json:"interfaces"`
+	}
+	if err := json.Unmarshal(updatedBytes, &updated); err != nil {
+		t.Fatal(err)
+	}
+
+	devOwners := make(map[string][]string)
+	for _, ifc := range updated.Interfaces {
+		devOwners[ifc.Device] = append(devOwners[ifc.Device], ifc.Name)
+	}
+	for dev, owners := range devOwners {
+		if len(owners) > 1 {
+			t.Fatalf("device %s bound to multiple logical interfaces after console reassignment: %v", dev, owners)
+		}
+	}
+	for _, unexpected := range []string{"opt3", "opt5"} {
+		for _, ifc := range updated.Interfaces {
+			if ifc.Name == unexpected {
+				t.Fatalf("expected colliding stale extra interface %s to be pruned, still present: %+v", unexpected, updated.Interfaces)
+			}
+		}
+	}
+	if len(devOwners["enp8s0"]) != 1 || devOwners["enp8s0"][0] != "opt4" || len(devOwners["enp10s0"]) != 1 || devOwners["enp10s0"][0] != "opt6" {
+		t.Fatalf("expected non-colliding opt4 (enp8s0) and opt6 (enp10s0) preserved, got %v", devOwners)
+	}
+}

@@ -112,14 +112,14 @@ import {
   PERSIST_CONFIG_DIR,
   YAML_CONFIG_DIRS,
   computeSubnetAndDefaultPool,
+  findOverlappingSubnet,
   getDesiredStateInternal,
   invalidateDesiredStateCacheInternal,
   ipToUint32,
   persistDesiredStateToDisk,
+  prepareDesiredStateBundle,
   readAllYamlConfigFiles,
-  restoreDesiredStateSnapshot,
-  snapshotDesiredStateOnDisk,
-  syncNetworkInterfacesFiles,
+  readLiveKernelIpv4Addrs,
   writeConfigFileSafe,
 } from './desired-state-internal';
 import {
@@ -130,6 +130,7 @@ import {
   readHostOSRelease,
 } from './dev-paths';
 import {
+  buildDaemonBundleFiles,
   clearMockPendingConfirm,
   getLastPendingJobId,
   getMockApplyState,
@@ -1792,6 +1793,14 @@ const CONTROLLABLE_SERVICE_UNITS = [
   'target.service',
 ];
 
+const CRITICAL_NO_STOP_UNITS = new Set([
+  'axonwalld.service',
+  'axonwall-ui.service',
+  'axonwall-controller.service',
+  'ssh.service',
+  'sshd.service',
+]);
+
 export async function controlSystemService(
   unit: string,
   action: 'start' | 'stop' | 'restart'
@@ -1805,6 +1814,18 @@ export async function controlSystemService(
   }
   if (action !== 'start' && action !== 'stop' && action !== 'restart') {
     return { success: false, message: `Invalid service action '${action}'.` };
+  }
+  if (action === 'stop' && CRITICAL_NO_STOP_UNITS.has(cleanUnit)) {
+    return {
+      success: false,
+      message: `Refusing to stop critical control-plane unit '${cleanUnit}': stopping it would sever appliance management or rollback safety.`,
+    };
+  }
+  if (action === 'restart' && cleanUnit === 'axonwall-ui.service') {
+    return {
+      success: false,
+      message: `Refusing to restart '${cleanUnit}' from within the Web Console request handler.`,
+    };
   }
 
   let resolvedUnit = cleanUnit;
@@ -2284,6 +2305,101 @@ export async function getPhysicalNetworkDevices(): Promise<string[]> {
   return list.length > 0 ? list : ['eth0', 'eth1', 'eth2', 'eth3'];
 }
 
+type InterfaceApplyOutcome =
+  | { status: 'applied'; preparedState: DesiredState; jobId: string }
+  | { status: 'failed'; message: string }
+  | { status: 'dev_unreachable'; preparedState: DesiredState; reason: string };
+
+async function submitInterfaceMutationBundle(params: {
+  state: DesiredState;
+  jobPrefix: string;
+  label: string;
+  actionNoun: string;
+  verbPast: string;
+}): Promise<InterfaceApplyOutcome> {
+  const { normalizedState: preparedState, yamlDaemonFiles, confContent, ifacesContent } =
+    prepareDesiredStateBundle(params.state);
+
+  const jobId = `${params.jobPrefix}-${Date.now()}`;
+  let daemonError: string | null = null;
+  let daemonTimedOut: string | null = null;
+  let daemonUnreachable: string | null = null;
+
+  try {
+    const { nftScript, files, reloadServices } = compileNftables(preparedState);
+    const bundleHash = crypto.createHash('sha256').update(nftScript).digest('hex');
+    const allFiles = buildDaemonBundleFiles({
+      preparedState,
+      compiledFiles: files,
+      yamlDaemonFiles,
+      confContent,
+      ifacesContent,
+    });
+
+    setLastPendingJobId(jobId);
+    const applyRes = await callAgentApiDetailed<any>(
+      '/v1/apply',
+      'POST',
+      {
+        job_id: jobId,
+        bundle_hash: bundleHash,
+        nft_script: nftScript,
+        files: allFiles,
+        reload_services: reloadServices,
+        confirm_timeout_seconds: 120,
+      },
+      120_000
+    );
+
+    if (applyRes.kind === 'ok' && applyRes.data?.success) {
+      // Do NOT auto-confirm over localhost: operator must verify reachability
+      // and confirm via header/API within 120s or axonwalld reverts.
+      invalidateDesiredStateCacheInternal();
+      return { status: 'applied', preparedState, jobId };
+    }
+    if (applyRes.kind === 'timeout') {
+      try {
+        const st = await callAgentApi<any>('/v1/status', 'GET', undefined, 5000);
+        const livePending = st?.pending_job_id || st?.pendingJobId;
+        if (livePending) setLastPendingJobId(livePending);
+      } catch {}
+      daemonTimedOut = `apply request timed out after 120s — ${params.actionNoun} may still be committing on axonwalld.`;
+    } else if (applyRes.kind === 'http_error' || applyRes.kind === 'ok') {
+      daemonError =
+        applyRes.kind === 'http_error'
+          ? applyRes.message
+          : applyRes.data?.message || applyRes.data?.error || `Daemon rejected ${params.actionNoun}`;
+    } else {
+      daemonUnreachable = 'apply call failed';
+    }
+  } catch (err: any) {
+    daemonUnreachable = err?.message || 'daemon call threw';
+  }
+
+  if (daemonError) {
+    invalidateDesiredStateCacheInternal();
+    setLastPendingJobId('');
+    return { status: 'failed', message: `${params.label} was not ${params.verbPast}: ${daemonError}` };
+  }
+
+  if (daemonTimedOut) {
+    return { status: 'failed', message: `${params.label} ${daemonTimedOut}` };
+  }
+
+  const reason = daemonUnreachable || 'daemon unreachable';
+  if (!isDevModeRuntime()) {
+    invalidateDesiredStateCacheInternal();
+    setLastPendingJobId('');
+    return {
+      status: 'failed',
+      message: `${params.label} was NOT ${params.verbPast}: axonwalld is unreachable (${reason}). On-disk configuration was left unchanged.`,
+    };
+  }
+
+  persistDesiredStateToDisk(preparedState);
+  return { status: 'dev_unreachable', preparedState, reason };
+}
+
 export async function saveInterfaceAssignment(data: {
   name: string;
   originalName?: string;
@@ -2298,7 +2414,7 @@ export async function saveInterfaceAssignment(data: {
   dhcpServer?: boolean;
   dhcpPoolStart?: string;
   dhcpPoolEnd?: string;
-}): Promise<{ success: boolean; message: string }> {
+}): Promise<{ success: boolean; message: string; pendingConfirm?: boolean; jobId?: string }> {
   const session = await getSession();
   assertActionPermitted(session, 'admin');
 
@@ -2372,32 +2488,33 @@ export async function saveInterfaceAssignment(data: {
     type: data.type,
     dhcpServer,
     ipv4Address: data.type === 'static' ? data.ipv4Address : undefined,
-    ipv4Gateway: data.type === 'static' && data.ipv4Gateway ? data.ipv4Gateway : undefined,
+    ipv4Gateway:
+      (role === 'wan' || role === 'wan-delegated') && data.type === 'static' && data.ipv4Gateway
+        ? data.ipv4Gateway
+        : undefined,
     description: data.description || defaultDesc,
     mtu: data.mtu || 1500,
   });
 
-  // A15: reject a static LAN subnet that overlaps another LAN
-  // interface's subnet. Two LANs on the same subnet would each get
-  // a Kea DHCP subnet on the same CIDR. The interface being edited
-  // or renamed is excluded (matched by its pre-edit name).
-  if (role === 'lan' && data.type === 'static' && data.ipv4Address) {
-    const newSubnet = computeSubnetAndDefaultPool(data.ipv4Address);
-    if (newSubnet) {
-      for (const other of state.interfaces) {
-        if (other.name === lookupName) continue;
-        if (other.role !== 'lan' || other.type !== 'static' || !other.ipv4Address) continue;
-        const otherSubnet = computeSubnetAndDefaultPool(other.ipv4Address);
-        if (!otherSubnet) continue;
-        if (
-          newSubnet.firstUsableInt <= otherSubnet.lastUsableInt &&
-          otherSubnet.firstUsableInt <= newSubnet.lastUsableInt
-        ) {
-          throw new Error(
-            `Subnet ${newSubnet.subnetCidr} overlaps interface '${other.name}' (${otherSubnet.subnetCidr}). Choose a different subnet for '${cleanName}'.`
-          );
-        }
-      }
+  // Reject any static IPv4 subnet that overlaps either another static interface
+  // (LAN or WAN) OR a live kernel IPv4 address (e.g. a DHCP lease on OPT1).
+  if (data.type === 'static' && data.ipv4Address && normalizedEnabled) {
+    const existingIface = idx >= 0 ? state.interfaces[idx] : undefined;
+    const excludeDevices = [
+      normalizedDevice !== 'none' ? normalizedDevice : '',
+      existingIface?.device && existingIface.device !== 'none' ? existingIface.device : '',
+    ].filter(Boolean);
+    const overlap = findOverlappingSubnet(
+      data.ipv4Address,
+      state.interfaces,
+      readLiveKernelIpv4Addrs(),
+      { excludeNames: [lookupName, cleanName], excludeDevices }
+    );
+    if (overlap) {
+      const candidateSub = computeSubnetAndDefaultPool(data.ipv4Address);
+      throw new Error(
+        `Subnet ${candidateSub?.subnetCidr || data.ipv4Address} overlaps ${overlap.source} (${overlap.cidr}). Assigning an overlapping static subnet on '${normalizedDevice}' creates a competing kernel route that can sever connectivity. Choose a different subnet for '${cleanName}'.`
+      );
     }
   }
 
@@ -2511,141 +2628,22 @@ export async function saveInterfaceAssignment(data: {
     state.system.antiLockout.interface = lanNames[0] || 'lan';
   }
 
-  const normalizedState = DesiredStateSchema.parse(state);
-  // C10: snapshot on-disk config before persisting, so an explicit daemon
-  // rejection below can roll it back instead of presenting a disk-only
-  // change as applied.
-  const diskSnapshot = snapshotDesiredStateOnDisk();
-  const yamlDaemonFiles = persistDesiredStateToDisk(normalizedState);
+  const outcome = await submitInterfaceMutationBundle({
+    state,
+    jobPrefix: 'iface',
+    label: `Interface ${cleanName.toUpperCase()}`,
+    actionNoun: 'the interface change',
+    verbPast: 'applied',
+  });
 
-  // Persist device mappings and interface configuration into /etc/axonwall/interfaces.conf and /etc/network/interfaces
-  const { confContent, ifacesContent } = syncNetworkInterfacesFiles(normalizedState);
-
-  // Delegate persistence, interface bring-up, Kea reload, and nftables commit to root axonwalld daemon
-  let daemonApplied = false;
-  let daemonError: string | null = null;
-  let daemonTimedOut: string | null = null;
-  let daemonUnreachable: string | null = null;
-  try {
-    const { nftScript, files, reloadServices } = compileNftables(normalizedState);
-    const bundleHash = crypto.createHash('sha256').update(nftScript).digest('hex');
-    const allFiles = [
-      ...files.map((f: any) => ({
-        ...f,
-        fileMode: f.fileMode ?? f.file_mode ?? 0o600,
-        file_mode: f.file_mode ?? f.fileMode ?? 0o600,
-      })),
-      ...Object.entries(yamlDaemonFiles).map(([filePath, content]) => ({
-        path: filePath,
-        content,
-        fileMode: 0o660,
-        file_mode: 0o660,
-      })),
-      {
-        path: '/etc/axonwall/interfaces.conf',
-        content: confContent,
-        fileMode: 0o664,
-        file_mode: 0o664,
-      },
-      ...(isApplianceRuntime() && readHostOSRelease().family === 'debian'
-        ? [
-            {
-              path: '/etc/network/interfaces',
-              content: ifacesContent,
-              fileMode: 0o644,
-              file_mode: 0o644,
-            },
-          ]
-        : []),
-      {
-        path: '/etc/axonwall/state.json',
-        content: JSON.stringify(normalizedState, null, 2),
-        fileMode: 0o660,
-        file_mode: 0o660,
-      },
-    ];
-
-    const ifaceJobId = `iface-${Date.now()}`;
-    setLastPendingJobId(ifaceJobId);
-    const applyRes = await callAgentApiDetailed<any>(
-      '/v1/apply',
-      'POST',
-      {
-        job_id: ifaceJobId,
-        bundle_hash: bundleHash,
-        nft_script: nftScript,
-        files: allFiles,
-        reload_services: reloadServices,
-        confirm_timeout_seconds: 120,
-      },
-      120_000
-    );
-    if (applyRes.kind === 'ok' && applyRes.data?.success) {
-      const confirmRes = await callAgentApiDetailed<any>(
-        '/v1/confirm',
-        'POST',
-        { job_id: ifaceJobId, jobId: ifaceJobId },
-        60_000
-      );
-      if (confirmRes.kind === 'ok' && confirmRes.data?.success) {
-        daemonApplied = true;
-        setLastPendingJobId('');
-      } else if (confirmRes.kind === 'http_error' || (confirmRes.kind === 'ok' && !confirmRes.data?.success)) {
-        daemonError =
-          confirmRes.kind === 'http_error'
-            ? confirmRes.message
-            : confirmRes.data?.message || confirmRes.data?.error || 'Daemon refused to confirm the interface change';
-      } else if (confirmRes.kind === 'timeout') {
-        daemonTimedOut = 'confirm request timed out after 60s; check pending commit-confirm status before retrying.';
-      } else {
-        daemonUnreachable = 'confirm call failed';
-      }
-    } else if (applyRes.kind === 'timeout') {
-      try {
-        const st = await callAgentApi<any>('/v1/status', 'GET', undefined, 5000);
-        const livePending = st?.pending_job_id || st?.pendingJobId;
-        if (livePending) setLastPendingJobId(livePending);
-      } catch {}
-      daemonTimedOut = 'apply request timed out after 120s — configuration may still be committing on axonwalld.';
-    } else if (applyRes.kind === 'http_error' || applyRes.kind === 'ok') {
-      daemonError =
-        applyRes.kind === 'http_error'
-          ? applyRes.message
-          : applyRes.data?.message || applyRes.data?.error || 'Daemon rejected the interface change';
-    } else {
-      daemonUnreachable = 'apply call failed';
-    }
-  } catch (err: any) {
-    daemonUnreachable = err?.message || 'daemon call threw';
-  }
-
-  if (daemonError) {
-    restoreDesiredStateSnapshot(diskSnapshot);
-    invalidateDesiredStateCacheInternal();
-    setLastPendingJobId('');
+  if (outcome.status === 'failed') {
     return {
       success: false,
-      message: `Interface ${cleanName.toUpperCase()} was not applied: ${daemonError}`,
+      message: outcome.message,
     };
   }
 
-  if (daemonTimedOut) {
-    return {
-      success: false,
-      message: `Interface ${cleanName.toUpperCase()} ${daemonTimedOut}`,
-    };
-  }
-
-  const devMode = isDevModeRuntime();
-  if (daemonUnreachable && !devMode) {
-    const restored = restoreDesiredStateSnapshot(diskSnapshot);
-    invalidateDesiredStateCacheInternal();
-    setLastPendingJobId('');
-    return {
-      success: false,
-      message: `Interface ${cleanName.toUpperCase()} was NOT applied: axonwalld is unreachable (${daemonUnreachable})${restored ? '. On-disk configuration was restored.' : '.'}`,
-    };
-  }
+  const normalizedState = outcome.preparedState;
 
   try {
     const { recordGitOpsChange } = await import('./gitops');
@@ -2658,9 +2656,16 @@ export async function saveInterfaceAssignment(data: {
     );
   } catch {}
 
-  // C10 residual: the local fallback below used to swallow every step's
-  // failure (`catch {}`) and still return success. Every step is now
-  // checked and its failure recorded, so the final return can report it.
+  if (outcome.status === 'applied') {
+    return {
+      success: true,
+      pendingConfirm: true,
+      jobId: outcome.jobId,
+      message: `Interface ${cleanName.toUpperCase()} (${role.toUpperCase()}) applied on ${validDev ? normalizedDevice : '<none>'}. Commit-Confirm active for 120s — click Confirm in the header bar to keep changes, or they will automatically revert.`,
+    };
+  }
+
+  // Dev-mode unreachable fallback: apply Kea/ip best-effort when axonwalld is not running in dev mode.
   const localErrors: string[] = [];
   const runLocalStep = (label: string, fn: () => void) => {
     try {
@@ -2670,37 +2675,26 @@ export async function saveInterfaceAssignment(data: {
     }
   };
 
-  // Sync Kea DHCPv4 config directly if running in standalone/dev mode (when axonwalld did not apply)
-  if (!daemonApplied) {
-    try {
-      const { files } = compileNftables(normalizedState);
-      const keaFile = files.find((f) => f.path === '/etc/kea/kea-dhcp4.conf');
-      if (keaFile && fs.existsSync('/etc/kea')) {
-        fs.writeFileSync('/etc/kea/kea-dhcp4.conf', keaFile.content, { mode: 0o640 });
-        runLocalStep('kea reload', () =>
-          execFileSync('systemctl', ['reload-or-restart', 'kea-dhcp4-server'], { stdio: 'ignore', timeout: 3000 })
-        );
-      }
-    } catch (err: any) {
-      localErrors.push(`kea sync: ${err?.message || 'failed'}`);
+  try {
+    const { files } = compileNftables(normalizedState);
+    const keaFile = files.find((f) => f.path === '/etc/kea/kea-dhcp4.conf');
+    if (keaFile && fs.existsSync('/etc/kea')) {
+      fs.writeFileSync('/etc/kea/kea-dhcp4.conf', keaFile.content, { mode: 0o640 });
+      runLocalStep('kea reload', () =>
+        execFileSync('systemctl', ['reload-or-restart', 'kea-dhcp4-server'], { stdio: 'ignore', timeout: 3000 })
+      );
     }
+  } catch (err: any) {
+    localErrors.push(`kea sync: ${err?.message || 'failed'}`);
   }
 
-  // Apply basic network state directly only when axonwalld was not reachable
-  if (!daemonApplied && validDev) {
+  if (validDev) {
     if (normalizedEnabled) {
       runLocalStep('ip link up', () =>
         execFileSync('ip', ['link', 'set', normalizedDevice, 'up'], { stdio: 'ignore', timeout: 2000 })
       );
       if (data.type === 'static' && data.ipv4Address) {
-        // C10 residual: the old order flushed the interface BEFORE adding
-        // the new address, so a failed add left the interface address-less
-        // while the UI reported success. Add first, then delete only the
-        // old addresses that differ — and verify the new address is
-        // actually present afterwards.
         const newAddr = data.ipv4Address;
-        // An add that fails only because the address is already present
-        // is not a failure — the verify step below is the arbiter.
         let addrAddError: string | null = null;
         try {
           execFileSync('ip', ['addr', 'add', newAddr, 'dev', normalizedDevice], { stdio: 'ignore', timeout: 2000 });
@@ -2755,7 +2749,13 @@ export async function saveInterfaceAssignment(data: {
           const dhcpcdBin = fs.existsSync('/usr/sbin/dhcpcd') ? '/usr/sbin/dhcpcd' : '/sbin/dhcpcd';
           const before = localErrors.length;
           runLocalStep('dhcpcd', () =>
-            execFileSync(dhcpcdBin, ['-4', normalizedDevice], { stdio: 'ignore', timeout: 8000 })
+            execFileSync(
+              dhcpcdBin,
+              role !== 'wan'
+                ? ['-4', '-G', '-C', 'resolv.conf', normalizedDevice]
+                : ['-4', normalizedDevice],
+              { stdio: 'ignore', timeout: 8000 }
+            )
           );
           handledByDhcpcd = localErrors.length === before;
         }
@@ -2775,28 +2775,19 @@ export async function saveInterfaceAssignment(data: {
     }
   }
 
-  // C10 residual: when the daemon was never reached, the change was saved
-  // to disk (and the local commands above ran best-effort) but the daemon
-  // — owner of nftables/Kea — never applied anything. Report that
-  // explicitly instead of "saved on eth1" success.
-  if (daemonUnreachable) {
-    const localNote =
-      localErrors.length > 0
-        ? ` Local fallback steps failed: ${localErrors.join('; ')}.`
-        : ' Local interface commands ran as a best-effort fallback only.';
-    return {
-      success: false,
-      message: `Interface ${cleanName.toUpperCase()} was saved to disk but NOT applied: axonwalld is unreachable (${daemonUnreachable}).${localNote}`,
-    };
-  }
-
+  const localNote =
+    localErrors.length > 0
+      ? ` Local fallback steps failed: ${localErrors.join('; ')}.`
+      : ' Local interface commands ran as a best-effort fallback only.';
   return {
-    success: true,
-    message: `Interface ${cleanName.toUpperCase()} (${role.toUpperCase()}) saved on ${validDev ? normalizedDevice : '<none>'}.`,
+    success: false,
+    message: `Interface ${cleanName.toUpperCase()} was saved to disk but NOT applied: axonwalld is unreachable (${outcome.reason}).${localNote}`,
   };
 }
 
-export async function deleteInterfaceAssignment(name: string): Promise<{ success: boolean; message: string }> {
+export async function deleteInterfaceAssignment(
+  name: string
+): Promise<{ success: boolean; message: string; pendingConfirm?: boolean; jobId?: string }> {
   const session = await getSession();
   assertActionPermitted(session, 'admin');
 
@@ -2819,158 +2810,32 @@ export async function deleteInterfaceAssignment(name: string): Promise<{ success
     state.system.antiLockout.interface = lanNames[0] || 'lan';
   }
 
-  const normalizedState = DesiredStateSchema.parse(state);
-  // C10: snapshot on-disk config before persisting, so an explicit daemon
-  // rejection below can roll it back instead of presenting a disk-only
-  // removal as applied.
-  const diskSnapshot = snapshotDesiredStateOnDisk();
-  const yamlDaemonFiles = persistDesiredStateToDisk(normalizedState);
-  const { confContent, ifacesContent } = syncNetworkInterfacesFiles(normalizedState);
+  const outcome = await submitInterfaceMutationBundle({
+    state,
+    jobPrefix: 'iface-del',
+    label: `Interface ${cleanName.toUpperCase()}`,
+    actionNoun: 'the interface removal',
+    verbPast: 'removed',
+  });
 
-  let daemonError: string | null = null;
-  let daemonTimedOut: string | null = null;
-  let daemonUnreachable: string | null = null;
-  try {
-    const { nftScript, files, reloadServices } = compileNftables(normalizedState);
-    const bundleHash = crypto.createHash('sha256').update(nftScript).digest('hex');
-    const allFiles = [
-      ...files.map((f: any) => ({
-        ...f,
-        fileMode: f.fileMode ?? f.file_mode ?? 0o600,
-        file_mode: f.file_mode ?? f.fileMode ?? 0o600,
-      })),
-      ...Object.entries(yamlDaemonFiles).map(([filePath, content]) => ({
-        path: filePath,
-        content,
-        fileMode: 0o660,
-        file_mode: 0o660,
-      })),
-      {
-        path: '/etc/axonwall/interfaces.conf',
-        content: confContent,
-        fileMode: 0o664,
-        file_mode: 0o664,
-      },
-      ...(isApplianceRuntime() && readHostOSRelease().family === 'debian'
-        ? [
-            {
-              path: '/etc/network/interfaces',
-              content: ifacesContent,
-              fileMode: 0o644,
-              file_mode: 0o644,
-            },
-          ]
-        : []),
-      {
-        path: '/etc/axonwall/state.json',
-        content: JSON.stringify(normalizedState, null, 2),
-        fileMode: 0o660,
-        file_mode: 0o660,
-      },
-    ];
-
-    const ifaceDelJobId = `iface-del-${Date.now()}`;
-    setLastPendingJobId(ifaceDelJobId);
-    const applyRes = await callAgentApiDetailed<any>(
-      '/v1/apply',
-      'POST',
-      {
-        job_id: ifaceDelJobId,
-        bundle_hash: bundleHash,
-        nft_script: nftScript,
-        files: allFiles,
-        reload_services: reloadServices,
-        confirm_timeout_seconds: 120,
-      },
-      120_000
-    );
-    if (applyRes.kind === 'ok' && applyRes.data?.success) {
-      const confirmRes = await callAgentApiDetailed<any>(
-        '/v1/confirm',
-        'POST',
-        { job_id: ifaceDelJobId, jobId: ifaceDelJobId },
-        60_000
-      );
-      if (confirmRes.kind === 'ok' && confirmRes.data?.success) {
-        setLastPendingJobId('');
-      } else if (confirmRes.kind === 'http_error' || (confirmRes.kind === 'ok' && !confirmRes.data?.success)) {
-        daemonError =
-          confirmRes.kind === 'http_error'
-            ? confirmRes.message
-            : confirmRes.data?.message || confirmRes.data?.error || 'Daemon refused to confirm the interface removal';
-      } else if (confirmRes.kind === 'timeout') {
-        daemonTimedOut = 'confirm request timed out after 60s; check pending commit-confirm status before retrying.';
-      } else {
-        daemonUnreachable = 'confirm call failed';
-      }
-    } else if (applyRes.kind === 'timeout') {
-      try {
-        const st = await callAgentApi<any>('/v1/status', 'GET', undefined, 5000);
-        const livePending = st?.pending_job_id || st?.pendingJobId;
-        if (livePending) setLastPendingJobId(livePending);
-      } catch {}
-      daemonTimedOut = 'apply request timed out after 120s — removal may still be committing on axonwalld.';
-    } else if (applyRes.kind === 'http_error' || applyRes.kind === 'ok') {
-      daemonError =
-        applyRes.kind === 'http_error'
-          ? applyRes.message
-          : applyRes.data?.message || applyRes.data?.error || 'Daemon rejected the interface removal';
-    } else {
-      daemonUnreachable = 'apply call failed';
-    }
-  } catch (err: any) {
-    daemonUnreachable = err?.message || 'daemon call threw';
-  }
-
-  if (daemonError) {
-    restoreDesiredStateSnapshot(diskSnapshot);
-    invalidateDesiredStateCacheInternal();
-    setLastPendingJobId('');
+  if (outcome.status === 'failed') {
     return {
       success: false,
-      message: `Interface ${cleanName.toUpperCase()} was not removed: ${daemonError}`,
+      message: outcome.message,
     };
   }
 
-  if (daemonTimedOut) {
+  if (outcome.status === 'dev_unreachable') {
     return {
       success: false,
-      message: `Interface ${cleanName.toUpperCase()} ${daemonTimedOut}`,
+      message: `Interface ${cleanName.toUpperCase()} was removed from disk state but NOT applied: axonwalld is unreachable (${outcome.reason}).`,
     };
   }
-
-  if (daemonUnreachable && !isDevModeRuntime()) {
-    const restored = restoreDesiredStateSnapshot(diskSnapshot);
-    invalidateDesiredStateCacheInternal();
-    setLastPendingJobId('');
-    return {
-      success: false,
-      message: `Interface ${cleanName.toUpperCase()} was NOT removed: axonwalld is unreachable (${daemonUnreachable})${restored ? '. On-disk configuration was restored.' : '.'}`,
-    };
-  }
-
-  if (daemonUnreachable) {
-    return {
-      success: false,
-      message: `Interface ${cleanName.toUpperCase()} was removed from disk state but NOT applied: axonwalld is unreachable (${daemonUnreachable}).`,
-    };
-  }
-
-  try {
-    const { files } = compileNftables(normalizedState);
-    const keaFile = files.find((f) => f.path === '/etc/kea/kea-dhcp4.conf');
-    if (keaFile && fs.existsSync('/etc/kea')) {
-      fs.writeFileSync('/etc/kea/kea-dhcp4.conf', keaFile.content, { mode: 0o640 });
-      try {
-        execFileSync('systemctl', ['reload-or-restart', 'kea-dhcp4-server'], { stdio: 'ignore', timeout: 3000 });
-      } catch {}
-    }
-  } catch {}
 
   try {
     const { recordGitOpsChange } = await import('./gitops');
     await recordGitOpsChange(
-      normalizedState,
+      outcome.preparedState,
       session?.username || 'admin',
       `Removed interface ${cleanName.toUpperCase()}`
     );
@@ -2978,7 +2843,9 @@ export async function deleteInterfaceAssignment(name: string): Promise<{ success
 
   return {
     success: true,
-    message: `Interface ${cleanName.toUpperCase()} removed.`,
+    pendingConfirm: true,
+    jobId: outcome.jobId,
+    message: `Interface ${cleanName.toUpperCase()} removed. Commit-Confirm active for 120s — click Confirm in the header bar to keep changes, or they will automatically revert.`,
   };
 }
 
@@ -8372,7 +8239,7 @@ export async function applyFabricPlanAction(input: {
     }
   }
 
-  if (!dryRun && input.localState) {
+  if (!dryRun && input.localState && baseResult.success) {
     try {
       const localRes = await applyDesiredState(input.localState, timeout);
       baseResult.results = [

@@ -25,6 +25,7 @@ User=root
 Group=axonwall-api
 RuntimeDirectory=axonwall
 RuntimeDirectoryMode=0770
+RuntimeDirectoryPreserve=yes
 LogsDirectory=axonwall
 
 # Sandboxing

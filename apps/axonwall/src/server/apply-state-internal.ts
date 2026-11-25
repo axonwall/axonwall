@@ -8,11 +8,65 @@ import { isApplianceRuntime, isDevRuntime, readHostOSRelease } from './dev-paths
 import {
   invalidateDesiredStateCacheInternal,
   persistDesiredStateToDisk,
+  prepareDesiredStateBundle,
   readAllYamlConfigFiles,
-  restoreDesiredStateSnapshot,
-  snapshotDesiredStateOnDisk,
-  syncNetworkInterfacesFiles,
 } from './desired-state-internal';
+
+export type DaemonBundleFile = {
+  path: string;
+  content: string;
+  fileMode: number;
+  file_mode: number;
+};
+
+/**
+ * Builds the ordered list of files submitted to `axonwalld /v1/apply` from an
+ * already-prepared desire-state bundle without performing any disk writes.
+ */
+export function buildDaemonBundleFiles(params: {
+  preparedState: DesiredState;
+  compiledFiles: any[];
+  yamlDaemonFiles: Record<string, string>;
+  confContent: string;
+  ifacesContent: string;
+}): DaemonBundleFile[] {
+  const { preparedState, compiledFiles, yamlDaemonFiles, confContent, ifacesContent } = params;
+  return [
+    ...compiledFiles.map((f: any) => ({
+      ...f,
+      fileMode: f.fileMode ?? f.file_mode ?? 0o600,
+      file_mode: f.file_mode ?? f.fileMode ?? 0o600,
+    })),
+    ...Object.entries(yamlDaemonFiles).map(([filePath, content]) => ({
+      path: filePath,
+      content,
+      fileMode: 0o660,
+      file_mode: 0o660,
+    })),
+    {
+      path: '/etc/axonwall/interfaces.conf',
+      content: confContent,
+      fileMode: 0o664,
+      file_mode: 0o664,
+    },
+    ...(isApplianceRuntime() && readHostOSRelease().family === 'debian'
+      ? [
+          {
+            path: '/etc/network/interfaces',
+            content: ifacesContent,
+            fileMode: 0o644,
+            file_mode: 0o644,
+          },
+        ]
+      : []),
+    {
+      path: '/etc/axonwall/state.json',
+      content: JSON.stringify(preparedState, null, 2),
+      fileMode: 0o660,
+      file_mode: 0o660,
+    },
+  ];
+}
 
 export function isDevModeRuntimeInternal(): boolean {
   return (
@@ -63,54 +117,25 @@ export async function runDesiredStateApplyPipeline(
     }
   }
 
-  const diskSnapshot = snapshotDesiredStateOnDisk();
+  // Build all candidate files strictly in memory before contacting axonwalld.
+  // Writing candidate files beforehand would poison axonwalld's LKG snapshot.
+  const { normalizedState: preparedState, yamlDaemonFiles, confContent, ifacesContent } =
+    prepareDesiredStateBundle(normalizedState);
 
-  const lintIssues = lintRuleset(normalizedState);
-  const { nftScript, files, reloadServices, warnings: compileWarnings } = compileNftables(normalizedState);
+  const lintIssues = lintRuleset(preparedState);
+  const { nftScript, files, reloadServices, warnings: compileWarnings } = compileNftables(preparedState);
   const warnings = [...lintIssues.map((i) => i.message), ...(compileWarnings || [])];
   const bundleHash = crypto.createHash('sha256').update(nftScript).digest('hex');
 
-  const yamlDaemonFiles = persistDesiredStateToDisk(normalizedState);
-  const { confContent, ifacesContent } = syncNetworkInterfacesFiles(normalizedState);
-
-  const allFiles = [
-    ...files.map((f: any) => ({
-      ...f,
-      fileMode: f.fileMode ?? f.file_mode ?? 0o600,
-      file_mode: f.file_mode ?? f.fileMode ?? 0o600,
-    })),
-    ...Object.entries(yamlDaemonFiles).map(([filePath, content]) => ({
-      path: filePath,
-      content,
-      fileMode: 0o660,
-      file_mode: 0o660,
-    })),
-    {
-      path: '/etc/axonwall/interfaces.conf',
-      content: confContent,
-      fileMode: 0o664,
-      file_mode: 0o664,
-    },
-    ...(isApplianceRuntime() && readHostOSRelease().family === 'debian'
-      ? [
-          {
-            path: '/etc/network/interfaces',
-            content: ifacesContent,
-            fileMode: 0o644,
-            file_mode: 0o644,
-          },
-        ]
-      : []),
-    {
-      path: '/etc/axonwall/state.json',
-      content: JSON.stringify(normalizedState, null, 2),
-      fileMode: 0o660,
-      file_mode: 0o660,
-    },
-  ];
+  const allFiles = buildDaemonBundleFiles({
+    preparedState,
+    compiledFiles: files,
+    yamlDaemonFiles,
+    confContent,
+    ifacesContent,
+  });
 
   const jobId = `ui-${Date.now()}`;
-  lastPendingJobId = jobId;
   const applyRes = await callAgentApiDetailed<any>(
     '/v1/apply',
     'POST',
@@ -128,20 +153,16 @@ export async function runDesiredStateApplyPipeline(
   if (applyRes.kind === 'ok') {
     const daemonResp = applyRes.data;
     if (!daemonResp.success) {
-      const restored = restoreDesiredStateSnapshot(diskSnapshot);
       invalidateDesiredStateCacheInternal();
-      lastPendingJobId = '';
-      throw new Error(
-        (daemonResp.message || 'Ruleset validation failed on daemon') +
-          (restored
-            ? ''
-            : ' WARNING: on-disk configuration could not be fully restored to its pre-apply state; disk and daemon state may diverge.')
-      );
+      if (lastPendingJobId === jobId) lastPendingJobId = '';
+      throw new Error(daemonResp.message || 'Ruleset validation failed on daemon');
     }
+    lastPendingJobId = jobId;
+    invalidateDesiredStateCacheInternal();
     try {
       const { recordGitOpsChange } = await import('./gitops');
       await recordGitOpsChange(
-        normalizedState,
+        preparedState,
         options?.actorUsername || 'admin',
         `Configuration applied to /etc/axonwall/*.yaml (SHA256: ${bundleHash.slice(0, 12)})`
       );
@@ -157,15 +178,9 @@ export async function runDesiredStateApplyPipeline(
   }
 
   if (applyRes.kind === 'http_error') {
-    const restored = restoreDesiredStateSnapshot(diskSnapshot);
     invalidateDesiredStateCacheInternal();
-    lastPendingJobId = '';
-    throw new Error(
-      (applyRes.message || 'Ruleset validation failed on daemon') +
-        (restored
-          ? ''
-          : ' WARNING: on-disk configuration could not be fully restored to its pre-apply state; disk and daemon state may diverge.')
-    );
+    if (lastPendingJobId === jobId) lastPendingJobId = '';
+    throw new Error(applyRes.message || 'Ruleset validation failed on daemon');
   }
 
   if (applyRes.kind === 'timeout') {
@@ -183,28 +198,26 @@ export async function runDesiredStateApplyPipeline(
 
   const devMode = isDevModeRuntimeInternal();
   if (!devMode) {
-    const restored = restoreDesiredStateSnapshot(diskSnapshot);
     invalidateDesiredStateCacheInternal();
-    lastPendingJobId = '';
+    if (lastPendingJobId === jobId) lastPendingJobId = '';
     throw new Error(
-      'axonwalld is unreachable — the configuration was NOT applied and no commit-confirm is active' +
-        (restored
-          ? '. On-disk configuration was restored to its pre-apply state.'
-          : ' WARNING: on-disk configuration could not be fully restored to its pre-apply state; disk and daemon state may diverge.')
+      'axonwalld is unreachable — the configuration was NOT applied and no commit-confirm is active. On-disk configuration was left unchanged.'
     );
   }
+
+  persistDesiredStateToDisk(preparedState);
 
   try {
     const { recordGitOpsChange } = await import('./gitops');
     await recordGitOpsChange(
-      normalizedState,
+      preparedState,
       options?.actorUsername || 'admin',
       `Configuration applied to /etc/axonwall/*.yaml (SHA256: ${bundleHash.slice(0, 12)})`
     );
   } catch {}
 
   try {
-    const routes = normalizedState.routes || [];
+    const routes = preparedState.routes || [];
     for (const r of routes) {
       if (!r.network || !r.gateway) continue;
       const isV6 = r.network.includes(':') || r.gateway.includes(':');

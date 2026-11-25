@@ -26,17 +26,25 @@ func TestStaleStaticAddrsKeepsVipsAndTarget(t *testing.T) {
 	}
 }
 
-func TestStaleStaticAddrsSkipsTargetInAnyPrefix(t *testing.T) {
+func TestStaleStaticAddrsRemovesDifferingPrefixOnSameIP(t *testing.T) {
 	addrShow := `    inet 203.0.113.20/24 brd 203.0.113.255 scope global eth0
     inet 203.0.113.20/25 brd 203.0.113.127 scope global eth0
     inet 203.0.113.30/24 brd 203.0.113.255 scope global eth0
 `
-	// The target IP itself (any prefix) is never "stale": `ip addr
-	// replace` handles the target, so only the other address is listed.
+	// Linux netlink keys addresses by (local, prefixlen): changing prefix
+	// length on the same IP requires removing the old prefix rather than
+	// leaving dual prefixes bound on the interface.
 	got := staleStaticAddrs(addrShow, "203.0.113.20/24")
-	want := []string{"203.0.113.30/24"}
+	want := []string{"203.0.113.20/25", "203.0.113.30/24"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("staleStaticAddrs = %v, want %v", got, want)
+	}
+
+	// Bare IP target without a prefix still preserves any matching IP prefix.
+	gotBare := staleStaticAddrs(addrShow, "203.0.113.20")
+	wantBare := []string{"203.0.113.30/24"}
+	if !reflect.DeepEqual(gotBare, wantBare) {
+		t.Fatalf("staleStaticAddrs(bare) = %v, want %v", gotBare, wantBare)
 	}
 }
 

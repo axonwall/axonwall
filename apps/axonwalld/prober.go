@@ -180,6 +180,9 @@ func (p *SDWanProber) run(ctx context.Context) {
 
 	// Initial probe
 	p.probeAll(ctx)
+	if ctx.Err() != nil {
+		return
+	}
 
 	// A-M4: evaluate failover unconditionally after the first
 	// post-reload probe cycle, even if no gateway changed state in

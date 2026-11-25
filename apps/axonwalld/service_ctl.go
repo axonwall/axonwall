@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -360,18 +361,33 @@ func dhcpClientRunning(dev string) bool {
 	return dhcpClientRunningForDev(dev, dhcpPidFilesForDev(dev))
 }
 
-func triggerDhcpClient(dev string, roles ...string) {
+type dhcpLaunchRecord struct {
+	role      string
+	startedAt time.Time
+}
+
+var (
+	dhcpLaunchMu     sync.Mutex
+	dhcpRecentLaunch = make(map[string]dhcpLaunchRecord)
+	dhcpRebindWindow = 5 * time.Second
+)
+
+func normalizeDhcpRole(roles []string) string {
+	role := "wan"
+	if len(roles) > 0 && strings.TrimSpace(roles[0]) != "" {
+		role = strings.ToLower(strings.TrimSpace(roles[0]))
+	}
+	return role
+}
+
+func startDhcpClientProcess(dev, role string) {
 	if !isValidNetdev(dev) {
 		return
 	}
-	role := "wan"
-	if len(roles) > 0 && roles[0] != "" {
-		role = strings.ToLower(strings.TrimSpace(roles[0]))
-	}
-	if dhcpClientRunning(dev) {
-		log.Printf("[Agent] DHCP client already running on %s; not starting another", dev)
-		return
-	}
+	dhcpLaunchMu.Lock()
+	dhcpRecentLaunch[dev] = dhcpLaunchRecord{role: role, startedAt: time.Now()}
+	dhcpLaunchMu.Unlock()
+
 	go func() {
 		if dhcpcdPath, err := exec.LookPath("dhcpcd"); err == nil {
 			if role != "wan" {
@@ -389,10 +405,97 @@ func triggerDhcpClient(dev string, roles ...string) {
 	}()
 }
 
+// stopDhcpClient stops the running DHCP daemon for dev cleanly without sending
+// a DHCPRELEASE packet (`dhcpcd -x`), preserving the upstream ISP lease across
+// unconfirmed Commit-Confirm applies and rollbacks.
+func stopDhcpClient(dev string) {
+	if !isValidNetdev(dev) {
+		return
+	}
+	dhcpLaunchMu.Lock()
+	delete(dhcpRecentLaunch, dev)
+	dhcpLaunchMu.Unlock()
+
+	if dhcpcdPath, err := exec.LookPath("dhcpcd"); err == nil {
+		_ = exec.Command(dhcpcdPath, "-x", dev).Run()
+	}
+	for _, pidFile := range []string{
+		"/var/run/dhclient." + dev + ".pid",
+		"/run/dhclient." + dev + ".pid",
+		"/var/run/udhcpc." + dev + ".pid",
+		"/run/udhcpc." + dev + ".pid",
+	} {
+		data, err := os.ReadFile(pidFile)
+		if err != nil {
+			continue
+		}
+		pid, pErr := strconv.Atoi(strings.TrimSpace(string(data)))
+		if pErr == nil && pid > 0 && pidBelongsToDhcpClient(pid) {
+			if proc, fErr := os.FindProcess(pid); fErr == nil {
+				_ = proc.Signal(syscall.SIGTERM)
+			}
+		}
+	}
+}
+
+func triggerDhcpClient(dev string, roles ...string) {
+	if !isValidNetdev(dev) {
+		return
+	}
+	role := normalizeDhcpRole(roles)
+	dhcpLaunchMu.Lock()
+	rec, recentlyLaunched := dhcpRecentLaunch[dev]
+	if recentlyLaunched && rec.role == role && time.Since(rec.startedAt) < dhcpRebindWindow {
+		dhcpLaunchMu.Unlock()
+		return
+	}
+	dhcpLaunchMu.Unlock()
+
+	if dhcpClientRunning(dev) {
+		log.Printf("[Agent] DHCP client already running on %s; not starting another", dev)
+		return
+	}
+	startDhcpClientProcess(dev, role)
+}
+
+// rebindOrStartDhcpClient forces DHCP acquisition/rebind for dev under the
+// requested role, replacing any running DHCP client (whose -G / resolv.conf
+// flags may reflect a previous role or stale lease) while deduplicating rapid
+// back-to-back calls for the same device and role within dhcpRebindWindow.
+func rebindOrStartDhcpClient(dev string, roles ...string) {
+	if !isValidNetdev(dev) {
+		return
+	}
+	role := normalizeDhcpRole(roles)
+	dhcpLaunchMu.Lock()
+	rec, recentlyLaunched := dhcpRecentLaunch[dev]
+	if recentlyLaunched && rec.role == role && time.Since(rec.startedAt) < dhcpRebindWindow {
+		dhcpLaunchMu.Unlock()
+		return
+	}
+	dhcpRecentLaunch[dev] = dhcpLaunchRecord{role: role, startedAt: time.Now()}
+	dhcpLaunchMu.Unlock()
+
+	if dhcpClientRunning(dev) {
+		if dhcpcdPath, err := exec.LookPath("dhcpcd"); err == nil {
+			_ = exec.Command(dhcpcdPath, "-x", dev).Run()
+		} else {
+			stopDhcpClient(dev)
+			dhcpLaunchMu.Lock()
+			dhcpRecentLaunch[dev] = dhcpLaunchRecord{role: role, startedAt: time.Now()}
+			dhcpLaunchMu.Unlock()
+		}
+	}
+	startDhcpClientProcess(dev, role)
+}
+
 func releaseDhcpLease(dev string) {
 	if !isValidNetdev(dev) {
 		return
 	}
+	dhcpLaunchMu.Lock()
+	delete(dhcpRecentLaunch, dev)
+	dhcpLaunchMu.Unlock()
 	if dhcpcdPath, err := exec.LookPath("dhcpcd"); err == nil {
 		_ = exec.Command(dhcpcdPath, "-k", dev).Run()
 		_ = exec.Command(dhcpcdPath, "-x", dev).Run()

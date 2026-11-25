@@ -12,6 +12,7 @@ import {
   parseDesiredStateFromYamlFiles,
   serializeDesiredStateToYamlFiles,
 } from '@axonwall/lib/yaml';
+import { execFileSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -374,7 +375,137 @@ export function writeConfigFileSafe(targetPath: string, content: string, mode = 
   return false;
 }
 
-export function syncNetworkInterfacesFiles(state: DesiredState): { ifacesContent: string; confContent: string } {
+export type LiveKernelIpv4Addr = {
+  device: string;
+  cidr: string;
+};
+
+function parseIpv4CidrRange(cidr?: string): { netInt: number; bcastInt: number; subnetCidr: string } | null {
+  if (!cidr) return null;
+  const parts = cidr.trim().split('/');
+  const ipStr = parts[0] || '';
+  const prefix = parts[1] !== undefined && parts[1] !== '' ? parseInt(parts[1], 10) : 24;
+  const ipInt = ipToUint32(ipStr);
+  if (ipInt === null || Number.isNaN(prefix) || prefix < 1 || prefix > 32) {
+    return null;
+  }
+  const mask = (0xffffffff << (32 - prefix)) >>> 0;
+  const netInt = (ipInt & mask) >>> 0;
+  const bcastInt = (netInt | (~mask >>> 0)) >>> 0;
+  return {
+    netInt,
+    bcastInt,
+    subnetCidr: `${uint32ToIp(netInt)}/${prefix}`,
+  };
+}
+
+/**
+ * Checks whether assigning `candidateCidr` overlaps any other enabled static
+ * interface (any role) or any live kernel IPv4 address (including DHCP leases)
+ * on another physical device.
+ */
+export function findOverlappingSubnet(
+  candidateCidr: string,
+  configuredInterfaces: DesiredState['interfaces'] | undefined,
+  liveKernelAddrs: LiveKernelIpv4Addr[],
+  options?: { excludeNames?: string[]; excludeDevices?: string[] }
+): { source: string; cidr: string } | null {
+  const candidate = parseIpv4CidrRange(candidateCidr);
+  if (!candidate) return null;
+
+  const excludedNames = new Set(
+    (options?.excludeNames || []).map((n) => n.trim().toLowerCase()).filter(Boolean)
+  );
+  const excludedDevices = new Set(
+    (options?.excludeDevices || []).map((d) => d.trim().toLowerCase()).filter(Boolean)
+  );
+
+  for (const other of configuredInterfaces || []) {
+    if (!other.enabled) continue;
+    const otherName = (other.name || '').trim().toLowerCase();
+    const otherDev = (other.device || '').trim().toLowerCase();
+    if (otherName && excludedNames.has(otherName)) continue;
+    if (otherDev && otherDev !== 'none' && excludedDevices.has(otherDev)) continue;
+    if (other.type !== 'static' || !other.ipv4Address) continue;
+
+    const otherRange = parseIpv4CidrRange(other.ipv4Address);
+    if (!otherRange) continue;
+    if (candidate.netInt <= otherRange.bcastInt && otherRange.netInt <= candidate.bcastInt) {
+      return {
+        source: `interface '${other.name}'${other.device && other.device !== 'none' ? ` (${other.device})` : ''}`,
+        cidr: otherRange.subnetCidr,
+      };
+    }
+  }
+
+  for (const live of liveKernelAddrs || []) {
+    const liveDev = (live.device || '').trim();
+    const liveDevLower = liveDev.toLowerCase();
+    if (!liveDev || liveDevLower === 'lo' || excludedDevices.has(liveDevLower)) continue;
+    const bareIp = (live.cidr || '').trim().split('/')[0] || '';
+    if (bareIp.startsWith('169.254.') || bareIp.startsWith('127.')) continue;
+
+    const liveRange = parseIpv4CidrRange(live.cidr);
+    if (!liveRange) continue;
+    if (candidate.netInt <= liveRange.bcastInt && liveRange.netInt <= candidate.bcastInt) {
+      const matched = (configuredInterfaces || []).find(
+        (i) => (i.device || '').trim().toLowerCase() === liveDevLower
+      );
+      return {
+        source: matched
+          ? `live interface '${matched.name}' (${liveDev}, ${matched.type.toUpperCase()})`
+          : `live device '${liveDev}'`,
+        cidr: live.cidr,
+      };
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Reads active global IPv4 CIDRs from the Linux kernel via `ip -j -4 addr show`.
+ * Returns an empty array cleanly if `ip` is unavailable or fails.
+ */
+export function readLiveKernelIpv4Addrs(): LiveKernelIpv4Addr[] {
+  try {
+    const out = execFileSync('ip', ['-j', '-4', 'addr', 'show'], {
+      encoding: 'utf8',
+      timeout: 2000,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    if (!out || !out.trim()) return [];
+    const parsed = JSON.parse(out) as Array<{
+      ifname?: string;
+      addr_info?: Array<{
+        family?: string;
+        local?: string;
+        prefixlen?: number;
+        scope?: string;
+      }>;
+    }>;
+    if (!Array.isArray(parsed)) return [];
+    const results: LiveKernelIpv4Addr[] = [];
+    for (const devEntry of parsed) {
+      const device = (devEntry?.ifname || '').trim();
+      if (!device || device === 'lo') continue;
+      for (const addr of devEntry.addr_info || []) {
+        if (addr.family !== 'inet' || !addr.local) continue;
+        if (addr.scope === 'host' || addr.scope === 'link') continue;
+        const prefix = typeof addr.prefixlen === 'number' ? addr.prefixlen : 24;
+        results.push({ device, cidr: `${addr.local}/${prefix}` });
+      }
+    }
+    return results;
+  } catch {
+    return [];
+  }
+}
+
+export function buildNetworkInterfacesFilesContent(state: DesiredState): {
+  ifacesContent: string;
+  confContent: string;
+} {
   const wanIface =
     state.interfaces?.find((i) => i.name === 'wan') ||
     state.interfaces?.find((i) => inferInterfaceRole(i) === 'wan' && i.enabled);
@@ -430,15 +561,11 @@ export function syncNetworkInterfacesFiles(state: DesiredState): { ifacesContent
     confLines.push(`${keyPrefix}_ROLE=${role}`);
     confLines.push(`${keyPrefix}_MODE=${iface.type}`);
     confLines.push(`${keyPrefix}_IPV4_ADDRESS=${iface.ipv4Address || ''}`);
-    confLines.push(`${keyPrefix}_IPV4_GATEWAY=${safeIpv4(iface.ipv4Gateway)}`);
+    confLines.push(`${keyPrefix}_IPV4_GATEWAY=${role === 'wan' ? safeIpv4(iface.ipv4Gateway) : ''}`);
     confLines.push(`${keyPrefix}_DHCP_SERVER=${authDhcp ? 'true' : 'false'}`);
   }
 
   const confContent = confLines.join('\n') + '\n';
-
-  for (const dir of YAML_CONFIG_DIRS) {
-    writeConfigFileSafe(path.join(dir, 'interfaces.conf'), confContent, 0o664);
-  }
 
   const cidrToNetmask = (cidr: number): string => {
     const mask = [];
@@ -453,7 +580,8 @@ export function syncNetworkInterfacesFiles(state: DesiredState): { ifacesContent
 
   const renderIfaceStanza = (label: string, ifaceObj?: typeof wanIface) => {
     if (!ifaceObj || !ifaceObj.device || !ifaceObj.enabled || !isValidDevice(ifaceObj.device)) return '';
-    const roleLabel = inferInterfaceRole(ifaceObj).toUpperCase();
+    const inferredRole = inferInterfaceRole(ifaceObj);
+    const roleLabel = inferredRole.toUpperCase();
     let s = `# ${label} (${roleLabel}) Interface\nauto ${ifaceObj.device}\n`;
     if (ifaceObj.type === 'static' && ifaceObj.ipv4Address) {
       const parts = ifaceObj.ipv4Address.split('/');
@@ -462,9 +590,12 @@ export function syncNetworkInterfacesFiles(state: DesiredState): { ifacesContent
       s += `iface ${ifaceObj.device} inet static\n`;
       s += `    address ${ip}\n`;
       s += `    netmask ${cidrToNetmask(cidr)}\n`;
-      const gw = safeIpv4(ifaceObj.ipv4Gateway);
-      if (gw) {
-        s += `    gateway ${gw}\n`;
+      // Only WAN interfaces should ever carry a default gateway in /etc/network/interfaces.
+      if (inferredRole === 'wan') {
+        const gw = safeIpv4(ifaceObj.ipv4Gateway);
+        if (gw) {
+          s += `    gateway ${gw}\n`;
+        }
       }
       if (validDnsServers.length > 0) {
         s += `    dns-nameservers ${validDnsServers.join(' ')}\n`;
@@ -514,12 +645,22 @@ export function syncNetworkInterfacesFiles(state: DesiredState): { ifacesContent
     }
   }
 
+  return { ifacesContent: ifaces, confContent };
+}
+
+export function syncNetworkInterfacesFiles(state: DesiredState): { ifacesContent: string; confContent: string } {
+  const { ifacesContent, confContent } = buildNetworkInterfacesFilesContent(state);
+
+  for (const dir of YAML_CONFIG_DIRS) {
+    writeConfigFileSafe(path.join(dir, 'interfaces.conf'), confContent, 0o664);
+  }
+
   if (isApplianceRuntime() && readHostOSRelease().family === 'debian') {
     try {
       if (!fs.existsSync('/etc/network')) {
         fs.mkdirSync('/etc/network', { recursive: true });
       }
-      fs.writeFileSync('/etc/network/interfaces', ifaces, 'utf8');
+      fs.writeFileSync('/etc/network/interfaces', ifacesContent, 'utf8');
       if (fs.existsSync('/etc/network/interfaces.d/axonwall')) {
         try {
           fs.unlinkSync('/etc/network/interfaces.d/axonwall');
@@ -528,10 +669,19 @@ export function syncNetworkInterfacesFiles(state: DesiredState): { ifacesContent
     } catch {}
   }
 
-  return { ifacesContent: ifaces, confContent };
+  return { ifacesContent, confContent };
 }
 
-export function persistDesiredStateToDisk(state: DesiredState): Record<string, string> {
+/**
+ * Normalizes `state`, synthesizes missing authoritative Kea subnets, and builds
+ * all daemon bundle file payloads purely in memory without touching disk.
+ */
+export function prepareDesiredStateBundle(state: DesiredState): {
+  normalizedState: DesiredState;
+  yamlDaemonFiles: Record<string, string>;
+  confContent: string;
+  ifacesContent: string;
+} {
   const normalized = DesiredStateSchema.parse(state);
 
   if (normalized.dhcp?.enabled !== false) {
@@ -563,18 +713,31 @@ export function persistDesiredStateToDisk(state: DesiredState): Record<string, s
   }
 
   const yamlFiles = serializeDesiredStateToYamlFiles(normalized);
-  const daemonFileMap: Record<string, string> = {};
-
+  const yamlDaemonFiles: Record<string, string> = {};
   for (const [filename, content] of Object.entries(yamlFiles)) {
-    daemonFileMap[`/etc/axonwall/${filename}`] = content;
+    yamlDaemonFiles[`/etc/axonwall/${filename}`] = content;
   }
+
+  const { ifacesContent, confContent } = buildNetworkInterfacesFilesContent(normalized);
+  return {
+    normalizedState: normalized,
+    yamlDaemonFiles,
+    confContent,
+    ifacesContent,
+  };
+}
+
+export function persistDesiredStateToDisk(state: DesiredState): Record<string, string> {
+  const { normalizedState: normalized, yamlDaemonFiles } = prepareDesiredStateBundle(state);
+  const daemonFileMap: Record<string, string> = { ...yamlDaemonFiles };
 
   for (const dir of [PERSIST_CONFIG_DIR, ETC_CONFIG_DIR]) {
     try {
       if (!fs.existsSync(dir)) {
         fs.mkdirSync(dir, { recursive: true, mode: 0o775 });
       }
-      for (const [filename, content] of Object.entries(yamlFiles)) {
+      for (const [daemonPath, content] of Object.entries(yamlDaemonFiles)) {
+        const filename = daemonPath.replace(/^\/etc\/axonwall\//, '');
         writeConfigFileSafe(path.join(dir, filename), content, 0o660);
       }
       const legacyMonolithic = path.join(dir, 'axonwall.yaml');
@@ -773,8 +936,10 @@ function reconcileStateWithInterfacesConf(state: DesiredState): boolean {
  */
 export async function getDesiredStateInternal(): Promise<DesiredState> {
   const { files, fingerprint } = readAllYamlConfigFiles();
+  const hadExistingConfigFiles = Object.keys(files).length > 0;
+  let lastParseError: any = null;
 
-  if (Object.keys(files).length > 0) {
+  if (hadExistingConfigFiles) {
     if (cachedDesiredState && fingerprint === lastLoadedFingerprint) {
       return structuredClone(cachedDesiredState);
     }
@@ -788,6 +953,7 @@ export async function getDesiredStateInternal(): Promise<DesiredState> {
       }
       return structuredClone(cachedDesiredState!);
     } catch (err: any) {
+      lastParseError = err;
       console.error('[axonwall] Failed to parse YAML files:', err?.message || err);
     }
   }
@@ -796,17 +962,29 @@ export async function getDesiredStateInternal(): Promise<DesiredState> {
     return structuredClone(cachedDesiredState);
   }
 
+  let hadExistingStateJson = false;
   for (const jsonPath of Array.from(
     new Set([getStateJsonPath(), path.join(ETC_CONFIG_DIR, 'state.json'), './state.json'])
   )) {
     try {
       if (fs.existsSync(jsonPath)) {
+        hadExistingStateJson = true;
         const raw = fs.readFileSync(jsonPath, 'utf8');
         const parsed = DesiredStateSchema.parse(JSON.parse(raw));
         persistDesiredStateToDisk(parsed);
         return structuredClone(parsed);
       }
-    } catch {}
+    } catch (err: any) {
+      lastParseError = lastParseError || err;
+    }
+  }
+
+  if (hadExistingConfigFiles || hadExistingStateJson) {
+    throw new Error(
+      `Refusing to overwrite existing Axonwall configuration with factory defaults after parse failure: ${
+        lastParseError?.message || 'corrupt or unreadable configuration'
+      }`
+    );
   }
 
   const baseline = buildBaselineState();
@@ -838,8 +1016,9 @@ export function snapshotDesiredStateOnDisk(): OnDiskConfigSnapshotEntry[] {
       } else {
         snapshot.push({ path: filePath, existed: false, content: null });
       }
-    } catch {
-      snapshot.push({ path: filePath, existed: false, content: null });
+    } catch (err: any) {
+      // Never record an unreadable file as existed: false, otherwise restoreDesiredStateSnapshot would unlink it.
+      console.warn(`[axonwall] Skipping unreadable config path during snapshot (${filePath}): ${err?.message || err}`);
     }
   }
   return snapshot;

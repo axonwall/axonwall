@@ -208,6 +208,7 @@ func snapshotLkgConfig(bundleDir string) {
 	// Walk configured directories recursively so managed/* and conf.d/*
 	// subsystem files are preserved alongside top-level configs.
 	srcDirs := lkgConfigSrcDirs
+	seenRels := make(map[string]bool)
 	for _, srcDir := range srcDirs {
 		_ = filepath.WalkDir(srcDir, func(path string, d fs.DirEntry, walkErr error) error {
 			if walkErr != nil {
@@ -236,8 +237,28 @@ func snapshotLkgConfig(bundleDir string) {
 			dstPath := filepath.Join(lkgConfigDir, rel)
 			if data, err := os.ReadFile(path); err == nil && len(data) > 0 {
 				if mkErr := os.MkdirAll(filepath.Dir(dstPath), 0700); mkErr == nil {
-					_ = os.WriteFile(dstPath, data, 0600)
+					if wErr := os.WriteFile(dstPath, data, 0600); wErr == nil {
+						seenRels[rel] = true
+					}
 				}
+			}
+			return nil
+		})
+	}
+
+	// Prune stale files from lkg-config that no longer exist in source dirs so
+	// previously removed configs are not resurrected on a future rollback.
+	if len(seenRels) > 0 {
+		_ = filepath.WalkDir(lkgConfigDir, func(dstPath string, d fs.DirEntry, walkErr error) error {
+			if walkErr != nil || d.IsDir() {
+				return nil
+			}
+			rel, err := filepath.Rel(lkgConfigDir, dstPath)
+			if err != nil || rel == "." || strings.HasPrefix(rel, "..") {
+				return nil
+			}
+			if !seenRels[rel] {
+				_ = os.Remove(dstPath)
 			}
 			return nil
 		})
@@ -461,7 +482,7 @@ func NewAgentServer(bundleDir string, iapManager *engine.IAPManager, haEngine *H
 		}
 	}
 	if lastGoodScript == "" && !pendingExists {
-		if out, err := exec.Command("nft", "list", "ruleset").CombinedOutput(); err == nil && len(out) > 0 {
+		if out, err := exec.Command("nft", "list", "ruleset").Output(); err == nil && len(out) > 0 {
 			scriptStr := string(out)
 			if !strings.HasPrefix(strings.TrimSpace(scriptStr), "flush ruleset") {
 				scriptStr = "flush ruleset\n" + scriptStr
@@ -554,6 +575,8 @@ func (s *AgentServer) handlePendingConfirmAtStartup(bundleDir string) {
 // as LKG and the live files are NOT snapshotted as LKG.
 func (s *AgentServer) rollbackPendingAtStartup(bundleDir string) {
 	restored := restoreLkgConfig(bundleDir)
+	restoredServices, extRestored := restoreExternalBundleFiles(bundleDir)
+	netRestored := restoreLiveNetSnapshot(bundleDir)
 	if s.lastGoodScript != "" {
 		if err := applyNftScriptString(s.lastGoodScript); err != nil {
 			log.Printf("[Agent] WARNING: startup rollback could not apply last-known-good ruleset: %v", err)
@@ -564,11 +587,27 @@ func (s *AgentServer) rollbackPendingAtStartup(bundleDir string) {
 			}
 		}
 	}
+	if restored || extRestored || netRestored {
+		if err := reapplyRestoredNetdev(); err != nil {
+			log.Printf("[Agent] Startup rollback: netdev re-apply warning: %v", err)
+		}
+		if err := applyBootInterfaces(); err != nil {
+			log.Printf("[Agent] Startup rollback: boot interfaces re-apply failed: %v", err)
+		}
+		if err := ReconcileStaticRoutes(); err != nil {
+			log.Printf("[Agent] Startup rollback: static routes reconciliation: %v", err)
+		}
+		if len(restoredServices) > 0 {
+			for _, rErr := range reloadBundleServices(restoredServices) {
+				log.Printf("[Agent] Startup rollback service reload warning: %v", rErr)
+			}
+		}
+	}
 	if restored {
 		// The restored files are the confirmed LKG config; snapshot
 		// them so the lkg-config dir matches what is live now.
 		snapshotLkgConfig(bundleDir)
-	} else {
+	} else if !extRestored {
 		if s.lastGoodScript == "" {
 			log.Printf("[Agent] WARNING: no last-known-good configuration exists to roll back to; the unconfirmed bundle from the previous run stays live but is NOT promoted to last-known-good")
 		} else {
@@ -576,6 +615,7 @@ func (s *AgentServer) rollbackPendingAtStartup(bundleDir string) {
 		}
 	}
 	clearPendingConfirmFiles(bundleDir)
+	clearPendingRollbackSnapshots(bundleDir)
 	_ = os.Remove("/run/axonwall/commit-confirm.pending")
 }
 
@@ -998,10 +1038,33 @@ func (s *AgentServer) ApplyBundle(ctx context.Context, req *pb.ApplyBundleReques
 		return nil, err
 	}
 
-	// Snapshot verified configuration before writing candidate changes
+	// Snapshot verified configuration, external bundle files, and live kernel
+	// network state BEFORE writing candidate changes.
 	if !s.pendingConfirm {
+		if s.lastGoodScript == "" {
+			lkgPath := filepath.Join(s.bundleDir, "last-known-good.nft")
+			if data, rErr := os.ReadFile(lkgPath); rErr == nil && len(data) > 0 {
+				h := sha256.Sum256(data)
+				s.lastGoodScript = string(data)
+				s.lastGoodHash = hex.EncodeToString(h[:])
+			} else if out, nErr := exec.Command("nft", "list", "ruleset").Output(); nErr == nil && strings.TrimSpace(string(out)) != "" {
+				scriptStr := string(out)
+				if !strings.HasPrefix(strings.TrimSpace(scriptStr), "flush ruleset") {
+					scriptStr = "flush ruleset\n" + scriptStr
+				}
+				scriptBytes := []byte(scriptStr)
+				h := sha256.Sum256(scriptBytes)
+				s.lastGoodScript = scriptStr
+				s.lastGoodHash = hex.EncodeToString(h[:])
+				if mkErr := os.MkdirAll(s.bundleDir, 0700); mkErr == nil {
+					_ = os.WriteFile(lkgPath, scriptBytes, 0600)
+				}
+			}
+		}
 		snapshotLkgConfig(s.bundleDir)
+		captureLiveNetSnapshot(s.bundleDir)
 	}
+	snapshotExternalBundleFiles(s.bundleDir, validatedFiles, s.pendingConfirm)
 
 	// 2. Write the already-validated bundle configuration files (e.g.
 	// kea, unbound, suricata, crowdsec). Paths, symlinks, and modes
@@ -1063,14 +1126,14 @@ func (s *AgentServer) ApplyBundle(ctx context.Context, req *pb.ApplyBundleReques
 		if strings.HasPrefix(cleanPath, "/etc/axonwall/") &&
 			(strings.HasSuffix(cleanPath, ".yaml") || strings.HasSuffix(cleanPath, ".yml") || strings.HasSuffix(cleanPath, ".json") || filepath.Base(cleanPath) == "interfaces.conf") {
 			relPath := strings.TrimPrefix(cleanPath, "/etc/axonwall/")
-			persistPath := filepath.Join("/var/lib/axonwall/etc-axonwall", relPath)
+			persistPath := filepath.Join(axonwallStateDir(), "etc-axonwall", relPath)
 			if err := mirrorBundleFile(persistPath, mode, []byte(f.Content), isSharedAxonwallCfg); err != nil {
 				log.Printf("[Agent] ERROR: Failed to mirror bundle file %s to %s: %v; the live config is applied but will not survive an A/B slot switch", cleanPath, persistPath, err)
 				applyWarnings = append(applyWarnings, fmt.Sprintf("mirror write failed for %s: %v", relPath, err))
 			}
 			if filepath.Base(cleanPath) == "state.json" {
-				if err := mirrorBundleFile("/var/lib/axonwall/state.json", 0660, []byte(f.Content), true); err != nil {
-					log.Printf("[Agent] ERROR: Failed to mirror state.json to /var/lib/axonwall/state.json: %v", err)
+				if err := mirrorBundleFile(filepath.Join(axonwallStateDir(), "state.json"), 0660, []byte(f.Content), true); err != nil {
+					log.Printf("[Agent] ERROR: Failed to mirror state.json to %s: %v", filepath.Join(axonwallStateDir(), "state.json"), err)
 					applyWarnings = append(applyWarnings, fmt.Sprintf("mirror write failed for state.json: %v", err))
 				}
 			}
@@ -1301,6 +1364,9 @@ func (s *AgentServer) ApplyBundle(ctx context.Context, req *pb.ApplyBundleReques
 	// 5. Reload any changed systemd units requested. A-M2: this runs
 	// without holding s.mu (see reloadBundleServices); the deferred
 	// unlock at the top of ApplyBundle releases the re-acquired lock.
+	if len(req.ReloadServices) > 0 {
+		recordPendingReloadServices(s.bundleDir, req.ReloadServices)
+	}
 	s.mu.Unlock()
 	for _, err := range reloadBundleServices(req.ReloadServices) {
 		applyWarnings = append(applyWarnings, err.Error())
@@ -1389,6 +1455,7 @@ func (s *AgentServer) clearPendingLocked() {
 	// restart does not try to confirm or roll back a bundle that
 	// already finished.
 	clearPendingConfirmFiles(s.bundleDir)
+	clearPendingRollbackSnapshots(s.bundleDir)
 }
 
 // pendingConfirmState is the on-disk record of an unconfirmed bundle
@@ -1458,6 +1525,12 @@ func loadPendingConfirmState(bundleDir string) (pendingConfirmState, string, boo
 	return state, string(candidate), true
 }
 
+// pendingConfirmFileExists reports whether a persisted pending-confirm state file exists on disk.
+func pendingConfirmFileExists(bundleDir string) bool {
+	_, err := os.Stat(pendingConfirmStatePath(bundleDir))
+	return err == nil
+}
+
 // pendingConfirmIsLive reports whether a previous run left a pending
 // confirm whose deadline is still in the future.
 func pendingConfirmIsLive(bundleDir string) bool {
@@ -1471,6 +1544,23 @@ func pendingConfirmIsLive(bundleDir string) bool {
 func clearPendingConfirmFiles(bundleDir string) {
 	_ = os.Remove(pendingConfirmStatePath(bundleDir))
 	_ = os.Remove(pendingCandidatePath(bundleDir))
+}
+
+func readManagedOrRootConfig(etcDir, name string) ([]byte, error) {
+	if !strings.Contains(name, "/") {
+		if data, err := os.ReadFile(filepath.Join(etcDir, "managed", name)); err == nil && len(data) > 0 {
+			return data, nil
+		}
+	}
+	return os.ReadFile(filepath.Join(etcDir, name))
+}
+
+func reapplyRestoredNetdev() error {
+	data, err := readManagedOrRootConfig(axonwallEtcDir(), "netdev_config.json")
+	if err != nil || len(data) == 0 {
+		return nil
+	}
+	return engine.ApplyNetdevBundleJSON(data, json.Unmarshal)
 }
 
 // applyNftScriptString applies an nftables script via a temp file,
@@ -1497,64 +1587,74 @@ func applyNftScriptString(script string) error {
 }
 
 func (s *AgentServer) executeRollback(reason string) error {
+	cancelPostBootVerification()
+	var rollbackErrs []string
+
 	if s.lastGoodScript == "" {
 		lkgPath := filepath.Join(s.bundleDir, "last-known-good.nft")
 		if data, err := os.ReadFile(lkgPath); err == nil && len(data) > 0 {
 			s.lastGoodScript = string(data)
-		} else {
-			// A-M1: no rollback target means the pending candidate
-			// must die here, not linger for a later Confirm.
-			s.clearPendingLocked()
-			return fmt.Errorf("no previous last-known-good configuration available for rollback")
 		}
 	}
 
-	if s.lastGoodScript != "" {
+	// Always restore LKG configuration files, external bundle files, and live kernel
+	// network state BEFORE giving up on a missing/failing nft script, so partial/broken
+	// candidate files, IPs, and routes are never stranded live on the appliance.
+	restored := restoreLkgConfig(s.bundleDir)
+	restoredServices, extRestored := restoreExternalBundleFiles(s.bundleDir)
+	netRestored := restoreLiveNetSnapshot(s.bundleDir)
+
+	if s.lastGoodScript == "" {
+		rollbackErrs = append(rollbackErrs, "no previous last-known-good configuration available for rollback")
+	} else {
 		if err := applyNftScriptString(s.lastGoodScript); err != nil {
 			log.Printf("[Agent] ERROR applying rollback ruleset: %v", err)
-			s.clearPendingLocked()
-			return fmt.Errorf("failed to execute rollback nftables application: %w", err)
-		}
-
-		if s.lastGoodHash != "" {
-			s.activeHash = s.lastGoodHash
+			rollbackErrs = append(rollbackErrs, fmt.Sprintf("failed to execute rollback nftables application: %v", err))
 		} else {
-			h := sha256.Sum256([]byte(s.lastGoodScript))
-			s.activeHash = hex.EncodeToString(h[:])
+			if s.lastGoodHash != "" {
+				s.activeHash = s.lastGoodHash
+			} else {
+				h := sha256.Sum256([]byte(s.lastGoodScript))
+				s.activeHash = hex.EncodeToString(h[:])
+			}
 		}
 	}
 
-	// Restore LKG configuration files & state
-	restoreLkgConfig(s.bundleDir)
+	if restored || extRestored || netRestored || s.lastGoodScript != "" {
+		// Re-create restored VLANs/bonds/bridges BEFORE re-applying IPs/routes.
+		if err := reapplyRestoredNetdev(); err != nil {
+			log.Printf("[Agent] Rollback: netdev re-apply failed: %v", err)
+			rollbackErrs = append(rollbackErrs, fmt.Sprintf("netdev_config.json: %v", err))
+		}
+		// A-M16: a rollback must not itself abort because one interface
+		// re-apply failed; log and continue restoring the rest.
+		if err := applyBootInterfaces(); err != nil {
+			log.Printf("[Agent] Rollback: boot interfaces re-apply failed: %v", err)
+		}
+		if err := ReconcileStaticRoutes(); err != nil {
+			log.Printf("[Agent] Rollback: static routes reconciliation: %v", err)
+		}
+		if len(restoredServices) > 0 {
+			for _, rErr := range reloadBundleServices(restoredServices) {
+				log.Printf("[Agent] Rollback: service reload warning: %v", rErr)
+			}
+		}
 
-	// Re-apply restored physical/logical interfaces and reconcile static routes
-	// A-M16: a rollback must not itself fail because one interface
-	// re-apply failed; log and continue restoring the rest.
-	if err := applyBootInterfaces(); err != nil {
-		log.Printf("[Agent] Rollback: boot interfaces re-apply failed: %v", err)
-	}
-	if err := ReconcileStaticRoutes(); err != nil {
-		log.Printf("[Agent] Rollback: static routes reconciliation: %v", err)
-	}
-
-	// A-H1 (round 2): restoring the files is not a rollback — re-apply
-	// the restored subsystem configs so live state matches the files,
-	// and restart the NGFW daemons the failed bundle stopped. A
-	// failure here is loud and degrades the rollback response instead
-	// of reporting a clean success while subsystems still run the
-	// failed bundle's live state.
-	var rollbackErrs []string
-	if err := s.reapplyRestoredSubsystems(); err != nil {
-		rollbackErrs = append(rollbackErrs, err.Error())
-	}
-	if err := s.restartNgfwDaemonsIfEnabled(); err != nil {
-		log.Printf("[Agent] Rollback: %v", err)
-		rollbackErrs = append(rollbackErrs, err.Error())
+		// A-H1 (round 2): restoring the files is not a rollback — re-apply
+		// the restored subsystem configs so live state matches the files,
+		// and restart the NGFW daemons the failed bundle stopped.
+		if err := s.reapplyRestoredSubsystemsImpl(false); err != nil {
+			rollbackErrs = append(rollbackErrs, err.Error())
+		}
+		if err := s.restartNgfwDaemonsIfEnabled(); err != nil {
+			log.Printf("[Agent] Rollback: %v", err)
+			rollbackErrs = append(rollbackErrs, err.Error())
+		}
 	}
 
 	s.clearPendingLocked()
 	if len(rollbackErrs) > 0 {
-		return fmt.Errorf("rolled back files and ruleset but subsystem re-apply failed: %s", strings.Join(rollbackErrs, "; "))
+		return fmt.Errorf("%s", strings.Join(rollbackErrs, "; "))
 	}
 	log.Printf("[Agent] Successfully rolled back to last known good configuration (reason: %s).", reason)
 	return nil
@@ -1562,25 +1662,16 @@ func (s *AgentServer) executeRollback(reason string) error {
 
 // reapplyRestoredSubsystems re-applies the subsystem configs that
 // restoreLkgConfig just put back, from the restored files on disk,
-// mirroring the subsystem applies in ApplyBundle. Each apply is
-// best-effort — one failing subsystem must not prevent the others from
-// being restored — but failures are aggregated into the returned error
-// so the rollback response reports degraded instead of clean success.
-// A config file absent after restore means it never existed in
-// last-known-good; for SD-WAN that stops the prober (its ReloadConfig
-// stops on a missing file), for the others there is nothing to apply.
+// mirroring the subsystem applies in ApplyBundle.
 func (s *AgentServer) reapplyRestoredSubsystems() error {
+	return s.reapplyRestoredSubsystemsImpl(true)
+}
+
+func (s *AgentServer) reapplyRestoredSubsystemsImpl(includeNetdev bool) error {
 	var errs []string
 	etcDir := axonwallEtcDir()
 	apply := func(name string, fn func([]byte) error) {
-		var data []byte
-		var err error
-		if !strings.Contains(name, "/") {
-			data, err = os.ReadFile(filepath.Join(etcDir, "managed", name))
-		}
-		if err != nil || len(data) == 0 {
-			data, err = os.ReadFile(filepath.Join(etcDir, name))
-		}
+		data, err := readManagedOrRootConfig(etcDir, name)
 		if err != nil {
 			return
 		}
@@ -1590,6 +1681,9 @@ func (s *AgentServer) reapplyRestoredSubsystems() error {
 		} else {
 			log.Printf("[Agent] Rollback: re-applied %s", name)
 		}
+	}
+	if includeNetdev {
+		apply("netdev_config.json", func(b []byte) error { return engine.ApplyNetdevBundleJSON(b, json.Unmarshal) })
 	}
 	if s.iapManager != nil {
 		apply("zero_trust_apps.json", func(b []byte) error { return s.iapManager.ApplyConfig(b) })
@@ -1837,8 +1931,9 @@ func (s *AgentServer) Confirm(ctx context.Context, req *pb.ConfirmRequest) (*pb.
 	}
 	log.Printf("[Agent] Persisted last-known-good configuration to %s", lkgPath)
 
-	// Snapshot confirmed YAML configuration to LKG
+	// Snapshot confirmed YAML configuration to LKG and clear transient rollback snapshots
 	snapshotLkgConfig(s.bundleDir)
+	clearPendingRollbackSnapshots(s.bundleDir)
 
 	return &pb.ConfirmResponse{
 		Success: true,
@@ -2240,9 +2335,16 @@ func loadAllBootInterfaces(config map[string]string) []bootIfaceSpec {
 		}
 	}
 
-	// 3. Merge interfaces from /etc/axonwall/interfaces.yaml or /var/lib/axonwall/etc-axonwall/interfaces.yaml
-	confStat, errConfStat := os.Stat("/etc/axonwall/interfaces.conf")
-	for _, yamlPath := range []string{"/etc/axonwall/interfaces.yaml", "/var/lib/axonwall/etc-axonwall/interfaces.yaml"} {
+	// 3. Merge interfaces from interfaces.yaml
+	etcDir := axonwallEtcDir()
+	stateDir := axonwallStateDir()
+	confStat, errConfStat := os.Stat(filepath.Join(etcDir, "interfaces.conf"))
+	yamlPaths := []string{filepath.Join(etcDir, "interfaces.yaml")}
+	if etcDir == "/etc/axonwall" {
+		yamlPaths = append(yamlPaths, "/var/lib/axonwall/etc-axonwall/interfaces.yaml")
+	}
+	yamlLoaded := false
+	for _, yamlPath := range yamlPaths {
 		yamlStat, errYamlStat := os.Stat(yamlPath)
 		raw, err := os.ReadFile(yamlPath)
 		if err != nil || len(raw) == 0 {
@@ -2261,6 +2363,7 @@ func loadAllBootInterfaces(config map[string]string) []bootIfaceSpec {
 			} `yaml:"interfaces"`
 		}
 		if yaml.Unmarshal(raw, &parsed) == nil && len(parsed.Interfaces) > 0 {
+			yamlLoaded = true
 			// If interfaces.yaml was modified more recently than interfaces.conf, treat interfaces.yaml
 			// as authoritative and prune any stale interfaces from interfaces.conf that were deleted.
 			if errYamlStat == nil && (errConfStat != nil || yamlStat.ModTime().After(confStat.ModTime().Add(2*time.Second))) {
@@ -2301,44 +2404,47 @@ func loadAllBootInterfaces(config map[string]string) []bootIfaceSpec {
 		}
 	}
 
-	// 4. Also merge interfaces from /etc/axonwall/state.json or /var/lib/axonwall/state.json
-	for _, statePath := range []string{"/etc/axonwall/state.json", "/var/lib/axonwall/state.json"} {
-		raw, err := os.ReadFile(statePath)
-		if err != nil {
-			continue
-		}
-		var parsed struct {
-			Interfaces []struct {
-				Name        string `json:"name"`
-				Role        string `json:"role"`
-				Device      string `json:"device"`
-				Type        string `json:"type"`
-				Enabled     *bool  `json:"enabled"`
-				IPv4Address string `json:"ipv4Address"`
-				IPv4Gateway string `json:"ipv4Gateway"`
-			} `json:"interfaces"`
-		}
-		if json.Unmarshal(raw, &parsed) == nil && len(parsed.Interfaces) > 0 {
-			for _, stIface := range parsed.Interfaces {
-				if stIface.Enabled != nil && !*stIface.Enabled {
-					remove(stIface.Name)
-					continue
-				}
-				dev := validDev(stIface.Device)
-				if dev == "" {
-					remove(stIface.Name)
-					continue
-				}
-				upsert(bootIfaceSpec{
-					Name:    stIface.Name,
-					Role:    stIface.Role,
-					Device:  dev,
-					Mode:    stIface.Type,
-					IPv4:    validCIDR(stIface.IPv4Address),
-					Gateway: validIP(stIface.IPv4Gateway),
-				})
+	// 4. Fall back to state.json only when interfaces.yaml was not loaded, so
+	// an older state.json never overrides a freshly restored interfaces.yaml.
+	if !yamlLoaded {
+		for _, statePath := range []string{filepath.Join(etcDir, "state.json"), filepath.Join(stateDir, "state.json")} {
+			raw, err := os.ReadFile(statePath)
+			if err != nil {
+				continue
 			}
-			break
+			var parsed struct {
+				Interfaces []struct {
+					Name        string `json:"name"`
+					Role        string `json:"role"`
+					Device      string `json:"device"`
+					Type        string `json:"type"`
+					Enabled     *bool  `json:"enabled"`
+					IPv4Address string `json:"ipv4Address"`
+					IPv4Gateway string `json:"ipv4Gateway"`
+				} `json:"interfaces"`
+			}
+			if json.Unmarshal(raw, &parsed) == nil && len(parsed.Interfaces) > 0 {
+				for _, stIface := range parsed.Interfaces {
+					if stIface.Enabled != nil && !*stIface.Enabled {
+						remove(stIface.Name)
+						continue
+					}
+					dev := validDev(stIface.Device)
+					if dev == "" {
+						remove(stIface.Name)
+						continue
+					}
+					upsert(bootIfaceSpec{
+						Name:    stIface.Name,
+						Role:    stIface.Role,
+						Device:  dev,
+						Mode:    stIface.Type,
+						IPv4:    validCIDR(stIface.IPv4Address),
+						Gateway: validIP(stIface.IPv4Gateway),
+					})
+				}
+				break
+			}
 		}
 	}
 
@@ -2398,7 +2504,7 @@ func staleStaticAddrs(addrShowOut string, targetCIDR string) []string {
 		}
 		addr := fields[1]
 		ip := strings.Split(addr, "/")[0]
-		if addr == targetCIDR || ip == targetIP {
+		if addr == targetCIDR || (!strings.Contains(targetCIDR, "/") && ip == targetIP) {
 			continue
 		}
 		// Keepalived VIPs are secondary addresses; link-local
@@ -2635,25 +2741,29 @@ func applyBootInterfaces() error {
 
 		_ = exec.Command("ip", "link", "set", spec.Device, "up").Run()
 		if spec.Mode == "static" && spec.IPv4 != "" {
+			if dhcpClientRunning(spec.Device) {
+				stopDhcpClient(spec.Device)
+			}
 			out, _ := exec.Command("ip", "-4", "addr", "show", "dev", spec.Device).CombinedOutput()
 			if !bootAddrMatches(string(out), spec.IPv4) {
 				log.Printf("[Agent] Boot-apply: configuring static IP %s on %s (%s, role=%s)", spec.IPv4, spec.Name, spec.Device, spec.Role)
-				if spec.Role == "wan" {
-					// A-M16: never flush the device — that deletes
-					// HA VIPs and secondary addresses. Delete only
-					// the specific stale global addresses, then use
-					// `ip addr replace` (add-or-replace just this
-					// address) for the target.
-					for _, stale := range staleStaticAddrs(string(out), spec.IPv4) {
-						if delOut, err := exec.Command("ip", "addr", "del", stale, "dev", spec.Device).CombinedOutput(); err != nil {
-							log.Printf("[Agent] Boot-apply: warning: failed to remove stale address %s on %s: %s", stale, spec.Device, string(delOut))
-						}
-					}
+				// Ensure promote_secondaries is enabled on Linux before removing stale
+				// primary addresses so newly added same-subnet IPs and VIPs are preserved.
+				if isValidNetdev(spec.Device) {
+					_ = os.WriteFile(filepath.Join("/proc/sys/net/ipv4/conf", spec.Device, "promote_secondaries"), []byte("1\n"), 0644)
 				}
+				// Add/replace the target address FIRST so a failed assignment never leaves the interface
+				// address-less, then remove stale non-secondary global addresses for ALL roles.
 				if addOut, err := exec.Command("ip", "addr", "replace", spec.IPv4, "dev", spec.Device).CombinedOutput(); err != nil {
 					log.Printf("[Agent] Boot-apply: failed to assign IP %s on %s: %s", spec.IPv4, spec.Device, string(addOut))
 					if firstIfaceErr == nil {
 						firstIfaceErr = fmt.Errorf("failed to assign IP %s on %s: %s", spec.IPv4, spec.Device, string(addOut))
+					}
+				} else {
+					for _, stale := range staleStaticAddrs(string(out), spec.IPv4) {
+						if delOut, err := exec.Command("ip", "addr", "del", stale, "dev", spec.Device).CombinedOutput(); err != nil {
+							log.Printf("[Agent] Boot-apply: warning: failed to remove stale address %s on %s: %s", stale, spec.Device, string(delOut))
+						}
 					}
 				}
 			}
@@ -2661,7 +2771,7 @@ func applyBootInterfaces() error {
 				staticGateways = append(staticGateways, staticWanGateway{gateway: spec.Gateway, device: spec.Device})
 			}
 			if currentRuntimeMode == engine.ModeAppliance && !isResolvConfSymlink() && spec.Role == "wan" && (wanDNS1 != "" || wanDNS2 != "") {
-				if rData, rErr := os.ReadFile("/etc/resolv.conf"); rErr != nil || len(strings.TrimSpace(string(rData))) == 0 {
+				if rData, rErr := os.ReadFile("/etc/resolv.conf"); rErr == nil || len(strings.TrimSpace(string(rData))) == 0 {
 					var resolv strings.Builder
 					resolv.WriteString("# Generated by Axonwall\noptions timeout:1 attempts:2\n")
 					if wanDNS1 != "" {
@@ -2676,9 +2786,24 @@ func applyBootInterfaces() error {
 		} else if spec.Mode == "dhcp" {
 			dhcpSpecs = append(dhcpSpecs, spec)
 			out, _ := exec.Command("ip", "-4", "addr", "show", "dev", spec.Device).CombinedOutput()
-			if !strings.Contains(string(out), "inet ") {
+			var staleStaticOnDhcp []string
+			for _, line := range strings.Split(string(out), "\n") {
+				trimmed := strings.TrimSpace(line)
+				if !strings.HasPrefix(trimmed, "inet ") || strings.Contains(trimmed, " secondary") || strings.Contains(trimmed, " scope link") || strings.Contains(trimmed, " dynamic") {
+					continue
+				}
+				if fields := strings.Fields(trimmed); len(fields) >= 2 && strings.Contains(fields[1], "/") {
+					staleStaticOnDhcp = append(staleStaticOnDhcp, fields[1])
+				}
+			}
+			for _, stale := range staleStaticOnDhcp {
+				if delOut, err := exec.Command("ip", "addr", "del", stale, "dev", spec.Device).CombinedOutput(); err != nil {
+					log.Printf("[Agent] Boot-apply: warning removing stale static IP %s on DHCP %s: %s", stale, spec.Device, string(delOut))
+				}
+			}
+			if len(staleStaticOnDhcp) > 0 || !strings.Contains(string(out), "inet ") {
 				log.Printf("[Agent] Boot-apply: starting DHCP client on %s (%s, role=%s)", spec.Name, spec.Device, spec.Role)
-				triggerDhcpClient(spec.Device, spec.Role)
+				rebindOrStartDhcpClient(spec.Device, spec.Role)
 			}
 		}
 	}
@@ -2703,6 +2828,8 @@ func applyBootInterfaces() error {
 	// Post-boot DHCP & static route verification once networking.service settles
 	if len(dhcpSpecs) > 0 {
 		schedulePostBootVerification(dhcpSpecs)
+	} else {
+		cancelPostBootVerification()
 	}
 
 	return firstIfaceErr
@@ -2728,6 +2855,15 @@ var postBootVerificationCancel context.CancelFunc
 // goroutine, so an earlier goroutine's prune phase could delete a
 // route the newer config just installed; now at most one verifier
 // runs, and it is cancelled by the next apply.
+func cancelPostBootVerification() {
+	postBootVerificationMu.Lock()
+	if postBootVerificationCancel != nil {
+		postBootVerificationCancel()
+		postBootVerificationCancel = nil
+	}
+	postBootVerificationMu.Unlock()
+}
+
 func schedulePostBootVerification(ifSpecs []bootIfaceSpec) {
 	postBootVerificationMu.Lock()
 	if postBootVerificationCancel != nil {
@@ -3032,38 +3168,49 @@ func main() {
 
 	// If boot-apply is requested in appliance mode, load last-known-good configuration
 	if *bootApply && runtimeMode == engine.ModeAppliance {
-		// A-M16: log a failed interface apply at boot; boot itself
-		// must not abort on one interface (the post-boot checks and
-		// later bundle applies still run).
-		if err := applyBootInterfaces(); err != nil {
-			log.Printf("[Agent] Boot-apply: boot interfaces failed: %v", err)
-		}
-
-		lkgPath := filepath.Join(*bundleDir, "last-known-good.nft")
-		hasLkg := false
-		if pendingConfirmIsLive(*bundleDir) {
-			// M3: a confirm is still pending from the previous run
-			// with time left on its deadline. The live ruleset is
-			// that unconfirmed bundle; applying LKG here would roll
-			// it back underneath the restored pending state (see
-			// NewAgentServer), so leave the kernel alone.
-			log.Printf("[Agent] Early-boot: a configuration confirm is still pending from the previous run; skipping last-known-good apply so the pending bundle stays live until its deadline")
-		} else if _, err := os.Stat(lkgPath); err == nil {
-			log.Printf("[Agent] Early-boot: applying last-known-good bundle from %s", lkgPath)
-			cmd := exec.Command("nft", "-f", lkgPath)
-			if out, err := cmd.CombinedOutput(); err != nil {
-				log.Printf("[Agent] Failed to apply boot bundle: %s", string(out))
-			} else {
-				log.Printf("[Agent] Boot bundle applied successfully.")
-				hasLkg = true
+		if pendingConfirmFileExists(*bundleDir) && !pendingConfirmIsLive(*bundleDir) {
+			log.Printf("[Agent] Early-boot: expired/corrupt pending-confirm bundle detected; deferring boot interface/firewall apply until startup rollback restores last-known-good")
+		} else {
+			// A-M16: log a failed interface apply at boot; boot itself
+			// must not abort on one interface (the post-boot checks and
+			// later bundle applies still run).
+			if err := applyBootInterfaces(); err != nil {
+				log.Printf("[Agent] Boot-apply: boot interfaces failed: %v", err)
 			}
-		}
-		reconcileBootAntiLockoutNft(hasLkg)
-		if err := ReconcileStaticRoutes(); err != nil {
-			log.Printf("[Agent] Early-boot: static routes reconciliation: %v", err)
-		}
-		if keaHasActiveInterfaces() {
-			_, _ = reloadOrRestartService("kea-dhcp4-server")
+
+			lkgPath := filepath.Join(*bundleDir, "last-known-good.nft")
+			hasLkg := false
+			if pendingConfirmIsLive(*bundleDir) {
+				// M3: a confirm is still pending from the previous run
+				// with time left on its deadline. ExecStartPre installed
+				// lockdown.nft before starting axonwalld, so re-apply the
+				// live pending candidate script now while preserving the
+				// remaining deadline in NewAgentServer.
+				if _, candidate, ok := loadPendingConfirmState(*bundleDir); ok {
+					log.Printf("[Agent] Early-boot: restoring active pending-confirm candidate ruleset (deadline still in future)")
+					if err := applyNftScriptString(candidate); err != nil {
+						log.Printf("[Agent] Failed to apply pending candidate ruleset at boot: %v", err)
+					} else {
+						hasLkg = true
+					}
+				}
+			} else if _, err := os.Stat(lkgPath); err == nil {
+				log.Printf("[Agent] Early-boot: applying last-known-good bundle from %s", lkgPath)
+				cmd := exec.Command("nft", "-f", lkgPath)
+				if out, err := cmd.CombinedOutput(); err != nil {
+					log.Printf("[Agent] Failed to apply boot bundle: %s", string(out))
+				} else {
+					log.Printf("[Agent] Boot bundle applied successfully.")
+					hasLkg = true
+				}
+			}
+			reconcileBootAntiLockoutNft(hasLkg)
+			if err := ReconcileStaticRoutes(); err != nil {
+				log.Printf("[Agent] Early-boot: static routes reconciliation: %v", err)
+			}
+			if keaHasActiveInterfaces() {
+				_, _ = reloadOrRestartService("kea-dhcp4-server")
+			}
 		}
 	}
 

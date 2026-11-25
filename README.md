@@ -1,12 +1,12 @@
 <div align="center">
 
-# 🛡️ Axonwall (`v0.16.0`)
+# 🛡️ Axonwall (`v0.16.1`)
 
 ### The Sovereign Linux Next-Generation Firewall, OpenZFS NAS, Hypervisor & Autonomous AI SecOps Platform
 
 *Reimagining perimeter & infrastructure security: from legacy FreeBSD `pf` & PHP to **Linux 6.12+ LTS `nftables`**, **Hardened KSPP Universal & Hardware-Locked Kernels**, **Zero-Shell UEFI UKIs**, **Post-Quantum Dual-KEM**, **CO-RE BPF-LSM & Blackbox Threat-LLM Harvesting**, **Enterprise NetFlow / IPFIX / sFlow Analytics**, **OpenZFS**, **Btrfs + Snapper**, **K3s**, **KVM/LXC**, and **Guardrailed MCP AI**.*
 
-[![Release](https://img.shields.io/badge/Release-v0.16.0-10b981.svg)](https://github.com/axonwall/axonwall/releases/tag/v0.16.0)
+[![Release](https://img.shields.io/badge/Release-v0.16.1-10b981.svg)](https://github.com/axonwall/axonwall/releases/tag/v0.16.1)
 [![License](https://img.shields.io/badge/License-GPL--2.0--or--later-blue.svg)](LICENSE)
 [![Kernel](https://img.shields.io/badge/Kernel-Linux_6.12+_LTS-orange.svg)](https://www.kernel.org/)
 [![Engine](https://img.shields.io/badge/Firewall-nftables_1.1+%20%26%20eBPF%2FXDP-red.svg)](https://netfilter.org/projects/nftables/)
@@ -26,7 +26,7 @@ For more than two decades, open-source firewalls relied on FreeBSD (`m0n0wall`, 
 
 **Axonwall** replaces that legacy stack from the kernel up—unifying **5 modular Core Roles** and **42 first-party Extension Plugins** (47 plugins total, with SHA-256-verified bundled binary archives and on-demand provisioning) over a strictly validated, declarative **14-file YAML control plane** (`/etc/axonwall/*.yaml`) with Junos-style **Commit-Confirm** automatic rollback.
 
-> **Lean Router/NGFW Core Architecture (`v0.16.0+`):** Fresh standard `axonwall` installations start lean with **only `core-firewall` enabled by default** (`nftables`, Kea DHCPv4/v6, Unbound DNS+RPZ, WireGuard, ACME, QoS, GeoIP, Aliases, static/multi-WAN routing, local POSIX users, health/flow/insight reporting, basic diagnostics, backups, updates, and the Plugin Store), while `axonwall-minimal` starts zero-role (`core-firewall` disabled, local break-glass/POSIX auth only). Every advanced NGFW/routing/VPN/directory/HA/observability/AI module installs on demand individually or via **4 Curated Starter Packs** (`enterprise-ngfw`, `remote-access-vpn`, `operator-diagnostics`, `ai-observability`) or an **Air-Gapped Offline Plugin Cache** (`scripts/build-plugins-bundle.sh`)—while existing `v0.15.x` upgrades automatically preserve active features.
+> **Lean Router/NGFW Core Architecture (`v0.16.1+`):** Fresh standard `axonwall` installations start lean with **only `core-firewall` enabled by default** (`nftables`, Kea DHCPv4/v6, Unbound DNS+RPZ, WireGuard, ACME, QoS, GeoIP, Aliases, static/multi-WAN routing, local POSIX users, health/flow/insight reporting, basic diagnostics, backups, updates, and the Plugin Store), while `axonwall-minimal` starts zero-role (`core-firewall` disabled, local break-glass/POSIX auth only). Every advanced NGFW/routing/VPN/directory/HA/observability/AI module installs on demand individually or via **4 Curated Starter Packs** (`enterprise-ngfw`, `remote-access-vpn`, `operator-diagnostics`, `ai-observability`) or an **Air-Gapped Offline Plugin Cache** (`scripts/build-plugins-bundle.sh`)—while existing `v0.15.x` upgrades automatically preserve active features.
 
 ```
                    ┌──────────────────────────────────────────────────────────────────┐
@@ -152,13 +152,13 @@ axonwall/
 
 ---
 
-## 🛠️ Installation & Quickstart (`v0.16.0`)
+## 🛠️ Installation & Quickstart (`v0.16.1`)
 
 ### Option 1: Bare-Metal / VM Unified UEFI ISO (`axonwall`, `minimal`, `vault`, or `k3s-storage` Edition)
 
 ```bash
-wget https://github.com/axonwall/axonwall/releases/download/v0.16.0/axonwall-debian13-amd64.iso
-wget https://github.com/axonwall/axonwall/releases/download/v0.16.0/axonwall-debian13-amd64.iso.sha256
+wget https://github.com/axonwall/axonwall/releases/download/v0.16.1/axonwall-debian13-amd64.iso
+wget https://github.com/axonwall/axonwall/releases/download/v0.16.1/axonwall-debian13-amd64.iso.sha256
 sha256sum -c axonwall-debian13-amd64.iso.sha256
 
 # Flash to USB drive:
@@ -173,14 +173,14 @@ sudo dd if=axonwall-debian13-amd64.iso of=/dev/sdX bs=4M status=progress conv=fs
 
 ### Option 2: Cloud QCOW2 Image, Edge UEFI UKI, or `.deb` Packages
 
-- **KVM / Proxmox Cloud Image:** [`axonwall-debian13-amd64-cloud.qcow2`](https://github.com/axonwall/axonwall/releases/download/v0.16.0/axonwall-debian13-amd64-cloud.qcow2)
-- **Zero-Shell Edge NGFW UKI:** [`axonwall-edge-sku-vm-virtio.efi`](https://github.com/axonwall/axonwall/releases/download/v0.16.0/axonwall-edge-sku-vm-virtio.efi)
+- **KVM / Proxmox Cloud Image:** [`axonwall-debian13-amd64-cloud.qcow2`](https://github.com/axonwall/axonwall/releases/download/v0.16.1/axonwall-debian13-amd64-cloud.qcow2)
+- **Zero-Shell Edge NGFW UKI:** [`axonwall-edge-sku-vm-virtio.efi`](https://github.com/axonwall/axonwall/releases/download/v0.16.1/axonwall-edge-sku-vm-virtio.efi)
 - **Debian 12/13 & Ubuntu 24.04 Packages:**
   ```bash
-  wget https://github.com/axonwall/axonwall/releases/download/v0.16.0/axonwall_0.16.0_amd64.deb
-  sudo apt-get update && sudo apt-get install -y ./axonwall_0.16.0_amd64.deb
+  wget https://github.com/axonwall/axonwall/releases/download/v0.16.1/axonwall_0.16.1_amd64.deb
+  sudo apt-get update && sudo apt-get install -y ./axonwall_0.16.1_amd64.deb
   # Edition packages also published per release:
-  #   axonwall-minimal_0.16.0_amd64.deb | axonwall-vault_0.16.0_amd64.deb | axonwall-k3s-storage_0.16.0_amd64.deb
+  #   axonwall-minimal_0.16.1_amd64.deb | axonwall-vault_0.16.1_amd64.deb | axonwall-k3s-storage_0.16.1_amd64.deb
   ```
 
 ### Option 3: Local Developer Setup

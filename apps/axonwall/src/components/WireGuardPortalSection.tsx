@@ -6,7 +6,7 @@ import { generateMfaSetup, verifyMfaSetup } from '@/server/auth';
 import { useDesiredStateApply } from '@/lib/use-desired-state-apply';
 
 export function WireGuardPortalSection() {
-  const { getFingerprint } = useDesiredStateApply();
+  const { getFingerprint, refreshFingerprint } = useDesiredStateApply();
   const [profile, setProfile] = useState<any>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -60,6 +60,10 @@ export function WireGuardPortalSection() {
       const res = await generateWireGuardProfile(
         fingerprint ? { expectedFingerprint: fingerprint } : undefined
       );
+      await refreshFingerprint();
+      if (res.pendingConfirm && typeof window !== 'undefined') {
+        window.dispatchEvent(new Event('axonwall:status-refresh'));
+      }
       setProfile(res);
     } catch (err: any) {
       setError(err.message);
@@ -145,6 +149,11 @@ export function WireGuardPortalSection() {
             <div className="bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 p-3.5 rounded-lg text-sm">
               Profile provisioned! Assigned tunnel IP: <strong className="font-mono">{profile.assignedIp}</strong>
             </div>
+            {profile.pendingConfirm && (
+              <div className="bg-amber-500/10 border border-amber-500/30 text-amber-300 p-3.5 rounded-lg text-sm">
+                <strong>Commit-Confirm active (120s):</strong> Confirm this configuration change in the top Commit-Confirm banner within 120 seconds (admin required), or the new WireGuard peer will automatically roll back.
+              </div>
+            )}
             <div className="flex flex-col md:flex-row gap-6">
               <div>
                 <h3 className="text-sm font-medium text-slate-200 mb-2">Mobile QR Import</h3>

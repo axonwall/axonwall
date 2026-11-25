@@ -276,14 +276,22 @@ func getInterfaceAssignments() (wan, lan, opt1, opt2 string) {
 	return
 }
 
-func triggerDhcpClient(dev string) {
+func triggerDhcpClient(dev string, roles ...string) {
 	dev = normalizeAssignedDevice(dev)
 	if dev == "" {
 		return
 	}
+	role := "wan"
+	if len(roles) > 0 && strings.TrimSpace(roles[0]) != "" {
+		role = strings.ToLower(strings.TrimSpace(roles[0]))
+	}
 	_ = exec.Command("ip", "link", "set", dev, "up").Run()
 	if dhcpcdPath, err := exec.LookPath("dhcpcd"); err == nil {
-		_ = exec.Command(dhcpcdPath, "-4", dev).Run()
+		if role != "wan" {
+			_ = exec.Command(dhcpcdPath, "-4", "-G", "-C", "resolv.conf", dev).Run()
+		} else {
+			_ = exec.Command(dhcpcdPath, "-4", dev).Run()
+		}
 		return
 	}
 	if udhcpcPath, err := exec.LookPath("udhcpc"); err == nil {
@@ -746,15 +754,31 @@ func updateStateJSONWithPaths(cfg NetworkConfig, etcDir, varDir, lockPath string
 	var updatedList []interface{}
 	var extraIfaces []map[string]interface{}
 	seen := make(map[string]bool)
+	assignedCoreDevs := make(map[string]bool)
 	for _, name := range []string{"wan", "lan", "opt1", "opt2"} {
 		if entry, ok := ifacesMap[name]; ok {
 			updatedList = append(updatedList, entry)
 			seen[name] = true
+			if devStr, _ := entry["device"].(string); devStr != "" {
+				normDev := strings.ToLower(strings.TrimSpace(devStr))
+				if normDev != "" && normDev != "none" {
+					assignedCoreDevs[normDev] = true
+				}
+			}
 		}
 	}
 	for _, name := range originalOrder {
 		if !seen[name] {
 			if entry, ok := ifacesMap[name]; ok {
+				if devStr, _ := entry["device"].(string); devStr != "" {
+					normDev := strings.ToLower(strings.TrimSpace(devStr))
+					if assignedCoreDevs[normDev] {
+						// Drop stale extra interface (e.g. opt3..opt6) whose physical device
+						// was reassigned to wan/lan/opt1/opt2 so two logical interfaces never
+						// contend on one NIC.
+						continue
+					}
+				}
 				updatedList = append(updatedList, entry)
 				extraIfaces = append(extraIfaces, entry)
 				seen[name] = true
@@ -2389,7 +2413,7 @@ func actionConfigureInterfaceIP(reader *bufio.Reader) {
 		if modeChoice != "2" {
 			// DHCP Client
 			fmt.Printf("\nConfiguring WAN (%s) as DHCP client...\n", iface)
-			triggerDhcpClient(iface)
+			triggerDhcpClient(iface, "wan")
 			cfg := readCurrentNetworkConfig()
 			cfg.WanDevice = iface
 			cfg.WanMode = "dhcp"
@@ -2537,7 +2561,7 @@ func actionConfigureInterfaceIP(reader *bufio.Reader) {
 	if modeChoice == "2" {
 		// Join Existing Network via DHCP Client (Non-authoritative)
 		fmt.Printf("\nConfiguring %s (%s) to join existing network via DHCP client (Non-authoritative)...\n", strings.ToUpper(ifName), iface)
-		triggerDhcpClient(iface)
+		triggerDhcpClient(iface, ifName)
 		cfg := readCurrentNetworkConfig()
 		if ifName == "lan" {
 			cfg.LanDevice = iface

@@ -149,6 +149,11 @@ export default function InterfacesPage() {
 
   useEffect(() => {
     loadData();
+    const handleConfigChanged = () => loadData();
+    window.addEventListener('axonwall:config-changed', handleConfigChanged);
+    return () => {
+      window.removeEventListener('axonwall:config-changed', handleConfigChanged);
+    };
   }, []);
 
   const getNextInterfaceName = (role: InterfaceRole): string => {
@@ -187,9 +192,12 @@ export default function InterfacesPage() {
     if (!loadError) {
       for (let lanIndex = 1; lanIndex <= 50; lanIndex++) {
         const candidate = `192.168.${lanIndex === 1 ? 1 : 10 + lanIndex}.1/24`;
-        const collides = interfaces.some(
-          (i) => i.ipv4Address && cidrsOverlap(candidate, i.ipv4Address)
-        );
+        const collides = interfaces.some((i) => {
+          if (i.ipv4Address && cidrsOverlap(candidate, i.ipv4Address)) return true;
+          const liveIp = i.liveStatus?.currentIp;
+          if (liveIp && liveIp.includes('/') && cidrsOverlap(candidate, liveIp)) return true;
+          return false;
+        });
         if (!collides) {
           defaultStaticIp = candidate;
           break;
@@ -199,6 +207,10 @@ export default function InterfacesPage() {
     const pool = suggestPoolFromCidr(defaultStaticIp);
 
     const isWanLike = presetRole === 'wan' || presetRole === 'wan-delegated';
+    const hasExistingAuthoritativeLan = interfaces.some(
+      (i) => i.role === 'lan' && (i.isAuthoritativeDhcp || i.dhcpServer)
+    );
+    const defaultDhcpServer = presetRole === 'lan' && !hasExistingAuthoritativeLan;
     setIsCreatingNew(true);
     setEditingIface({
       name: nextName,
@@ -207,9 +219,9 @@ export default function InterfacesPage() {
       device: dev,
       enabled: true,
       type: isWanLike ? 'dhcp' : 'static',
-      dhcpServer: presetRole === 'lan',
-      dhcpPoolStart: pool?.start || '',
-      dhcpPoolEnd: pool?.end || '',
+      dhcpServer: defaultDhcpServer,
+      dhcpPoolStart: defaultDhcpServer ? pool?.start || '' : '',
+      dhcpPoolEnd: defaultDhcpServer ? pool?.end || '' : '',
       ipv4Address: presetRole === 'lan' ? defaultStaticIp : '',
       ipv4Gateway: '',
       description:
@@ -217,7 +229,7 @@ export default function InterfacesPage() {
           ? `${nextName.toUpperCase()} WAN Uplink`
           : `${nextName.toUpperCase()} Local Network`,
       mtu: 1500,
-      isAuthoritativeDhcp: presetRole === 'lan',
+      isAuthoritativeDhcp: defaultDhcpServer,
       isOpt: false,
       liveStatus: {
         isUp: false,
@@ -234,9 +246,9 @@ export default function InterfacesPage() {
       device: dev,
       enabled: true,
       type: isWanLike ? 'dhcp' : 'static',
-      dhcpServer: presetRole === 'lan',
-      dhcpPoolStart: pool?.start || '',
-      dhcpPoolEnd: pool?.end || '',
+      dhcpServer: defaultDhcpServer,
+      dhcpPoolStart: defaultDhcpServer ? pool?.start || '' : '',
+      dhcpPoolEnd: defaultDhcpServer ? pool?.end || '' : '',
       ipv4Address: presetRole === 'lan' ? defaultStaticIp : '',
       ipv4Gateway: '',
       description:
@@ -294,7 +306,10 @@ export default function InterfacesPage() {
             ? editForm.dhcpPoolEnd
             : undefined,
         ipv4Address: editForm.type === 'static' ? editForm.ipv4Address : undefined,
-        ipv4Gateway: editForm.type === 'static' ? editForm.ipv4Gateway : undefined,
+        ipv4Gateway:
+          (editForm.role === 'wan' || editForm.role === 'wan-delegated') && editForm.type === 'static'
+            ? editForm.ipv4Gateway
+            : undefined,
         description: editForm.description,
         mtu: Number(editForm.mtu) || 1500,
       });
@@ -303,6 +318,7 @@ export default function InterfacesPage() {
       if (res.success) {
         setEditingIface(null);
         setIsCreatingNew(false);
+        window.dispatchEvent(new Event('axonwall:status-refresh'));
       }
       await loadData();
     } catch (err: any) {
@@ -321,8 +337,11 @@ export default function InterfacesPage() {
     try {
       const res = await deleteInterfaceAssignment(iface.name);
       setFeedback({ type: res.success ? 'success' : 'error', message: res.message });
-      if (res.success && editingIface?.name === iface.name) {
-        setEditingIface(null);
+      if (res.success) {
+        if (editingIface?.name === iface.name) {
+          setEditingIface(null);
+        }
+        window.dispatchEvent(new Event('axonwall:status-refresh'));
       }
       await loadData();
     } catch (err: any) {
@@ -978,7 +997,11 @@ export default function InterfacesPage() {
               {/* Static IP + Optional DHCP Pool Fields */}
               {editForm.type === 'static' && (
                 <div className="space-y-3 p-3.5 bg-slate-950 rounded-xl border border-slate-800">
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div
+                    className={`grid grid-cols-1 ${
+                      editForm.role === 'wan' || editForm.role === 'wan-delegated' ? 'sm:grid-cols-2' : ''
+                    } gap-3`}
+                  >
                     <div>
                       <label className="text-xs font-medium text-slate-300 block mb-1">
                         IPv4 Address / CIDR
@@ -1002,18 +1025,20 @@ export default function InterfacesPage() {
                         className="w-full bg-slate-900 border border-slate-800 rounded-lg px-3 py-1.5 text-xs text-white font-mono focus:outline-none focus:border-emerald-500"
                       />
                     </div>
-                    <div>
-                      <label className="text-xs font-medium text-slate-300 block mb-1">
-                        Upstream Gateway {editForm.role === 'wan' ? '(Required for Static WAN)' : '(Optional)'}
-                      </label>
-                      <input
-                        type="text"
-                        placeholder="e.g. 192.168.10.254"
-                        value={editForm.ipv4Gateway}
-                        onChange={(e) => setEditForm({ ...editForm, ipv4Gateway: e.target.value })}
-                        className="w-full bg-slate-900 border border-slate-800 rounded-lg px-3 py-1.5 text-xs text-white font-mono focus:outline-none focus:border-emerald-500"
-                      />
-                    </div>
+                    {(editForm.role === 'wan' || editForm.role === 'wan-delegated') && (
+                      <div>
+                        <label className="text-xs font-medium text-slate-300 block mb-1">
+                          Upstream Gateway (Required for Static WAN)
+                        </label>
+                        <input
+                          type="text"
+                          placeholder="e.g. 192.168.10.254"
+                          value={editForm.ipv4Gateway}
+                          onChange={(e) => setEditForm({ ...editForm, ipv4Gateway: e.target.value })}
+                          className="w-full bg-slate-900 border border-slate-800 rounded-lg px-3 py-1.5 text-xs text-white font-mono focus:outline-none focus:border-emerald-500"
+                        />
+                      </div>
+                    )}
                   </div>
 
                   {editForm.role === 'lan' && editForm.dhcpServer && (
@@ -1067,6 +1092,13 @@ export default function InterfacesPage() {
                     className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-xs text-white font-mono focus:outline-none focus:border-emerald-500"
                   />
                 </div>
+              </div>
+
+              <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-[11px] text-amber-200 flex items-start gap-2">
+                <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+                <span>
+                  Commit-Confirm (120s): Interface changes take effect immediately and automatically revert after 120 seconds unless you click Confirm in the top bar.
+                </span>
               </div>
 
               {/* Modal Actions */}

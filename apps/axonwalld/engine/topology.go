@@ -1460,23 +1460,28 @@ func (m *TopologyManager) ApplyFabricPlan(
 		})
 	}
 
-	// Auto-confirm applied peers after reachability verification succeeds
-	for _, ap := range appliedPeers {
-		client, err := m.buildPeerHTTPClient(ap.peer)
-		if err != nil {
-			continue
-		}
-		validURL, _ := validatePluginHTTPURL(ap.peer.APIURL, ap.peer.Name)
-		cReq, err := http.NewRequestWithContext(ctx, http.MethodPost, validURL+"/api/v1/confirm", bytes.NewReader([]byte("{}")))
-		if err != nil {
-			continue
-		}
-		cReq.Header.Set("Content-Type", "application/json")
-		if ap.token != "" {
-			cReq.Header.Set("Authorization", "Bearer "+ap.token)
-		}
-		if cResp, cErr := client.Do(cReq); cErr == nil {
-			_ = cResp.Body.Close()
+	// Auto-confirm applied peers after reachability verification succeeds,
+	// ONLY when Phase 3 is finished (or there are no local changes). When
+	// localApplyFn == nil and HasLocalChanges is true, the caller runs Phase 3
+	// separately afterward and peers must retain their Commit-Confirm timer.
+	if !req.HasLocalChanges || localApplyFn != nil {
+		for _, ap := range appliedPeers {
+			client, err := m.buildPeerHTTPClient(ap.peer)
+			if err != nil {
+				continue
+			}
+			validURL, _ := validatePluginHTTPURL(ap.peer.APIURL, ap.peer.Name)
+			cReq, err := http.NewRequestWithContext(ctx, http.MethodPost, validURL+"/api/v1/confirm", bytes.NewReader([]byte("{}")))
+			if err != nil {
+				continue
+			}
+			cReq.Header.Set("Content-Type", "application/json")
+			if ap.token != "" {
+				cReq.Header.Set("Authorization", "Bearer "+ap.token)
+			}
+			if cResp, cErr := client.Do(cReq); cErr == nil {
+				_ = cResp.Body.Close()
+			}
 		}
 	}
 

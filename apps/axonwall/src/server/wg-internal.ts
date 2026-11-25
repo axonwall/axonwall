@@ -1,11 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { DesiredStateSchema, type WireGuardPeer } from '@axonwall/lib/schemas';
-import { callAgentApiDetailed } from './agent-client';
 import { getDesiredStateInternal } from './desired-state-internal';
-import {
-  runDesiredStateApplyPipeline,
-  setLastPendingJobId,
-} from './apply-state-internal';
+import { runDesiredStateApplyPipeline } from './apply-state-internal';
 
 /**
  * Derive the X25519 public key for a base64 WireGuard private key.
@@ -56,9 +52,12 @@ export async function registerWireGuardPeerInternal(params: {
   newPeer: WireGuardPeer;
   expectedFingerprint?: string;
   actorUsername: string;
-}): Promise<void> {
+}): Promise<{ jobId?: string; pendingConfirm: boolean }> {
   const currentState = await getDesiredStateInternal();
   const wgCfg = currentState.wireguard;
+  if (!wgCfg?.enabled) {
+    throw new Error('WireGuard server is disabled — enable WireGuard before generating client profiles.');
+  }
   if (!wgCfg?.privateKey) {
     throw new Error('WireGuard server key is not configured.');
   }
@@ -80,15 +79,8 @@ export async function registerWireGuardPeerInternal(params: {
     actorUsername: params.actorUsername,
   });
 
-  if (!applyRes.devMode && applyRes.jobId) {
-    const confirmRes = await callAgentApiDetailed<any>(
-      '/v1/confirm',
-      'POST',
-      { job_id: applyRes.jobId, jobId: applyRes.jobId },
-      60_000
-    );
-    if (confirmRes.kind === 'ok' && confirmRes.data?.success) {
-      setLastPendingJobId('');
-    }
-  }
+  return {
+    jobId: applyRes.jobId,
+    pendingConfirm: !applyRes.devMode,
+  };
 }

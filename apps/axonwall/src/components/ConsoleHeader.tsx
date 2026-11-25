@@ -4,7 +4,7 @@ import { Shield, Clock, RotateCcw, CheckCircle2, LogOut, UserCheck, Loader2 } fr
 import { logoutAction } from '../server/auth';
 import { confirmActiveRuleset, rollbackActiveRuleset, getAgentStatus } from '../server/agent';
 import type { UserSession } from '@axonwall/lib/rbac';
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import { ThemeSwitcher } from './ThemeSwitcher';
 
@@ -41,10 +41,12 @@ export function ConsoleHeader({
   // the 1s loop stops; this flag renders the expired-pending state
   // until the next poll cycle (3s when pending) refreshes the status.
   const [expiryChecked, setExpiryChecked] = useState<boolean>(false);
+  const wasPendingRef = useRef<boolean>(initialPending);
 
   // Sync with prop updates from Server Component
   useEffect(() => {
     setIsPending(initialPending);
+    wasPendingRef.current = initialPending;
     setDeadline(initialDeadline);
     setDaemonDown(initialDaemonDown);
     setExpiryChecked(false);
@@ -57,17 +59,24 @@ export function ConsoleHeader({
   const checkStatus = useCallback(async () => {
     try {
       const status = await getAgentStatus();
-      setIsPending(Boolean(status.pendingConfirm));
+      const wasPending = wasPendingRef.current;
+      const nextPending = Boolean(status.pendingConfirm);
+      wasPendingRef.current = nextPending;
+      setIsPending(nextPending);
       setDaemonDown(Boolean(status.daemonDown));
       const newDeadline = Number(status.confirmDeadlineUnix || 0);
       setDeadline(newDeadline);
-      if (status.pendingConfirm && newDeadline) {
+      if (nextPending && newDeadline) {
         setTimeLeft(Math.max(0, newDeadline - Math.floor(Date.now() / 1000)));
       } else {
         setTimeLeft(0);
       }
+      if (wasPending && !nextPending) {
+        window.dispatchEvent(new Event('axonwall:config-changed'));
+        router.refresh();
+      }
     } catch {}
-  }, []);
+  }, [router]);
 
   // Countdown timer
   useEffect(() => {
@@ -125,9 +134,11 @@ export function ConsoleHeader({
         }
       }
       setIsPending(false);
+      wasPendingRef.current = false;
       setTimeLeft(0);
       setFeedback('Configuration confirmed and promoted to Last-Known-Good.');
       setTimeout(() => setFeedback(null), 4000);
+      window.dispatchEvent(new Event('axonwall:config-changed'));
       router.refresh();
     } catch (err: any) {
       if (err?.message?.includes('Failed to find Server Action')) {
@@ -156,9 +167,11 @@ export function ConsoleHeader({
         }
       }
       setIsPending(false);
+      wasPendingRef.current = false;
       setTimeLeft(0);
       setFeedback('Rolled back to Last-Known-Good configuration.');
       setTimeout(() => setFeedback(null), 4000);
+      window.dispatchEvent(new Event('axonwall:config-changed'));
       router.refresh();
     } catch (err: any) {
       if (err?.message?.includes('Failed to find Server Action')) {

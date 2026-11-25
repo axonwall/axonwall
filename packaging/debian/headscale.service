@@ -33,6 +33,7 @@ PrivateTmp=yes
 # Axonwall data is stored in /var/lib/axonwall
 RuntimeDirectory=headscale
 RuntimeDirectoryMode=0770
+RuntimeDirectoryPreserve=yes
 ReadWritePaths=-/var/lib/axonwall/headscale -/run/headscale
 
 [Install]
