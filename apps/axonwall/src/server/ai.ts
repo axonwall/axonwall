@@ -11,7 +11,10 @@ import type { AiProviderType, AiConfig } from '@axonwall/lib/schemas';
 import { isPluginEnabled } from '@axonwall/lib/plugins';
 import { getSession } from './auth';
 import { assertActionPermitted } from './auth-guard';
+import { callAgentApiDetailed } from './agent-client';
+import { getTopFlows } from './clickhouse';
 import { getDesiredStateInternal } from './desired-state-internal';
+import { fetchObservabilityNodes, queryVictoriaLogs } from './observability-clients';
 import { assertSafeOutboundUrl, ssrfSafeFetch, type SsrfSafeResponse } from './ssrf-guard';
 
 export interface AiProbeResult {
@@ -381,11 +384,59 @@ export async function generateAiCompletion(
   const aiCfg = currentConfig || state.ai;
   const isClientConfig = Boolean(currentConfig);
 
-  const systemPrompt = buildSystemPrompt({
+  let systemPrompt = buildSystemPrompt({
     hostname: state.system?.hostname || 'axonwall',
     interfaces: (state.interfaces || []).map((i) => `${i.device} (${i.name})`),
     rulesCount: (state.rules || []).length,
   });
+
+  // Best-effort live observability context enrichment (bounded to <=1500ms so offline stores never block AI)
+  try {
+    const contextPromise = Promise.allSettled([
+      fetchObservabilityNodes(state),
+      queryVictoriaLogs('*', { state, limit: 8, timeoutMs: 1200 }),
+      getTopFlows({ limit: 5, windowHours: 1 }).catch(() => []),
+      callAgentApiDetailed<Record<string, unknown>>('/v1/observability/status', 'GET', undefined, 1000),
+    ]);
+    const timeoutPromise = new Promise<null>((resolve) => setTimeout(() => resolve(null), 1500));
+    const settled = await Promise.race([contextPromise, timeoutPromise]);
+    if (Array.isArray(settled)) {
+      const [nodesRes, logsRes, flowsRes, statusRes] = settled;
+      const lines: string[] = [];
+      if (nodesRes.status === 'fulfilled' && nodesRes.value.length > 0) {
+        const nodeList = nodesRes.value
+          .slice(0, 8)
+          .map((n) => `${n.nodeName || n.nodeId} (${n.flowsCount} flows${n.metricsOnline ? ', metrics up' : ''})`)
+          .join(', ');
+        lines.push(`Observed Nodes: ${nodeList}`);
+      }
+      if (statusRes.status === 'fulfilled' && statusRes.value.kind === 'ok') {
+        const st = statusRes.value.data as Record<string, any>;
+        lines.push(
+          `Telemetry Offload: offloadEnabled=${Boolean(st.offloadEnabled)}, metricsSent=${st.metricsQueue?.sentTotal ?? 0}, logsSent=${st.logsQueue?.sentTotal ?? 0}, netflowDropped=${st.netflowQueue?.droppedTotal ?? 0}`
+        );
+      }
+      if (flowsRes.status === 'fulfilled' && Array.isArray(flowsRes.value) && flowsRes.value.length > 0) {
+        const topSummary = flowsRes.value
+          .slice(0, 5)
+          .map((f: any) => `${f.src_ip}->${f.dst_ip} (${f.app_name || f.protocol}, ${f.total_bytes}B)`)
+          .join('; ');
+        lines.push(`Recent Top Flows: ${topSummary}`);
+      }
+      if (logsRes.status === 'fulfilled' && logsRes.value.status === 'ok' && logsRes.value.entries.length > 0) {
+        const logSummary = logsRes.value.entries
+          .slice(0, 5)
+          .map((e: any) => `[${e.source || 'log'}/${e.node_id || 'local'}] ${String(e._msg || '').slice(0, 120)}`)
+          .join(' | ');
+        lines.push(`Recent Logs: ${logSummary}`);
+      }
+      if (lines.length > 0) {
+        systemPrompt = `${systemPrompt}\n\n[Live Fleet & Observability Context]\n${lines.join('\n')}`;
+      }
+    }
+  } catch {
+    // Non-fatal: keep base systemPrompt
+  }
 
   let formattedUserPrompt = userPrompt;
   if (mode === 'draft') {

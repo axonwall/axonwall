@@ -30,16 +30,25 @@ type cachedTemplate struct {
 	packetsUsing uint64
 }
 
+type cachedNodeMeta struct {
+	nodeID   string
+	hostname string
+}
+
 type FlowDecoder struct {
 	mu           sync.RWMutex
 	templates    map[netflowTemplateKey]*cachedTemplate
-	samplingRate map[string]uint32 // key: exporterIP|sourceID
+	samplingRate map[string]uint32         // key: exporterIP|sourceID
+	nodeMeta     map[string]cachedNodeMeta // key: exporterIP|sourceID
+	ifNames      map[ifAliasKey]string     // key: (exporterIP, ifIndex)
 }
 
 func NewFlowDecoder() *FlowDecoder {
 	return &FlowDecoder{
 		templates:    make(map[netflowTemplateKey]*cachedTemplate),
 		samplingRate: make(map[string]uint32),
+		nodeMeta:     make(map[string]cachedNodeMeta),
+		ifNames:      make(map[ifAliasKey]string),
 	}
 }
 
@@ -323,6 +332,62 @@ func (d *FlowDecoder) parseV9OptionsTemplate(exporterIP string, sourceID uint32,
 	})
 }
 
+func allZeroBytes(b []byte) bool {
+	for _, c := range b {
+		if c != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+func (d *FlowDecoder) stampDecodedMetadata(exporterIP string, domainID uint32, rec *FlowRecord) {
+	d.mu.RLock()
+	nm := d.nodeMeta[fmt.Sprintf("%s|%d", exporterIP, domainID)]
+	inName := ""
+	outName := ""
+	if rec.InIfIndex > 0 {
+		inName = d.ifNames[ifAliasKey{exporterIP: exporterIP, ifIndex: rec.InIfIndex}]
+	}
+	if rec.OutIfIndex > 0 {
+		outName = d.ifNames[ifAliasKey{exporterIP: exporterIP, ifIndex: rec.OutIfIndex}]
+	}
+	d.mu.RUnlock()
+	if rec.HostID == "" && nm.nodeID != "" {
+		rec.HostID = nm.nodeID
+	}
+	if rec.HostName == "" && nm.hostname != "" {
+		rec.HostName = nm.hostname
+	}
+	if rec.InIfName == "" && inName != "" {
+		rec.InIfName = inName
+	}
+	if rec.OutIfName == "" && outName != "" {
+		rec.OutIfName = outName
+	}
+}
+
+func (d *FlowDecoder) applyOptionsRecord(exporterIP string, domainID uint32, rec FlowRecord) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	expKey := fmt.Sprintf("%s|%d", exporterIP, domainID)
+	if rec.SamplingRate > 1 {
+		d.samplingRate[expKey] = rec.SamplingRate
+	}
+	if rec.HostID != "" || rec.HostName != "" {
+		cur := d.nodeMeta[expKey]
+		if rec.HostID != "" {
+			cur.nodeID = rec.HostID
+		}
+		if rec.HostName != "" {
+			cur.hostname = rec.HostName
+		}
+		d.nodeMeta[expKey] = cur
+	}
+	if rec.InIfIndex > 0 && rec.InIfName != "" {
+		d.ifNames[ifAliasKey{exporterIP: exporterIP, ifIndex: rec.InIfIndex}] = rec.InIfName
+	}
+}
 func (d *FlowDecoder) decodeIPFIX(exporterIP string, raw []byte, recvTime time.Time) ([]FlowRecord, error) {
 	const hdrLen = 16
 	if len(raw) < hdrLen {
@@ -366,19 +431,19 @@ func (d *FlowDecoder) decodeIPFIX(exporterIP string, raw []byte, recvTime time.T
 				if !tmpl.hasVarLen && tmpl.fixedLen > 0 && len(body)-recOff < tmpl.fixedLen {
 					break // IPFIX Set padding bytes
 				}
+				if tmpl.hasVarLen && len(body)-recOff <= 3 && allZeroBytes(body[recOff:]) {
+					break // RFC 7011 trailing zero padding on varlen set
+				}
 				rec, nextOff, ok := decodeVariableOrFixedRecord(tmpl, body, recOff, exporterIP, domainID, "ipfix", baseTime, 0, d.GetExporterSampling(exporterIP))
 				if !ok || nextOff <= recOff {
 					break
 				}
 				recOff = nextOff
 				if tmpl.isOptions {
-					if rec.SamplingRate > 1 {
-						d.mu.Lock()
-						d.samplingRate[fmt.Sprintf("%s|%d", exporterIP, domainID)] = rec.SamplingRate
-						d.mu.Unlock()
-					}
+					d.applyOptionsRecord(exporterIP, domainID, rec)
 					continue
 				}
+				d.stampDecodedMetadata(exporterIP, domainID, &rec)
 				flows = append(flows, rec)
 			}
 		}
@@ -451,11 +516,7 @@ func (d *FlowDecoder) parseOptionsData(exporterIP string, sourceID uint32, tmpl 
 		return
 	}
 	rec := decodeTemplateRecord(tmpl, body[:tmpl.fixedLen], exporterIP, sourceID, tmpl.key.version, time.Now(), 0, 1)
-	if rec.SamplingRate > 1 {
-		d.mu.Lock()
-		d.samplingRate[fmt.Sprintf("%s|%d", exporterIP, sourceID)] = rec.SamplingRate
-		d.mu.Unlock()
-	}
+	d.applyOptionsRecord(exporterIP, sourceID, rec)
 }
 
 func (d *FlowDecoder) storeTemplate(t *cachedTemplate) {
@@ -594,6 +655,10 @@ func applyFieldSlices(
 				}
 			case 4:
 				out.Retransmits = uint32(decodeUint(v))
+			case 5:
+				out.HostID = strings.TrimRight(strings.TrimSpace(string(v)), "\x00")
+			case 6:
+				out.HostName = strings.TrimRight(strings.TrimSpace(string(v)), "\x00")
 			}
 			continue
 		}
@@ -655,6 +720,16 @@ func applyFieldSlices(
 			}
 		case 58, 243: // vlanId / dot1qVlanId
 			out.VlanID = uint16(decodeUint(v))
+		case 82: // interfaceName
+			out.InIfName = strings.TrimRight(strings.TrimSpace(string(v)), "\x00")
+		case 83: // interfaceDescription
+			if out.InIfName == "" {
+				out.InIfName = strings.TrimRight(strings.TrimSpace(string(v)), "\x00")
+			}
+		case 149: // observationDomainId
+			if did := uint32(decodeUint(v)); did > 0 {
+				out.SourceID = did
+			}
 		case 85: // octetTotalCount (fallback if delta missing)
 			if out.Bytes == 0 {
 				out.Bytes = decodeUint(v)
@@ -1104,6 +1179,122 @@ func EncodeIPFIXPacket(domainID uint32, seq uint32, includeTemplates bool, flows
 	return buf
 }
 
+func appendIPFIXVarString(dst *[]byte, s string) {
+	if len(s) > 250 {
+		s = s[:250]
+	}
+	*dst = append(*dst, byte(len(s)))
+	*dst = append(*dst, s...)
+}
+
+// EncodeIPFIXOptionsPacket emits RFC 7011 Options Templates 258 (node_id + hostname)
+// and 259 (ifIndex -> ifName/description) plus corresponding Data Sets.
+func EncodeIPFIXOptionsPacket(domainID uint32, seq uint32, nodeID, hostname string, ifaces []NetFlowRemoteIface) []byte {
+	const nodeOptTmplID uint16 = 258
+	const ifaceOptTmplID uint16 = 259
+	const axonwallPEN uint32 = 62999
+
+	buf := make([]byte, 16, 1500)
+	binary.BigEndian.PutUint16(buf[0:2], 10)
+	binary.BigEndian.PutUint32(buf[4:8], uint32(time.Now().Unix()))
+	binary.BigEndian.PutUint32(buf[8:12], seq)
+	binary.BigEndian.PutUint32(buf[12:16], domainID)
+
+	appendFieldSpec := func(dst *[]byte, ie uint16, length uint16, ent uint32) {
+		var tmp [8]byte
+		if ent != 0 {
+			binary.BigEndian.PutUint16(tmp[0:2], ie|0x8000)
+			binary.BigEndian.PutUint16(tmp[2:4], length)
+			binary.BigEndian.PutUint32(tmp[4:8], ent)
+			*dst = append(*dst, tmp[:8]...)
+		} else {
+			binary.BigEndian.PutUint16(tmp[0:2], ie)
+			binary.BigEndian.PutUint16(tmp[2:4], length)
+			*dst = append(*dst, tmp[:4]...)
+		}
+	}
+
+	// Build Set ID 3: Options Templates 258 + 259
+	var optTmplBody []byte
+	{
+		var hdr [6]byte
+		binary.BigEndian.PutUint16(hdr[0:2], nodeOptTmplID)
+		binary.BigEndian.PutUint16(hdr[2:4], 3) // fieldCount
+		binary.BigEndian.PutUint16(hdr[4:6], 1) // scopeFieldCount
+		optTmplBody = append(optTmplBody, hdr[:]...)
+		appendFieldSpec(&optTmplBody, 149, 4, 0)          // observationDomainId (scope)
+		appendFieldSpec(&optTmplBody, 5, 0xFFFF, axonwallPEN) // axonwallNodeId
+		appendFieldSpec(&optTmplBody, 6, 0xFFFF, axonwallPEN) // axonwallNodeHostname
+	}
+	if len(ifaces) > 0 {
+		var hdr [6]byte
+		binary.BigEndian.PutUint16(hdr[0:2], ifaceOptTmplID)
+		binary.BigEndian.PutUint16(hdr[2:4], 3) // fieldCount
+		binary.BigEndian.PutUint16(hdr[4:6], 1) // scopeFieldCount
+		optTmplBody = append(optTmplBody, hdr[:]...)
+		appendFieldSpec(&optTmplBody, 10, 4, 0)      // ingressInterface (scope)
+		appendFieldSpec(&optTmplBody, 82, 0xFFFF, 0) // interfaceName
+		appendFieldSpec(&optTmplBody, 83, 0xFFFF, 0) // interfaceDescription
+	}
+	if pad := (4 - (len(optTmplBody) % 4)) % 4; pad > 0 {
+		optTmplBody = append(optTmplBody, make([]byte, pad)...)
+	}
+	var optSetHdr [4]byte
+	binary.BigEndian.PutUint16(optSetHdr[0:2], 3) // Options Template Set ID = 3
+	binary.BigEndian.PutUint16(optSetHdr[2:4], uint16(4+len(optTmplBody)))
+	buf = append(buf, optSetHdr[:]...)
+	buf = append(buf, optTmplBody...)
+
+	// Data Set 258 (node identity)
+	if nodeID != "" || hostname != "" {
+		var dBody []byte
+		var dom [4]byte
+		binary.BigEndian.PutUint32(dom[0:4], domainID)
+		dBody = append(dBody, dom[:]...)
+		appendIPFIXVarString(&dBody, nodeID)
+		appendIPFIXVarString(&dBody, hostname)
+		if pad := (4 - (len(dBody) % 4)) % 4; pad > 0 {
+			dBody = append(dBody, make([]byte, pad)...)
+		}
+		var dHdr [4]byte
+		binary.BigEndian.PutUint16(dHdr[0:2], nodeOptTmplID)
+		binary.BigEndian.PutUint16(dHdr[2:4], uint16(4+len(dBody)))
+		buf = append(buf, dHdr[:]...)
+		buf = append(buf, dBody...)
+	}
+
+	// Data Set 259 (interface table, capped safely to fit MTU)
+	if len(ifaces) > 0 {
+		var dBody []byte
+		for _, ifc := range ifaces {
+			if ifc.IfIndex == 0 || ifc.Name == "" {
+				continue
+			}
+			if len(buf)+4+len(dBody)+8+len(ifc.Name)+len(ifc.Description) > 1400 {
+				break
+			}
+			var idxBuf [4]byte
+			binary.BigEndian.PutUint32(idxBuf[0:4], ifc.IfIndex)
+			dBody = append(dBody, idxBuf[:]...)
+			appendIPFIXVarString(&dBody, ifc.Name)
+			appendIPFIXVarString(&dBody, ifc.Description)
+		}
+		if len(dBody) > 0 {
+			if pad := (4 - (len(dBody) % 4)) % 4; pad > 0 {
+				dBody = append(dBody, make([]byte, pad)...)
+			}
+			var dHdr [4]byte
+			binary.BigEndian.PutUint16(dHdr[0:2], ifaceOptTmplID)
+			binary.BigEndian.PutUint16(dHdr[2:4], uint16(4+len(dBody)))
+			buf = append(buf, dHdr[:]...)
+			buf = append(buf, dBody...)
+		}
+	}
+
+	binary.BigEndian.PutUint16(buf[2:4], uint16(len(buf)))
+	return buf
+}
+
 // EncodeNetFlowV9Packet builds a valid RFC 3954 NetFlow v9 datagram for target exporters requiring v9.
 func EncodeNetFlowV9Packet(sourceID uint32, seq uint32, includeTemplates bool, flows []FlowRecord) []byte {
 	const tmplID uint16 = 257
@@ -1240,6 +1431,10 @@ func ieName(entID uint32, ft uint16) string {
 			return "axonwallTcpRttMicros"
 		case 4:
 			return "axonwallTcpRetransmits"
+		case 5:
+			return "axonwallNodeId"
+		case 6:
+			return "axonwallNodeHostname"
 		default:
 			return fmt.Sprintf("ent(%d).%d", entID, ft)
 		}

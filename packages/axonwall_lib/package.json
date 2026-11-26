@@ -227,6 +227,10 @@
       "types": "./dist/compile/netflow/index.d.ts",
       "default": "./dist/compile/netflow/index.js"
     },
+    "./compile/observability": {
+      "types": "./dist/compile/observability/index.d.ts",
+      "default": "./dist/compile/observability/index.js"
+    },
     "./import/proxmox": {
       "types": "./dist/import/proxmox/index.d.ts",
       "default": "./dist/import/proxmox/index.js"

@@ -7,6 +7,23 @@ function safeIdentifier(str: string): string {
   return str.replace(/[^a-zA-Z0-9_-]/g, '_');
 }
 
+export function sanitizeHaProxyHostname(raw?: string): string {
+  if (!raw) return '';
+  let trimmed = raw.trim().replace(/[\r\n\x00]/g, '');
+  trimmed = trimmed.replace(/^https?:\/\//i, '');
+  const slashIdx = trimmed.indexOf('/');
+  if (slashIdx >= 0) trimmed = trimmed.slice(0, slashIdx);
+  const colonIdx = trimmed.indexOf(':');
+  if (colonIdx >= 0) trimmed = trimmed.slice(0, colonIdx);
+  return trimmed.replace(/[^a-zA-Z0-9.-]/g, '').toLowerCase();
+}
+
+function safeHaProxyPath(raw: string): string {
+  const clean = raw.trim().replace(/[\r\n\x00\s"';]/g, '');
+  if (!clean.startsWith('/') || clean.includes('..')) return '';
+  return clean;
+}
+
 export function compileHaProxy(config: HaProxyPluginConfig): string {
   const lines: string[] = [];
 
@@ -49,17 +66,82 @@ export function compileHaProxy(config: HaProxyPluginConfig): string {
     lines.push(bindLine);
     lines.push(`    mode ${safeConfigMode}`);
     if (safeConfigMode === 'http') {
-      lines.push('    option forwardfor');
-      lines.push('    http-request set-header X-Forwarded-Proto https if { ssl_fc }');
+      const safeStrictHost = sanitizeHaProxyHostname(fe.strictHost);
+      if (safeStrictHost) {
+        if (fe.ssl) {
+          lines.push(`    acl valid_sni ssl_fc_sni -i ${safeStrictHost}`);
+          lines.push(`    acl valid_host req.hdr(host),field(1,:) -i ${safeStrictHost}`);
+          lines.push('    http-request silent-drop unless valid_sni valid_host');
+        } else {
+          lines.push(`    acl valid_host req.hdr(host),field(1,:) -i ${safeStrictHost}`);
+          lines.push('    http-request silent-drop unless valid_host');
+        }
+      }
+
+      const pathRules = fe.pathRules ?? [];
+      if (pathRules.length > 0) {
+        lines.push('    acl bad_traversal path_sub ..');
+        lines.push('    acl bad_encoded_dot path_sub -i %2e');
+        lines.push('    acl bad_encoded_slash path_sub -i %2f');
+        lines.push('    http-request silent-drop if bad_traversal or bad_encoded_dot or bad_encoded_slash');
+      }
+
+      if (fe.sanitizeProxyHeaders) {
+        lines.push('    http-request del-header X-Forwarded-For');
+        lines.push('    http-request del-header X-Real-IP');
+        lines.push('    http-request del-header X-Forwarded-Host');
+        lines.push('    http-request del-header X-Forwarded-Proto');
+        lines.push('    option forwardfor');
+        lines.push('    http-request set-header X-Real-IP %[src]');
+        lines.push(`    http-request set-header X-Forwarded-Proto ${fe.ssl ? 'https' : 'http'}`);
+      } else {
+        lines.push('    option forwardfor');
+        lines.push('    http-request set-header X-Forwarded-Proto https if { ssl_fc }');
+      }
+
+      const compiledPathRules: Array<{ cond: string; backend: string }> = [];
+      pathRules.forEach((rule, idx) => {
+        const cleanPath = safeHaProxyPath(rule.path);
+        if (!cleanPath) return;
+        const matcher = rule.matchType === 'exact' ? 'path' : 'path_beg';
+        const pathAcl = `allow_path_${idx}`;
+        lines.push(`    acl ${pathAcl} ${matcher} ${cleanPath}`);
+        let cond = pathAcl;
+        const validMethods = (rule.methods ?? []).filter((m) =>
+          ['GET', 'POST', 'HEAD', 'OPTIONS'].includes(m),
+        );
+        if (validMethods.length > 0) {
+          const methodAcl = `allow_method_${idx}`;
+          lines.push(`    acl ${methodAcl} method ${validMethods.join(' ')}`);
+          cond = `${pathAcl} ${methodAcl}`;
+        }
+        lines.push(`    http-request set-var(txn.path_allowed) int(1) if ${cond}`);
+        compiledPathRules.push({ cond, backend: safeIdentifier(rule.backend) });
+      });
+
+      if (fe.silentDropUnmatched) {
+        if (compiledPathRules.length > 0) {
+          lines.push('    http-request silent-drop unless { var(txn.path_allowed) -m int eq 1 }');
+        } else {
+          lines.push('    http-request silent-drop');
+        }
+      }
+
       for (const hr of fe.hostRules ?? []) {
-        const cleanHost = hr.hostname.replace(/[^a-zA-Z0-9.-]/g, '').toLowerCase();
+        const cleanHost = sanitizeHaProxyHostname(hr.hostname);
         if (!cleanHost) continue;
         const aclId = `host_${safeIdentifier(cleanHost)}`;
         lines.push(`    acl ${aclId} hdr_dom(host) -i ${cleanHost}`);
         lines.push(`    use_backend ${safeIdentifier(hr.backend)} if ${aclId}`);
       }
+
+      for (const pr of compiledPathRules) {
+        lines.push(`    use_backend ${pr.backend} if ${pr.cond}`);
+      }
     }
-    lines.push(`    default_backend ${safeIdentifier(fe.defaultBackend)}`);
+    if (!fe.silentDropUnmatched) {
+      lines.push(`    default_backend ${safeIdentifier(fe.defaultBackend)}`);
+    }
     lines.push('');
   }
 

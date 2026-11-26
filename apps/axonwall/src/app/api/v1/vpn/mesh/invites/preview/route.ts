@@ -51,6 +51,7 @@ export async function GET(req: NextRequest) {
       mode: preview.invite.mode,
       expiresAt: preview.invite.expiresAt,
       createStarterKey: preview.invite.createStarterKey,
+      requiresPin: Boolean(preview.invite.requiresPin),
       magicDnsDomain: network.magicDnsDomain,
       minPasswordLength,
     },

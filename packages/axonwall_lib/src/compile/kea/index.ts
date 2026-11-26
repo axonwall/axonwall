@@ -82,7 +82,15 @@ export function synthesizeDefaultDhcpSubnet(iface: Interface): DhcpSubnet | null
   };
 }
 
-export function compileKeaDhcp4(dhcp: DhcpConfig, interfaces: Interface[]): KeaCompileResult {
+export interface KeaCompileOptions {
+  logLeases?: boolean;
+}
+
+export function compileKeaDhcp4(
+  dhcp: DhcpConfig,
+  interfaces: Interface[],
+  options?: KeaCompileOptions,
+): KeaCompileResult {
   const ifDeviceMap = new Map<string, string>();
   const ifaceByName = new Map<string, Interface>();
   for (const iface of interfaces) {
@@ -125,6 +133,8 @@ export function compileKeaDhcp4(dhcp: DhcpConfig, interfaces: Interface[]): KeaC
     new Set(activeSubnets.map((s) => ifDeviceMap.get(s.interface) || s.interface).filter(isValidDevice))
   );
 
+  const enableLogging = Boolean(options?.logLeases ?? dhcp.logLeases);
+
   const keaConfig = {
     Dhcp4: {
       'interfaces-config': {
@@ -139,6 +149,23 @@ export function compileKeaDhcp4(dhcp: DhcpConfig, interfaces: Interface[]): KeaC
       'valid-lifetime': 7200,
       'renew-timer': 1800,
       'rebind-timer': 3600,
+      ...(enableLogging
+        ? {
+            loggers: [
+              {
+                name: 'kea-dhcp4',
+                severity: 'INFO',
+                output_options: [
+                  {
+                    output: '/var/log/axonwall/kea-dhcp4.log',
+                    maxsize: 10485760,
+                    maxver: 3,
+                  },
+                ],
+              },
+            ],
+          }
+        : {}),
       'subnet4': activeSubnets.map((sub, idx) => {
         const optionData: Array<{ name: string; data: string }> = [];
 

@@ -362,3 +362,9 @@ sudo curl -sk --cacert /var/lib/axonwall/secrets/ha-pki/ca.crt \
 2. **Graceful Maintenance Failover**: On Host 1, set `maintenanceMode: true` under `ha:` in `/etc/axonwall/ha.yaml` and run `axonwallctl apply` (or click **Force Failover to Peer** -> **Save to ha.yaml** in `/ha`). Verify that Host 2 immediately claims `198.51.100.1/24` and `10.0.10.1/24` with zero dropped packets.
 3. **Simulated Link Failure**: With Host 1 restored as `MASTER`, run `sudo ip link set eth0 down` on Host 1. Host 2 transitions to `MASTER` within 1000ms, commits the `conntrackd` external cache into the kernel Netfilter table, and keeps the active SSH session alive without a TCP reset.
 4. Run `sudo ip link set eth0 up` on Host 1 to return it to normal operation.
+
+---
+
+### Operational Note (`v0.16.2+`): Mesh WAN Invites & Central Analytics Offload
+- **Headscale WAN Invites (`vpn.yaml`):** `headscale.wanInvite` replicates cleanly across HA nodes alongside HAProxy configuration (`/etc/haproxy/haproxy.cfg`) and managed TLS certificates. Because dynamic `headscale_wan_window_ports` elements follow the active invite store, sync or copy `/var/lib/axonwall/headscale-invites.json` if issuing WAN invite tokens prior to failover.
+- **Central Analytics Offload (`system.yaml` / `netflow.yaml`):** Assign distinct `observability.offload.nodeId` / `netflow.nodeId` identifiers per HA firewall node when shipping Prometheus Remote-Write metrics, VictoriaLogs events, and IPFIX PEN `62999` flows to a central `axonwall-analytics` cluster so metrics and ClickHouse flows attribute cleanly per appliance.

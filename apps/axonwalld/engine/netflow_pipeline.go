@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -98,9 +99,12 @@ type NetFlowManager struct {
 	exporters  map[string]*exporterTracker
 	exportersMu sync.RWMutex
 
-	selfPrev      map[string]exporterCounterState
-	selfSeq       atomic.Uint32
-	selfLastTmpl  map[string]time.Time
+	selfPrevByTarget map[string]map[string]exporterCounterState
+	selfSeq          atomic.Uint32
+	selfLastTmpl     map[string]time.Time
+	targetConnsMu    sync.Mutex
+	targetConns      map[string]net.Conn
+	exportQueue      *TelemetryQueue
 
 	replMu    sync.RWMutex
 	replConns map[string]*net.UDPConn
@@ -149,11 +153,13 @@ func NewNetFlowManager(
 		decoder:       NewFlowDecoder(),
 		enricher:      NewFlowEnricher(k3s, netbox, librenms),
 		store:         NewFlowStore(NetFlowStoragePayload{}),
-		baselines:     NewBaselineEngine("/var/lib/axonwall/netflow"),
-		exporters:     make(map[string]*exporterTracker),
-		selfPrev:      make(map[string]exporterCounterState),
-		selfLastTmpl:  make(map[string]time.Time),
-		replConns:     make(map[string]*net.UDPConn),
+		baselines:        NewBaselineEngine("/var/lib/axonwall/netflow"),
+		exporters:        make(map[string]*exporterTracker),
+		selfPrevByTarget: make(map[string]map[string]exporterCounterState),
+		selfLastTmpl:     make(map[string]time.Time),
+		targetConns:      make(map[string]net.Conn),
+		exportQueue:      NewTelemetryQueue("netflow-export", 24, false, "/var/lib/axonwall/telemetry-spool", 256),
+		replConns:        make(map[string]*net.UDPConn),
 		replRate:      make(map[string]*replRateBucket),
 		alertCooldown: make(map[string]int64),
 		alertWindows:  make(map[string]*alertWindowTrack),
@@ -209,14 +215,32 @@ func (m *NetFlowManager) ApplyConfig(rawJSON []byte) error {
 	}
 
 	m.Stop()
-	m.enricher.UpdateBundle(&bundle)
-	m.store.Configure(bundle.Config.Storage)
-	m.baselines.SetDataDir(bundle.Config.Storage.DataDir)
+	bufMB := bundle.Buffer.MaxMemoryMB
+	if bufMB <= 0 {
+		bufMB = 24
+	}
+	m.exportQueue.Configure(bufMB, bundle.Buffer.DiskSpoolEnabled, bundle.Buffer.DiskSpoolDir, bundle.Buffer.DiskSpoolMaxMB)
+	if !isExporterOnlyMode(&bundle) {
+		m.enricher.UpdateBundle(&bundle)
+		m.store.Configure(bundle.Config.Storage)
+		m.baselines.SetDataDir(bundle.Config.Storage.DataDir)
+	}
 
 	if !bundle.Enabled {
 		return nil
 	}
 	return m.Start()
+}
+
+func isExporterOnlyMode(b *NetFlowRuntimeBundle) bool {
+	if b == nil {
+		return false
+	}
+	mode := strings.ToLower(strings.TrimSpace(b.Mode))
+	if mode == "" {
+		mode = strings.ToLower(strings.TrimSpace(b.Config.Mode))
+	}
+	return mode == "exporter"
 }
 
 const netflowMaskedPlaceholder = "********"
@@ -263,8 +287,10 @@ func (m *NetFlowManager) SetEnabled(enabled bool) error {
 	if !enabled {
 		return nil
 	}
-	m.enricher.UpdateBundle(b)
-	m.store.Configure(b.Config.Storage)
+	if !isExporterOnlyMode(b) {
+		m.enricher.UpdateBundle(b)
+		m.store.Configure(b.Config.Storage)
+	}
 	return m.Start()
 }
 
@@ -278,12 +304,22 @@ func (m *NetFlowManager) Start() error {
 		m.mu.Unlock()
 		return nil
 	}
-	cfg := m.bundle.Config
+	bundle := m.bundle
+	cfg := bundle.Config
+	exporterOnly := isExporterOnlyMode(bundle)
 	stopCh := make(chan struct{})
 	m.stopCh = stopCh
 	m.running = true
 	m.listeners = nil
 	m.mu.Unlock()
+
+	if exporterOnly {
+		// Edge exporter-only mode: zero listeners, zero local ClickHouse/chunk/baseline/enrichment overhead
+		m.wg.Add(2)
+		go m.selfExportLoop(stopCh)
+		go m.metadataSyncLoop(stopCh)
+		return nil
+	}
 
 	for _, lCfg := range cfg.Listeners {
 		if !lCfg.Enabled {
@@ -295,12 +331,13 @@ func (m *NetFlowManager) Start() error {
 		m.mu.Unlock()
 	}
 
-	// Background loops: storage flusher, external cache refresher, self-exporter, scheduled reporter
-	m.wg.Add(4)
+	// Background loops: storage flusher, external cache refresher, self-exporter, scheduled reporter, metadata sync
+	m.wg.Add(5)
 	go m.flushLoop(stopCh, cfg.Storage.FlushIntervalSec)
 	go m.enrichmentLoop(stopCh)
 	go m.selfExportLoop(stopCh)
 	go m.reportingLoop(stopCh)
+	go m.metadataSyncLoop(stopCh)
 
 	return nil
 }
@@ -335,33 +372,88 @@ func (m *NetFlowManager) Stop() {
 		delete(m.replConns, k)
 	}
 	m.replMu.Unlock()
+	m.closeAllTargetConns()
 
 	m.wg.Wait()
-	_ = m.store.Flush()
-	_ = m.baselines.Save("")
+	m.mu.RLock()
+	exporterOnly := isExporterOnlyMode(m.bundle)
+	m.mu.RUnlock()
+	if !exporterOnly {
+		_ = m.store.Flush()
+		_ = m.baselines.Save("")
+	}
 }
 
-func buildNetFlowTLSConfig(tlsCfg *NetFlowTlsConfigPayload, isServer bool) (*tls.Config, error) {
+func (m *NetFlowManager) closeAllTargetConns() {
+	m.targetConnsMu.Lock()
+	defer m.targetConnsMu.Unlock()
+	for k, c := range m.targetConns {
+		_ = c.Close()
+		delete(m.targetConns, k)
+	}
+}
+
+func buildTLSConfigFromBundleParams(useHaPki bool, caCertOrPath, certPath, keyPath, serverName string, insecureSkipVerify, requireClientCert, isServer bool) (*tls.Config, error) {
 	var cfg *tls.Config
 	var err error
-	if tlsCfg == nil || tlsCfg.UseHaPki || (tlsCfg.CertPath == "" && tlsCfg.CAPath == "") {
+	if useHaPki || (certPath == "" && caCertOrPath == "") {
 		cfg, err = LoadHAPKITLSConfig()
+	} else if strings.Contains(caCertOrPath, "BEGIN CERTIFICATE") {
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM([]byte(caCertOrPath)) {
+			return nil, errors.New("invalid inline TLS CA PEM")
+		}
+		cfg = &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS13}
+		if certPath != "" && keyPath != "" {
+			if cert, cerr := tls.LoadX509KeyPair(certPath, keyPath); cerr == nil {
+				cfg.Certificates = []tls.Certificate{cert}
+			}
+		}
 	} else {
-		cfg, err = LoadHAPKITLSConfigFromPaths(tlsCfg.CAPath, tlsCfg.CertPath, tlsCfg.KeyPath)
+		cfg, err = LoadHAPKITLSConfigFromPaths(caCertOrPath, certPath, keyPath)
 	}
 	if err != nil {
+		if insecureSkipVerify && !isServer {
+			return &tls.Config{
+				MinVersion:         tls.VersionTLS13,
+				InsecureSkipVerify: true, //nolint:gosec
+				ServerName:         serverName,
+			}, nil
+		}
 		return nil, err
 	}
 	cloned := cfg.Clone()
 	cloned.MinVersion = tls.VersionTLS13
+	if serverName != "" {
+		cloned.ServerName = serverName
+	}
+	if insecureSkipVerify && !isServer {
+		cloned.InsecureSkipVerify = true //nolint:gosec
+	}
 	if isServer {
-		if tlsCfg != nil && !tlsCfg.RequireClientCert {
+		if !requireClientCert {
 			cloned.ClientAuth = tls.VerifyClientCertIfGiven
 		} else {
 			cloned.ClientAuth = tls.RequireAndVerifyClientCert
 		}
 	}
 	return cloned, nil
+}
+
+func buildNetFlowTLSConfig(tlsCfg *NetFlowTlsConfigPayload, isServer bool) (*tls.Config, error) {
+	if tlsCfg == nil {
+		return buildTLSConfigFromBundleParams(true, "", "", "", "", false, true, isServer)
+	}
+	return buildTLSConfigFromBundleParams(
+		tlsCfg.UseHaPki,
+		tlsCfg.CAPath,
+		tlsCfg.CertPath,
+		tlsCfg.KeyPath,
+		tlsCfg.ServerName,
+		tlsCfg.InsecureSkipVerify,
+		tlsCfg.RequireClientCert,
+		isServer,
+	)
 }
 
 func (m *NetFlowManager) startListener(cfg NetFlowListenerPayload, stopCh chan struct{}) *listenerRuntime {
@@ -939,22 +1031,42 @@ func (m *NetFlowManager) selfExportLoop(stopCh chan struct{}) {
 			if bundle == nil || !bundle.Enabled || !bundle.Config.SelfExport.Enabled {
 				continue
 			}
-			deltaFlows := m.sampleLocalDeltaFlows()
-			if len(deltaFlows) == 0 {
+
+			// First drain any buffered unsent packets for enabled targets when collector recovers
+			m.drainQueuedExportPackets(bundle)
+
+			rawFlows := m.sampleRawLocalFlows()
+			if len(rawFlows) == 0 {
 				continue
 			}
+			localIfaces, ifNameByIdx := collectLocalInterfaceSnapshot(bundle)
+			nodeID := strings.TrimSpace(bundle.NodeID)
+			if nodeID == "" {
+				nodeID = strings.TrimSpace(bundle.Config.NodeID)
+			}
+			if nodeID == "" {
+				nodeID = bundle.LocalHostname
+			}
+
 			for _, tgt := range bundle.Config.SelfExport.Targets {
 				if !tgt.Enabled || tgt.Host == "" || tgt.Port <= 0 {
 					continue
 				}
-				minInterval := time.Duration(maxInt(5, tgt.ActiveTimeoutSec)) * time.Second
-				if minInterval > 15*time.Second {
-					minInterval = 15 * time.Second
+				activeSec := maxInt(5, tgt.ActiveTimeoutSec)
+				if activeSec > 300 {
+					activeSec = 300
 				}
+				minInterval := time.Duration(activeSec) * time.Second
 				if last, ok := lastTargetExport[tgt.ID]; ok && now.Sub(last) < minInterval {
 					continue
 				}
 				lastTargetExport[tgt.ID] = now
+
+				// Compute per-target deltas so longer-interval targets never drop intermediate ticks
+				deltaFlows := m.computeTargetFlowDeltas(tgt.ID, rawFlows, tgt.Interfaces, tgt.SamplingRate, ifNameByIdx)
+				if len(deltaFlows) == 0 {
+					continue
+				}
 
 				lastTmpl := m.selfLastTmpl[tgt.ID]
 				refreshInterval := time.Duration(maxInt(30, tgt.TemplateRefreshSec)) * time.Second
@@ -967,6 +1079,14 @@ func (m *NetFlowManager) selfExportLoop(stopCh chan struct{}) {
 				domainID := tgt.ObservationDomainID
 				if domainID == 0 {
 					domainID = 1
+				}
+
+				if includeTmpl && tgt.Version != "netflow9" {
+					optSeq := m.selfSeq.Add(1)
+					optPkt := EncodeIPFIXOptionsPacket(domainID, optSeq, nodeID, bundle.LocalHostname, localIfaces)
+					if err := m.sendTargetDatagram(tgt, optPkt); err != nil {
+						m.enqueueExportPacket(tgt.ID, optPkt)
+					}
 				}
 
 				// Chunk flows into <= 20 per MTU-safe UDP datagram
@@ -982,8 +1102,11 @@ func (m *NetFlowManager) selfExportLoop(stopCh chan struct{}) {
 					} else {
 						pkt = EncodeIPFIXPacket(domainID, seq, includeTmpl && start == 0, batch)
 					}
-					if err := sendFlowDatagram(tgt.Transport, tgt.Host, tgt.Port, tgt.TLS, pkt); err == nil {
+					if err := m.sendTargetDatagram(tgt, pkt); err == nil {
 						m.totalSelfExport.Add(uint64(len(batch)))
+						m.exportQueue.MarkSent(uint64(len(batch)))
+					} else {
+						m.enqueueExportPacket(tgt.ID, pkt)
 					}
 				}
 			}
@@ -991,8 +1114,129 @@ func (m *NetFlowManager) selfExportLoop(stopCh chan struct{}) {
 	}
 }
 
+func (m *NetFlowManager) enqueueExportPacket(targetID string, pkt []byte) {
+	if len(pkt) == 0 {
+		return
+	}
+	idBytes := []byte(targetID)
+	if len(idBytes) > 250 {
+		idBytes = idBytes[:250]
+	}
+	framed := make([]byte, 0, 1+len(idBytes)+len(pkt))
+	framed = append(framed, byte(len(idBytes)))
+	framed = append(framed, idBytes...)
+	framed = append(framed, pkt...)
+	m.exportQueue.Push(framed)
+}
+
+func (m *NetFlowManager) drainQueuedExportPackets(bundle *NetFlowRuntimeBundle) {
+	targetsByID := make(map[string]NetFlowSelfExportTargetPayload, len(bundle.Config.SelfExport.Targets))
+	for _, t := range bundle.Config.SelfExport.Targets {
+		if t.Enabled && t.Host != "" && t.Port > 0 {
+			targetsByID[t.ID] = t
+		}
+	}
+	batch := m.exportQueue.PopBatch(32)
+	if len(batch) == 0 {
+		return
+	}
+	var failed [][]byte
+	for idx, item := range batch {
+		if len(item) < 2 {
+			continue
+		}
+		idLen := int(item[0])
+		if 1+idLen >= len(item) {
+			continue
+		}
+		tid := string(item[1 : 1+idLen])
+		pkt := item[1+idLen:]
+		tgt, ok := targetsByID[tid]
+		if !ok {
+			continue
+		}
+		if err := m.sendTargetDatagram(tgt, pkt); err != nil {
+			failed = batch[idx:]
+			break
+		}
+		m.exportQueue.MarkSent(1)
+	}
+	if len(failed) > 0 {
+		m.exportQueue.RequeueFront(failed)
+	}
+}
+
+// sendTargetDatagram reuses a persistent TCP/TLS connection per target when transport is tcp or tls.
+func (m *NetFlowManager) sendTargetDatagram(tgt NetFlowSelfExportTargetPayload, pkt []byte) error {
+	transport := strings.ToLower(strings.TrimSpace(tgt.Transport))
+	if transport == "" {
+		transport = "udp"
+	}
+	addr := net.JoinHostPort(tgt.Host, strconv.Itoa(tgt.Port))
+	if transport == "udp" {
+		conn, err := net.DialTimeout("udp", addr, 1500*time.Millisecond)
+		if err != nil {
+			return err
+		}
+		defer conn.Close()
+		_ = conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
+		_, err = conn.Write(pkt)
+		return err
+	}
+
+	poolKey := fmt.Sprintf("%s|%s|%s", tgt.ID, transport, addr)
+	m.targetConnsMu.Lock()
+	conn := m.targetConns[poolKey]
+	m.targetConnsMu.Unlock()
+
+	writeOnce := func(c net.Conn) error {
+		_ = c.SetWriteDeadline(time.Now().Add(3 * time.Second))
+		_, err := c.Write(pkt)
+		return err
+	}
+
+	if conn != nil {
+		if err := writeOnce(conn); err == nil {
+			return nil
+		}
+		_ = conn.Close()
+		m.targetConnsMu.Lock()
+		if m.targetConns[poolKey] == conn {
+			delete(m.targetConns, poolKey)
+		}
+		m.targetConnsMu.Unlock()
+	}
+
+	var newConn net.Conn
+	var err error
+	if transport == "tls" {
+		conf, cerr := buildNetFlowTLSConfig(tgt.TLS, false)
+		if cerr != nil {
+			return cerr
+		}
+		dialer := &net.Dialer{Timeout: 3 * time.Second}
+		newConn, err = tls.DialWithDialer(dialer, "tcp", addr, conf)
+	} else {
+		newConn, err = net.DialTimeout("tcp", addr, 3*time.Second)
+	}
+	if err != nil {
+		return err
+	}
+	if err := writeOnce(newConn); err != nil {
+		_ = newConn.Close()
+		return err
+	}
+	m.targetConnsMu.Lock()
+	if old := m.targetConns[poolKey]; old != nil {
+		_ = old.Close()
+	}
+	m.targetConns[poolKey] = newConn
+	m.targetConnsMu.Unlock()
+	return nil
+}
+
 func sendFlowDatagram(transport, host string, port int, tlsCfg *NetFlowTlsConfigPayload, pkt []byte) error {
-	addr := fmt.Sprintf("%s:%d", host, port)
+	addr := net.JoinHostPort(host, strconv.Itoa(port))
 	if transport == "tls" {
 		conf, err := buildNetFlowTLSConfig(tlsCfg, false)
 		if err != nil {
@@ -1022,18 +1266,22 @@ func sendFlowDatagram(transport, host string, port int, tlsCfg *NetFlowTlsConfig
 	return err
 }
 
-func (m *NetFlowManager) sampleLocalDeltaFlows() []FlowRecord {
+func (m *NetFlowManager) sampleRawLocalFlows() []FlowRecord {
 	now := time.Now()
 	current := make(map[string]FlowRecord)
 	tcpDiag := readTCPDiagMetrics()
 
 	if m.ebpf != nil {
-		snap := m.ebpf.GetDataplaneSnapshot(1024)
-		for _, ef := range snap.TopFlows {
+		counters := m.ebpf.GetAllFlowCounters(16384)
+		for _, ef := range counters {
 			if ef.SrcIP == "" || ef.DstIP == "" {
 				continue
 			}
-			key := fmt.Sprintf("%d|%s|%d|%s|%d", ef.Protocol, ef.SrcIP, ef.SrcPort, ef.DstIP, ef.DstPort)
+			inIdx := ef.IngressIfIndex
+			if inIdx == 0 {
+				inIdx = 1
+			}
+			key := fmt.Sprintf("%d|%s|%d|%s|%d|%d", ef.Protocol, ef.SrcIP, ef.SrcPort, ef.DstIP, ef.DstPort, inIdx)
 			rec := FlowRecord{
 				FlowStartMs: now.Add(-5 * time.Second).UnixMilli(),
 				TimestampMs: now.UnixMilli(),
@@ -1045,7 +1293,7 @@ func (m *NetFlowManager) sampleLocalDeltaFlows() []FlowRecord {
 				VlanID:      ef.VlanID,
 				Bytes:       ef.Bytes,
 				Packets:     ef.Packets,
-				InIfIndex:   1,
+				InIfIndex:   inIdx,
 			}
 			if dm, ok := tcpDiag[fmt.Sprintf("%s|%d|%s|%d", ef.SrcIP, ef.SrcPort, ef.DstIP, ef.DstPort)]; ok {
 				rec.RttMs = dm.RttMs
@@ -1060,28 +1308,72 @@ func (m *NetFlowManager) sampleLocalDeltaFlows() []FlowRecord {
 		m.enricher.UpdateConntrackNAT(natIdx)
 	}
 	for _, cf := range conntrackRecs {
-		key := fmt.Sprintf("%d|%s|%d|%s|%d", cf.Protocol, cf.SrcIP, cf.SrcPort, cf.DstIP, cf.DstPort)
-		if ex, ok := current[key]; ok {
-			if ex.PostNatSrcIP == "" {
-				ex.PostNatSrcIP = cf.PostNatSrcIP
-				ex.PostNatSrcPort = cf.PostNatSrcPort
-				ex.PostNatDstIP = cf.PostNatDstIP
-				ex.PostNatDstPort = cf.PostNatDstPort
-				current[key] = ex
+		fiveKey := fmt.Sprintf("%d|%s|%d|%s|%d", cf.Protocol, cf.SrcIP, cf.SrcPort, cf.DstIP, cf.DstPort)
+		matchedExisting := false
+		for ck, ex := range current {
+			if strings.HasPrefix(ck, fiveKey+"|") {
+				if ex.PostNatSrcIP == "" {
+					ex.PostNatSrcIP = cf.PostNatSrcIP
+					ex.PostNatSrcPort = cf.PostNatSrcPort
+					ex.PostNatDstIP = cf.PostNatDstIP
+					ex.PostNatDstPort = cf.PostNatDstPort
+					current[ck] = ex
+				}
+				matchedExisting = true
 			}
-		} else if len(current) < 512 {
+		}
+		if !matchedExisting && len(current) < 16384 {
 			if dm, ok := tcpDiag[fmt.Sprintf("%s|%d|%s|%d", cf.SrcIP, cf.SrcPort, cf.DstIP, cf.DstPort)]; ok {
 				cf.RttMs = dm.RttMs
 				cf.Retransmits = dm.Retransmits
 			}
-			current[key] = cf
+			current[fiveKey+"|1"] = cf
 		}
 	}
 
-	deltas := make([]FlowRecord, 0, len(current))
-	nextPrev := make(map[string]exporterCounterState, len(current))
-	for k, f := range current {
-		prev := m.selfPrev[k]
+	out := make([]FlowRecord, 0, len(current))
+	for _, rec := range current {
+		out = append(out, rec)
+	}
+	return out
+}
+
+// computeTargetFlowDeltas tracks cumulative counters independently per targetID so different
+// activeTimeoutSec intervals never discard intermediate ticks.
+func (m *NetFlowManager) computeTargetFlowDeltas(
+	targetID string,
+	raw []FlowRecord,
+	targetIfaces []string,
+	samplingRate int,
+	ifNameByIdx map[uint32]string,
+) []FlowRecord {
+	var allowedIfaceSet map[string]bool
+	if len(targetIfaces) > 0 {
+		allowedIfaceSet = make(map[string]bool, len(targetIfaces))
+		for _, ifc := range targetIfaces {
+			if s := strings.TrimSpace(ifc); s != "" {
+				allowedIfaceSet[s] = true
+			}
+		}
+	}
+
+	m.mu.Lock()
+	prevMap := m.selfPrevByTarget[targetID]
+	if prevMap == nil {
+		prevMap = make(map[string]exporterCounterState)
+	}
+	nextPrev := make(map[string]exporterCounterState, len(raw))
+	deltas := make([]FlowRecord, 0, len(raw))
+
+	for i, f := range raw {
+		if len(allowedIfaceSet) > 0 {
+			inName := ifNameByIdx[f.InIfIndex]
+			if !allowedIfaceSet[inName] && !allowedIfaceSet[strconv.FormatUint(uint64(f.InIfIndex), 10)] {
+				continue
+			}
+		}
+		key := fmt.Sprintf("%d|%s|%d|%s|%d|%d", f.Protocol, f.SrcIP, f.SrcPort, f.DstIP, f.DstPort, f.InIfIndex)
+		prev := prevMap[key]
 		var dBytes, dPkts uint64
 		if f.Bytes >= prev.bytes {
 			dBytes = f.Bytes - prev.bytes
@@ -1093,15 +1385,192 @@ func (m *NetFlowManager) sampleLocalDeltaFlows() []FlowRecord {
 		} else {
 			dPkts = f.Packets
 		}
-		nextPrev[k] = exporterCounterState{bytes: f.Bytes, packets: f.Packets}
+		nextPrev[key] = exporterCounterState{bytes: f.Bytes, packets: f.Packets}
 		if dBytes > 0 || dPkts > 0 {
+			if samplingRate > 1 {
+				if i%samplingRate != 0 {
+					continue
+				}
+				f.SamplingRate = uint32(samplingRate)
+			}
 			f.Bytes = dBytes
 			f.Packets = dPkts
 			deltas = append(deltas, f)
 		}
 	}
-	m.selfPrev = nextPrev
+	m.selfPrevByTarget[targetID] = nextPrev
+	m.mu.Unlock()
 	return deltas
+}
+
+func collectLocalInterfaceSnapshot(bundle *NetFlowRuntimeBundle) ([]NetFlowRemoteIface, map[uint32]string) {
+	hintByDev := make(map[string]NetFlowInterfaceHint)
+	if bundle != nil {
+		for _, h := range bundle.LocalInterfaces {
+			hintByDev[h.Device] = h
+		}
+	}
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return nil, map[uint32]string{}
+	}
+	out := make([]NetFlowRemoteIface, 0, len(ifaces))
+	nameByIdx := make(map[uint32]string, len(ifaces))
+	for _, ifc := range ifaces {
+		if ifc.Index <= 0 {
+			continue
+		}
+		idx := uint32(ifc.Index)
+		nameByIdx[idx] = ifc.Name
+		desc := ifc.Name
+		ipv4 := ""
+		if h, ok := hintByDev[ifc.Name]; ok {
+			if h.Name != "" {
+				desc = h.Name
+			}
+			ipv4 = h.IPv4Address
+		}
+		out = append(out, NetFlowRemoteIface{
+			IfIndex:     idx,
+			Name:        ifc.Name,
+			Description: desc,
+			MacAddress:  ifc.HardwareAddr.String(),
+			IPv4Address: ipv4,
+		})
+	}
+	return out, nameByIdx
+}
+
+func (m *NetFlowManager) metadataSyncLoop(stopCh chan struct{}) {
+	defer m.wg.Done()
+	tk := time.NewTicker(15 * time.Second)
+	defer tk.Stop()
+	var lastSync time.Time
+
+	for {
+		select {
+		case <-stopCh:
+			return
+		case now := <-tk.C:
+			m.mu.RLock()
+			bundle := m.bundle
+			m.mu.RUnlock()
+			if bundle == nil || !bundle.Enabled || bundle.Config.SelfExport.MetadataSync == nil || !bundle.Config.SelfExport.MetadataSync.Enabled {
+				continue
+			}
+			syncCfg := bundle.Config.SelfExport.MetadataSync
+			targetURL := strings.TrimSpace(syncCfg.TargetURL)
+			if targetURL == "" && bundle.HubURL != "" {
+				targetURL = strings.TrimRight(bundle.HubURL, "/") + "/api/v1/netflow/metadata-sync"
+			}
+			if targetURL == "" {
+				continue
+			}
+			interval := time.Duration(maxInt(15, syncCfg.IntervalSec)) * time.Second
+			if !lastSync.IsZero() && now.Sub(lastSync) < interval {
+				continue
+			}
+			lastSync = now
+			m.pushMetadataSyncOnce(bundle, syncCfg, targetURL)
+		}
+	}
+}
+
+func (m *NetFlowManager) pushMetadataSyncOnce(bundle *NetFlowRuntimeBundle, syncCfg *NetFlowMetadataSyncPayload, targetURL string) {
+	ifaces, _ := collectLocalInterfaceSnapshot(bundle)
+	leasesList := readActiveKeaLeases("/var/lib/kea/kea-leases4.csv")
+	leases := make([]NetFlowRemoteLease, 0, len(leasesList))
+	for _, l := range leasesList {
+		ip := strings.Split(l.Address, "/")[0]
+		if ip != "" && l.Description != "" {
+			leases = append(leases, NetFlowRemoteLease{IP: ip, Hostname: l.Description})
+		}
+	}
+	nodeID := strings.TrimSpace(bundle.NodeID)
+	if nodeID == "" {
+		nodeID = bundle.LocalHostname
+	}
+	payload := RemoteNodeMetadataPayload{
+		NodeID:      nodeID,
+		Hostname:    bundle.LocalHostname,
+		Interfaces:  ifaces,
+		StaticHosts: bundle.StaticHostMap,
+		DhcpLeases:  leases,
+		TimestampMs: time.Now().UnixMilli(),
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return
+	}
+	req, err := http.NewRequest(http.MethodPost, targetURL, bytes.NewReader(body))
+	if err != nil {
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	tok := strings.TrimSpace(syncCfg.APIToken)
+	if tok == "" {
+		tok = strings.TrimSpace(bundle.IngestToken)
+	}
+	if tok != "" {
+		req.Header.Set("Authorization", "Bearer "+tok)
+	}
+	client := &http.Client{Timeout: 5 * time.Second}
+	if strings.HasPrefix(targetURL, "https://") {
+		if tlsConf, terr := buildTLSConfigFromBundleParams(bundle.UseHaMtls, bundle.TLSCACert, "", "", "", bundle.TLSInsecureSkipVerify, false, false); terr == nil {
+			client.Transport = &http.Transport{TLSClientConfig: tlsConf}
+		}
+	}
+	resp, err := client.Do(req)
+	if err == nil {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+	}
+}
+
+// ApplyRemoteNodeMetadata registers remote interface mappings and DHCP/DNS hostnames pushed from an edge node.
+func (m *NetFlowManager) ApplyRemoteNodeMetadata(p RemoteNodeMetadataPayload) {
+	m.enricher.ApplyRemoteNodeMetadata(p)
+}
+
+// IngestExternalBatch ingests flow records bridged from external/satellite sources through enrichment, storage, and alerting.
+func (m *NetFlowManager) IngestExternalBatch(nodeID, hostname, exporterIP string, flows []FlowRecord) int {
+	if len(flows) == 0 {
+		return 0
+	}
+	var totalBytes uint64
+	nowMs := time.Now().UnixMilli()
+	for i := range flows {
+		if flows[i].HostID == "" {
+			flows[i].HostID = nodeID
+		}
+		if flows[i].HostName == "" {
+			flows[i].HostName = hostname
+		}
+		if flows[i].ExporterIP == "" {
+			flows[i].ExporterIP = exporterIP
+		}
+		if flows[i].TimestampMs <= 0 {
+			flows[i].TimestampMs = nowMs
+			flows[i].Timestamp = time.UnixMilli(nowMs).UTC().Format(time.RFC3339Nano)
+		}
+		if flows[i].Version == "" {
+			flows[i].Version = "ipfix"
+		}
+		m.enricher.Enrich(&flows[i])
+		totalBytes += flows[i].Bytes
+	}
+	m.recordExporterActivity(firstNonEmpty(exporterIP, nodeID), nil, flows[0].Version, len(flows), totalBytes, nil)
+	m.totalFlowsIngest.Add(uint64(len(flows)))
+	m.totalBytesIngest.Add(totalBytes)
+	m.store.Ingest(flows)
+	m.broadcastSSE(flows)
+	m.evaluateAlerts(flows)
+	return len(flows)
+}
+
+// ListNodes returns distinct edge/host identities observed in flows.
+func (m *NetFlowManager) ListNodes() []NetFlowNodeSummary {
+	return m.store.ListDistinctNodes()
 }
 
 func readConntrackDeltasAndNAT() ([]FlowRecord, map[string]natTupleInfo) {
@@ -1115,7 +1584,7 @@ func readConntrackDeltasAndNAT() ([]FlowRecord, map[string]natTupleInfo) {
 	var out []FlowRecord
 	natIdx := make(map[string]natTupleInfo)
 	sc := bufio.NewScanner(f)
-	for sc.Scan() && len(out) < 512 {
+	for sc.Scan() && len(out) < 16384 {
 		if rec, hasNat, nt, ok := parseConntrackLine(sc.Text(), now); ok {
 			if hasNat {
 				k := fmt.Sprintf("%d|%s|%d|%s|%d", rec.Protocol, rec.SrcIP, rec.SrcPort, rec.DstIP, rec.DstPort)
@@ -1420,7 +1889,10 @@ func (m *NetFlowManager) triggerRuleAlertLocked(rule NetFlowAlertRulePayload, cu
 				go postAlertWebhook(u, rule, culpritIP, summary)
 			}
 		case "vigilante_soar":
-			if m.vigilante != nil && culpritIP != "" {
+			if rule.RemoteEdgeMitigation && exporterIP != "" && exporterIP != "127.0.0.1" && exporterIP != "::1" && m.topology != nil {
+				actionsTaken = append(actionsTaken, "remote_soar_queued")
+				go m.dispatchRemoteEdgeMitigation(exporterIP, culpritIP, ttl, "NetFlow SOAR: "+rule.Name)
+			} else if m.vigilante != nil && culpritIP != "" {
 				if err := m.vigilante.BlockIP(culpritIP, ttl); err == nil {
 					actionsTaken = append(actionsTaken, "vigilante_soar_blocked")
 				} else {
@@ -1428,7 +1900,10 @@ func (m *NetFlowManager) triggerRuleAlertLocked(rule NetFlowAlertRulePayload, cu
 				}
 			}
 		case "xdp_block":
-			if m.ebpf != nil && culpritIP != "" {
+			if rule.RemoteEdgeMitigation && exporterIP != "" && exporterIP != "127.0.0.1" && exporterIP != "::1" && m.topology != nil {
+				actionsTaken = append(actionsTaken, "remote_xdp_queued")
+				go m.dispatchRemoteEdgeMitigation(exporterIP, culpritIP, ttl, "NetFlow anomaly: "+rule.Name)
+			} else if m.ebpf != nil && culpritIP != "" {
 				if err := m.ebpf.AddXdpBlock(culpritIP, ttl, XdpReasonSoarQuarantine, "NetFlow anomaly: "+rule.Name); err == nil {
 					actionsTaken = append(actionsTaken, "xdp_blocked")
 				} else {
@@ -1477,6 +1952,51 @@ func postAlertWebhook(webhookURL string, rule NetFlowAlertRulePayload, culpritIP
 	resp, err := client.Do(req)
 	if err == nil {
 		_ = resp.Body.Close()
+	}
+}
+
+func (m *NetFlowManager) dispatchRemoteEdgeMitigation(exporterIP, culpritIP string, ttlSec int, reason string) {
+	m.mu.RLock()
+	tm := m.topology
+	m.mu.RUnlock()
+	if tm == nil || culpritIP == "" || exporterIP == "" {
+		return
+	}
+	peers, peerTokens := tm.ListEnabledPeersWithTokens()
+	for _, p := range peers {
+		validURL, err := validatePluginHTTPURL(p.APIURL, "peer "+p.Name)
+		if err != nil {
+			continue
+		}
+		if !strings.Contains(p.APIURL, exporterIP) && p.ID != exporterIP && p.Name != exporterIP {
+			continue
+		}
+		client, cerr := tm.BuildPeerHTTPClient(p)
+		if cerr != nil {
+			continue
+		}
+		payload, _ := json.Marshal(map[string]any{
+			"targetIp": culpritIP,
+			"ttlSec":   ttlSec,
+			"reason":   reason,
+		})
+		ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+		req, rerr := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(validURL, "/")+"/api/v1/observability/mitigate", bytes.NewReader(payload))
+		if rerr != nil {
+			cancel()
+			return
+		}
+		req.Header.Set("Content-Type", "application/json")
+		if tok := peerTokens[p.ID]; tok != "" {
+			req.Header.Set("Authorization", "Bearer "+tok)
+		}
+		resp, derr := client.Do(req)
+		if derr == nil {
+			_, _ = io.Copy(io.Discard, resp.Body)
+			_ = resp.Body.Close()
+		}
+		cancel()
+		return
 	}
 }
 

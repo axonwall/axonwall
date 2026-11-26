@@ -1,0 +1,43 @@
+clickhouse:
+  retention:
+    rawDays: 90
+    rollupDays: 365
+  persistence:
+    size: 500Gi
+  resources:
+    requests:
+      cpu: "2000m"
+      memory: "8Gi"
+    limits:
+      cpu: "8000m"
+      memory: "32Gi"
+
+victoriametrics:
+  retentionPeriod: "180d"
+  persistence:
+    size: 200Gi
+  resources:
+    requests:
+      cpu: "1000m"
+      memory: "2Gi"
+    limits:
+      cpu: "4000m"
+      memory: "16Gi"
+
+victorialogs:
+  retentionPeriod: "90d"
+  persistence:
+    size: 200Gi
+  resources:
+    requests:
+      cpu: "1000m"
+      memory: "2Gi"
+    limits:
+      cpu: "4000m"
+      memory: "16Gi"
+
+controller:
+  enabled: true
+
+librenms:
+  enabled: true

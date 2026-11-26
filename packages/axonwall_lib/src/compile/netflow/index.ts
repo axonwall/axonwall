@@ -25,6 +25,19 @@ export interface NetFlowThreatEntry {
 
 export interface CompiledNetFlowBundle {
   enabled: boolean;
+  mode: 'collector' | 'exporter' | 'both';
+  nodeId: string;
+  hubUrl: string;
+  ingestToken: string;
+  useHaMtls: boolean;
+  tlsCaCert: string;
+  tlsInsecureSkipVerify: boolean;
+  buffer: {
+    maxMemoryMB: number;
+    diskSpoolEnabled: boolean;
+    diskSpoolDir: string;
+    diskSpoolMaxMB: number;
+  };
   config: NetFlowConfig;
   localHostname: string;
   localInterfaces: NetFlowInterfaceHint[];
@@ -36,6 +49,7 @@ export interface CompiledNetFlowBundle {
   };
   threatCidrs: NetFlowThreatEntry[];
   summary: {
+    mode: 'collector' | 'exporter' | 'both';
     listenersCount: number;
     exportersCount: number;
     selfTargetsCount: number;
@@ -155,6 +169,8 @@ export const KNOWN_FQL_FIELDS = new Set([
   'retransmits',
   'host',
   'host_id',
+  'node',
+  'node_id',
   'version',
 ]);
 
@@ -171,11 +187,66 @@ export interface FqlValidationResult {
  */
 export function resolveNetFlowConfig(state?: Partial<DesiredState> | null): NetFlowConfig {
   const parsed = NetFlowConfigSchema.parse(state?.netflow ?? {});
-  const enabled = isPluginEnabled('netflow-collector', state);
-
+  const offload = state?.observability?.offload;
   const legacyExport = state?.observability?.flowExport;
-  const selfTargets = [...parsed.selfExport.targets];
-  if (legacyExport?.enabled && legacyExport.collectorHost?.trim()) {
+  const offloadIpfixActive = Boolean(offload?.enabled && offload.ipfix?.enabled !== false);
+  const legacyActive = Boolean(legacyExport?.enabled && legacyExport.collectorHost?.trim());
+
+  const resolvedMode: 'collector' | 'exporter' | 'both' =
+    state?.netflow?.mode ?? (offloadIpfixActive ? 'exporter' : 'both');
+
+  const enabled =
+    isPluginEnabled('netflow-collector', state) ||
+    offloadIpfixActive ||
+    legacyActive ||
+    (resolvedMode === 'exporter' && parsed.selfExport.enabled);
+
+  let listeners = parsed.listeners;
+  let selfTargets = [...parsed.selfExport.targets];
+  if (resolvedMode === 'exporter') {
+    listeners = listeners.map((l) => ({ ...l, enabled: false }));
+    selfTargets = selfTargets.filter((t) => t.id !== 'local-loopback-ipfix');
+  }
+
+  if (offloadIpfixActive && offload?.collectorHost?.trim()) {
+    const collectorHost = offload.collectorHost.trim();
+    const collectorPort = offload.collectorPort || 2055;
+    const alreadyExists = selfTargets.some(
+      (t) => t.id === 'edge-offload-ipfix' || (t.host === collectorHost && t.port === collectorPort),
+    );
+    if (!alreadyExists) {
+      selfTargets.push({
+        id: 'edge-offload-ipfix',
+        name: `Edge Offload (${collectorHost}:${collectorPort})`,
+        enabled: true,
+        version: offload.ipfix?.version === 'netflow9' ? 'netflow9' : 'ipfix',
+        host: collectorHost,
+        port: collectorPort,
+        transport: offload.ipfixTransport ?? 'udp',
+        interfaces: offload.ipfix?.interfaces ?? [],
+        activeTimeoutSec: offload.ipfix?.activeTimeoutSec ?? 15,
+        inactiveTimeoutSec: 15,
+        templateRefreshSec: 300,
+        samplingRate: offload.ipfix?.samplingRate ?? 1,
+        observationDomainId: 1,
+        ...(offload.ipfixTransport === 'tls'
+          ? {
+              tls: {
+                useHaPki: Boolean(offload.useHaMtls),
+                caPath: offload.tlsCaCert || '',
+                certPath: '',
+                keyPath: '',
+                requireClientCert: false,
+                serverName: collectorHost,
+                insecureSkipVerify: Boolean(offload.tlsInsecureSkipVerify),
+              },
+            }
+          : {}),
+      });
+    }
+  }
+
+  if (legacyActive && legacyExport?.collectorHost?.trim()) {
     const legacyHost = legacyExport.collectorHost.trim();
     const legacyPort = legacyExport.collectorPort || 2055;
     const alreadyExists = selfTargets.some(
@@ -200,12 +271,30 @@ export function resolveNetFlowConfig(state?: Partial<DesiredState> | null): NetF
     }
   }
 
+  const baseSync = parsed.selfExport.metadataSync;
+  const hubBase = (offload?.hubUrl || '').trim().replace(/\/+$/, '');
+  const metadataSync =
+    baseSync?.enabled
+      ? baseSync
+      : offloadIpfixActive && offload?.ipfix?.pushMetadata !== false && hubBase
+        ? {
+            enabled: true,
+            targetUrl: `${hubBase}/api/v1/netflow/metadata-sync`,
+            apiToken: offload?.ingestToken,
+            intervalSec: baseSync?.intervalSec ?? 60,
+          }
+        : baseSync;
+
   return {
     ...parsed,
     enabled,
+    mode: resolvedMode,
+    nodeId: parsed.nodeId || offload?.nodeId || state?.system?.hostname,
+    listeners,
     selfExport: {
-      enabled: parsed.selfExport.enabled || Boolean(legacyExport?.enabled),
+      enabled: parsed.selfExport.enabled || offloadIpfixActive || Boolean(legacyExport?.enabled),
       targets: selfTargets,
+      ...(metadataSync ? { metadataSync } : {}),
     },
   };
 }
@@ -216,7 +305,10 @@ export function resolveNetFlowConfig(state?: Partial<DesiredState> | null): NetF
  */
 export function compileNetFlowBundle(state?: Partial<DesiredState> | null): CompiledNetFlowBundle {
   const config = resolveNetFlowConfig(state);
+  const offload = state?.observability?.offload;
   const localHostname = state?.system?.hostname || 'axonwall-edge';
+  const mode = config.mode ?? 'both';
+  const nodeId = config.nodeId || offload?.nodeId || localHostname;
 
   const localInterfaces: NetFlowInterfaceHint[] = (state?.interfaces ?? []).map((ifc) => ({
     name: ifc.name,
@@ -270,6 +362,19 @@ export function compileNetFlowBundle(state?: Partial<DesiredState> | null): Comp
 
   return {
     enabled: config.enabled,
+    mode,
+    nodeId,
+    hubUrl: (offload?.hubUrl || '').trim(),
+    ingestToken: offload?.ingestToken || '',
+    useHaMtls: Boolean(offload?.useHaMtls),
+    tlsCaCert: offload?.tlsCaCert || '',
+    tlsInsecureSkipVerify: Boolean(offload?.tlsInsecureSkipVerify),
+    buffer: {
+      maxMemoryMB: offload?.buffer?.maxMemoryMB ?? 24,
+      diskSpoolEnabled: Boolean(offload?.buffer?.diskSpoolEnabled),
+      diskSpoolDir: offload?.buffer?.diskSpoolDir || '/var/lib/axonwall/telemetry-spool',
+      diskSpoolMaxMB: offload?.buffer?.diskSpoolMaxMB ?? 256,
+    },
     config,
     localHostname,
     localInterfaces,
@@ -281,7 +386,8 @@ export function compileNetFlowBundle(state?: Partial<DesiredState> | null): Comp
     },
     threatCidrs,
     summary: {
-      listenersCount: config.listeners.filter((l) => l.enabled).length,
+      mode,
+      listenersCount: mode === 'exporter' ? 0 : config.listeners.filter((l) => l.enabled).length,
       exportersCount: config.exporterProfiles.length,
       selfTargetsCount: config.selfExport.enabled
         ? config.selfExport.targets.filter((t) => t.enabled).length

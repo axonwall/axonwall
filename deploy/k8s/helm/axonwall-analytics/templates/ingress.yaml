@@ -1,0 +1,55 @@
+{{- if .Values.ingress.enabled }}
+{{- $fullname := include "axonwall-analytics.fullname" . -}}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ $fullname }}
+  namespace: {{ include "axonwall-analytics.namespace" . }}
+  labels:
+    {{- include "axonwall-analytics.labels" . | nindent 4 }}
+  {{- with .Values.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- if .Values.ingress.className }}
+  ingressClassName: {{ .Values.ingress.className | quote }}
+  {{- end }}
+  {{- if .Values.ingress.tlsSecretName }}
+  tls:
+    - hosts:
+        - {{ .Values.ingress.host | quote }}
+      secretName: {{ .Values.ingress.tlsSecretName | quote }}
+  {{- end }}
+  rules:
+    - host: {{ .Values.ingress.host | quote }}
+      http:
+        paths:
+          {{- if .Values.victoriametrics.enabled }}
+          - path: /vm
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $fullname }}-vm
+                port:
+                  number: 8428
+          {{- end }}
+          {{- if .Values.victorialogs.enabled }}
+          - path: /vl
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $fullname }}-vl
+                port:
+                  number: 9428
+          {{- end }}
+          {{- if and .Values.collector.enabled .Values.collector.ui.enabled }}
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $fullname }}-ui
+                port:
+                  number: {{ .Values.collector.ports.ui }}
+          {{- end }}
+{{- end }}

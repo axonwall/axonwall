@@ -6,6 +6,37 @@ Official build artifacts, SHA-256 checksums, and detached RSA-4096 SHA-256 signa
 
 ---
 
+## `v0.16.2` (2026-11-25) — Edge-to-Central-Analytics Observability, Hardened WAN Headscale Invites & Port Knocking, Scoped Service Tokens & K3s Analytics Stack
+
+### Highlights
+- **Edge-to-Central Telemetry Offload (`packages/axonwall_lib`, `apps/axonwalld`)**:
+  - Added unified `observability.offload` in `system.yaml` alongside decoupled `netflow.mode` (`collector` | `exporter` | `both`) and `netflow.nodeId` in `netflow.yaml`, keeping empty/default edge installs zero-overhead.
+  - Added `apps/axonwalld` non-blocking **Prometheus Remote-Write** (`snappy` + protobuf `WriteRequest` + optional `/metrics` scrape endpoint), **VictoriaLogs NDJSON/gzip** shipper (native `NETLINK_NETFILTER` NFLOG listener with token-bucket rate limit guard defaulting to `50/s`, `journald`, Suricata EVE, CrowdSec alerts, Kea DHCP lease logging, and strictly opt-in Unbound query logging), and **bounded RAM ring buffer + opt-in zstd disk spool**.
+  - Fixed per-target eBPF/conntrack delta accounting (`selfPrevByTarget`), removed the 50-flow exporter cap (`GetAllFlowCounters(16384)`), added `ingress_ifindex` to `flow_tracker.c` eBPF maps, added IPFIX Enterprise PEN `62999` Options Templates `258`/`259` for remote node identity & interface names, added multi-node `node_id`/`node_name` ClickHouse schema & `node:` FQL filtering, and introduced unprivileged `--mode=collector` (`ModeCollector`) for containerized hub deployments.
+  - Added SD-WAN ping RTT/jitter/loss extraction and opt-in `remoteEdgeMitigation` with anti-lockout `protectedCidrs` and bounded XDP block TTLs.
+- **Hardened WAN Headscale Invite Access, Auto-Closing `nftables` Window & Optional Port Knocking (`packages/axonwall_lib`, `apps/axonwalld`, `apps/axonwall`)**:
+  - Added `headscale.wanInvite` in `vpn.yaml` (`packages/axonwall_lib/src/schemas/index.ts`) and hardened HAProxy path allowlisting (`compileHaProxy`) injecting `fe_headscale_wan_invite` with strict TLS SNI + `Host` enforcement, path-traversal guards (`..`, `%2e`, `%2f`), proxy forwarding-header sanitization, optional Headscale control-plane co-hosting, and `http-request silent-drop` keeping `/login`, `/lobby`, `/vpn`, `/admin`, and `/metrics` unreachable from WAN.
+  - Added `HeadscaleWanGateManager` (`apps/axonwalld/engine/headscale_wan_gate.go`) to reconcile the dynamic `headscale_wan_window_ports` `nftables` set automatically against pending unexpired invites (`autoWindow: true`) and manual admin arm/close overrides via `/v1/vpn/headscale/wan-window/{status,sync,arm}` (including a 15s expiry ticker and post-`nft -f` apply/rollback reconciliation), ensuring zero open WAN ports at rest.
+  - Added optional kernel-native UDP/TCP stateful `nftables` port knocking (`headscale_knock_s*` → `headscale_knock_allow_v4/v6`), optional `allowedCidrs`, optional scrypt-hashed 6-digit out-of-band verification PINs with 5-attempt auto-revocation, single-page post-redeem CLI/QR onboarding directly on `/invite/[token]`, and WAN Invite & Port Knocking controls on `/vpn/mesh`.
+- **Central Analytics Control Plane, Satellite Bridge & 29-Tool MCP (`apps/axonwall`, `apps/axonwall-controller`)**:
+  - Added HMAC-free scrypt-hashed **Scoped Service Tokens (`axw_svc_*`)** (`/api/v1/system/service-tokens*`) accepted over Bearer auth in `getSession()`.
+  - Added VictoriaMetrics PromQL, VictoriaLogs LogsQL, ClickHouse `netflow_flows`, metadata-sync, node directory, status, and opt-in mitigation APIs plus bounded live observability context in AI Copilot.
+  - Bridged satellite `TELEMETRY_REPORT` and `EDGE_FLOW_BATCH` streams to VictoriaMetrics, VictoriaLogs, and `axonwalld`, and expanded `axonwall-mcp` to **18 read-only resources** and **29 guardrailed tools** (`axonwall://observability/{offload-status,nodes}`, `mcp_query_metrics`, `mcp_query_logs`, `mcp_query_historical_flows`, `mcp_trigger_edge_mitigation`).
+- **Multi-Node WebUI & K3s/Docker Deployment (`apps/axonwall`, `deploy/`, `packaging/k3s-storage/`)**:
+  - Added `/reporting/observability` (Offload Control Center + Service Tokens), `/reporting/logs` (LogsQL Explorer), live VictoriaMetrics charts & node selectors on `/reporting/health` & `/reporting/insight`, multi-node FQL selector in NetFlow Studio, and live `axonwall-controller` telemetry/sync/block wiring on `/fleet`.
+  - Added unprivileged multi-arch container images (`Dockerfile.axonwalld`, `Dockerfile.controller`), updated Docker Compose, added the `deploy/k8s/helm/axonwall-analytics` Helm chart targeting `axonwall-zfs-local` (`homelab`/`standard`/`enterprise` profiles), opt-in K3s storage firstboot analytics rules (without `flush ruleset`), and `.github/workflows/containers.yml`.
+
+---
+
+## `v0.16.1` (2026-11-25) — Commit-Confirm, Live Kernel Network Rollback & Systemd IPC Hardening
+
+### Highlights
+- **Commit-Confirm & Anti-Lockout Hardening**: Removed localhost `/v1/confirm` auto-confirm bypasses and pre-apply `/etc/axonwall/*` disk writes across Web Console interface assignments, DesiredState apply pipelines, and WireGuard peer registration; added live+static overlapping subnet guards and restricted default gateway emission to WAN.
+- **Live Kernel Network Rollback (`apps/axonwalld/net_rollback.go`)**: Added live IPv4/route/link snapshot and rollback with ECMP multipath nexthop restoration, virtual/overlay NIC exclusion (`tailscale*`, `wg*`, `veth*`, `tap*`, `cni*`, `flannel*`, `cilium*`, `br-*`), non-releasing `dhcpcd -x` / rebind, `promote_secondaries=1`, and resilient `executeRollback` even when `last-known-good.nft` is empty or `nft -f` fails.
+- **Boot, SD-WAN, Topology & Systemd Reliability**: Fixed `--boot-apply` startup ordering for expired/live pending-confirm bundles, `prober.go` cancellation race before `evaluateFailover()`, `topology.go` premature peer auto-confirm, `getDesiredStateInternal()` read-clobber protection, `controlSystemService` critical-unit stop guards, and `RuntimeDirectoryPreserve=yes` on `axonwalld`/`headscale`/`axonwall-ui` systemd units.
+
+---
+
 ## `v0.16.0` (2026-11-24) — Lean Router/NGFW Core, 47-Plugin On-Demand Architecture, Curated Starter Packs & Air-Gapped Plugin Cache
 
 ### Highlights

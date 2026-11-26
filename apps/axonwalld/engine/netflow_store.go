@@ -190,6 +190,8 @@ func (s *FlowStore) initClickHouse(ch NetFlowClickHousePayload) {
 		timestamp DateTime64(3),
 		version LowCardinality(String),
 		exporter_ip String,
+		node_id LowCardinality(String),
+		node_name LowCardinality(String),
 		src_ip String,
 		dst_ip String,
 		src_port UInt16,
@@ -230,6 +232,7 @@ func (s *FlowStore) initClickHouse(ch NetFlowClickHousePayload) {
 		return
 	}
 	for _, colDef := range []string{
+		"node_id LowCardinality(String)", "node_name LowCardinality(String)",
 		"src_asn UInt32", "dst_asn UInt32",
 		"src_city LowCardinality(String)", "dst_city LowCardinality(String)",
 		"peer_as UInt32",
@@ -537,7 +540,7 @@ func (s *FlowStore) Flush() error {
 	if len(toCH) > 0 && chConnected && chConn != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		batch, err := chConn.PrepareBatch(ctx, fmt.Sprintf(`INSERT INTO %s (
-			timestamp, version, exporter_ip, src_ip, dst_ip, src_port, dst_port,
+			timestamp, version, exporter_ip, node_id, node_name, src_ip, dst_ip, src_port, dst_port,
 			protocol, app_name, direction, in_if_name, out_if_name, vlan_id,
 			bytes, packets, bps, src_country, dst_country, threat_match,
 			src_asn, dst_asn, src_city, dst_city, peer_as,
@@ -546,10 +549,16 @@ func (s *FlowStore) Flush() error {
 		)`, chTable))
 		if err == nil {
 			for _, f := range toCH {
+				nodeID := f.HostID
+				if nodeID == "" {
+					nodeID = f.ExporterIP
+				}
 				_ = batch.Append(
 					time.UnixMilli(f.TimestampMs),
 					f.Version,
 					f.ExporterIP,
+					nodeID,
+					f.HostName,
 					f.SrcIP,
 					f.DstIP,
 					f.SrcPort,
@@ -952,6 +961,105 @@ func (s *FlowStore) Query(req FlowQueryRequest) FlowQueryResponse {
 	resp := buildFlowQueryResponse(matched, startMs, endMs, req)
 	resp.Engine = engineName
 	return resp
+}
+
+// ListDistinctNodes aggregates unique node_id / exporter_ip identities across the hot ring and ClickHouse.
+func (s *FlowStore) ListDistinctNodes() []NetFlowNodeSummary {
+	byKey := make(map[string]*NetFlowNodeSummary)
+
+	s.mu.RLock()
+	for i := range s.hotRing {
+		r := &s.hotRing[i]
+		nid := r.HostID
+		if nid == "" {
+			nid = r.ExporterIP
+		}
+		if nid == "" {
+			continue
+		}
+		cur := byKey[nid]
+		if cur == nil {
+			cur = &NetFlowNodeSummary{
+				NodeID:     nid,
+				NodeName:   r.HostName,
+				ExporterIP: r.ExporterIP,
+			}
+			byKey[nid] = cur
+		}
+		if cur.NodeName == "" && r.HostName != "" {
+			cur.NodeName = r.HostName
+		}
+		if cur.ExporterIP == "" && r.ExporterIP != "" {
+			cur.ExporterIP = r.ExporterIP
+		}
+		cur.FlowsCount++
+		if r.TimestampMs > cur.LastSeenMs {
+			cur.LastSeenMs = r.TimestampMs
+		}
+	}
+	conn := s.chConn
+	connected := s.chConnected
+	tableFQN := s.chTableFQN
+	s.mu.RUnlock()
+
+	if connected && conn != nil && tableFQN != "" {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		rows, err := conn.Query(ctx, fmt.Sprintf(`
+			SELECT
+				if(node_id != '', node_id, exporter_ip) AS nid,
+				anyIf(node_name, node_name != '') AS nname,
+				anyIf(exporter_ip, exporter_ip != '') AS exp_ip,
+				count() AS cnt,
+				max(timestamp) AS last_ts
+			FROM %s
+			GROUP BY nid
+			ORDER BY last_ts DESC
+			LIMIT 200
+		`, tableFQN))
+		if err == nil {
+			for rows.Next() {
+				var nid, nname, expIP string
+				var cnt uint64
+				var lastTs time.Time
+				if rows.Scan(&nid, &nname, &expIP, &cnt, &lastTs) == nil && nid != "" {
+					cur := byKey[nid]
+					if cur == nil {
+						cur = &NetFlowNodeSummary{NodeID: nid}
+						byKey[nid] = cur
+					}
+					if cur.NodeName == "" {
+						cur.NodeName = nname
+					}
+					if cur.ExporterIP == "" {
+						cur.ExporterIP = expIP
+					}
+					if cnt > cur.FlowsCount {
+						cur.FlowsCount = cnt
+					}
+					if ms := lastTs.UnixMilli(); ms > cur.LastSeenMs {
+						cur.LastSeenMs = ms
+					}
+				}
+			}
+			rows.Close()
+		}
+		cancel()
+	}
+
+	out := make([]NetFlowNodeSummary, 0, len(byKey))
+	for _, v := range byKey {
+		if v.NodeName == "" {
+			v.NodeName = v.NodeID
+		}
+		out = append(out, *v)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].LastSeenMs != out[j].LastSeenMs {
+			return out[i].LastSeenMs > out[j].LastSeenMs
+		}
+		return out[i].NodeID < out[j].NodeID
+	})
+	return out
 }
 
 func (s *FlowStore) queryRollupsResponse(req FlowQueryRequest, startMs, endMs int64) (FlowQueryResponse, bool) {
@@ -1643,8 +1751,8 @@ func (p fqlPred) Eval(f *FlowRecord) bool {
 		return matchIPField(f.ExporterIP, p)
 	case "host":
 		return matchStrField(f.SrcHost, p) || matchStrField(f.DstHost, p) || matchStrField(f.HostName, p)
-	case "host_id":
-		return matchStrField(f.HostID, p) || matchStrField(f.HostName, p)
+	case "host_id", "node", "node_id":
+		return matchStrField(f.HostID, p) || matchStrField(f.HostName, p) || matchIPField(f.ExporterIP, p)
 	case "src_port":
 		return matchNumField(float64(f.SrcPort), p)
 	case "dst_port":

@@ -1,0 +1,16 @@
+apiVersion: v2
+name: axonwall-analytics
+description: Axonwall Centralized Network & Security Analytics Stack (ClickHouse + VictoriaMetrics + VictoriaLogs + Collector/UI) on OpenEBS ZFS-LocalPV
+type: application
+version: 0.16.1
+appVersion: "0.16.1"
+home: https://axonwall.com
+keywords:
+  - axonwall
+  - netflow
+  - ipfix
+  - victoriametrics
+  - victorialogs
+  - clickhouse
+  - openebs
+  - zfs

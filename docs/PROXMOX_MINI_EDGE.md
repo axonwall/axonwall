@@ -723,6 +723,10 @@ Because `VM 100` stores zero state on disk, upgrades simply swap the immutable U
 - **Method A (ESP Disk)**: Mount `vm-100-disk-1` temporarily (or regenerate `/tmp/axonwall-edge-esp.raw` and `qm importdisk`) and replace `/EFI/BOOT/BOOTX64.EFI`, then run `qm reboot 100`.
 - **Method B (`-kernel` snippet)**: Overwrite `/var/lib/vz/snippets/axonwall-edge-sku-vm-virtio.efi` and run `qm reboot 100`.
 
+### 8.4 Offload Edge Telemetry to a Central K3s/Analytics Host (`v0.16.2+`)
+
+Leave heavy NetFlow/ClickHouse/VictoriaMetrics storage off latency-critical routers by setting `observability.offload` in `/etc/axonwall/system.yaml` and `netflow.mode: exporter` on the Hub/full appliance (or streaming Satellite `TELEMETRY_REPORT` + `EDGE_FLOW_BATCH` messages directly through `axonwall-controller`). Mint scoped `axw_svc_*` service tokens on the central Hub under **Reporting → Observability (`/reporting/observability`)** so edge gateways push flows, Prometheus Remote-Write metrics, and VictoriaLogs records over WireGuard without holding admin credentials.
+
 ---
 
 ## Troubleshooting

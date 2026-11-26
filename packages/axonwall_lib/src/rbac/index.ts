@@ -110,10 +110,14 @@ export interface UserSession {
   username: string;
   displayName?: string;
   email?: string;
-  source: 'ldap' | 'local_admin' | 'local' | 'oidc' | 'saml';
+  source: 'ldap' | 'local_admin' | 'local' | 'oidc' | 'saml' | 'service_token';
   roles: string[];
   privileges: Privilege[];
   exp: number;
+  /** Optional long-lived service token identifier when source === 'service_token'. */
+  tokenId?: string;
+  /** Optional fine-grained scopes granted to a service token. */
+  scopes?: string[];
   /** True while the local admin still uses the never-changed default
    *  password; carried into the session JWT as pwd_change_required. */
   passwordChangeRequired?: boolean;

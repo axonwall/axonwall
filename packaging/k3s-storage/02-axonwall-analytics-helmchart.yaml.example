@@ -1,0 +1,34 @@
+# Example K3s HelmChart CRD manifest for Axonwall Centralized Analytics Stack.
+# Copy to /var/lib/rancher/k3s/server/manifests/02-axonwall-analytics.yaml
+# (or set ANALYTICS_INGEST_ENABLED=1 with /etc/axonwall/analytics-values.yaml on K3s Storage firstboot).
+apiVersion: helm.cattle.io/v1
+kind: HelmChart
+metadata:
+  name: axonwall-analytics
+  namespace: kube-system
+spec:
+  chart: oci://ghcr.io/axonwall/charts/axonwall-analytics
+  version: "0.16.1"
+  targetNamespace: axonwall-analytics
+  createNamespace: true
+  valuesContent: |-
+    storageClass: "axonwall-zfs-local"
+    clickhouse:
+      retention:
+        rawDays: 30
+        rollupDays: 180
+      persistence:
+        size: 100Gi
+    victoriametrics:
+      retentionPeriod: "90d"
+      persistence:
+        size: 50Gi
+    victorialogs:
+      retentionPeriod: "30d"
+      persistence:
+        size: 50Gi
+    collector:
+      enabled: true
+    service:
+      uiType: NodePort
+      ingestType: LoadBalancer

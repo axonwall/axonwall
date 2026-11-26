@@ -40,6 +40,8 @@ export function PipelineConfigTab({
   const [seTrans, setSeTrans] = useState<NetFlowSelfExportTarget['transport']>('udp');
   const [seHost, setSeHost] = useState('');
   const [sePort, setSePort] = useState('2055');
+  const [seServerName, setSeServerName] = useState('');
+  const [seInsecureSkipVerify, setSeInsecureSkipVerify] = useState(false);
   const [geoUpdating, setGeoUpdating] = useState(false);
   const [geoMsg, setGeoMsg] = useState<string | null>(null);
 
@@ -70,6 +72,54 @@ export function PipelineConfigTab({
 
   return (
     <div className="space-y-6 text-xs">
+      {/* Pipeline Mode & Multi-Node Identity */}
+      <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 grid grid-cols-1 md:grid-cols-3 gap-4 items-end">
+        <div>
+          <h3 className="text-sm font-semibold text-white">Pipeline Mode &amp; Node Identity</h3>
+          <p className="text-slate-400 mt-0.5">
+            Select whether this host collects flows, exports eBPF/conntrack IPFIX upstream (edge offload), or runs both.
+          </p>
+        </div>
+        <label className="block">
+          <span className="text-slate-400 block mb-1">Operating Mode</span>
+          <select
+            value={cfg.mode ?? 'both'}
+            onChange={(e) =>
+              onUpdateDraft((prev) => {
+                const cur = NetFlowConfigSchema.parse(prev.netflow ?? {});
+                return {
+                  ...prev,
+                  netflow: { ...cur, mode: e.target.value as 'collector' | 'exporter' | 'both' },
+                };
+              })
+            }
+            className="w-full px-2.5 py-1.5 rounded bg-slate-950 border border-slate-700 text-white font-mono"
+          >
+            <option value="both">both (Collect + Export)</option>
+            <option value="exporter">exporter (Edge Offload Only)</option>
+            <option value="collector">collector (Central Hub / K3s)</option>
+          </select>
+        </label>
+        <label className="block">
+          <span className="text-slate-400 block mb-1">Node ID Override (optional)</span>
+          <input
+            type="text"
+            value={cfg.nodeId || ''}
+            onChange={(e) =>
+              onUpdateDraft((prev) => {
+                const cur = NetFlowConfigSchema.parse(prev.netflow ?? {});
+                return {
+                  ...prev,
+                  netflow: { ...cur, nodeId: e.target.value.trim() || undefined },
+                };
+              })
+            }
+            placeholder="e.g. edge-checkpoint1 (auto-hostname if empty)"
+            className="w-full px-2.5 py-1.5 rounded bg-slate-950 border border-slate-700 text-white font-mono"
+          />
+        </label>
+      </div>
+
       {/* Synthetic Pipeline Verification Burst */}
       <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 flex flex-wrap items-center justify-between gap-4">
         <div>
@@ -278,10 +328,19 @@ export function PipelineConfigTab({
           </div>
           <div className="space-y-1.5 font-mono">
             {cfg.selfExport.targets.map((t) => (
-              <div key={t.id} className="px-3 py-2 rounded bg-slate-950 border border-slate-800 flex items-center justify-between">
-                <span>
-                  {t.name} · {t.version.toUpperCase()} ({t.transport.toUpperCase()}) → {t.host}:{t.port}
-                </span>
+              <div key={t.id} className="px-3 py-2 rounded bg-slate-950 border border-slate-800 flex items-center justify-between gap-2">
+                <div>
+                  <div>
+                    {t.name} · {t.version.toUpperCase()} ({t.transport.toUpperCase()}) → {t.host}:{t.port}
+                  </div>
+                  {t.transport === 'tls' && t.tls && (
+                    <div className="text-[11px] text-slate-400">
+                      TLS {t.tls.useHaPki ? 'HA-PKI mTLS' : 'custom'}
+                      {t.tls.serverName ? ` · SNI=${t.tls.serverName}` : ''}
+                      {t.tls.insecureSkipVerify ? ' · insecureSkipVerify=true' : ''}
+                    </div>
+                  )}
+                </div>
                 <button
                   type="button"
                   onClick={() =>
@@ -306,6 +365,26 @@ export function PipelineConfigTab({
               </div>
             ))}
           </div>
+          {seTrans === 'tls' && (
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-2 pt-2">
+              <input
+                type="text"
+                value={seServerName}
+                onChange={(e) => setSeServerName(e.target.value)}
+                placeholder="TLS SNI serverName (optional, e.g. collector.k3s.local)"
+                className="px-2 py-1.5 rounded bg-slate-950 border border-slate-700 text-white font-mono"
+              />
+              <label className="flex items-center gap-2 text-slate-300 cursor-pointer px-2">
+                <input
+                  type="checkbox"
+                  checked={seInsecureSkipVerify}
+                  onChange={(e) => setSeInsecureSkipVerify(e.target.checked)}
+                  className="accent-sky-500"
+                />
+                <span>Allow self-signed cert (`insecureSkipVerify`)</span>
+              </label>
+            </div>
+          )}
           <div className="grid grid-cols-5 gap-2 pt-2 border-t border-slate-800">
             <input
               type="text"
@@ -371,6 +450,8 @@ export function PipelineConfigTab({
                             certPath: '',
                             keyPath: '',
                             caPath: '',
+                            serverName: seServerName.trim() || undefined,
+                            insecureSkipVerify: seInsecureSkipVerify,
                           },
                         }
                       : {}),
@@ -387,6 +468,8 @@ export function PipelineConfigTab({
                   });
                   setSeName('');
                   setSeHost('');
+                  setSeServerName('');
+                  setSeInsecureSkipVerify(false);
                 }}
                 className="flex-1 px-2 py-1.5 rounded bg-sky-600 hover:bg-sky-500 disabled:opacity-40 text-white font-semibold"
               >

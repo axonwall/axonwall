@@ -16,9 +16,11 @@ import {
   createHeadscaleInvite,
   listHeadscaleInvites,
   revokeHeadscaleInvite,
+  syncHeadscaleWanWindow,
   validateInviteUsername,
 } from '@/server/headscale-invites';
 import {
+  buildPortKnockCommands,
   buildQuickConnectCommand,
   generateTemporaryPassword,
   resolveHeadscaleNetworkInfo,
@@ -174,6 +176,8 @@ export async function POST(req: NextRequest) {
         typeof body?.displayName === 'string' ? body.displayName.trim() : username;
       const createStarterKey = body?.createStarterKey !== false;
       const expiryHours = body?.expiryHours ? Number(body.expiryHours) : 48;
+      const requirePin =
+        typeof body?.requirePin === 'boolean' ? body.requirePin : network.wanInvite.requirePin;
 
       const directory = await fetchDirectoryUsers();
       const existingDir = directory.users.find((u) => u.username === username);
@@ -218,14 +222,17 @@ export async function POST(req: NextRequest) {
         );
       }
 
-      const { invite, rawToken } = await createHeadscaleInvite({
+      const { invite, rawToken, invitePin } = await createHeadscaleInvite({
         username,
         displayName,
         mode,
         createStarterKey,
+        requirePin,
         expiryHours,
         createdBy: session.username,
       });
+
+      await syncHeadscaleWanWindow();
 
       let headscaleProvisioned = false;
       let headscaleWarning: string | undefined;
@@ -240,20 +247,55 @@ export async function POST(req: NextRequest) {
         headscaleWarning = 'Headscale service is not running yet; namespace will be created when Headscale starts or on first login.';
       }
 
-      const inviteUrl = `${network.portalUrl}/invite/${rawToken}`;
-      const welcomeMessage = [
+      const inviteBaseUrl =
+        network.wanInvite.enabled && network.wanInvite.baseUrl
+          ? network.wanInvite.baseUrl
+          : network.portalUrl;
+      const inviteUrl = `${inviteBaseUrl}/invite/${rawToken}`;
+      const knockCommands =
+        network.wanInvite.enabled &&
+        network.wanInvite.portKnocking.enabled &&
+        network.wanInvite.hostname
+          ? buildPortKnockCommands(
+              network.wanInvite.hostname,
+              network.wanInvite.portKnocking.protocol,
+              network.wanInvite.portKnocking.sequence
+            )
+          : undefined;
+
+      const welcomeLines = [
         `You have been invited to the Axonwall Mesh VPN (${network.magicDnsDomain}).`,
-        `1. Open your activation link (expires ${new Date(invite.expiresAt).toLocaleString()}):`,
-        inviteUrl,
-        `2. Choose a password for username '${username}'.`,
-        `3. You will be signed in to the Self-Service VPN Portal (${network.portalUrl}/vpn) where you can add devices and copy one-click Tailscale connect commands.`,
-      ].join('\n');
+      ];
+      let stepNum = 1;
+      if (knockCommands) {
+        welcomeLines.push(
+          `${stepNum++}. Knock the sequence (${network.wanInvite.portKnocking.protocol.toUpperCase()} ports ${network.wanInvite.portKnocking.sequence.join(', ')}) from your terminal first:`,
+          knockCommands.unix
+        );
+      }
+      welcomeLines.push(
+        `${stepNum++}. Open your activation link (expires ${new Date(invite.expiresAt).toLocaleString()}):`,
+        inviteUrl
+      );
+      if (invitePin) {
+        welcomeLines.push(
+          `${stepNum++}. Enter the 6-digit verification PIN sent by your administrator over a separate channel and choose a password for username '${username}'.`
+        );
+      } else {
+        welcomeLines.push(`${stepNum++}. Choose a password for username '${username}'.`);
+      }
+      welcomeLines.push(
+        `${stepNum++}. Follow the Tailscale setup command or scan the QR code shown right on the activation page to connect. Once connected, you can visit ${network.portalUrl}/vpn.`
+      );
+      const welcomeMessage = welcomeLines.join('\n');
 
       return NextResponse.json({
         status: 'ok',
         data: {
           invite,
           inviteUrl,
+          ...(invitePin ? { invitePin } : {}),
+          ...(knockCommands ? { knockCommands } : {}),
           headscaleProvisioned,
           headscaleWarning,
           welcomeMessage,
@@ -441,6 +483,7 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ status: 'error', error: 'inviteId is required' }, { status: 400 });
       }
       const invite = revokeHeadscaleInvite(inviteId);
+      await syncHeadscaleWanWindow();
       return NextResponse.json({ status: 'ok', data: invite });
     }
 

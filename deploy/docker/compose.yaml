@@ -6,6 +6,7 @@ services:
     container_name: axonwalld
     network_mode: host
     restart: unless-stopped
+    command: ["--socket", "/run/axonwalld/agent.sock", "--boot-apply"]
     environment:
       - AXONWALL_SOCKET_GROUP=1001
       - AXONWALL_AGENT_TOKEN=${AXONWALL_AGENT_TOKEN:?AXONWALL_AGENT_TOKEN must be set}
@@ -33,16 +34,50 @@ services:
       #   JWT_SECRET=$(openssl rand -hex 32)
       - JWT_SECRET=${JWT_SECRET:?JWT_SECRET must be set (see comment above)}
       - AXONWALL_AGENT_TOKEN=${AXONWALL_AGENT_TOKEN:?AXONWALL_AGENT_TOKEN must be set}
+      - AGENT_SOCKET=/run/axonwalld/agent.sock
       - AGENT_API_SOCKET=/run/axonwalld/agent-api.sock
       - LDAP_URL=ldap://openldap:389
       - LDAP_BASE_DN=dc=axonwall,dc=internal
       - LDAP_BIND_DN=cn=admin,dc=axonwall,dc=internal
       - LDAP_BIND_PASSWORD=${LDAP_ADMIN_PASSWORD:?LDAP_ADMIN_PASSWORD must be set}
+      - CLICKHOUSE_URL=http://clickhouse:8123
+      - CLICKHOUSE_USER=admin
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:?CLICKHOUSE_PASSWORD must be set}
+      - CLICKHOUSE_DB=axonwall
+      - VICTORIAMETRICS_URL=http://victoriametrics:8428
+      - VICTORIALOGS_URL=http://victorialogs:9428
+      - CONTROLLER_URL=http://axonwall-controller:2966
     volumes:
       - /run/axonwalld:/run/axonwalld
     depends_on:
       - openldap
       - supabase-db
+      - clickhouse
+      - victoriametrics
+      - victorialogs
+      - axonwall-controller
+
+  axonwall-controller:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.controller
+    container_name: axonwall-controller
+    restart: unless-stopped
+    ports:
+      - "2966:2966"
+    environment:
+      - NODE_ENV=production
+      - CONTROLLER_PORT=2966
+      - AXONWALL_AGENT_TOKEN=${AXONWALL_AGENT_TOKEN:?AXONWALL_AGENT_TOKEN must be set}
+      - AXONWALL_AGENT_API_SOCK=/run/axonwalld/agent-api.sock
+      - AXONWALL_VM_IMPORT_URL=http://victoriametrics:8428/api/v1/import/prometheus
+      - AXONWALL_VL_INSERT_URL=http://victorialogs:9428/insert/jsonline
+      - AXONWALL_ZTP_TOKEN=${AXONWALL_ZTP_TOKEN:-}
+    volumes:
+      - /run/axonwalld:/run/axonwalld
+    depends_on:
+      - victoriametrics
+      - victorialogs
 
   openldap:
     image: osixia/openldap:1.5.0@sha256:18742e9c449c9c1afe129d3f2f3ee15fb34cc43e5f940a20f3399728f41d7c28
@@ -70,6 +105,20 @@ services:
     volumes:
       - supabase_data:/var/lib/postgresql/data
 
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8-alpine
+    container_name: axonwall-clickhouse
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8123:8123"
+    environment:
+      - CLICKHOUSE_DB=axonwall
+      - CLICKHOUSE_USER=admin
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:?CLICKHOUSE_PASSWORD must be set}
+      - CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT=1
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+
   victoriametrics:
     image: victoriametrics/victoria-metrics:v1.156.0@sha256:da8a90ac0912f16589be2b96a6441a2fca4bca415c83783d972d92e3b5b66970
     container_name: axonwall-vm
@@ -77,7 +126,7 @@ services:
     ports:
       - "127.0.0.1:8428:8428"
     command:
-      - "-retentionPeriod=30d"
+      - "-retentionPeriod=90d"
       - "-storageDataPath=/vm-data"
     volumes:
       - vm_data:/vm-data
@@ -89,7 +138,7 @@ services:
     ports:
       - "127.0.0.1:9428:9428"
     command:
-      - "-retentionPeriod=14d"
+      - "-retentionPeriod=30d"
       - "-storageDataPath=/vl-data"
     volumes:
       - vl_data:/vl-data
@@ -98,5 +147,6 @@ volumes:
   openldap_data:
   openldap_config:
   supabase_data:
+  clickhouse_data:
   vm_data:
   vl_data:

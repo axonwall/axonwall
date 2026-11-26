@@ -1,0 +1,76 @@
+{{- if .Values.librenms.enabled }}
+{{- $fullname := include "axonwall-analytics.fullname" . -}}
+{{- $ns := include "axonwall-analytics.namespace" . -}}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ $fullname }}-librenms-data
+  namespace: {{ $ns }}
+  labels:
+    {{- include "axonwall-analytics.labels" . | nindent 4 }}
+spec:
+  accessModes: ["ReadWriteOnce"]
+  {{- if .Values.storageClass }}
+  storageClassName: {{ .Values.storageClass | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.librenms.persistence.size | quote }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $fullname }}-librenms
+  namespace: {{ $ns }}
+  labels:
+    {{- include "axonwall-analytics.labels" . | nindent 4 }}
+    app.kubernetes.io/component: librenms
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: librenms
+  template:
+    metadata:
+      labels:
+        {{- include "axonwall-analytics.labels" . | nindent 8 }}
+        app.kubernetes.io/component: librenms
+    spec:
+      containers:
+        - name: librenms
+          image: "{{ .Values.librenms.image.repository }}:{{ .Values.librenms.image.tag }}"
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          env:
+            - name: TZ
+              value: {{ .Values.librenms.timezone | quote }}
+          ports:
+            - name: http
+              containerPort: 8000
+          resources:
+            {{- toYaml .Values.librenms.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ $fullname }}-librenms-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $fullname }}-librenms
+  namespace: {{ $ns }}
+  labels:
+    {{- include "axonwall-analytics.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: librenms
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http
+{{- end }}

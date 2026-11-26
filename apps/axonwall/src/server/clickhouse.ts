@@ -1,10 +1,12 @@
 import { createClient, type ClickHouseClient } from '@clickhouse/client';
+import type { DesiredState } from '@axonwall/lib/schemas';
 import { getSession } from './auth';
 import { assertActionPermitted } from './auth-guard';
+import { getDesiredStateInternal } from './desired-state-internal';
 
 let client: ClickHouseClient | null = null;
 
-function getClient(): ClickHouseClient | null {
+function getEnvClient(): ClickHouseClient | null {
   if (!process.env.CLICKHOUSE_URL || !process.env.CLICKHOUSE_PASSWORD) {
     return null;
   }
@@ -17,6 +19,47 @@ function getClient(): ClickHouseClient | null {
     });
   }
   return client;
+}
+
+function buildStateClickHouseConfig(state?: DesiredState | null): {
+  url: string;
+  username: string;
+  password: string;
+  database: string;
+  table: string;
+} | null {
+  const envUrl = process.env.CLICKHOUSE_URL?.trim();
+  const envPass = process.env.CLICKHOUSE_PASSWORD;
+  if (envUrl && envPass) {
+    return {
+      url: envUrl,
+      username: process.env.CLICKHOUSE_USER?.trim() || 'admin',
+      password: envPass,
+      database: process.env.CLICKHOUSE_DB?.trim() || 'axonwall',
+      table: process.env.CLICKHOUSE_NETFLOW_TABLE?.trim() || 'netflow_flows',
+    };
+  }
+  const nfCh = state?.netflow?.storage?.clickhouse;
+  if (nfCh?.enabled && nfCh.url?.trim()) {
+    return {
+      url: nfCh.url.trim(),
+      username: nfCh.username?.trim() || 'admin',
+      password: nfCh.password || '',
+      database: nfCh.database?.trim() || 'axonwall',
+      table: nfCh.table?.trim() || 'netflow_flows',
+    };
+  }
+  const obsCh = state?.observability?.clickhouse;
+  if (obsCh?.enabled && obsCh.url?.trim()) {
+    return {
+      url: obsCh.url.trim(),
+      username: obsCh.username?.trim() || 'admin',
+      password: obsCh.password || '',
+      database: obsCh.database?.trim() || 'axonwall',
+      table: 'netflow_flows',
+    };
+  }
+  return null;
 }
 
 export interface DataLakeTableMetric {
@@ -64,7 +107,7 @@ export async function queryDataLakeMetrics(cfg?: {
 
   const database = (useEnv ? process.env.CLICKHOUSE_DB : cfg?.database)?.trim() || 'axonwall';
   const ch = useEnv
-    ? getClient()!
+    ? getEnvClient()!
     : createClient({
         url: cfg!.url!.trim(),
         username: cfg?.username?.trim() || 'admin',
@@ -147,28 +190,92 @@ export async function queryDataLakeMetrics(cfg?: {
   }
 }
 
-export async function getTopFlows() {
+export interface TopFlowRow {
+  src_ip: string;
+  dst_ip: string;
+  protocol: number | string;
+  app_name?: string;
+  node_id?: string;
+  node_name?: string;
+  total_packets: number;
+  total_bytes: number;
+}
+
+export async function getTopFlows(options?: {
+  nodeId?: string;
+  limit?: number;
+  windowHours?: number;
+}): Promise<TopFlowRow[]> {
   const session = await getSession();
   assertActionPermitted(session);
 
-  const ch = getClient();
-  if (!ch) {
+  const envClient = getEnvClient();
+  const state = envClient ? null : await getDesiredStateInternal().catch(() => null);
+  const resolved = buildStateClickHouseConfig(state);
+  if (!envClient && !resolved) {
     return [];
   }
-  try {
-    const result = await ch.query({
-      query: `
-        SELECT src_ip, dst_ip, protocol, sum(packets) as total_packets, sum(bytes) as total_bytes
-        FROM flows
-        GROUP BY src_ip, dst_ip, protocol
-        ORDER BY total_bytes DESC
-        LIMIT 10
-      `,
-      format: 'JSONEachRow',
+
+  const limit = Math.max(1, Math.min(200, Math.floor(options?.limit ?? 10)));
+  const windowHours = Math.max(1, Math.min(24 * 90, Math.floor(options?.windowHours ?? 24)));
+  const nodeId = options?.nodeId?.trim() || '';
+  const ch =
+    envClient ??
+    createClient({
+      url: resolved!.url,
+      username: resolved!.username,
+      password: resolved!.password,
+      database: resolved!.database,
     });
-    return await result.json();
+  const tableName = (resolved?.table || 'netflow_flows').replace(/[^a-zA-Z0-9_]/g, '') || 'netflow_flows';
+
+  try {
+    try {
+      const result = await ch.query({
+        query: `
+          SELECT
+            src_ip,
+            dst_ip,
+            protocol,
+            any(app_name) AS app_name,
+            node_id,
+            any(node_name) AS node_name,
+            toUInt64(sum(packets)) AS total_packets,
+            toUInt64(sum(bytes)) AS total_bytes
+          FROM ${tableName}
+          WHERE timestamp >= now() - INTERVAL {windowHours:UInt32} HOUR
+            AND ({nodeId:String} = '' OR node_id = {nodeId:String} OR node_name = {nodeId:String})
+          GROUP BY src_ip, dst_ip, protocol, node_id
+          ORDER BY total_bytes DESC
+          LIMIT {limit:UInt32}
+        `,
+        query_params: { windowHours, nodeId, limit },
+        format: 'JSONEachRow',
+      });
+      return (await result.json()) as TopFlowRow[];
+    } catch {
+      if (nodeId) return [];
+      const fallback = await ch.query({
+        query: `
+          SELECT src_ip, dst_ip, protocol, sum(packets) AS total_packets, sum(bytes) AS total_bytes
+          FROM flows
+          GROUP BY src_ip, dst_ip, protocol
+          ORDER BY total_bytes DESC
+          LIMIT {limit:UInt32}
+        `,
+        query_params: { limit },
+        format: 'JSONEachRow',
+      });
+      return (await fallback.json()) as TopFlowRow[];
+    }
   } catch (err) {
     console.error('ClickHouse query error:', err);
     return [];
+  } finally {
+    if (!envClient) {
+      try {
+        await ch.close();
+      } catch {}
+    }
   }
 }

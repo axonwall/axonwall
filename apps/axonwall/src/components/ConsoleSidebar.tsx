@@ -237,6 +237,8 @@ export const NAV_SECTIONS: NavSection[] = [
     icon: Activity,
     items: [
       { name: 'System Telemetry', href: '/reporting/health', icon: Activity },
+      { name: 'Observability & Offload', href: '/reporting/observability', icon: Radio },
+      { name: 'Log Explorer', href: '/reporting/logs', icon: FileText },
       { name: 'eBPF & K3s Observability', href: '/reporting/ebpf', icon: Cpu, badge: 'eBPF', pluginId: 'coroot-ebpf-apm' },
       { name: 'Insight Flow Analytics', href: '/reporting/insight', icon: Compass },
       { name: 'NetFlow Collector', href: '/reporting/netflow', icon: Activity, badge: 'IPFIX', pluginId: 'netflow-collector' },

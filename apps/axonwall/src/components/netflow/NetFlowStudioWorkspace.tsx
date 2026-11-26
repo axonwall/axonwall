@@ -55,6 +55,8 @@ export function NetFlowStudioWorkspace() {
   const [rangeMinutes, setRangeMinutes] = useState(60);
   const [groupBy, setGroupBy] = useState('protocol');
   const [scope, setScope] = useState<'local' | 'fleet'>('local');
+  const [selectedNodeId, setSelectedNodeId] = useState<string>('all');
+  const [nodes, setNodes] = useState<Array<{ nodeId: string; nodeName: string; exporterIp: string; flowsCount: number }>>([]);
   const [biflow, setBiflow] = useState(false);
   const [customWindow, setCustomWindow] = useState<{ startMs: number; endMs: number } | null>(null);
   const [loading, setLoading] = useState(true);
@@ -67,6 +69,7 @@ export function NetFlowStudioWorkspace() {
       overrideFql?: string,
       overrides?: {
         scope?: 'local' | 'fleet';
+        nodeId?: string;
         biflow?: boolean;
         window?: { startMs: number; endMs: number } | null;
         rangeMins?: number;
@@ -76,11 +79,19 @@ export function NetFlowStudioWorkspace() {
       setQuerying(true);
       try {
         const effWin = overrides && 'window' in overrides ? overrides.window : customWindow;
+        const baseFql = (overrideFql !== undefined ? overrideFql : fql).trim();
+        const effNode = overrides?.nodeId !== undefined ? overrides.nodeId : selectedNodeId;
+        const effectiveFql =
+          effNode && effNode !== 'all'
+            ? baseFql
+              ? `(${baseFql}) and node="${effNode.replace(/"/g, '')}"`
+              : `node="${effNode.replace(/"/g, '')}"`
+            : baseFql;
         const res = await queryNetFlowAction({
           rangeMinutes: overrides?.rangeMins ?? rangeMinutes,
           startMs: effWin?.startMs,
           endMs: effWin?.endMs,
-          fql: overrideFql !== undefined ? overrideFql : fql,
+          fql: effectiveFql,
           groupBy: overrides?.gb ?? groupBy,
           biflow: overrides?.biflow ?? biflow,
           scope: overrides?.scope ?? scope,
@@ -91,20 +102,26 @@ export function NetFlowStudioWorkspace() {
         setQuerying(false);
       }
     },
-    [biflow, customWindow, fql, groupBy, rangeMinutes, scope],
+    [biflow, customWindow, fql, groupBy, rangeMinutes, scope, selectedNodeId],
   );
 
   const refreshRuntime = useCallback(async () => {
-    const [st, exp, tmpl, al] = await Promise.all([
+    const [st, exp, tmpl, al, nodesJson] = await Promise.all([
       getNetFlowStatusAction(),
       getNetFlowExportersAction(),
       getNetFlowTemplatesAction(),
       getNetFlowAlertsAction(),
+      fetch('/api/v1/netflow/nodes', { cache: 'no-store' })
+        .then((r) => (r.ok ? r.json() : null))
+        .catch(() => null),
     ]);
     setStatus(st);
     setExporters(exp);
     setTemplates(tmpl);
     setAlerts(al);
+    if (Array.isArray(nodesJson?.nodes)) {
+      setNodes(nodesJson.nodes);
+    }
   }, []);
 
   useEffect(() => {
@@ -212,6 +229,23 @@ export function NetFlowStudioWorkspace() {
               </button>
             ))}
           </div>
+          <select
+            aria-label="Filter by exporter node"
+            value={selectedNodeId}
+            onChange={(e) => {
+              const nextNode = e.target.value;
+              setSelectedNodeId(nextNode);
+              void runQuery(undefined, { nodeId: nextNode });
+            }}
+            className="px-2.5 py-1.5 rounded-lg bg-slate-900 border border-slate-700 text-xs font-mono text-slate-200"
+          >
+            <option value="all">All Nodes ({nodes.length || 1})</option>
+            {nodes.map((n) => (
+              <option key={n.nodeId} value={n.nodeId}>
+                {n.nodeName || n.nodeId} ({n.flowsCount.toLocaleString()})
+              </option>
+            ))}
+          </select>
           <a
             href="/api/v1/netflow/metrics"
             target="_blank"

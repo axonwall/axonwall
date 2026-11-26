@@ -11,7 +11,7 @@ import {
   mintSupabaseToken,
   verifyToken,
 } from '@axonwall/lib/ldap';
-import { type UserSession } from '@axonwall/lib/rbac';
+import { DEFAULT_ROLES, type UserSession } from '@axonwall/lib/rbac';
 import {
   getEtcConfigDir,
   getPersistConfigDir,
@@ -26,6 +26,7 @@ import {
   writeAuthFileSafe,
   writeMfaEnv,
 } from './auth-internal';
+import { verifyServiceToken } from './service-tokens';
 import {
   bumpSessionEpoch,
   isSessionRevoked,
@@ -37,19 +38,35 @@ export async function getSession(): Promise<UserSession | null> {
   const cookieStore = await cookies();
   const reqHeaders = await headers();
   let token = cookieStore.get(SESSION_COOKIE)?.value;
-  
+
   if (!token) {
     const authHeader = reqHeaders.get('authorization');
     if (authHeader && authHeader.startsWith('Bearer ')) {
-      token = authHeader.substring(7);
-      // No development backdoor tokens: a Bearer credential is only
-      // ever a real session JWT verified below. (A hardcoded
-      // 'dev-test-token-123' previously minted an admin session in
-      // any non-production deployment.)
+      token = authHeader.substring(7).trim();
     }
   }
 
   if (!token) return null;
+
+  if (token.startsWith('axw_svc_')) {
+    const rec = verifyServiceToken(token);
+    if (!rec) return null;
+    const roleDef = DEFAULT_ROLES[rec.role];
+    const exp = rec.expiresAt
+      ? Math.floor(Date.parse(rec.expiresAt) / 1000)
+      : Math.floor(Date.now() / 1000) + 3600;
+    return {
+      userId: `svc:${rec.id}`,
+      username: `svc:${rec.name}`,
+      source: 'service_token',
+      roles: [rec.role],
+      privileges: roleDef ? roleDef.privileges : [],
+      exp,
+      tokenId: rec.id,
+      scopes: rec.scopes,
+    };
+  }
+
   const session = await verifyToken(token, getJwtSecret());
   if (!session) return null;
   // Server-side revocation (audit B-09): logout denylists the token's

@@ -1,0 +1,38 @@
+clickhouse:
+  persistence:
+    size: 20Gi
+  resources:
+    requests:
+      cpu: "250m"
+      memory: "1Gi"
+    limits:
+      cpu: "2000m"
+      memory: "4Gi"
+
+victoriametrics:
+  retentionPeriod: "30d"
+  persistence:
+    size: 15Gi
+  resources:
+    requests:
+      cpu: "150m"
+      memory: "256Mi"
+    limits:
+      cpu: "1000m"
+      memory: "1Gi"
+
+victorialogs:
+  retentionPeriod: "14d"
+  persistence:
+    size: 15Gi
+  resources:
+    requests:
+      cpu: "150m"
+      memory: "256Mi"
+    limits:
+      cpu: "1000m"
+      memory: "1Gi"
+
+collector:
+  persistence:
+    stateSize: 4Gi

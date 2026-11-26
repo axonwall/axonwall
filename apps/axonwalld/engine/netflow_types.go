@@ -1,11 +1,13 @@
 package engine
 
 type NetFlowTlsConfigPayload struct {
-	UseHaPki          bool   `json:"useHaPki"`
-	RequireClientCert bool   `json:"requireClientCert"`
-	CertPath          string `json:"certPath,omitempty"`
-	KeyPath           string `json:"keyPath,omitempty"`
-	CAPath            string `json:"caPath,omitempty"`
+	UseHaPki           bool   `json:"useHaPki"`
+	RequireClientCert  bool   `json:"requireClientCert"`
+	CertPath           string `json:"certPath,omitempty"`
+	KeyPath            string `json:"keyPath,omitempty"`
+	CAPath             string `json:"caPath,omitempty"`
+	ServerName         string `json:"serverName,omitempty"`
+	InsecureSkipVerify bool   `json:"insecureSkipVerify,omitempty"`
 }
 
 type NetFlowListenerPayload struct {
@@ -52,9 +54,17 @@ type NetFlowSelfExportTargetPayload struct {
 	TLS                 *NetFlowTlsConfigPayload `json:"tls,omitempty"`
 }
 
+type NetFlowMetadataSyncPayload struct {
+	Enabled     bool   `json:"enabled"`
+	TargetURL   string `json:"targetUrl,omitempty"`
+	APIToken    string `json:"apiToken,omitempty"`
+	IntervalSec int    `json:"intervalSec"`
+}
+
 type NetFlowSelfExportPayload struct {
-	Enabled bool                             `json:"enabled"`
-	Targets []NetFlowSelfExportTargetPayload `json:"targets"`
+	Enabled      bool                             `json:"enabled"`
+	Targets      []NetFlowSelfExportTargetPayload `json:"targets"`
+	MetadataSync *NetFlowMetadataSyncPayload      `json:"metadataSync,omitempty"`
 }
 
 type NetFlowReplicatorTargetPayload struct {
@@ -130,18 +140,19 @@ type NetFlowReportingPayload struct {
 }
 
 type NetFlowAlertRulePayload struct {
-	ID             string   `json:"id"`
-	Name           string   `json:"name"`
-	Enabled        bool     `json:"enabled"`
-	Kind           string   `json:"kind"`
-	Severity       string   `json:"severity"`
-	FQLFilter      string   `json:"fqlFilter,omitempty"`
-	Threshold      float64  `json:"threshold"`
-	WindowSec      int      `json:"windowSec"`
-	CooldownSec    int      `json:"cooldownSec"`
-	Actions        []string `json:"actions"`
-	XdpBlockTTLSec int      `json:"xdpBlockTtlSec"`
-	WebhookURL     string   `json:"webhookUrl,omitempty"`
+	ID                   string   `json:"id"`
+	Name                 string   `json:"name"`
+	Enabled              bool     `json:"enabled"`
+	Kind                 string   `json:"kind"`
+	Severity             string   `json:"severity"`
+	FQLFilter            string   `json:"fqlFilter,omitempty"`
+	Threshold            float64  `json:"threshold"`
+	WindowSec            int      `json:"windowSec"`
+	CooldownSec          int      `json:"cooldownSec"`
+	Actions              []string `json:"actions"`
+	XdpBlockTTLSec       int      `json:"xdpBlockTtlSec"`
+	RemoteEdgeMitigation bool     `json:"remoteEdgeMitigation,omitempty"`
+	WebhookURL           string   `json:"webhookUrl,omitempty"`
 }
 
 type NetFlowAlertingPayload struct {
@@ -156,6 +167,8 @@ type NetFlowTopologyOverlayConfigPayload struct {
 
 type NetFlowConfigPayload struct {
 	Enabled          bool                                `json:"enabled"`
+	Mode             string                              `json:"mode,omitempty"`   // collector | exporter | both
+	NodeID           string                              `json:"nodeId,omitempty"`
 	Listeners        []NetFlowListenerPayload            `json:"listeners"`
 	ExporterProfiles []NetFlowExporterProfilePayload     `json:"exporterProfiles"`
 	SelfExport       NetFlowSelfExportPayload            `json:"selfExport"`
@@ -191,14 +204,61 @@ type NetFlowK3sCidrs struct {
 	Domain      string `json:"domain"`
 }
 
+type TelemetryBufferPayload struct {
+	MaxMemoryMB      int    `json:"maxMemoryMB"`
+	DiskSpoolEnabled bool   `json:"diskSpoolEnabled"`
+	DiskSpoolDir     string `json:"diskSpoolDir"`
+	DiskSpoolMaxMB   int    `json:"diskSpoolMaxMB"`
+}
+
+type NetFlowRemoteIface struct {
+	IfIndex     uint32 `json:"ifIndex"`
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	MacAddress  string `json:"macAddress,omitempty"`
+	IPv4Address string `json:"ipv4Address,omitempty"`
+}
+
+type NetFlowRemoteLease struct {
+	IP         string `json:"ip"`
+	Hostname   string `json:"hostname"`
+	MacAddress string `json:"macAddress,omitempty"`
+}
+
+type RemoteNodeMetadataPayload struct {
+	NodeID      string                   `json:"nodeId"`
+	Hostname    string                   `json:"hostname"`
+	ExporterIP  string                   `json:"exporterIp,omitempty"`
+	Interfaces  []NetFlowRemoteIface     `json:"interfaces,omitempty"`
+	StaticHosts []NetFlowStaticHostEntry `json:"staticHosts,omitempty"`
+	DhcpLeases  []NetFlowRemoteLease     `json:"dhcpLeases,omitempty"`
+	TimestampMs int64                    `json:"timestampMs"`
+}
+
+type NetFlowNodeSummary struct {
+	NodeID     string `json:"nodeId"`
+	NodeName   string `json:"nodeName"`
+	ExporterIP string `json:"exporterIp"`
+	FlowsCount uint64 `json:"flowsCount"`
+	LastSeenMs int64  `json:"lastSeenMs"`
+}
+
 type NetFlowRuntimeBundle struct {
-	Enabled         bool                     `json:"enabled"`
-	Config          NetFlowConfigPayload     `json:"config"`
-	LocalHostname   string                   `json:"localHostname"`
-	LocalInterfaces []NetFlowInterfaceHint   `json:"localInterfaces"`
-	StaticHostMap   []NetFlowStaticHostEntry `json:"staticHostMap"`
-	K3sCidrs        NetFlowK3sCidrs          `json:"k3sCidrs"`
-	ThreatCidrs     []NetFlowThreatEntry     `json:"threatCidrs"`
+	Enabled               bool                     `json:"enabled"`
+	Mode                  string                   `json:"mode,omitempty"`
+	NodeID                string                   `json:"nodeId,omitempty"`
+	HubURL                string                   `json:"hubUrl,omitempty"`
+	IngestToken           string                   `json:"ingestToken,omitempty"`
+	UseHaMtls             bool                     `json:"useHaMtls,omitempty"`
+	TLSCACert             string                   `json:"tlsCaCert,omitempty"`
+	TLSInsecureSkipVerify bool                     `json:"tlsInsecureSkipVerify,omitempty"`
+	Buffer                TelemetryBufferPayload   `json:"buffer,omitempty"`
+	Config                NetFlowConfigPayload     `json:"config"`
+	LocalHostname         string                   `json:"localHostname"`
+	LocalInterfaces       []NetFlowInterfaceHint   `json:"localInterfaces"`
+	StaticHostMap         []NetFlowStaticHostEntry `json:"staticHostMap"`
+	K3sCidrs              NetFlowK3sCidrs          `json:"k3sCidrs"`
+	ThreatCidrs           []NetFlowThreatEntry     `json:"threatCidrs"`
 }
 
 type FlowRecord struct {

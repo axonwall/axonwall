@@ -19,6 +19,13 @@ import {
 } from 'lucide-react';
 import { MeshGraph } from './MeshGraph';
 import { getCurrentDesiredState } from '@/server/agent';
+import {
+  blockFleetTargetAction,
+  getLiveFleetSatellitesAction,
+  triggerFleetSyncAction,
+  unblockFleetTargetAction,
+  type LiveFleetSatellite,
+} from '@/server/fleet';
 import { useDesiredStateApply } from '@/lib/use-desired-state-apply';
 
 interface WifiRadioInfo {
@@ -97,6 +104,16 @@ function FleetPageContent() {
   // showing a change as applied when it was not.
   const [saveError, setSaveError] = useState<string | null>(null);
   const [hubHostname, setHubHostname] = useState('127.0.0.1');
+  const [controllerStatus, setControllerStatus] = useState<{
+    reachable: boolean;
+    error?: string;
+    liveCount: number;
+  }>({ reachable: false, liveCount: 0 });
+  const [syncNotice, setSyncNotice] = useState<string | null>(null);
+  const [blockTarget, setBlockTarget] = useState('');
+  const [blockTtl, setBlockTtl] = useState(300);
+  const [blockReason, setBlockReason] = useState('Central operator block');
+  const [blockSubmitting, setBlockSubmitting] = useState(false);
 
   useEffect(() => {
     if (typeof window !== 'undefined' && window.location.hostname) {
@@ -106,14 +123,33 @@ function FleetPageContent() {
 
   const loadFleetState = useCallback(async () => {
     try {
-      const state = await getCurrentDesiredState();
+      const [state, liveRes] = await Promise.all([
+        getCurrentDesiredState(),
+        getLiveFleetSatellitesAction().catch((err: any) => ({
+          reachable: false,
+          error: err?.message || 'Controller unreachable',
+          data: undefined,
+        })),
+      ]);
       if (state.fleet) {
         setListenPort(state.fleet.listenPort ?? 2966);
         setHeartbeatIntervalSec(state.fleet.defaultHeartbeatIntervalSec ?? 30);
         setWatchdogTimeoutSec(state.fleet.watchdogTimeoutSec ?? 60);
       }
+
+      const liveSats = liveRes.reachable ? liveRes.data?.satellites ?? [] : [];
+      const liveById = new Map<string, LiveFleetSatellite>(liveSats.map((ls) => [ls.id, ls]));
+      setControllerStatus({
+        reachable: liveRes.reachable,
+        error: liveRes.error,
+        liveCount: liveSats.length,
+      });
+
       const nodes = state.fleet?.nodes ?? [];
+      const seen = new Set<string>();
       const loaded: SatelliteNodeView[] = nodes.map((s) => {
+        seen.add(s.id);
+        const live = liveById.get(s.id);
         const wifiRadios: WifiRadioInfo[] = (s.wifi ?? []).map((w) => ({
           radio: w.radio,
           ssid: w.ssid,
@@ -122,33 +158,72 @@ function FleetPageContent() {
           clientsCount: w.clientsCount ?? 0,
           enabled: w.enabled ?? true,
         }));
-        const role = s.role ?? 'satellite';
+        const role = live?.role ?? s.role ?? 'satellite';
+        const isLiveOnline = Boolean(live && !live.disconnectedAt);
         return {
           id: s.id,
           name: s.name,
           role,
-          skuProfile: s.skuProfile,
-          fastpathOffload: s.fastpathOffload ?? true,
-          wanInterface: s.wanInterface || 'eth0',
-          lanInterface: s.lanInterface || 'eth1',
-          arch: s.arch ?? 'unknown',
+          skuProfile: (live?.skuProfile as SatelliteNodeView['skuProfile']) ?? s.skuProfile,
+          fastpathOffload: live?.fastpathOffload ?? s.fastpathOffload ?? true,
+          wanInterface: live?.wanInterface || s.wanInterface || 'eth0',
+          lanInterface: live?.lanInterface || s.lanInterface || 'eth1',
+          arch: (live?.arch as SatelliteNodeView['arch']) ?? s.arch ?? 'unknown',
           os: s.os || (role === 'edge-ngfw' ? 'AxonWall Edge UKI (PID 1 Go)' : 'Linux'),
-          ip: s.ip || '—',
-          tunnelIp: s.wireguard?.tunnelIp || '—',
-          wgConnected: Boolean(s.wireguard?.connected || s.status === 'online'),
-          status: s.status ?? 'enrolling',
-          cpuPercent: s.metrics?.cpuUsagePercent ?? 0,
-          memPercent: s.metrics?.memUsagePercent ?? 0,
-          activeConns: s.metrics?.activeConns ?? 0,
+          ip: live?.ip || s.ip || '—',
+          tunnelIp: live?.wireguard?.tunnelIp || live?.tunnelIp || s.wireguard?.tunnelIp || '—',
+          wgConnected: isLiveOnline || Boolean(s.wireguard?.connected || s.status === 'online'),
+          status: isLiveOnline
+            ? live?.lastApplyError
+              ? 'degraded'
+              : 'online'
+            : live?.disconnectedAt
+              ? 'offline'
+              : s.status ?? 'enrolling',
+          cpuPercent: live?.metrics?.cpuUsagePercent ?? s.metrics?.cpuUsagePercent ?? 0,
+          memPercent: live?.metrics?.memUsagePercent ?? s.metrics?.memUsagePercent ?? 0,
+          activeConns: live?.metrics?.activeConns ?? s.metrics?.activeConns ?? 0,
           offloadedConns: s.metrics?.offloadedConns ?? 0,
-          pid1Mode: s.metrics?.pid1Mode ?? role === 'edge-ngfw',
-          uptimeSeconds: s.metrics?.uptimeSeconds ?? 0,
+          pid1Mode: live?.metrics?.pid1Mode ?? s.metrics?.pid1Mode ?? role === 'edge-ngfw',
+          uptimeSeconds: live?.metrics?.uptimeSeconds ?? s.metrics?.uptimeSeconds ?? 0,
           wifiRadios,
           wifiClients: wifiRadios.reduce((sum, w) => sum + (w.clientsCount || 0), 0),
-          lastSeen: s.lastSeen || 'Never',
+          lastSeen: live?.lastSeen || s.lastSeen || 'Never',
           activePolicyVersion: s.activePolicyVersion ?? 1,
         };
       });
+
+      for (const live of liveSats) {
+        if (seen.has(live.id)) continue;
+        const role = live.role ?? 'satellite';
+        const isLiveOnline = !live.disconnectedAt;
+        loaded.push({
+          id: live.id,
+          name: live.id,
+          role,
+          skuProfile: live.skuProfile as SatelliteNodeView['skuProfile'],
+          fastpathOffload: live.fastpathOffload ?? true,
+          wanInterface: live.wanInterface || 'eth0',
+          lanInterface: live.lanInterface || 'eth1',
+          arch: (live.arch as SatelliteNodeView['arch']) || 'unknown',
+          os: role === 'edge-ngfw' ? 'AxonWall Edge UKI (PID 1 Go)' : 'Linux',
+          ip: live.ip || '—',
+          tunnelIp: live.wireguard?.tunnelIp || live.tunnelIp || '—',
+          wgConnected: isLiveOnline,
+          status: isLiveOnline ? (live.lastApplyError ? 'degraded' : 'online') : 'offline',
+          cpuPercent: live.metrics?.cpuUsagePercent ?? 0,
+          memPercent: live.metrics?.memUsagePercent ?? 0,
+          activeConns: live.metrics?.activeConns ?? 0,
+          offloadedConns: 0,
+          pid1Mode: live.metrics?.pid1Mode ?? role === 'edge-ngfw',
+          uptimeSeconds: live.metrics?.uptimeSeconds ?? 0,
+          wifiRadios: [],
+          wifiClients: 0,
+          lastSeen: live.lastSeen || 'Just now',
+          activePolicyVersion: 1,
+        });
+      }
+
       setSatellites(loaded);
       setSelectedSat((prev) => {
         if (prev) {
@@ -235,7 +310,17 @@ function FleetPageContent() {
   };
 
   const handleSyncFleetToYaml = async () => {
+    setSyncNotice(null);
     await persistSatellites(satellites);
+    const syncRes = await triggerFleetSyncAction().catch(() => null);
+    if (syncRes?.reachable && (!syncRes.status || syncRes.status < 400)) {
+      setSyncNotice(`Synced desired state to live controller (${syncRes.data?.syncedCount ?? satellites.length} nodes).`);
+    } else if (syncRes && !syncRes.reachable) {
+      setSyncNotice('Saved fleet.yaml locally (controller daemon offline — push skipped).');
+    } else if (syncRes?.error) {
+      setSyncNotice(`Saved locally; controller sync warning: ${syncRes.error}`);
+    }
+    await loadFleetState();
   };
 
   // D16: allocate the first tunnel octet not already in use by a live
@@ -307,16 +392,17 @@ function FleetPageContent() {
     await persistSatellites(nextList);
   };
 
-  // D16: these only bump a version number / flip a status in the local
-  // fleet record and persist it. There is no controller call behind them:
-  // a "pushed" policy is never sent to the node and a "quarantined" node
-  // keeps its WireGuard tunnel up. The buttons are labelled as local
-  // record changes (see below) until a real push/disconnect exists.
   const handlePushPolicy = async (id: string) => {
     const nextList = satellites.map((s) =>
       s.id === id ? { ...s, activePolicyVersion: s.activePolicyVersion + 1 } : s
     );
     await persistSatellites(nextList);
+    const syncRes = await triggerFleetSyncAction(id).catch(() => null);
+    if (syncRes?.reachable && (!syncRes.status || syncRes.status < 400)) {
+      setSyncNotice(`Pushed policy update to ${id}.`);
+    } else if (syncRes?.error) {
+      setSyncNotice(`Updated policy version for ${id}; controller offline/warn: ${syncRes.error}`);
+    }
   };
 
   const handleQuarantine = async (id: string) => {
@@ -324,6 +410,29 @@ function FleetPageContent() {
       s.id === id ? { ...s, status: 'degraded' as const, wgConnected: false } : s
     );
     await persistSatellites(nextList);
+  };
+
+  const handleFleetBlock = async (mode: 'block' | 'unblock') => {
+    const target = blockTarget.trim();
+    if (!target) return;
+    setBlockSubmitting(true);
+    setSyncNotice(null);
+    try {
+      const res =
+        mode === 'block'
+          ? await blockFleetTargetAction(target, blockTtl, blockReason)
+          : await unblockFleetTargetAction(target, blockReason);
+      if (res.reachable && (!res.status || res.status < 400)) {
+        setSyncNotice(
+          `${mode === 'block' ? 'Blocked' : 'Unblocked'} ${target} across active fleet satellites.`
+        );
+        setBlockTarget('');
+      } else {
+        setSyncNotice(res.error || `Fleet ${mode} failed (controller unreachable)`);
+      }
+    } finally {
+      setBlockSubmitting(false);
+    }
   };
 
   const filtered = satellites.filter((s) => {
@@ -373,6 +482,18 @@ function FleetPageContent() {
             <span className="px-2 py-0.5 text-xs font-semibold rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
               OpenWrt & Linux Ready
             </span>
+            <span
+              className={`px-2 py-0.5 text-xs font-semibold rounded-full border ${
+                controllerStatus.reachable
+                  ? 'bg-sky-500/10 text-sky-300 border-sky-500/30'
+                  : 'bg-amber-500/10 text-amber-300 border-amber-500/30'
+              }`}
+              title={controllerStatus.error || 'Axonwall Controller WebSocket & REST status'}
+            >
+              {controllerStatus.reachable
+                ? `Controller Live (${controllerStatus.liveCount} connected)`
+                : 'Controller Offline / Degraded'}
+            </span>
           </div>
           <p className="text-sm text-slate-400 mt-1">
             Centralized orchestration, zero-touch provisioning (ZTP), and distributed nftables microsegmentation across remote edge routers and access points.
@@ -396,9 +517,65 @@ function FleetPageContent() {
             className="flex items-center gap-2 px-3.5 py-2 rounded-lg bg-slate-800 border border-slate-700 text-slate-200 font-medium text-sm hover:bg-slate-700 transition cursor-pointer disabled:opacity-50"
           >
             <RefreshCw className={`w-4 h-4 ${isSaving ? 'animate-spin' : ''}`} />
-            {isSaving ? 'Saving to ha.yaml...' : 'Sync All Nodes'}
+            {isSaving ? 'Syncing Fleet...' : 'Sync All Nodes'}
           </button>
         </div>
+      </div>
+
+      {syncNotice && (
+        <div className="p-3.5 rounded-xl border text-xs font-medium bg-sky-500/10 border-sky-500/30 text-sky-200 flex items-center justify-between">
+          <span>{syncNotice}</span>
+          <button onClick={() => setSyncNotice(null)} className="text-slate-400 hover:text-white">
+            ×
+          </button>
+        </div>
+      )}
+
+      {/* Fleet-Wide Live Block / Unblock Action Bar */}
+      <div className="p-4 rounded-xl bg-slate-900 border border-slate-800 flex flex-wrap items-center gap-3">
+        <span className="text-xs font-semibold text-slate-300 flex items-center gap-1.5">
+          <ShieldAlert className="w-4 h-4 text-amber-400" />
+          Fleet XDP/NFT Mitigation
+        </span>
+        <input
+          type="text"
+          value={blockTarget}
+          onChange={(e) => setBlockTarget(e.target.value)}
+          placeholder="Target IPv4/IPv6 or MAC (e.g. 203.0.113.50)"
+          className="flex-1 min-w-[220px] px-3 py-1.5 rounded-lg bg-slate-950 border border-slate-700 text-xs font-mono text-white"
+        />
+        <input
+          type="number"
+          min={60}
+          max={86400}
+          value={blockTtl}
+          onChange={(e) => setBlockTtl(Number(e.target.value) || 300)}
+          title="Block TTL (seconds)"
+          className="w-24 px-2.5 py-1.5 rounded-lg bg-slate-950 border border-slate-700 text-xs font-mono text-white"
+        />
+        <input
+          type="text"
+          value={blockReason}
+          onChange={(e) => setBlockReason(e.target.value)}
+          placeholder="Audit reason"
+          className="w-52 px-2.5 py-1.5 rounded-lg bg-slate-950 border border-slate-700 text-xs text-white"
+        />
+        <button
+          type="button"
+          disabled={!blockTarget.trim() || blockSubmitting}
+          onClick={() => void handleFleetBlock('block')}
+          className="px-3 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-500 disabled:opacity-40 text-white text-xs font-semibold cursor-pointer"
+        >
+          Block Fleet-Wide
+        </button>
+        <button
+          type="button"
+          disabled={!blockTarget.trim() || blockSubmitting}
+          onClick={() => void handleFleetBlock('unblock')}
+          className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-slate-200 border border-slate-700 text-xs font-semibold cursor-pointer"
+        >
+          Unblock
+        </button>
       </div>
 
       {/* D16: fleet save failures are surfaced here instead of swallowed. */}

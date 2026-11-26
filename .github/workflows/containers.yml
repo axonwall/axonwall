@@ -1,0 +1,96 @@
+name: Build and Publish Container Images & Helm Chart
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  containers:
+    name: Build & Push ${{ matrix.component }} (amd64/arm64)
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - component: axonwalld
+            dockerfile: deploy/docker/Dockerfile.axonwalld
+          - component: axonwall-ui
+            dockerfile: deploy/docker/Dockerfile.ui
+          - component: axonwall-controller
+            dockerfile: deploy/docker/Dockerfile.controller
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Derive image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/${{ matrix.component }}
+          tags: |
+            type=ref,event=tag
+            type=sha,prefix=sha-
+
+      - name: Build and push container image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  helm-charts:
+    name: Package & Push Helm Charts (OCI)
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+
+      - name: Lint and template axonwall-analytics Helm chart
+        run: |
+          helm lint deploy/k8s/helm/axonwall-analytics
+          helm template test-homelab deploy/k8s/helm/axonwall-analytics -f deploy/k8s/helm/axonwall-analytics/values-homelab.yaml >/dev/null
+          helm template test-standard deploy/k8s/helm/axonwall-analytics -f deploy/k8s/helm/axonwall-analytics/values-standard.yaml >/dev/null
+          helm template test-enterprise deploy/k8s/helm/axonwall-analytics -f deploy/k8s/helm/axonwall-analytics/values-enterprise.yaml >/dev/null
+
+      - name: Login and push Helm chart to GHCR OCI
+        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+        env:
+          HELM_REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "${HELM_REGISTRY_TOKEN}" | helm registry login ghcr.io --username "${{ github.actor }}" --password-stdin
+          mkdir -p /tmp/helm-dist
+          helm package deploy/k8s/helm/axonwall-analytics --destination /tmp/helm-dist
+          helm push /tmp/helm-dist/axonwall-analytics-*.tgz "oci://ghcr.io/${{ github.repository_owner }}/charts"

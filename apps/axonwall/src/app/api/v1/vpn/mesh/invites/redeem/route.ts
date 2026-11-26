@@ -5,8 +5,16 @@ import { DEFAULT_ROLES, type UserSession } from '@axonwall/lib/rbac';
 import { callAgentApiDetailed, callAgentApiResponse } from '@/server/agent-client';
 import { getJwtSecret, SESSION_COOKIE } from '@/server/auth-constants';
 import { createPreAuthKey, ensureUser, isHeadscaleSocketReady } from '@/server/headscale';
-import { checkInviteRateLimit, consumeHeadscaleInvite } from '@/server/headscale-invites';
-import { resolveClientIp, resolveHeadscaleNetworkInfo } from '@/server/headscale-network';
+import {
+  checkInviteRateLimit,
+  consumeHeadscaleInvite,
+  syncHeadscaleWanWindow,
+} from '@/server/headscale-invites';
+import {
+  buildQuickConnectCommand,
+  resolveClientIp,
+  resolveHeadscaleNetworkInfo,
+} from '@/server/headscale-network';
 import { bumpUserSessionEpoch, stampSessionEpoch } from '@/server/session-revocation';
 
 export async function POST(req: NextRequest) {
@@ -23,6 +31,7 @@ export async function POST(req: NextRequest) {
     const token = typeof body?.token === 'string' ? body.token.trim() : '';
     const password = typeof body?.password === 'string' ? body.password : '';
     const confirmPassword = typeof body?.confirmPassword === 'string' ? body.confirmPassword : undefined;
+    const pin = typeof body?.pin === 'string' ? body.pin.trim() : '';
 
     if (!token) {
       return NextResponse.json({ status: 'error', error: 'Invite token is required' }, { status: 400 });
@@ -65,76 +74,82 @@ export async function POST(req: NextRequest) {
 
     const network = await resolveHeadscaleNetworkInfo(req);
 
-    const { invite, result } = await consumeHeadscaleInvite(token, async (inv) => {
-      const usersRes = await callAgentApiDetailed<{
-        users: Array<{ username: string; applianceRole: string }>;
-      }>('/v1/system/users', 'GET');
-      if (usersRes.kind !== 'ok') {
-        const err = new Error('Appliance directory service unavailable');
-        (err as any).statusCode = 503;
-        throw err;
-      }
+    const { invite, result } = await consumeHeadscaleInvite(
+      token,
+      async (inv) => {
+        const usersRes = await callAgentApiDetailed<{
+          users: Array<{ username: string; applianceRole: string }>;
+        }>('/v1/system/users', 'GET');
+        if (usersRes.kind !== 'ok') {
+          const err = new Error('Appliance directory service unavailable');
+          (err as any).statusCode = 503;
+          throw err;
+        }
 
-      const existing = (usersRes.data.users || []).find((u) => u.username === inv.username);
-      if (existing) {
-        if (existing.applianceRole !== 'vpn_user') {
-          const err = new Error(
-            `Forbidden: Privileged account '${inv.username}' cannot be modified via VPN invite`
+        const existing = (usersRes.data.users || []).find((u) => u.username === inv.username);
+        if (existing) {
+          if (existing.applianceRole !== 'vpn_user') {
+            const err = new Error(
+              `Forbidden: Privileged account '${inv.username}' cannot be modified via VPN invite`
+            );
+            (err as any).statusCode = 403;
+            throw err;
+          }
+          const updRes = await callAgentApiResponse<{ success?: boolean; message?: string; error?: string }>(
+            `/v1/system/users/${encodeURIComponent(inv.username)}`,
+            'PUT',
+            { password, passwordLocked: false }
           );
-          (err as any).statusCode = 403;
-          throw err;
-        }
-        const updRes = await callAgentApiResponse<{ success?: boolean; message?: string; error?: string }>(
-          `/v1/system/users/${encodeURIComponent(inv.username)}`,
-          'PUT',
-          { password, passwordLocked: false }
-        );
-        if (!updRes || !updRes.success) {
-          throw new Error(updRes?.error || updRes?.message || 'Failed to update account password');
-        }
-        bumpUserSessionEpoch(inv.username);
-      } else {
-        if (inv.mode === 'reset') {
-          const err = new Error(`Account '${inv.username}' no longer exists`);
-          (err as any).statusCode = 404;
-          throw err;
-        }
-        const createRes = await callAgentApiResponse<{ success?: boolean; message?: string; error?: string }>(
-          '/v1/system/users',
-          'POST',
-          {
-            username: inv.username,
-            comment: inv.displayName || inv.username,
-            password,
-            shell: '/usr/sbin/nologin',
-            applianceRole: 'vpn_user',
+          if (!updRes || !updRes.success) {
+            throw new Error(updRes?.error || updRes?.message || 'Failed to update account password');
           }
-        );
-        if (!createRes || !createRes.success) {
-          throw new Error(createRes?.error || createRes?.message || 'Failed to provision directory account');
-        }
-      }
-
-      let starterKey: { id: string | number; key: string; expiration?: string } | null = null;
-      if (isHeadscaleSocketReady()) {
-        try {
-          await ensureUser(inv.username);
-          if (inv.createStarterKey) {
-            const expIso = new Date(
-              Date.now() + (network.defaultKeyExpiryHours || 24) * 3600 * 1000
-            ).toISOString();
-            const created = await createPreAuthKey(inv.username, false, false, expIso);
-            starterKey = {
-              id: created.id,
-              key: created.key,
-              expiration: created.expiration,
-            };
+          bumpUserSessionEpoch(inv.username);
+        } else {
+          if (inv.mode === 'reset') {
+            const err = new Error(`Account '${inv.username}' no longer exists`);
+            (err as any).statusCode = 404;
+            throw err;
           }
-        } catch {}
-      }
+          const createRes = await callAgentApiResponse<{ success?: boolean; message?: string; error?: string }>(
+            '/v1/system/users',
+            'POST',
+            {
+              username: inv.username,
+              comment: inv.displayName || inv.username,
+              password,
+              shell: '/usr/sbin/nologin',
+              applianceRole: 'vpn_user',
+            }
+          );
+          if (!createRes || !createRes.success) {
+            throw new Error(createRes?.error || createRes?.message || 'Failed to provision directory account');
+          }
+        }
 
-      return { starterKey };
-    });
+        let starterKey: { id: string | number; key: string; expiration?: string } | null = null;
+        if (isHeadscaleSocketReady()) {
+          try {
+            await ensureUser(inv.username);
+            if (inv.createStarterKey) {
+              const expIso = new Date(
+                Date.now() + (network.defaultKeyExpiryHours || 24) * 3600 * 1000
+              ).toISOString();
+              const created = await createPreAuthKey(inv.username, false, false, expIso);
+              starterKey = {
+                id: created.id,
+                key: created.key,
+                expiration: created.expiration,
+              };
+            }
+          } catch {}
+        }
+
+        return { starterKey };
+      },
+      { pin }
+    );
+
+    await syncHeadscaleWanWindow();
 
     const roleDef = DEFAULT_ROLES.vpn_user;
     const session: UserSession = {
@@ -165,6 +180,7 @@ export async function POST(req: NextRequest) {
       starterKey: result.starterKey,
       serverUrl: network.serverUrl,
       magicDnsDomain: network.magicDnsDomain,
+      quickConnectCommand: buildQuickConnectCommand(network.serverUrl, result.starterKey?.key),
     });
   } catch (err: any) {
     const code = err?.code;

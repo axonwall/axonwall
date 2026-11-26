@@ -1,8 +1,25 @@
 import crypto from 'node:crypto';
 import type { NextRequest } from 'next/server';
+import { sanitizeHaProxyHostname } from '@axonwall/lib/compile/haproxy';
 import { getDesiredStateInternal } from './desired-state-internal';
 import { resolvePublicOrigin } from './oidc';
 import { isHeadscaleSocketReady, readHeadscaleConfigDefaults } from './headscale';
+
+export interface HeadscaleWanInviteNetworkInfo {
+  enabled: boolean;
+  hostname: string;
+  bindPort: number;
+  baseUrl: string;
+  autoWindow: boolean;
+  requirePin: boolean;
+  portKnocking: {
+    enabled: boolean;
+    protocol: 'tcp' | 'udp';
+    sequence: number[];
+    stepTimeoutSec: number;
+    openDurationSec: number;
+  };
+}
 
 export interface HeadscaleNetworkInfo {
   enabled: boolean;
@@ -12,6 +29,7 @@ export interface HeadscaleNetworkInfo {
   magicDnsDomain: string;
   allowSelfRegistration: boolean;
   defaultKeyExpiryHours: number;
+  wanInvite: HeadscaleWanInviteNetworkInfo;
 }
 
 export async function resolveHeadscaleNetworkInfo(
@@ -41,6 +59,19 @@ export async function resolveHeadscaleNetworkInfo(
   const configuredPortalUrl = state?.headscale?.portalUrl?.trim().replace(/\/+$/, '') || '';
   const portalUrl = configuredPortalUrl || reqOrigin || '';
 
+  const wan = state?.headscale?.wanInvite;
+  const wanEnabled = Boolean(enabled && wan?.enabled);
+  const wanHostname = sanitizeHaProxyHostname(wan?.hostname);
+  const rawBindPort = wan?.bindPort ?? 8443;
+  const wanBindPort = Number.isInteger(rawBindPort) && rawBindPort >= 1 && rawBindPort <= 65535 ? rawBindPort : 8443;
+  const wanBaseUrl =
+    wanEnabled && wanHostname
+      ? `https://${wanHostname}${wanBindPort === 443 ? '' : `:${wanBindPort}`}`
+      : '';
+  const knock = wan?.portKnocking;
+  const knockSequence =
+    knock?.sequence && knock.sequence.length >= 2 ? knock.sequence : [41821, 52913, 38477];
+
   return {
     enabled,
     serviceRunning,
@@ -49,6 +80,21 @@ export async function resolveHeadscaleNetworkInfo(
     magicDnsDomain,
     allowSelfRegistration: state?.headscale?.allowSelfRegistration !== false,
     defaultKeyExpiryHours: state?.headscale?.defaultKeyExpiryHours ?? 24,
+    wanInvite: {
+      enabled: wanEnabled,
+      hostname: wanHostname,
+      bindPort: wanBindPort,
+      baseUrl: wanBaseUrl,
+      autoWindow: wan?.autoWindow !== false,
+      requirePin: Boolean(wan?.requirePin),
+      portKnocking: {
+        enabled: Boolean(wanEnabled && knock?.enabled),
+        protocol: knock?.protocol === 'tcp' ? 'tcp' : 'udp',
+        sequence: knockSequence,
+        stepTimeoutSec: knock?.stepTimeoutSec ?? 15,
+        openDurationSec: knock?.openDurationSec ?? 900,
+      },
+    },
   };
 }
 
@@ -89,4 +135,27 @@ export function buildQuickConnectCommand(serverUrl: string, authKey?: string | n
     return `tailscale up ${loginArg} --authkey=${authKey}`;
   }
   return `tailscale up ${loginArg}`;
+}
+
+export function buildPortKnockCommands(
+  hostname: string,
+  protocol: 'tcp' | 'udp',
+  sequence: number[]
+): { unix: string; powershell: string } {
+  const cleanHost = sanitizeHaProxyHostname(hostname) || '<INVITE_HOST>';
+  const ports = (sequence.length > 0 ? sequence : [41821, 52913, 38477]).filter(
+    (p) => Number.isInteger(p) && p >= 1 && p <= 65535
+  );
+  const portsSpace = ports.join(' ');
+  const portsComma = ports.join(',');
+
+  if (protocol === 'tcp') {
+    const unix = `for p in ${portsSpace}; do nc -z -w 1 ${cleanHost} "$p" >/dev/null 2>&1 || true; sleep 0.25; done`;
+    const powershell = `${portsComma} | ForEach-Object { $c = New-Object System.Net.Sockets.TcpClient; $ar = $c.BeginConnect('${cleanHost}', $_, $null, $null); $ar.AsyncWaitHandle.WaitOne(250) | Out-Null; $c.Close(); Start-Sleep -Milliseconds 250 }`;
+    return { unix, powershell };
+  }
+
+  const unix = `for p in ${portsSpace}; do printf 'knock' | nc -u -w 1 ${cleanHost} "$p" >/dev/null 2>&1 || true; sleep 0.25; done`;
+  const powershell = `$u = New-Object System.Net.Sockets.UdpClient; $b = [Text.Encoding]::ASCII.GetBytes('knock'); ${portsComma} | ForEach-Object { $u.Send($b, $b.Length, '${cleanHost}', $_) | Out-Null; Start-Sleep -Milliseconds 250 }; $u.Close()`;
+  return { unix, powershell };
 }

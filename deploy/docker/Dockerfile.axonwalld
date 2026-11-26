@@ -1,4 +1,4 @@
-# Multi-stage build for axonwalld (Privileged Go Daemon)
+# Multi-stage build for axonwalld (Privileged Go Daemon & Unprivileged ModeCollector)
 FROM golang:1.27-bookworm@sha256:4fa7c968ba93f1635670522dbb01a2c78150443e1385746924566079f36570ea AS builder
 
 WORKDIR /src
@@ -15,12 +15,21 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     iproute2 \
     procps \
     ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --system --gid 1001 axonwall \
+    && useradd --system --uid 1001 --gid 1001 --no-create-home axonwall \
+    && mkdir -p \
+      /run/axonwalld \
+      /run/axonwall \
+      /etc/axonwall/managed \
+      /var/lib/axonwall/bundles \
+      /var/lib/axonwall/telemetry-spool \
+      /var/log/axonwall \
+    && chown -R 1001:1001 /run/axonwalld /run/axonwall /etc/axonwall /var/lib/axonwall /var/log/axonwall \
+    && chmod 0775 /run/axonwalld /run/axonwall /etc/axonwall /etc/axonwall/managed /var/lib/axonwall /var/lib/axonwall/bundles /var/lib/axonwall/telemetry-spool /var/log/axonwall
 
 COPY --from=builder /bin/axonwalld /usr/sbin/axonwalld
 COPY packaging/debian/lockdown.nft /usr/share/axonwall/lockdown.nft
 
-RUN mkdir -p /run/axonwalld /var/lib/axonwall /var/log/axonwall
-
 ENTRYPOINT ["/usr/sbin/axonwalld"]
-CMD ["--socket", "/run/axonwalld/axonwalld.sock", "--boot-apply"]
+CMD ["--socket", "/run/axonwalld/agent.sock", "--boot-apply"]

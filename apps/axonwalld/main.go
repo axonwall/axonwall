@@ -85,10 +85,18 @@ type AgentServer struct {
 	librenmsManager        *engine.LibreNMSManager
 	topologyManager        *engine.TopologyManager
 	netflowManager         *engine.NetFlowManager
+	observabilityManager   *engine.ObservabilityManager
 	etckeeperManager       *engine.EtckeeperManager
 	directoryManager       *engine.DirectoryManager
-	pluginManager          *engine.PluginManager
-	ddnsManager            *engine.DdnsManager
+	pluginManager           *engine.PluginManager
+	ddnsManager             *engine.DdnsManager
+	headscaleWanGateManager *engine.HeadscaleWanGateManager
+}
+
+func (s *AgentServer) SetHeadscaleWanGateManager(m *engine.HeadscaleWanGateManager) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.headscaleWanGateManager = m
 }
 
 func (s *AgentServer) SetPluginManager(pm *engine.PluginManager) {
@@ -131,6 +139,12 @@ func (s *AgentServer) SetNetFlowManager(nfm *engine.NetFlowManager) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.netflowManager = nfm
+}
+
+func (s *AgentServer) SetObservabilityManager(om *engine.ObservabilityManager) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.observabilityManager = om
 }
 
 // isSnapshotEligibleName reports whether a config file name is covered
@@ -481,7 +495,7 @@ func NewAgentServer(bundleDir string, iapManager *engine.IAPManager, haEngine *H
 			break
 		}
 	}
-	if lastGoodScript == "" && !pendingExists {
+	if lastGoodScript == "" && !pendingExists && currentRuntimeMode != engine.ModeCollector {
 		if out, err := exec.Command("nft", "list", "ruleset").Output(); err == nil && len(out) > 0 {
 			scriptStr := string(out)
 			if !strings.HasPrefix(strings.TrimSpace(scriptStr), "flush ruleset") {
@@ -1006,30 +1020,34 @@ func (s *AgentServer) ApplyBundle(ctx context.Context, req *pb.ApplyBundleReques
 		return nil, status.Errorf(codes.FailedPrecondition, "another configuration apply (job %s) is still pending confirmation; confirm that job or roll it back (or wait for its deadline at %s) before applying a new bundle", s.pendingJobID, s.confirmDeadline.Format(time.RFC3339))
 	}
 
-	// 1. Dry run syntax check using `nft -c -f`
-	tmpFile, err := os.CreateTemp("", "axonwall-candidate-*.nft")
-	if err != nil {
-		return nil, status.Errorf(codes.Internal, "failed to create temp candidate file: %v", err)
-	}
-	defer os.Remove(tmpFile.Name())
+	// 1. Dry run syntax check using `nft -c -f` (skipped in collector-only container mode)
+	var tmpFilePath string
+	if currentRuntimeMode != engine.ModeCollector {
+		tmpFile, err := os.CreateTemp("", "axonwall-candidate-*.nft")
+		if err != nil {
+			return nil, status.Errorf(codes.Internal, "failed to create temp candidate file: %v", err)
+		}
+		tmpFilePath = tmpFile.Name()
+		defer os.Remove(tmpFilePath)
 
-	if _, err := tmpFile.WriteString(req.NftScript); err != nil {
+		if _, err := tmpFile.WriteString(req.NftScript); err != nil {
+			_ = tmpFile.Close()
+			return nil, status.Errorf(codes.Internal, "failed to write candidate script: %v", err)
+		}
 		_ = tmpFile.Close()
-		return nil, status.Errorf(codes.Internal, "failed to write candidate script: %v", err)
-	}
-	_ = tmpFile.Close()
 
-	// A-M2: bound the validation exec; an nft binary that hangs must
-	// not wedge the agent API behind s.mu forever.
-	validateCtx, validateCancel := context.WithTimeout(context.Background(), nftValidateTimeout)
-	defer validateCancel()
-	validateCmd := exec.CommandContext(validateCtx, "nft", "-c", "-f", tmpFile.Name())
-	if out, err := validateCmd.CombinedOutput(); err != nil {
-		log.Printf("[Agent] nft validation error: %s", string(out))
-		return &pb.ApplyBundleResponse{
-			Success: false,
-			Message: fmt.Sprintf("nftables syntax validation failed: %s", string(out)),
-		}, nil
+		// A-M2: bound the validation exec; an nft binary that hangs must
+		// not wedge the agent API behind s.mu forever.
+		validateCtx, validateCancel := context.WithTimeout(context.Background(), nftValidateTimeout)
+		defer validateCancel()
+		validateCmd := exec.CommandContext(validateCtx, "nft", "-c", "-f", tmpFilePath)
+		if out, err := validateCmd.CombinedOutput(); err != nil {
+			log.Printf("[Agent] nft validation error: %s", string(out))
+			return &pb.ApplyBundleResponse{
+				Success: false,
+				Message: fmt.Sprintf("nftables syntax validation failed: %s", string(out)),
+			}, nil
+		}
 	}
 
 	// A-H2: validate every file before writing any of them.
@@ -1041,28 +1059,30 @@ func (s *AgentServer) ApplyBundle(ctx context.Context, req *pb.ApplyBundleReques
 	// Snapshot verified configuration, external bundle files, and live kernel
 	// network state BEFORE writing candidate changes.
 	if !s.pendingConfirm {
-		if s.lastGoodScript == "" {
-			lkgPath := filepath.Join(s.bundleDir, "last-known-good.nft")
-			if data, rErr := os.ReadFile(lkgPath); rErr == nil && len(data) > 0 {
-				h := sha256.Sum256(data)
-				s.lastGoodScript = string(data)
-				s.lastGoodHash = hex.EncodeToString(h[:])
-			} else if out, nErr := exec.Command("nft", "list", "ruleset").Output(); nErr == nil && strings.TrimSpace(string(out)) != "" {
-				scriptStr := string(out)
-				if !strings.HasPrefix(strings.TrimSpace(scriptStr), "flush ruleset") {
-					scriptStr = "flush ruleset\n" + scriptStr
-				}
-				scriptBytes := []byte(scriptStr)
-				h := sha256.Sum256(scriptBytes)
-				s.lastGoodScript = scriptStr
-				s.lastGoodHash = hex.EncodeToString(h[:])
-				if mkErr := os.MkdirAll(s.bundleDir, 0700); mkErr == nil {
-					_ = os.WriteFile(lkgPath, scriptBytes, 0600)
+		if currentRuntimeMode != engine.ModeCollector {
+			if s.lastGoodScript == "" {
+				lkgPath := filepath.Join(s.bundleDir, "last-known-good.nft")
+				if data, rErr := os.ReadFile(lkgPath); rErr == nil && len(data) > 0 {
+					h := sha256.Sum256(data)
+					s.lastGoodScript = string(data)
+					s.lastGoodHash = hex.EncodeToString(h[:])
+				} else if out, nErr := exec.Command("nft", "list", "ruleset").Output(); nErr == nil && strings.TrimSpace(string(out)) != "" {
+					scriptStr := string(out)
+					if !strings.HasPrefix(strings.TrimSpace(scriptStr), "flush ruleset") {
+						scriptStr = "flush ruleset\n" + scriptStr
+					}
+					scriptBytes := []byte(scriptStr)
+					h := sha256.Sum256(scriptBytes)
+					s.lastGoodScript = scriptStr
+					s.lastGoodHash = hex.EncodeToString(h[:])
+					if mkErr := os.MkdirAll(s.bundleDir, 0700); mkErr == nil {
+						_ = os.WriteFile(lkgPath, scriptBytes, 0600)
+					}
 				}
 			}
+			captureLiveNetSnapshot(s.bundleDir)
 		}
 		snapshotLkgConfig(s.bundleDir)
-		captureLiveNetSnapshot(s.bundleDir)
 	}
 	snapshotExternalBundleFiles(s.bundleDir, validatedFiles, s.pendingConfirm)
 
@@ -1261,6 +1281,15 @@ func (s *AgentServer) ApplyBundle(ctx context.Context, req *pb.ApplyBundleReques
 			})
 		}
 
+		if filepath.Base(cleanPath) == "observability_config.json" && s.observabilityManager != nil {
+			content := []byte(f.Content)
+			om := s.observabilityManager
+			pendingApplies = append(pendingApplies, pendingSubsystemApply{
+				name:  "Observability & Offload config",
+				apply: func() error { return om.ApplyConfig(content) },
+			})
+		}
+
 		if filepath.Base(cleanPath) == "netdev_config.json" {
 			content := []byte(f.Content)
 			pendingApplies = append(pendingApplies, pendingSubsystemApply{
@@ -1284,6 +1313,15 @@ func (s *AgentServer) ApplyBundle(ctx context.Context, req *pb.ApplyBundleReques
 			pendingApplies = append(pendingApplies, pendingSubsystemApply{
 				name:  "Dynamic DNS config",
 				apply: func() error { return dm.ApplyConfigJSON(content) },
+			})
+		}
+
+		if filepath.Base(cleanPath) == "headscale_wan_config.json" && s.headscaleWanGateManager != nil {
+			content := []byte(f.Content)
+			hwm := s.headscaleWanGateManager
+			pendingApplies = append(pendingApplies, pendingSubsystemApply{
+				name:  "Headscale WAN invite gate config",
+				apply: func() error { return hwm.ApplyConfig(content) },
 			})
 		}
 	}
@@ -1315,23 +1353,25 @@ func (s *AgentServer) ApplyBundle(ctx context.Context, req *pb.ApplyBundleReques
 		}, nil
 	}
 
-	// Reconcile physical/logical interfaces and static routes whenever a bundle is applied
-	// A-M16: a failed static address assignment fails the apply (with
-	// rollback, like the nft failure below) instead of being logged
-	// while the WAN is left address-less.
-	if err := applyBootInterfaces(); err != nil {
-		log.Printf("[Agent] Failed to apply boot interfaces: %v; rolling back", err)
-		_ = s.executeRollback("interface apply failed")
-		return &pb.ApplyBundleResponse{
-			Success: false,
-			Message: fmt.Sprintf("failed to apply interfaces: %v", err),
-		}, nil
-	}
-	if err := ReconcileStaticRoutes(); err != nil {
-		log.Printf("[Agent] Warning: Static routes reconciliation: %v", err)
+	if currentRuntimeMode != engine.ModeCollector {
+		// Reconcile physical/logical interfaces and static routes whenever a bundle is applied
+		// A-M16: a failed static address assignment fails the apply (with
+		// rollback, like the nft failure below) instead of being logged
+		// while the WAN is left address-less.
+		if err := applyBootInterfaces(); err != nil {
+			log.Printf("[Agent] Failed to apply boot interfaces: %v; rolling back", err)
+			_ = s.executeRollback("interface apply failed")
+			return &pb.ApplyBundleResponse{
+				Success: false,
+				Message: fmt.Sprintf("failed to apply interfaces: %v", err),
+			}, nil
+		}
+		if err := ReconcileStaticRoutes(); err != nil {
+			log.Printf("[Agent] Warning: Static routes reconciliation: %v", err)
+		}
 	}
 
-	if s.etckeeperManager != nil && len(req.Files) > 0 {
+	if s.etckeeperManager != nil && len(req.Files) > 0 && currentRuntimeMode != engine.ModeCollector {
 		commitMsg := fmt.Sprintf("Axonwall configuration bundle applied (%s)", req.BundleHash)
 		s.etckeeperManager.ScheduleCommit(commitMsg, "axonwall")
 	}
@@ -1339,19 +1379,29 @@ func (s *AgentServer) ApplyBundle(ctx context.Context, req *pb.ApplyBundleReques
 	// 3. Backup current script for rollback
 	s.candidateScript = req.NftScript
 
-	// 4. Apply ruleset atomically (bounded by A-M2's timeout).
-	applyCtx, applyCancel := context.WithTimeout(context.Background(), nftApplyTimeout)
-	defer applyCancel()
-	applyCmd := exec.CommandContext(applyCtx, "nft", "-f", tmpFile.Name())
-	if out, err := applyCmd.CombinedOutput(); err != nil {
-		log.Printf("[Agent] Failed to apply nftables ruleset: %s; rolling back config files and services", string(out))
-		if rbErr := s.executeRollback("nftables apply failed"); rbErr != nil {
-			log.Printf("[Agent] Rollback after nftables apply failure also failed: %v", rbErr)
+	if currentRuntimeMode != engine.ModeCollector {
+		// 4. Apply ruleset atomically (bounded by A-M2's timeout).
+		applyCtx, applyCancel := context.WithTimeout(context.Background(), nftApplyTimeout)
+		defer applyCancel()
+		applyCmd := exec.CommandContext(applyCtx, "nft", "-f", tmpFilePath)
+		if out, err := applyCmd.CombinedOutput(); err != nil {
+			log.Printf("[Agent] Failed to apply nftables ruleset: %s; rolling back config files and services", string(out))
+			if rbErr := s.executeRollback("nftables apply failed"); rbErr != nil {
+				log.Printf("[Agent] Rollback after nftables apply failure also failed: %v", rbErr)
+			}
+			return &pb.ApplyBundleResponse{
+				Success: false,
+				Message: fmt.Sprintf("failed to execute atomic nft application: %s", string(out)),
+			}, nil
 		}
-		return &pb.ApplyBundleResponse{
-			Success: false,
-			Message: fmt.Sprintf("failed to execute atomic nft application: %s", string(out)),
-		}, nil
+	}
+
+	// Re-populate dynamic Headscale WAN invite window elements after nft -f flush/recreate.
+	if s.headscaleWanGateManager != nil {
+		hwm := s.headscaleWanGateManager
+		s.mu.Unlock()
+		_ = hwm.Reconcile()
+		s.mu.Lock()
 	}
 
 	if req.BundleHash != "" {
@@ -1361,17 +1411,19 @@ func (s *AgentServer) ApplyBundle(ctx context.Context, req *pb.ApplyBundleReques
 		s.activeHash = hex.EncodeToString(h[:])
 	}
 
-	// 5. Reload any changed systemd units requested. A-M2: this runs
-	// without holding s.mu (see reloadBundleServices); the deferred
-	// unlock at the top of ApplyBundle releases the re-acquired lock.
-	if len(req.ReloadServices) > 0 {
-		recordPendingReloadServices(s.bundleDir, req.ReloadServices)
+	if currentRuntimeMode != engine.ModeCollector {
+		// 5. Reload any changed systemd units requested. A-M2: this runs
+		// without holding s.mu (see reloadBundleServices); the deferred
+		// unlock at the top of ApplyBundle releases the re-acquired lock.
+		if len(req.ReloadServices) > 0 {
+			recordPendingReloadServices(s.bundleDir, req.ReloadServices)
+		}
+		s.mu.Unlock()
+		for _, err := range reloadBundleServices(req.ReloadServices) {
+			applyWarnings = append(applyWarnings, err.Error())
+		}
+		s.mu.Lock()
 	}
-	s.mu.Unlock()
-	for _, err := range reloadBundleServices(req.ReloadServices) {
-		applyWarnings = append(applyWarnings, err.Error())
-	}
-	s.mu.Lock()
 
 	// 6. Setup Commit-Confirm deadline
 	// C26 (daemon side): the UI now validates/clamps this value, but
@@ -1646,6 +1698,9 @@ func (s *AgentServer) executeRollback(reason string) error {
 		if err := s.reapplyRestoredSubsystemsImpl(false); err != nil {
 			rollbackErrs = append(rollbackErrs, err.Error())
 		}
+		if s.headscaleWanGateManager != nil {
+			_ = s.headscaleWanGateManager.Reconcile()
+		}
 		if err := s.restartNgfwDaemonsIfEnabled(); err != nil {
 			log.Printf("[Agent] Rollback: %v", err)
 			rollbackErrs = append(rollbackErrs, err.Error())
@@ -1727,6 +1782,9 @@ func (s *AgentServer) reapplyRestoredSubsystemsImpl(includeNetdev bool) error {
 	if s.netflowManager != nil {
 		apply("netflow_config.json", func(b []byte) error { return s.netflowManager.ApplyConfig(b) })
 	}
+	if s.observabilityManager != nil {
+		apply("observability_config.json", func(b []byte) error { return s.observabilityManager.ApplyConfig(b) })
+	}
 	if s.vigilanteManager != nil {
 		apply("vigilante_config.json", func(b []byte) error { return s.vigilanteManager.ApplyConfig(b) })
 	}
@@ -1735,6 +1793,14 @@ func (s *AgentServer) reapplyRestoredSubsystemsImpl(includeNetdev bool) error {
 	}
 	if s.ddnsManager != nil {
 		apply("ddns_config.json", func(b []byte) error { return s.ddnsManager.ApplyConfigJSON(b) })
+	}
+	if s.headscaleWanGateManager != nil {
+		apply("headscale_wan_config.json", func(b []byte) error {
+			if err := s.headscaleWanGateManager.ApplyConfig(b); err != nil {
+				return err
+			}
+			return s.headscaleWanGateManager.Reconcile()
+		})
 	}
 	if len(errs) > 0 {
 		return fmt.Errorf("subsystem re-apply failures: %s", strings.Join(errs, "; "))
@@ -3122,7 +3188,7 @@ func main() {
 	socketPath := flag.String("socket", "/run/axonwall/agent.sock", "Path to agent Unix socket")
 	bundleDir := flag.String("bundle-dir", "/var/lib/axonwall/bundles", "Directory for storing last-known-good bundles")
 	bootApply := flag.Bool("boot-apply", false, "Apply last-known-good configuration immediately on boot")
-	modeFlag := flag.String("mode", "auto", "Runtime mode: auto, appliance, host, or dev")
+	modeFlag := flag.String("mode", "auto", "Runtime mode: auto, appliance, host, dev, or collector")
 	devFlag := flag.Bool("dev", false, "Run in non-destructive local development mode (equivalent to --mode=dev)")
 	socketGroupFlag := flag.String("socket-group", "", "Group name or GID granted access to agent sockets and token")
 	flag.Parse()
@@ -3158,6 +3224,10 @@ func main() {
 		}
 		_ = os.MkdirAll(axonwallEtcDir(), 0750)
 		_ = os.MkdirAll(axonwallStateDir(), 0750)
+	} else if runtimeMode == engine.ModeCollector {
+		_ = os.MkdirAll(axonwallEtcDir(), 0750)
+		_ = os.MkdirAll(axonwallStateDir(), 0750)
+		_ = os.MkdirAll(*bundleDir, 0750)
 	}
 
 	osInfo := engine.DetectOSInfo("/")
@@ -3263,7 +3333,9 @@ func main() {
 	terminalMgr := engine.NewTerminalManager()
 	taskManager := engine.NewTaskManager()
 	virtManager := engine.NewVirtManager(taskManager, nasManager)
-	go virtManager.AutostartAll()
+	if runtimeMode != engine.ModeCollector {
+		go virtManager.AutostartAll()
+	}
 	vfioManager := engine.NewVFIOManager()
 	consoleProxy := engine.NewConsoleProxy()
 	watchdog := engine.NewWatchdogEngine()
@@ -3288,8 +3360,10 @@ func main() {
 	}
 	// Shell PATH: repair plugin snippets after a reboot, a zshenv wipe,
 	// or a crashed lifecycle call. Soft-fail: log + continue.
-	if err := engine.RebuildPluginShellPaths(pluginManager); err != nil {
-		log.Printf("[PluginManager] Warning: failed to rebuild plugin shell PATHs at startup: %v", err)
+	if runtimeMode != engine.ModeCollector {
+		if err := engine.RebuildPluginShellPaths(pluginManager); err != nil {
+			log.Printf("[PluginManager] Warning: failed to rebuild plugin shell PATHs at startup: %v", err)
+		}
 	}
 	mcpTrafficManager := engine.NewMcpTrafficManager()
 	haEngine.SetDirectoryManager(directoryManager)
@@ -3365,7 +3439,9 @@ func main() {
 
 	// Start eBPF Manager across real UP non-loopback host interfaces
 	ebpfManager := engine.NewEBPFManager()
-	if runtimeMode == engine.ModeDev && strings.TrimSpace(os.Getenv("AXONWALL_DEV_EBPF")) != "1" {
+	if runtimeMode == engine.ModeCollector {
+		log.Printf("[Agent] Collector mode: skipping XDP/eBPF interface attach")
+	} else if runtimeMode == engine.ModeDev && strings.TrimSpace(os.Getenv("AXONWALL_DEV_EBPF")) != "1" {
 		log.Printf("[Agent] Dev mode: skipping automatic XDP/eBPF interface attach (set AXONWALL_DEV_EBPF=1 to enable)")
 	} else if activeIfaces := discoverActiveNetIfaces(); len(activeIfaces) > 0 {
 		if err := ebpfManager.Start(activeIfaces); err != nil {
@@ -3375,7 +3451,7 @@ func main() {
 
 	// Start in-kernel BPF-LSM Preventive Guard only in appliance mode or when explicitly enabled
 	lsmGuardManager := engine.NewLsmGuardManager()
-	if runtimeMode == engine.ModeAppliance || strings.TrimSpace(os.Getenv("AXONWALL_LSM_ENFORCE")) == "1" {
+	if runtimeMode != engine.ModeCollector && (runtimeMode == engine.ModeAppliance || strings.TrimSpace(os.Getenv("AXONWALL_LSM_ENFORCE")) == "1") {
 		if err := lsmGuardManager.Start(engine.DefaultLsmGuardPolicyConfig()); err != nil {
 			log.Printf("[Agent] Warning: Failed to start BPF-LSM guard: %v", err)
 		}
@@ -3394,6 +3470,13 @@ func main() {
 	topologyManager.SetNetFlowManager(netflowManager)
 	netflowManager.SetTopologyManager(topologyManager)
 	pluginManager.SetNetFlowManager(netflowManager)
+
+	observabilityManager := engine.NewObservabilityManager(ebpfManager, hardwareMgr, nasManager, netflowManager, sdwanProber.Snapshot)
+	agentServer.SetObservabilityManager(observabilityManager)
+
+	headscaleWanGateManager := engine.NewHeadscaleWanGateManager(stateDir, runtimeMode == engine.ModeDev || runtimeMode == engine.ModeCollector || os.Geteuid() != 0)
+	agentServer.SetHeadscaleWanGateManager(headscaleWanGateManager)
+
 	go func() {
 		loadedNetFlow := false
 		for _, cand := range []string{
@@ -3413,6 +3496,29 @@ func main() {
 				log.Printf("[Agent] Warning: netflow-collector plugin is enabled but failed to start: %v", err)
 			}
 		}
+		for _, cand := range []string{
+			filepath.Join(etcDir, "managed", "observability_config.json"),
+			filepath.Join(etcDir, "observability_config.json"),
+		} {
+			if data, err := os.ReadFile(cand); err == nil && len(data) > 0 {
+				if err := observabilityManager.ApplyConfig(data); err != nil {
+					log.Printf("[Agent] Startup Observability config warning (%s): %v", cand, err)
+				}
+				break
+			}
+		}
+		for _, cand := range []string{
+			filepath.Join(etcDir, "managed", "headscale_wan_config.json"),
+			filepath.Join(etcDir, "headscale_wan_config.json"),
+		} {
+			if data, err := os.ReadFile(cand); err == nil && len(data) > 0 {
+				if err := headscaleWanGateManager.ApplyConfig(data); err != nil {
+					log.Printf("[Agent] Startup Headscale WAN gate config warning (%s): %v", cand, err)
+				}
+				break
+			}
+		}
+		headscaleWanGateManager.Start()
 	}()
 	go func() {
 		for _, cand := range []string{
@@ -3432,7 +3538,7 @@ func main() {
 		// the plugin toggle reports the true state via
 		// SnapshotStatus (BpfLoadError) and the next enable attempt
 		// fails closed instead of claiming success.
-		if pluginManager.IsPluginEnabled("ebpf-threat-harvester") {
+		if runtimeMode != engine.ModeCollector && pluginManager.IsPluginEnabled("ebpf-threat-harvester") {
 			if err := threatHarvesterManager.SetEnabled(true); err != nil {
 				log.Printf("[Agent] Warning: ebpf-threat-harvester plugin is enabled but the harvester failed to start: %v", err)
 			}
@@ -5492,6 +5598,110 @@ func main() {
 			_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "status": netflowManager.GetStatus()})
 		})
 
+		mux.HandleFunc("/v1/observability/status", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodGet {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(observabilityManager.GetStatus())
+		})
+
+		mux.HandleFunc("/v1/observability/metrics", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodGet {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+			observabilityManager.WritePrometheusMetrics(w)
+		})
+
+		mux.HandleFunc("/v1/observability/mitigate", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			var req engine.RemoteMitigateRequest
+			if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				_ = json.NewEncoder(w).Encode(map[string]any{"success": false, "accepted": false, "error": err.Error()})
+				return
+			}
+			resp, err := observabilityManager.HandleRemoteMitigate(req)
+			w.Header().Set("Content-Type", "application/json")
+			if err != nil {
+				code := http.StatusForbidden
+				if strings.Contains(err.Error(), "invalid targetIp") {
+					code = http.StatusBadRequest
+				}
+				w.WriteHeader(code)
+				_ = json.NewEncoder(w).Encode(map[string]any{"success": false, "accepted": false, "error": err.Error()})
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"success":  true,
+				"accepted": resp.Accepted,
+				"targetIp": resp.TargetIP,
+				"ttlSec":   resp.TTLSec,
+				"message":  resp.Message,
+			})
+		})
+
+		mux.HandleFunc("/v1/netflow/metadata-sync", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			var req engine.RemoteNodeMetadataPayload
+			if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<20)).Decode(&req); err != nil {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				_ = json.NewEncoder(w).Encode(map[string]any{"success": false, "error": err.Error()})
+				return
+			}
+			if strings.TrimSpace(req.ExporterIP) == "" {
+				if xff := strings.TrimSpace(r.Header.Get("X-Forwarded-For")); xff != "" {
+					parts := strings.Split(xff, ",")
+					req.ExporterIP = strings.TrimSpace(parts[0])
+				}
+			}
+			netflowManager.ApplyRemoteNodeMetadata(req)
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "nodeId": req.NodeID})
+		})
+
+		mux.HandleFunc("/v1/netflow/ingest-batch", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			var req struct {
+				NodeID     string              `json:"nodeId"`
+				Hostname   string              `json:"hostname"`
+				ExporterIP string              `json:"exporterIp"`
+				Flows      []engine.FlowRecord `json:"flows"`
+			}
+			if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8<<20)).Decode(&req); err != nil {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				_ = json.NewEncoder(w).Encode(map[string]any{"success": false, "error": err.Error()})
+				return
+			}
+			ingested := netflowManager.IngestExternalBatch(req.NodeID, req.Hostname, req.ExporterIP, req.Flows)
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "ingested": ingested})
+		})
+
+		mux.HandleFunc("/v1/netflow/nodes", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodGet {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"nodes": netflowManager.ListNodes()})
+		})
+
 		mux.HandleFunc("/v1/topology/sync/netbox", func(w http.ResponseWriter, r *http.Request) {
 			if r.Method != http.MethodPost {
 				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -6567,6 +6777,54 @@ func main() {
 			})
 		})
 
+		mux.HandleFunc("/v1/vpn/headscale/wan-window/status", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodGet {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"success": true,
+				"data":    headscaleWanGateManager.Status(),
+			})
+		})
+
+		mux.HandleFunc("/v1/vpn/headscale/wan-window/sync", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"success": true,
+				"data":    headscaleWanGateManager.SyncFromInvites(),
+			})
+		})
+
+		mux.HandleFunc("/v1/vpn/headscale/wan-window/arm", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			var req struct {
+				DurationSec int `json:"durationSec"`
+			}
+			if err := json.NewDecoder(io.LimitReader(r.Body, 64*1024)).Decode(&req); err != nil {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				_ = json.NewEncoder(w).Encode(map[string]any{"success": false, "error": fmt.Sprintf("invalid json: %v", err)})
+				return
+			}
+			st, err := headscaleWanGateManager.ArmManual(req.DurationSec)
+			w.Header().Set("Content-Type", "application/json")
+			if err != nil {
+				w.WriteHeader(http.StatusInternalServerError)
+				_ = json.NewEncoder(w).Encode(map[string]any{"success": false, "error": err.Error(), "data": st})
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "data": st})
+		})
+
 		// =====================================================================
 		// Host Malware, Rootkit & Ghost-in-the-Ring Kernel Telemetry APIs
 		// =====================================================================
@@ -7055,6 +7313,9 @@ func main() {
 		iapManager.Stop()
 		haEngine.Stop()
 		sdwanProber.stop()
+		headscaleWanGateManager.Stop()
+		observabilityManager.Stop()
+		netflowManager.Stop()
 		lsmGuardManager.Stop()
 		threatHarvesterManager.Stop()
 		ebpfManager.Stop()

@@ -338,6 +338,7 @@ export const DhcpConfigSchema = z.object({
   subnets: z.array(DhcpSubnetSchema).default([]),
   dhcp6Enabled: z.boolean().default(false).optional(),
   subnets6: z.array(Dhcp6SubnetSchema).default([]).optional(),
+  logLeases: z.boolean().default(false).optional(),
 });
 export type DhcpConfig = z.infer<typeof DhcpConfigSchema>;
 
@@ -378,6 +379,7 @@ export const DnsConfigSchema = z.object({
   blocklist: DnsBlocklistConfigSchema.optional(),
   autoRegisterVirtHosts: z.boolean().default(true).optional(),
   autoRegisterK3sIngresses: z.boolean().default(true).optional(),
+  logQueries: z.boolean().default(false).optional(),
 });
 export type DnsConfig = z.infer<typeof DnsConfigSchema>;
 
@@ -902,6 +904,97 @@ export const HighAvailabilityConfigSchema = z.object({
 });
 export type HighAvailabilityConfig = z.infer<typeof HighAvailabilityConfigSchema>;
 
+export const ObservabilityOffloadSchema = z.object({
+  enabled: z.boolean().default(false),
+  nodeId: z.string().max(128).optional(),
+  hubUrl: z.string().optional(),
+  collectorHost: z.string().optional(),
+  collectorPort: z.number().int().min(1).max(65535).default(2055),
+  ipfixTransport: z.enum(['udp', 'tcp', 'tls']).default('udp'),
+  ingestToken: z.string().optional(),
+  useHaMtls: z.boolean().default(false),
+  tlsCaCert: z.string().optional(),
+  tlsInsecureSkipVerify: z.boolean().default(false),
+  ipfix: z
+    .object({
+      enabled: z.boolean().default(true),
+      version: z.enum(['ipfix', 'netflow9']).default('ipfix'),
+      activeTimeoutSec: z.number().int().min(5).max(300).default(15),
+      samplingRate: z.number().int().min(1).max(65535).default(1),
+      interfaces: z.array(z.string()).default([]),
+      pushMetadata: z.boolean().default(true),
+    })
+    .prefault({}),
+  metrics: z
+    .object({
+      enabled: z.boolean().default(true),
+      remoteWriteUrl: z.string().optional(),
+      intervalSec: z.number().int().min(5).max(300).default(15),
+      exposeScrape: z.boolean().default(false),
+      scrapeBind: z.string().default('127.0.0.1'),
+      scrapePort: z.number().int().min(1).max(65535).default(9100),
+      scrapeToken: z.string().optional(),
+    })
+    .prefault({}),
+  logs: z
+    .object({
+      enabled: z.boolean().default(true),
+      victoriaLogsUrl: z.string().optional(),
+      flushIntervalSec: z.number().int().min(1).max(60).default(5),
+      batchSize: z.number().int().min(10).max(5000).default(256),
+      nflog: z
+        .object({
+          enabled: z.boolean().default(true),
+          group: z.number().int().min(0).max(65535).default(0),
+          rateLimitPerSec: z.number().int().min(0).max(100000).default(50),
+        })
+        .prefault({}),
+      journald: z
+        .object({
+          enabled: z.boolean().default(true),
+          units: z.array(z.string()).default([]),
+        })
+        .prefault({}),
+      suricata: z
+        .object({
+          enabled: z.boolean().default(true),
+        })
+        .prefault({}),
+      crowdsec: z
+        .object({
+          enabled: z.boolean().default(true),
+        })
+        .prefault({}),
+      keaDhcp: z
+        .object({
+          enabled: z.boolean().default(true),
+        })
+        .prefault({}),
+      unboundDns: z
+        .object({
+          enabled: z.boolean().default(false),
+        })
+        .prefault({}),
+    })
+    .prefault({}),
+  buffer: z
+    .object({
+      maxMemoryMB: z.number().int().min(4).max(256).default(24),
+      diskSpoolEnabled: z.boolean().default(false),
+      diskSpoolDir: z.string().default('/var/lib/axonwall/telemetry-spool'),
+      diskSpoolMaxMB: z.number().int().min(16).max(4096).default(256),
+    })
+    .prefault({}),
+  activeMitigation: z
+    .object({
+      acceptRemoteBlocks: z.boolean().default(false),
+      maxTtlSec: z.number().int().min(60).max(86400).default(3600),
+      protectedCidrs: z.array(z.string()).default(['127.0.0.0/8', '10.8.0.0/24']),
+    })
+    .prefault({}),
+});
+export type ObservabilityOffloadConfig = z.infer<typeof ObservabilityOffloadSchema>;
+
 export const ObservabilityConfigSchema = z.object({
   metrics: z.object({
     enabled: z.boolean().default(true),
@@ -930,6 +1023,17 @@ export const ObservabilityConfigSchema = z.object({
     username: z.string().default('admin'),
     password: z.string().optional(),
   }).default({ enabled: false, url: 'http://127.0.0.1:8123', database: 'axonwall', username: 'admin' }),
+  victoriaMetrics: z.object({
+    enabled: z.boolean().default(false),
+    url: z.string().default('http://127.0.0.1:8428'),
+    bearerToken: z.string().optional(),
+  }).optional(),
+  victoriaLogs: z.object({
+    enabled: z.boolean().default(false),
+    url: z.string().default('http://127.0.0.1:9428'),
+    bearerToken: z.string().optional(),
+  }).optional(),
+  offload: ObservabilityOffloadSchema.optional(),
   ebpfApm: z.object({
     enabled: z.boolean().default(false),
     serviceMapEnabled: z.boolean().default(true),
@@ -974,6 +1078,14 @@ export const HaProxyHostRuleSchema = z.object({
 });
 export type HaProxyHostRule = z.infer<typeof HaProxyHostRuleSchema>;
 
+export const HaProxyPathRuleSchema = z.object({
+  matchType: z.enum(['beg', 'exact']).default('beg'),
+  path: z.string().min(1),
+  methods: z.array(z.enum(['GET', 'POST', 'HEAD', 'OPTIONS'])).optional(),
+  backend: z.string().min(1),
+});
+export type HaProxyPathRule = z.infer<typeof HaProxyPathRuleSchema>;
+
 export const HaProxyFrontendSchema = z.object({
   name: z.string().min(1),
   bindPort: z.number().int().min(1).max(65535),
@@ -981,6 +1093,10 @@ export const HaProxyFrontendSchema = z.object({
   defaultBackend: z.string().min(1),
   certName: z.string().optional(),
   hostRules: z.array(HaProxyHostRuleSchema).default([]).optional(),
+  strictHost: z.string().optional(),
+  pathRules: z.array(HaProxyPathRuleSchema).optional(),
+  silentDropUnmatched: z.boolean().optional(),
+  sanitizeProxyHeaders: z.boolean().optional(),
 });
 export type HaProxyFrontend = z.infer<typeof HaProxyFrontendSchema>;
 
@@ -1024,12 +1140,25 @@ export const FreeRadiusPluginConfigSchema = z.object({
 });
 export type FreeRadiusPluginConfig = z.infer<typeof FreeRadiusPluginConfigSchema>;
 
+export const SnmpV3UserSchema = z.object({
+  username: z.string().min(1).max(64),
+  authProtocol: z.enum(['SHA', 'SHA-256', 'SHA-512']).default('SHA-256'),
+  authPassword: z.string().min(8).max(128),
+  privProtocol: z.enum(['AES', 'AES-256']).default('AES'),
+  privPassword: z.string().min(8).max(128),
+  securityLevel: z.enum(['authPriv', 'authNoPriv']).default('authPriv'),
+});
+export type SnmpV3User = z.infer<typeof SnmpV3UserSchema>;
+
 export const SnmpPluginConfigSchema = z.object({
   enabled: z.boolean().default(false),
+  version: z.enum(['v2c', 'v3']).default('v2c').optional(),
   community: z.string().default('public'),
   sysLocation: z.string().default('Axonwall Gateway'),
   sysContact: z.string().default('admin@local'),
   listenPort: z.number().int().default(161),
+  bindAddresses: z.array(z.string()).default([]).optional(),
+  v3Users: z.array(SnmpV3UserSchema).default([]).optional(),
 });
 export type SnmpPluginConfig = z.infer<typeof SnmpPluginConfigSchema>;
 
@@ -1505,6 +1634,28 @@ export const ZeroTrustConfigSchema = z.object({
 });
 export type ZeroTrustConfig = z.infer<typeof ZeroTrustConfigSchema>;
 
+export const HeadscalePortKnockSchema = z.object({
+  enabled: z.boolean().default(false),
+  protocol: z.enum(['tcp', 'udp']).default('udp'),
+  sequence: z.array(z.number().int().min(1024).max(65535)).min(2).max(5).default([41821, 52913, 38477]),
+  stepTimeoutSec: z.number().int().min(3).max(60).default(15),
+  openDurationSec: z.number().int().min(60).max(86400).default(900),
+});
+export type HeadscalePortKnock = z.infer<typeof HeadscalePortKnockSchema>;
+
+export const HeadscaleWanInviteSchema = z.object({
+  enabled: z.boolean().default(false),
+  hostname: z.string().max(253).default(''),
+  bindPort: z.number().int().min(1).max(65535).default(8443),
+  certName: z.string().max(128).default('hub'),
+  autoWindow: z.boolean().default(true),
+  requirePin: z.boolean().default(false),
+  allowedCidrs: z.array(z.string()).default([]),
+  exposeHeadscaleControl: z.boolean().default(false),
+  portKnocking: HeadscalePortKnockSchema.optional(),
+});
+export type HeadscaleWanInvite = z.infer<typeof HeadscaleWanInviteSchema>;
+
 export const HeadscaleConfigSchema = z.object({
   enabled: z.boolean().default(false),
   magicDnsDomain: z.string().default('tailnet.axonwall.local'),
@@ -1512,6 +1663,7 @@ export const HeadscaleConfigSchema = z.object({
   portalUrl: z.string().optional(),
   allowSelfRegistration: z.boolean().optional(),
   defaultKeyExpiryHours: z.number().int().min(1).max(720).optional(),
+  wanInvite: HeadscaleWanInviteSchema.optional(),
 });
 export type HeadscaleConfig = z.infer<typeof HeadscaleConfigSchema>;
 
@@ -3029,6 +3181,8 @@ export const NetFlowTlsConfigSchema = z.object({
   certPath: z.string().default(''),
   keyPath: z.string().default(''),
   caPath: z.string().default(''),
+  serverName: z.string().optional(),
+  insecureSkipVerify: z.boolean().optional(),
 });
 export type NetFlowTlsConfig = z.infer<typeof NetFlowTlsConfigSchema>;
 
@@ -3074,6 +3228,14 @@ export const NetFlowExporterProfileSchema = z.object({
   expectedFpsMin: z.number().min(0).default(0),
 });
 export type NetFlowExporterProfile = z.infer<typeof NetFlowExporterProfileSchema>;
+
+export const NetFlowMetadataSyncSchema = z.object({
+  enabled: z.boolean().default(false),
+  targetUrl: z.string().optional(),
+  apiToken: z.string().optional(),
+  intervalSec: z.number().int().min(15).max(3600).default(60),
+});
+export type NetFlowMetadataSync = z.infer<typeof NetFlowMetadataSyncSchema>;
 
 export const NetFlowSelfExportTargetSchema = z.object({
   id: z.string().min(1),
@@ -3204,6 +3366,7 @@ export const NetFlowAlertRuleSchema = z.object({
   cooldownSec: z.number().int().min(30).max(86400).default(300),
   actions: z.array(NetFlowAlertActionSchema).default(['alert_log']),
   xdpBlockTtlSec: z.number().int().min(60).max(86400).default(900),
+  remoteEdgeMitigation: z.boolean().default(false).optional(),
   webhookUrl: z.string().optional(),
 });
 export type NetFlowAlertRule = z.infer<typeof NetFlowAlertRuleSchema>;
@@ -3292,12 +3455,15 @@ const DEFAULT_NETFLOW_ALERT_RULES: NetFlowAlertRule[] = [
 
 export const NetFlowConfigSchema = z.object({
   enabled: z.boolean().default(false),
+  mode: z.enum(['collector', 'exporter', 'both']).default('both').optional(),
+  nodeId: z.string().max(128).optional(),
   listeners: z.array(NetFlowListenerSchema).default(DEFAULT_NETFLOW_LISTENERS),
   exporterProfiles: z.array(NetFlowExporterProfileSchema).default([]),
   selfExport: z
     .object({
       enabled: z.boolean().default(true),
       targets: z.array(NetFlowSelfExportTargetSchema).default(DEFAULT_NETFLOW_SELF_TARGETS),
+      metadataSync: NetFlowMetadataSyncSchema.optional(),
     })
     .default({ enabled: true, targets: DEFAULT_NETFLOW_SELF_TARGETS }),
   replicator: z

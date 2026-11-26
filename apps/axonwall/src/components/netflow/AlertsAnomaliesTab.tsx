@@ -33,6 +33,7 @@ export function AlertsAnomaliesTab({
   const [windowSec, setWindowSec] = useState('60');
   const [fqlFilter, setFqlFilter] = useState('');
   const [webhookUrl, setWebhookUrl] = useState('');
+  const [remoteEdgeMitigation, setRemoteEdgeMitigation] = useState(false);
   const [actions, setActions] = useState<NetFlowAlertRule['actions']>(['alert_log']);
   const [baselines, setBaselines] = useState<NetFlowBaselineSummarySnapshot[]>([]);
   const [loadingBase, setLoadingBase] = useState(false);
@@ -72,6 +73,7 @@ export function AlertsAnomaliesTab({
       cooldownSec: 300,
       actions: actions.length > 0 ? actions : ['alert_log'],
       xdpBlockTtlSec: 900,
+      remoteEdgeMitigation,
       webhookUrl: webhookUrl.trim() || undefined,
     };
     onUpdateDraft((prev) => {
@@ -90,6 +92,7 @@ export function AlertsAnomaliesTab({
     setName('');
     setFqlFilter('');
     setWebhookUrl('');
+    setRemoteEdgeMitigation(false);
   };
 
   return (
@@ -205,6 +208,7 @@ export function AlertsAnomaliesTab({
                 </div>
                 <div className="font-mono text-[11px] text-slate-400 mt-0.5">
                   Actions: {r.actions.join(', ')} {r.fqlFilter ? `· FQL: ${r.fqlFilter}` : ''}
+                  {r.remoteEdgeMitigation ? ' · Remote Edge XDP Block (opt-in)' : ''}
                 </div>
               </div>
               <div className="flex items-center gap-2">
@@ -333,6 +337,15 @@ export function AlertsAnomaliesTab({
                   {act}
                 </label>
               ))}
+              <label className="flex items-center gap-1.5 text-amber-300 cursor-pointer font-mono ml-2">
+                <input
+                  type="checkbox"
+                  checked={remoteEdgeMitigation}
+                  onChange={(e) => setRemoteEdgeMitigation(e.target.checked)}
+                  className="accent-amber-500"
+                />
+                remote_edge_xdp (opt-in)
+              </label>
             </div>
             <button
               type="submit"

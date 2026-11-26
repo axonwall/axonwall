@@ -1,0 +1,49 @@
+#!/usr/sbin/nft -f
+# Opt-in analytics ingest firewall rules for Axonwall K3s + ZFS Storage hosts.
+#
+# CRITICAL: NEVER issue `flush ruleset` here! K3s kube-proxy and Flannel
+# manage their own nftables/iptables-nft chains dynamically. Instead, ONLY
+# recreate `table inet k3s_host_filter` idempotently.
+
+table inet k3s_host_filter {}
+delete table inet k3s_host_filter
+
+table inet k3s_host_filter {
+    chain input {
+        type filter hook input priority 0; policy drop;
+
+        iif "lo" accept
+        ct state established,related accept
+
+        # Allow DHCPv4 / DHCPv6 client lease replies
+        udp sport 67 udp dport 68 accept
+        udp sport 547 udp dport 546 accept
+
+        ip protocol icmp accept
+        ip6 nexthdr ipv6-icmp accept
+
+        # Trust CNI bridge, Flannel overlay, and WireGuard mesh interfaces
+        iifname { "cni0", "flannel*", "wg*" } accept
+
+        # Base host admin, K8s API, and Flannel overlay ports
+        tcp dport { 22, 6443, 10250 } accept
+        udp dport { 8472, 51820, 51821 } accept
+
+        # Opt-in Axonwall Analytics ingest (HTTPS UI/VM/VL + IPFIX TLS/TCP + NetFlow/IPFIX/sFlow UDP)
+        # Restrict source CIDRs as appropriate for your management/WireGuard overlay:
+        ip saddr { 10.8.0.0/24, 10.99.0.0/24, 192.168.0.0/16 } tcp dport { 443, 3000, 4739, 8123, 8428, 9428 } accept
+        ip saddr { 10.8.0.0/24, 10.99.0.0/24, 192.168.0.0/16 } udp dport { 2055, 4739, 6343 } accept
+    }
+
+    chain forward {
+        type filter hook forward priority 0; policy drop;
+
+        ct state established,related accept
+        iifname { "cni0", "flannel*" } accept
+        oifname { "cni0", "flannel*" } accept
+    }
+
+    chain output {
+        type filter hook output priority 0; policy accept;
+    }
+}

@@ -1,0 +1,41 @@
+# Multi-stage build for Axonwall Fleet Controller & MCP Server
+FROM node:26-bookworm-slim@sha256:5df79989ed685e09f0a98019db4cebfb22fb9df1a53c0161664a011f7ff6b0f1 AS base
+ENV PNPM_HOME="/pnpm"
+ENV PATH="$PNPM_HOME:$PATH"
+RUN npm install -g pnpm@12.9.1
+
+FROM base AS builder
+WORKDIR /app
+COPY pnpm-lock.yaml pnpm-workspace.yaml package.json turbo.json tsconfig.base.json biome.json ./
+COPY packages/axonwall_lib ./packages/axonwall_lib
+COPY packages/nastymap ./packages/nastymap
+COPY packages/vigilante_lib ./packages/vigilante_lib
+COPY apps/axonwall-controller ./apps/axonwall-controller
+
+RUN pnpm install --frozen-lockfile
+RUN pnpm --filter @axonwall/lib build && pnpm --filter axonwall-controller build
+
+FROM node:26-bookworm-slim@sha256:5df79989ed685e09f0a98019db4cebfb22fb9df1a53c0161664a011f7ff6b0f1 AS runner
+WORKDIR /app
+ENV NODE_ENV=production
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    openssl \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --system --gid 1001 axonwall \
+    && useradd --system --uid 1001 --gid 1001 --no-create-home axonwall \
+    && mkdir -p /etc/axonwall /var/lib/axonwall /var/log/axonwall \
+    && chown -R 1001:1001 /etc/axonwall /var/lib/axonwall /var/log/axonwall
+
+COPY --from=builder /app/package.json ./package.json
+COPY --from=builder /app/node_modules ./node_modules
+COPY --from=builder /app/packages/axonwall_lib/package.json ./packages/axonwall_lib/package.json
+COPY --from=builder /app/packages/axonwall_lib/dist ./packages/axonwall_lib/dist
+COPY --from=builder /app/apps/axonwall-controller/package.json ./apps/axonwall-controller/package.json
+COPY --from=builder --chown=1001:1001 /app/apps/axonwall-controller/dist ./apps/axonwall-controller/dist
+
+USER axonwall
+EXPOSE 2966
+
+CMD ["node", "apps/axonwall-controller/dist/index.js"]

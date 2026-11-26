@@ -1,13 +1,11 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import {
   Activity,
   Cpu,
   Database,
-  HardDrive,
   RefreshCw,
-  Server,
   Zap,
   Layers,
   ShieldAlert,
@@ -15,18 +13,141 @@ import {
   ArrowUpRight,
   ArrowDownLeft,
 } from 'lucide-react';
+import {
+  AreaChart,
+  Area,
+  LineChart,
+  Line,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip,
+  ResponsiveContainer,
+} from 'recharts';
 import { getSystemHealthTelemetry, getHubCertStatus, type SystemHealthMetrics, type HubCertStatus } from '../../../../server/agent';
+
+interface PromPoint {
+  time: string;
+  ts: number;
+  cpu?: number;
+  memPct?: number;
+  rxKbps?: number;
+  txKbps?: number;
+  conntrack?: number;
+  rttMs?: number;
+  lossPct?: number;
+}
+
+interface NodeOption {
+  nodeId: string;
+  nodeName: string;
+  metricsOnline?: boolean;
+}
+
+const WINDOW_SECONDS: Record<string, number> = {
+  '15m': 900,
+  '1h': 3600,
+  '6h': 21600,
+  '24h': 86400,
+};
+
+function mergeSeries(
+  seriesList: Array<{ key: keyof PromPoint; result: any[]; transform?: (v: number) => number }>
+): PromPoint[] {
+  const buckets = new Map<number, PromPoint>();
+  for (const { key, result, transform } of seriesList) {
+    if (!Array.isArray(result) || result.length === 0) continue;
+    for (const s of result) {
+      const values = Array.isArray(s?.values) ? s.values : [];
+      for (const pair of values) {
+        const ts = Number(pair?.[0] ?? 0);
+        const raw = Number(pair?.[1] ?? 0);
+        if (!Number.isFinite(ts) || !Number.isFinite(raw)) continue;
+        const val = transform ? transform(raw) : raw;
+        const existing = buckets.get(ts) || {
+          ts,
+          time: new Date(ts * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        };
+        const prev = existing[key];
+        (existing as any)[key] = typeof prev === 'number' ? prev + val : val;
+        buckets.set(ts, existing);
+      }
+    }
+  }
+  return Array.from(buckets.values()).sort((a, b) => a.ts - b.ts);
+}
 
 export default function SystemHealthPage() {
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [metrics, setMetrics] = useState<SystemHealthMetrics | null>(null);
-  // B21: metrics stays null both before the first load completes and
-  // when the load fails. Track the load outcome so a failed load
-  // renders "Unknown" instead of the fake "Active" + 20%/25% bars.
   const [metricsLoaded, setMetricsLoaded] = useState(false);
-  // null = not loaded yet. The server action now distinguishes 'missing'
-  // from 'error', so a failed cert read renders an alert, not nothing.
   const [cert, setCert] = useState<HubCertStatus | null>(null);
+
+  const [nodes, setNodes] = useState<NodeOption[]>([]);
+  const [selectedNode, setSelectedNode] = useState<string>('all');
+  const [windowId, setWindowId] = useState<string>('1h');
+  const [vmSeries, setVmSeries] = useState<PromPoint[]>([]);
+  const [vmStatus, setVmStatus] = useState<{
+    configured: boolean;
+    unavailable: boolean;
+    url?: string;
+    reason?: string;
+  }>({ configured: false, unavailable: false });
+
+  const loadVmTelemetry = useCallback(async (nodeVal: string, winVal: string) => {
+    const endSec = Math.floor(Date.now() / 1000);
+    const span = WINDOW_SECONDS[winVal] || 3600;
+    const startSec = endSec - span;
+    const stepSec = Math.max(15, Math.floor(span / 60));
+    const nodeFilter = nodeVal !== 'all' ? `{node_id="${nodeVal.replace(/"/g, '')}"}` : '';
+
+    const runProm = async (query: string) => {
+      const res = await fetch('/api/v1/observability/metrics/query', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query, start: startSec, end: endSec, step: stepSec }),
+      });
+      if (!res.ok) return null;
+      const json = await res.json().catch(() => null);
+      return json?.data ?? null;
+    };
+
+    const [statusRes, cpuRes, memRes, rxRes, txRes, ctRes, rttRes, lossRes] = await Promise.all([
+      fetch('/api/v1/observability/status', { cache: 'no-store' })
+        .then((r) => (r.ok ? r.json() : null))
+        .catch(() => null),
+      runProm(`avg(axonwall_cpu_usage_percent${nodeFilter})`),
+      runProm(`avg(axonwall_mem_used_bytes${nodeFilter}) / clamp_min(avg(axonwall_mem_total_bytes${nodeFilter}), 1) * 100`),
+      runProm(`sum(rate(axonwall_net_rx_bytes_total${nodeFilter}[1m]))`),
+      runProm(`sum(rate(axonwall_net_tx_bytes_total${nodeFilter}[1m]))`),
+      runProm(`sum(axonwall_conntrack_entries${nodeFilter})`),
+      runProm(`avg(axonwall_sdwan_rtt_ms${nodeFilter})`),
+      runProm(`avg(axonwall_sdwan_packet_loss_percent${nodeFilter})`),
+    ]);
+
+    const vmEndpoint = statusRes?.endpoints?.victoriaMetrics;
+    if (cpuRes) {
+      setVmStatus({
+        configured: Boolean(cpuRes.configured),
+        unavailable: Boolean(cpuRes.unavailable),
+        url: vmEndpoint?.url,
+        reason: cpuRes.reason,
+      });
+      setVmSeries(
+        mergeSeries([
+          { key: 'cpu', result: cpuRes?.result ?? [], transform: (v) => Number(v.toFixed(1)) },
+          { key: 'memPct', result: memRes?.result ?? [], transform: (v) => Number(v.toFixed(1)) },
+          { key: 'rxKbps', result: rxRes?.result ?? [], transform: (v) => Math.round(v / 1024) },
+          { key: 'txKbps', result: txRes?.result ?? [], transform: (v) => Math.round(v / 1024) },
+          { key: 'conntrack', result: ctRes?.result ?? [], transform: (v) => Math.round(v) },
+          { key: 'rttMs', result: rttRes?.result ?? [], transform: (v) => Number(v.toFixed(2)) },
+          { key: 'lossPct', result: lossRes?.result ?? [], transform: (v) => Number(v.toFixed(1)) },
+        ])
+      );
+    } else if (vmEndpoint) {
+      setVmStatus({ configured: Boolean(vmEndpoint.configured), unavailable: true, url: vmEndpoint.url });
+    }
+  }, []);
 
   useEffect(() => {
     getSystemHealthTelemetry()
@@ -38,32 +159,41 @@ export default function SystemHealthPage() {
       .catch((err: any) =>
         setCert({ state: 'error', message: err?.message || 'Failed to load hub certificate status.' })
       );
+    fetch('/api/v1/netflow/nodes', { cache: 'no-store' })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (Array.isArray(d?.nodes)) setNodes(d.nodes);
+      })
+      .catch(() => {});
   }, []);
+
+  useEffect(() => {
+    void loadVmTelemetry(selectedNode, windowId);
+  }, [loadVmTelemetry, selectedNode, windowId]);
 
   const handleRefresh = async () => {
     setIsRefreshing(true);
     try {
-      const data = await getSystemHealthTelemetry();
-      setMetrics(data);
-    } catch {
+      const [data, certData] = await Promise.all([
+        getSystemHealthTelemetry().catch(() => null),
+        getHubCertStatus().catch((err: any) => ({
+          state: 'error' as const,
+          message: err?.message || 'Failed to load hub certificate status.',
+        })),
+        loadVmTelemetry(selectedNode, windowId),
+      ]);
+      if (data) setMetrics(data);
+      if (certData) setCert(certData);
     } finally {
       setMetricsLoaded(true);
-    }
-    try {
-      // C12: Refresh used to fetch telemetry only, so a stale cert
-      // display persisted indefinitely after first load.
-      const certData = await getHubCertStatus();
-      setCert(certData);
-    } catch (err: any) {
-      setCert({ state: 'error', message: err?.message || 'Failed to load hub certificate status.' });
-    } finally {
       setIsRefreshing(false);
     }
   };
 
+  const latestPoint = vmSeries[vmSeries.length - 1];
+
   return (
     <div className="p-8 max-w-7xl mx-auto space-y-8">
-      {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-800 pb-6">
         <div className="flex items-center gap-3">
           <div className="w-10 h-10 rounded-xl bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center text-emerald-400">
@@ -72,17 +202,39 @@ export default function SystemHealthPage() {
           <div>
             <h1 className="text-2xl font-bold text-white tracking-tight">System Health & Telemetry</h1>
             <p className="text-sm text-slate-400">
-              High-resolution time-series monitoring powered by embedded Linux cgroups and netfilter subsystem.
+              High-resolution time-series monitoring from VictoriaMetrics and local kernel subsystem telemetry.
             </p>
           </div>
         </div>
 
-        <div className="flex items-center gap-3">
-          {/* C13: the 1h/24h/7d control changed no data, no fetch, and no
-              chart — the charts were constants. No time-series query
-              exists for this page, so the control is removed rather
-              than left as a dead control that implies range-filtered
-              data. */}
+        <div className="flex flex-wrap items-center gap-2">
+          <select
+            aria-label="Filter telemetry by node"
+            value={selectedNode}
+            onChange={(e) => setSelectedNode(e.target.value)}
+            className="px-3 py-2 rounded-lg bg-slate-900 border border-slate-800 text-xs font-mono text-slate-200"
+          >
+            <option value="all">All Nodes ({nodes.length || 1})</option>
+            {nodes.map((n) => (
+              <option key={n.nodeId} value={n.nodeId}>
+                {n.nodeName || n.nodeId}
+              </option>
+            ))}
+          </select>
+          <div className="flex items-center rounded-lg bg-slate-900 border border-slate-800 p-0.5 text-xs font-mono">
+            {(['15m', '1h', '6h', '24h'] as const).map((w) => (
+              <button
+                key={w}
+                type="button"
+                onClick={() => setWindowId(w)}
+                className={`px-2.5 py-1 rounded ${
+                  windowId === w ? 'bg-emerald-600 text-white' : 'text-slate-400 hover:text-white'
+                }`}
+              >
+                {w}
+              </button>
+            ))}
+          </div>
           <button
             onClick={handleRefresh}
             className="p-2 rounded-lg bg-slate-900 border border-slate-800 text-slate-300 hover:text-white hover:bg-slate-800 transition"
@@ -94,29 +246,40 @@ export default function SystemHealthPage() {
 
       {/* KPI Status Cards */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-        {/* CPU */}
         <div className="p-5 rounded-2xl bg-slate-900 border border-slate-800 space-y-3">
           <div className="flex items-center justify-between text-slate-400">
-            <span className="text-xs font-semibold uppercase tracking-wider">CPU Utilization</span>
+            <span className="text-xs font-semibold uppercase tracking-wider">CPU Load / Utilization</span>
             <Cpu className="w-4 h-4 text-emerald-400" />
           </div>
           <div className="flex items-baseline gap-2">
             <span className="text-2xl font-bold text-white font-mono">
-              {metrics ? `${metrics.loadAvg[0].toFixed(2)}` : metricsLoaded ? 'Unknown' : '…'}
+              {typeof latestPoint?.cpu === 'number'
+                ? `${latestPoint.cpu.toFixed(1)}%`
+                : metrics
+                  ? metrics.loadAvg[0].toFixed(2)
+                  : metricsLoaded
+                    ? 'Unknown'
+                    : '…'}
             </span>
             <span className="text-xs text-emerald-400">
-              {metrics ? `${metrics.cpuCount} Cores (${metrics.arch})` : metricsLoaded ? 'Failed to load' : ''}
+              {metrics ? `${metrics.cpuCount} Cores (${metrics.arch})` : metricsLoaded ? 'VM series' : ''}
             </span>
           </div>
           <div className="w-full bg-slate-800 h-2 rounded-full overflow-hidden">
             <div
               className="bg-emerald-500 h-full rounded-full transition-all"
-              style={{ width: metrics ? `${Math.min(100, Math.round(metrics.loadAvg[0] * 25))}%` : '0%' }}
+              style={{
+                width:
+                  typeof latestPoint?.cpu === 'number'
+                    ? `${Math.min(100, Math.round(latestPoint.cpu))}%`
+                    : metrics
+                      ? `${Math.min(100, Math.round(metrics.loadAvg[0] * 25))}%`
+                      : '0%',
+              }}
             />
           </div>
         </div>
 
-        {/* Memory */}
         <div className="p-5 rounded-2xl bg-slate-900 border border-slate-800 space-y-3">
           <div className="flex items-center justify-between text-slate-400">
             <span className="text-xs font-semibold uppercase tracking-wider">Memory (RAM)</span>
@@ -124,55 +287,64 @@ export default function SystemHealthPage() {
           </div>
           <div className="flex items-baseline gap-2">
             <span className="text-2xl font-bold text-white font-mono">
-              {metrics ? `${metrics.usedMemGB} GB` : metricsLoaded ? 'Unknown' : '…'}
+              {metrics
+                ? `${metrics.usedMemGB} GB`
+                : typeof latestPoint?.memPct === 'number'
+                  ? `${latestPoint.memPct.toFixed(1)}%`
+                  : metricsLoaded
+                    ? 'Unknown'
+                    : '…'}
             </span>
             <span className="text-xs text-slate-400">
-              {metrics ? `/ ${metrics.totalMemGB} GB` : metricsLoaded ? 'Failed to load' : ''}
+              {metrics ? `/ ${metrics.totalMemGB} GB` : ''}
             </span>
           </div>
           <div className="w-full bg-slate-800 h-2 rounded-full overflow-hidden">
             <div
               className="bg-sky-500 h-full rounded-full transition-all"
-              style={{ width: metrics ? `${metrics.memPercent}%` : '0%' }}
+              style={{
+                width: metrics
+                  ? `${metrics.memPercent}%`
+                  : typeof latestPoint?.memPct === 'number'
+                    ? `${Math.min(100, Math.round(latestPoint.memPct))}%`
+                    : '0%',
+              }}
             />
           </div>
         </div>
 
-        {/* Conntrack States */}
         <div className="p-5 rounded-2xl bg-slate-900 border border-slate-800 space-y-3">
           <div className="flex items-center justify-between text-slate-400">
-            <span className="text-xs font-semibold uppercase tracking-wider">Netfilter Subsystem</span>
+            <span className="text-xs font-semibold uppercase tracking-wider">Conntrack Table</span>
             <Layers className="w-4 h-4 text-purple-400" />
           </div>
           <div className="flex items-baseline gap-2">
-            {/* C13: was a hardcoded "Active" at 100% with no measurement
-                behind it. No conntrack telemetry is wired here. */}
-            <span className="text-2xl font-bold text-slate-400">Unknown</span>
-            <span className="text-xs text-slate-500">No measurement available</span>
+            <span className="text-2xl font-bold text-white font-mono">
+              {typeof latestPoint?.conntrack === 'number' ? latestPoint.conntrack.toLocaleString() : '—'}
+            </span>
+            <span className="text-xs text-slate-400">
+              {typeof latestPoint?.conntrack === 'number' ? 'tracked flows' : 'Awaiting VM metric'}
+            </span>
           </div>
         </div>
 
-        {/* nftables Rates */}
         <div className="p-5 rounded-2xl bg-slate-900 border border-slate-800 space-y-3">
           <div className="flex items-center justify-between text-slate-400">
-            <span className="text-xs font-semibold uppercase tracking-wider">Packet Filtering</span>
+            <span className="text-xs font-semibold uppercase tracking-wider">SD-WAN RTT / Loss</span>
             <Zap className="w-4 h-4 text-amber-400" />
           </div>
           <div className="flex items-baseline gap-2">
-            {/* C13: was a hardcoded "Enforcing" at 100% with no check
-                behind it. */}
-            <span className="text-2xl font-bold text-slate-400">Unknown</span>
-            <span className="text-xs text-slate-500">No measurement available</span>
+            <span className="text-2xl font-bold text-white font-mono">
+              {typeof latestPoint?.rttMs === 'number' ? `${latestPoint.rttMs} ms` : '—'}
+            </span>
+            <span className="text-xs text-slate-400">
+              {typeof latestPoint?.lossPct === 'number' ? `${latestPoint.lossPct}% loss` : 'No probe metric'}
+            </span>
           </div>
         </div>
       </div>
 
-      {/* Network Bandwidth Gauges */}
-      {/* Hub TLS certificate (audit B-14) */}
-      {/* C12: 'missing' renders an informational card and 'error' an
-          alert — neither vanishes the way the old null did. The
-          expired-cert icon is red, not amber: the old <= 90 branch gave
-          an expired cert the amber icon, understating expiry. */}
+      {/* Hub TLS certificate */}
       {cert?.state === 'missing' && (
         <div className="p-5 rounded-2xl border space-y-2 bg-slate-900 border-slate-800">
           <div className="flex items-center justify-between text-slate-400">
@@ -192,8 +364,7 @@ export default function SystemHealthPage() {
             <ShieldAlert className="w-4 h-4 text-red-400" />
           </div>
           <div className="text-sm text-red-200">
-            Hub certificate status unknown: {cert.message} Check the certificate at
-            /etc/axonwall/certs/hub.crt — expiry warnings cannot be shown until it is readable.
+            Hub certificate status unknown: {cert.message}
           </div>
         </div>
       )}
@@ -219,89 +390,122 @@ export default function SystemHealthPage() {
             )}
           </div>
           <div className="text-sm text-slate-300">
-            Expires{' '}
-            <span className="text-white font-semibold">{new Date(cert.expiresAt).toLocaleDateString()}</span>{' '}
-            {cert.daysRemaining < 0
-              ? `(expired ${Math.abs(cert.daysRemaining)} days ago)`
-              : `(${cert.daysRemaining} days remaining)`}{' '}
-            · {cert.subject}
+            Expires <span className="text-white font-semibold">{new Date(cert.expiresAt).toLocaleDateString()}</span>{' '}
+            ({cert.daysRemaining} days remaining) · {cert.subject}
           </div>
-          {cert.daysRemaining <= 90 && (
-            <p className="text-xs text-amber-300">
-              Rotate before expiry with <span className="font-mono">axonwall-rotate-hub-cert</span> on the
-              appliance. Satellites pinned to the fleet CA are unaffected; browsers must re-trust the new
-              self-signed certificate.
-            </p>
-          )}
         </div>
       )}
 
+      {/* Time-Series Charts */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
         <div className="p-6 rounded-2xl bg-slate-900 border border-slate-800 space-y-4">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
               <ArrowDownLeft className="w-5 h-5 text-emerald-400" />
-              <h2 className="text-base font-semibold text-white">WAN Ingress Throughput</h2>
+              <h2 className="text-base font-semibold text-white">Interface Throughput (RX / TX KB/s)</h2>
             </div>
             <span className="text-xs font-mono text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded border border-emerald-500/20">
-              eth0 (WAN)
+              {selectedNode === 'all' ? 'All Nodes' : selectedNode}
             </span>
           </div>
-          {/* C13: the bars and Peak/Current/Average labels were constants
-              that never changed with the time range or with traffic. */}
-          <div className="h-44 flex items-center justify-center p-3 bg-slate-950 rounded-xl border border-slate-800/80">
-            <p className="text-xs text-slate-500 text-center">
-              Throughput history unavailable — no time-series query is wired for this page.
-            </p>
-          </div>
+          {vmSeries.length > 0 ? (
+            <div className="h-52">
+              <ResponsiveContainer width="100%" height="100%">
+                <AreaChart data={vmSeries}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" vertical={false} />
+                  <XAxis dataKey="time" tick={{ fontSize: 11, fill: '#94a3b8' }} />
+                  <YAxis tick={{ fontSize: 11, fill: '#94a3b8' }} unit=" KB/s" width={72} />
+                  <Tooltip />
+                  <Area type="monotone" dataKey="rxKbps" name="RX KB/s" stroke="#10b981" fill="#10b981" fillOpacity={0.2} />
+                  <Area type="monotone" dataKey="txKbps" name="TX KB/s" stroke="#38bdf8" fill="#38bdf8" fillOpacity={0.15} />
+                </AreaChart>
+              </ResponsiveContainer>
+            </div>
+          ) : (
+            <div className="h-52 flex items-center justify-center p-3 bg-slate-950 rounded-xl border border-slate-800/80">
+              <p className="text-xs text-slate-500 text-center">
+                {!vmStatus.configured
+                  ? 'VictoriaMetrics not configured — enable Central Analytics or Edge Offload to view historical throughput.'
+                  : vmStatus.reason || 'No throughput time-series samples found in selected window.'}
+              </p>
+            </div>
+          )}
         </div>
 
         <div className="p-6 rounded-2xl bg-slate-900 border border-slate-800 space-y-4">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
               <ArrowUpRight className="w-5 h-5 text-sky-400" />
-              <h2 className="text-base font-semibold text-white">WAN Egress Throughput</h2>
+              <h2 className="text-base font-semibold text-white">CPU, Memory &amp; SD-WAN Latency</h2>
             </div>
             <span className="text-xs font-mono text-sky-400 bg-sky-500/10 px-2 py-0.5 rounded border border-sky-500/20">
-              eth0 (WAN)
+              {windowId}
             </span>
           </div>
-          <div className="h-44 flex items-center justify-center p-3 bg-slate-950 rounded-xl border border-slate-800/80">
-            <p className="text-xs text-slate-500 text-center">
-              Throughput history unavailable — no time-series query is wired for this page.
-            </p>
-          </div>
+          {vmSeries.length > 0 ? (
+            <div className="h-52">
+              <ResponsiveContainer width="100%" height="100%">
+                <LineChart data={vmSeries}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" vertical={false} />
+                  <XAxis dataKey="time" tick={{ fontSize: 11, fill: '#94a3b8' }} />
+                  <YAxis tick={{ fontSize: 11, fill: '#94a3b8' }} width={52} />
+                  <Tooltip />
+                  <Line type="monotone" dataKey="cpu" name="CPU %" stroke="#10b981" dot={false} />
+                  <Line type="monotone" dataKey="memPct" name="RAM %" stroke="#38bdf8" dot={false} />
+                  <Line type="monotone" dataKey="rttMs" name="SD-WAN RTT ms" stroke="#f59e0b" dot={false} />
+                </LineChart>
+              </ResponsiveContainer>
+            </div>
+          ) : (
+            <div className="h-52 flex items-center justify-center p-3 bg-slate-950 rounded-xl border border-slate-800/80">
+              <p className="text-xs text-slate-500 text-center">
+                {!vmStatus.configured
+                  ? 'VictoriaMetrics not configured — enable Central Analytics or Edge Offload to view CPU/RAM/SD-WAN history.'
+                  : vmStatus.reason || 'No system metric samples found in selected window.'}
+              </p>
+            </div>
+          )}
         </div>
       </div>
 
-      {/* Embedded VictoriaMetrics Configuration */}
+      {/* VictoriaMetrics Backend Status */}
       <div className="p-6 rounded-2xl bg-slate-900 border border-slate-800 space-y-4">
         <div className="flex items-center justify-between">
           <div>
             <h2 className="text-base font-semibold text-white">VictoriaMetrics Engine Status</h2>
             <p className="text-xs text-slate-400">
-              Slim single-node time-series database configured for local retention and Prometheus-compatible scraping.
+              Prometheus Remote-Write &amp; PromQL backend for edge routers and satellites.
             </p>
           </div>
-          {/* C13: was a hardcoded "OK" badge that asserted the service
-              healthy without checking it. */}
-          <span className="px-3 py-1 bg-slate-800 text-slate-400 border border-slate-700 rounded-lg text-xs font-medium">
-            Status unknown (not checked)
+          <span
+            className={`px-3 py-1 rounded-lg text-xs font-medium border ${
+              vmStatus.configured && !vmStatus.unavailable
+                ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
+                : vmStatus.configured
+                  ? 'bg-amber-500/15 text-amber-300 border-amber-500/30'
+                  : 'bg-slate-800 text-slate-400 border-slate-700'
+            }`}
+          >
+            {vmStatus.configured && !vmStatus.unavailable
+              ? 'Connected'
+              : vmStatus.configured
+                ? 'Degraded / Unreachable'
+                : 'Not configured'}
           </span>
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4 font-mono text-xs">
           <div className="p-4 rounded-xl bg-slate-950 border border-slate-800">
-            <span className="text-slate-500 block mb-1">PROMETHEUS ENDPOINT</span>
-            <span className="text-white font-semibold">http://127.0.0.1:9090/metrics</span>
+            <span className="text-slate-500 block mb-1">VICTORIAMETRICS URL</span>
+            <span className="text-white font-semibold">{vmStatus.url || 'Unconfigured'}</span>
           </div>
           <div className="p-4 rounded-xl bg-slate-950 border border-slate-800">
-            <span className="text-slate-500 block mb-1">DATA RETENTION</span>
-            <span className="text-slate-400 font-semibold">Unknown</span>
+            <span className="text-slate-500 block mb-1">QUERY WINDOW</span>
+            <span className="text-slate-200 font-semibold">{windowId}</span>
           </div>
           <div className="p-4 rounded-xl bg-slate-950 border border-slate-800">
-            <span className="text-slate-500 block mb-1">SCRAPE INTERVAL</span>
-            <span className="text-slate-400 font-semibold">Unknown</span>
+            <span className="text-slate-500 block mb-1">NODES REPORTING</span>
+            <span className="text-slate-200 font-semibold">{nodes.length}</span>
           </div>
         </div>
       </div>

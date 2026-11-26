@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { callAgentApiDetailed } from './agent-client';
 import { getStateDir } from './dev-paths';
 
 export type HeadscaleInviteMode = 'onboard' | 'reset';
@@ -20,6 +21,9 @@ interface StoredInviteRecord {
   status: HeadscaleInviteStatus;
   redeemedAt?: string;
   revokedAt?: string;
+  pinSalt?: string;
+  pinHash?: string;
+  failedPinAttempts?: number;
 }
 
 export interface PublicInviteRecord {
@@ -31,11 +35,14 @@ export interface PublicInviteRecord {
   expiresAt: string;
   createdBy: string;
   createStarterKey: boolean;
+  requiresPin: boolean;
   status: HeadscaleInviteStatus;
   effectiveStatus: HeadscaleInviteEffectiveStatus;
   redeemedAt?: string;
   revokedAt?: string;
 }
+
+export const MAX_PIN_ATTEMPTS = 5;
 
 const VALID_USERNAME_RE = /^[a-z][a-z0-9_-]{0,31}$/;
 const RESERVED_USERNAMES = new Set([
@@ -114,6 +121,10 @@ function hashInviteToken(rawToken: string): string {
   return crypto.createHash('sha256').update(rawToken).digest('hex');
 }
 
+function hashInvitePin(pin: string, saltHex: string): string {
+  return crypto.scryptSync(pin, saltHex, 32).toString('hex');
+}
+
 function constantTimeHashMatch(a: string, b: string): boolean {
   if (!a || !b) return false;
   const bufA = Buffer.from(a, 'utf8');
@@ -131,9 +142,16 @@ function computeEffectiveStatus(record: StoredInviteRecord, now = Date.now()): H
 }
 
 function toPublicInvite(record: StoredInviteRecord, now = Date.now()): PublicInviteRecord {
-  const { tokenHash: _omit, ...rest } = record;
+  const {
+    tokenHash: _omitTokenHash,
+    pinSalt: _omitPinSalt,
+    pinHash: _omitPinHash,
+    failedPinAttempts: _omitPinAttempts,
+    ...rest
+  } = record;
   return {
     ...rest,
+    requiresPin: Boolean(record.pinHash && record.pinSalt),
     effectiveStatus: computeEffectiveStatus(record, now),
   };
 }
@@ -177,9 +195,10 @@ export async function createHeadscaleInvite(params: {
   displayName?: string;
   mode?: HeadscaleInviteMode;
   createStarterKey?: boolean;
+  requirePin?: boolean;
   expiryHours?: number;
   createdBy: string;
-}): Promise<{ invite: PublicInviteRecord; rawToken: string }> {
+}): Promise<{ invite: PublicInviteRecord; rawToken: string; invitePin?: string }> {
   const username = validateInviteUsername(params.username);
   const mode: HeadscaleInviteMode = params.mode === 'reset' ? 'reset' : 'onboard';
   const rawDisplay = (params.displayName || '').trim();
@@ -203,6 +222,15 @@ export async function createHeadscaleInvite(params: {
     }
   }
 
+  let invitePin: string | undefined;
+  let pinSalt: string | undefined;
+  let pinHash: string | undefined;
+  if (params.requirePin) {
+    invitePin = String(crypto.randomInt(100000, 1000000));
+    pinSalt = crypto.randomBytes(16).toString('hex');
+    pinHash = hashInvitePin(invitePin, pinSalt);
+  }
+
   const rawToken = crypto.randomBytes(24).toString('base64url');
   const record: StoredInviteRecord = {
     id: crypto.randomUUID(),
@@ -215,6 +243,7 @@ export async function createHeadscaleInvite(params: {
     createdBy: params.createdBy || 'admin',
     createStarterKey,
     status: 'pending',
+    ...(pinSalt && pinHash ? { pinSalt, pinHash, failedPinAttempts: 0 } : {}),
   };
 
   records.push(record);
@@ -223,6 +252,7 @@ export async function createHeadscaleInvite(params: {
   return {
     invite: toPublicInvite(record, now.getTime()),
     rawToken,
+    ...(invitePin ? { invitePin } : {}),
   };
 }
 
@@ -275,7 +305,8 @@ export function previewHeadscaleInvite(rawToken: string): {
 
 export async function consumeHeadscaleInvite<T>(
   rawToken: string,
-  provisionFn: (invite: PublicInviteRecord) => Promise<T>
+  provisionFn: (invite: PublicInviteRecord) => Promise<T>,
+  options?: { pin?: string }
 ): Promise<{ invite: PublicInviteRecord; result: T }> {
   const token = String(rawToken || '').trim();
   if (!token || token.length < 16 || token.length > 256) {
@@ -318,6 +349,34 @@ export async function consumeHeadscaleInvite<T>(
       throw err;
     }
 
+    if (rec.pinHash && rec.pinSalt) {
+      const submittedPin = String(options?.pin ?? '').trim();
+      const pinMatches =
+        /^\d{6}$/.test(submittedPin) &&
+        constantTimeHashMatch(rec.pinHash, hashInvitePin(submittedPin, rec.pinSalt));
+      if (!pinMatches) {
+        const nextAttempts = (rec.failedPinAttempts ?? 0) + 1;
+        rec.failedPinAttempts = nextAttempts;
+        if (nextAttempts >= MAX_PIN_ATTEMPTS) {
+          rec.status = 'revoked';
+          rec.revokedAt = new Date().toISOString();
+          writeInviteStore(records);
+          const err = new Error('Invite revoked after too many invalid PIN attempts');
+          (err as any).code = 'REVOKED';
+          (err as any).statusCode = 410;
+          throw err;
+        }
+        writeInviteStore(records);
+        const remaining = MAX_PIN_ATTEMPTS - nextAttempts;
+        const err = new Error(
+          `Invalid or missing 6-digit invite PIN (${remaining} attempt${remaining === 1 ? '' : 's'} remaining)`
+        );
+        (err as any).code = 'INVALID_PIN';
+        (err as any).statusCode = 403;
+        throw err;
+      }
+    }
+
     const publicBefore = toPublicInvite(rec);
     const result = await provisionFn(publicBefore);
 
@@ -344,5 +403,33 @@ export async function consumeHeadscaleInvite<T>(
     };
   } finally {
     redeemingHashes.delete(targetHash);
+  }
+}
+
+export function getActivePendingInviteWindow(now = Date.now()): {
+  pendingCount: number;
+  latestExpiresAt: string | null;
+} {
+  let pendingCount = 0;
+  let maxExpMs = 0;
+  for (const rec of readInviteStore()) {
+    if (computeEffectiveStatus(rec, now) !== 'pending') continue;
+    pendingCount += 1;
+    const expMs = Date.parse(rec.expiresAt);
+    if (Number.isFinite(expMs) && expMs > maxExpMs) {
+      maxExpMs = expMs;
+    }
+  }
+  return {
+    pendingCount,
+    latestExpiresAt: maxExpMs > 0 ? new Date(maxExpMs).toISOString() : null,
+  };
+}
+
+export async function syncHeadscaleWanWindow(): Promise<void> {
+  try {
+    await callAgentApiDetailed('/v1/vpn/headscale/wan-window/sync', 'POST', {}, 2500);
+  } catch {
+    // Best-effort sync; periodic ticker & post-apply reconciliation also keep nftables in sync.
   }
 }

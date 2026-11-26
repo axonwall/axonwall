@@ -170,4 +170,52 @@ describe('NetFlow / IPFIX / sFlow Collector Compiler & FQL', () => {
     expect(csv).toContain('10.80.0.25');
     expect(buildTcpdumpFilter(flow)).toBe('tcp and host 10.80.0.25 and host 1.1.1.1 and port 443');
   });
+
+  it('resolves exporter-only mode when observability.offload is enabled and opens zero local collector ports', () => {
+    const state = DesiredStateSchema.parse({
+      system: { hostname: 'checkpoint1' },
+      interfaces: [
+        { name: 'wan', device: 'eth0', type: 'dhcp', role: 'wan', enabled: true },
+        { name: 'lan', device: 'eth1', type: 'static', role: 'lan', enabled: true, ipv4Address: '10.60.0.1/24' },
+      ],
+      observability: {
+        offload: {
+          enabled: true,
+          nodeId: 'checkpoint1',
+          hubUrl: 'https://10.8.0.10:2966',
+          collectorHost: '10.8.0.10',
+          collectorPort: 4739,
+          ipfixTransport: 'tls',
+          ingestToken: 'axw_svc_edge',
+          ipfix: {
+            enabled: true,
+            version: 'ipfix',
+            activeTimeoutSec: 20,
+            samplingRate: 1,
+            interfaces: ['eth0'],
+            pushMetadata: true,
+          },
+        },
+      },
+    });
+
+    const bundle = compileNetFlowBundle(state);
+    expect(bundle.enabled).toBe(true);
+    expect(bundle.mode).toBe('exporter');
+    expect(bundle.nodeId).toBe('checkpoint1');
+    expect(bundle.summary.listenersCount).toBe(0);
+    expect(bundle.config.listeners.every((l) => !l.enabled)).toBe(true);
+    expect(bundle.config.selfExport.targets.some((t) => t.id === 'local-loopback-ipfix')).toBe(false);
+    const offloadTarget = bundle.config.selfExport.targets.find((t) => t.id === 'edge-offload-ipfix');
+    expect(offloadTarget).toBeDefined();
+    expect(offloadTarget?.host).toBe('10.8.0.10');
+    expect(offloadTarget?.port).toBe(4739);
+    expect(offloadTarget?.transport).toBe('tls');
+    expect(bundle.config.selfExport.metadataSync?.enabled).toBe(true);
+    expect(bundle.config.selfExport.metadataSync?.targetUrl).toBe('https://10.8.0.10:2966/api/v1/netflow/metadata-sync');
+
+    const nft = compileNftables(state);
+    expect(nft.nftScript).not.toContain('comment "netflow-');
+    expect(nft.files.some((f) => f.path === '/etc/axonwall/managed/netflow_config.json')).toBe(true);
+  });
 });

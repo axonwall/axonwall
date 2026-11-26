@@ -1,0 +1,263 @@
+{{- if .Values.collector.enabled }}
+{{- $fullname := include "axonwall-analytics.fullname" . -}}
+{{- $ns := include "axonwall-analytics.namespace" . -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $fullname }}-collector-config
+  namespace: {{ $ns }}
+  labels:
+    {{- include "axonwall-analytics.labels" . | nindent 4 }}
+data:
+  netflow_config.json: |
+    {
+      "enabled": true,
+      "mode": "collector",
+      "listeners": [
+        { "id": "k3s-netflow-udp", "name": "NetFlow/IPFIX UDP", "protocol": "auto", "transport": "udp", "bind": "0.0.0.0", "port": {{ .Values.collector.ports.netflowUdp }}, "enabled": true },
+        { "id": "k3s-ipfix-udp", "name": "IPFIX Standard UDP", "protocol": "ipfix", "transport": "udp", "bind": "0.0.0.0", "port": {{ .Values.collector.ports.ipfixUdp }}, "enabled": true },
+        { "id": "k3s-ipfix-tcp", "name": "IPFIX Persistent TCP", "protocol": "ipfix", "transport": "tcp", "bind": "0.0.0.0", "port": {{ .Values.collector.ports.ipfixTls }}, "enabled": true },
+        { "id": "k3s-sflow-udp", "name": "sFlow v5 UDP", "protocol": "sflow5", "transport": "udp", "bind": "0.0.0.0", "port": {{ .Values.collector.ports.sflowUdp }}, "enabled": true }
+      ],
+      "selfExport": { "enabled": false, "targets": [] },
+      "storage": {
+        "mode": "{{ if .Values.clickhouse.enabled }}clickhouse{{ else }}local{{ end }}",
+        "retentionDays": {{ .Values.clickhouse.retention.rawDays }},
+        "rollupDays": {{ .Values.clickhouse.retention.rollupDays }},
+        "clickhouse": {
+          "enabled": {{ .Values.clickhouse.enabled }},
+          "url": "http://{{ $fullname }}-clickhouse:8123",
+          "database": {{ .Values.clickhouse.database | quote }},
+          "table": "netflow_flows",
+          "username": {{ .Values.clickhouse.username | quote }}
+        }
+      }
+    }
+  observability_config.json: |
+    {
+      "enabled": true,
+      "victoriaMetrics": {
+        "enabled": {{ .Values.victoriametrics.enabled }},
+        "url": "http://{{ $fullname }}-vm:8428"
+      },
+      "victoriaLogs": {
+        "enabled": {{ .Values.victorialogs.enabled }},
+        "url": "http://{{ $fullname }}-vl:9428"
+      },
+      "offload": {
+        "enabled": false
+      }
+    }
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ $fullname }}-collector-state
+  namespace: {{ $ns }}
+  labels:
+    {{- include "axonwall-analytics.labels" . | nindent 4 }}
+spec:
+  accessModes: ["ReadWriteOnce"]
+  {{- if .Values.storageClass }}
+  storageClassName: {{ .Values.storageClass | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.collector.persistence.stateSize | quote }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $fullname }}-collector
+  namespace: {{ $ns }}
+  labels:
+    {{- include "axonwall-analytics.labels" . | nindent 4 }}
+    app.kubernetes.io/component: collector
+spec:
+  replicas: {{ .Values.collector.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: collector
+  template:
+    metadata:
+      labels:
+        {{- include "axonwall-analytics.labels" . | nindent 8 }}
+        app.kubernetes.io/component: collector
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        runAsGroup: 1001
+        fsGroup: 1001
+        fsGroupChangePolicy: OnRootMismatch
+      containers:
+        - name: axonwalld
+          image: "{{ .Values.collector.axonwalld.image.repository }}:{{ .Values.collector.axonwalld.image.tag }}"
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          args:
+            - "--mode=collector"
+            - "--socket"
+            - "/run/axonwall/agent.sock"
+            - "--bundle-dir"
+            - "/var/lib/axonwall/bundles"
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          env:
+            - name: AXONWALL_MODE
+              value: "collector"
+            - name: AXONWALL_COLLECTOR_ONLY
+              value: "1"
+            - name: AXONWALL_ETC_DIR
+              value: "/etc/axonwall"
+            - name: AXONWALL_STATE_DIR
+              value: "/var/lib/axonwall"
+            - name: AXONWALL_AGENT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "axonwall-analytics.secretName" . }}
+                  key: agent-token
+            - name: CLICKHOUSE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "axonwall-analytics.secretName" . }}
+                  key: clickhouse-password
+          ports:
+            - name: netflow-udp
+              containerPort: {{ .Values.collector.ports.netflowUdp }}
+              protocol: UDP
+            - name: ipfix-udp
+              containerPort: {{ .Values.collector.ports.ipfixUdp }}
+              protocol: UDP
+            - name: ipfix-tcp
+              containerPort: {{ .Values.collector.ports.ipfixTls }}
+              protocol: TCP
+            - name: sflow-udp
+              containerPort: {{ .Values.collector.ports.sflowUdp }}
+              protocol: UDP
+          resources:
+            {{- toYaml .Values.collector.axonwalld.resources | nindent 12 }}
+          volumeMounts:
+            - name: runtime-sock
+              mountPath: /run/axonwall
+            - name: collector-state
+              mountPath: /var/lib/axonwall
+            - name: collector-config
+              mountPath: /etc/axonwall/managed
+              readOnly: true
+        {{- if .Values.collector.ui.enabled }}
+        - name: axonwall-ui
+          image: "{{ .Values.collector.ui.image.repository }}:{{ .Values.collector.ui.image.tag }}"
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          env:
+            - name: NODE_ENV
+              value: "production"
+            - name: AXONWALL_AGENT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "axonwall-analytics.secretName" . }}
+                  key: agent-token
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "axonwall-analytics.secretName" . }}
+                  key: jwt-secret
+            - name: AGENT_SOCKET
+              value: "/run/axonwall/agent.sock"
+            - name: AGENT_API_SOCKET
+              value: "/run/axonwall/agent-api.sock"
+            - name: AXONWALL_ETC_DIR
+              value: "/etc/axonwall"
+            - name: AXONWALL_STATE_DIR
+              value: "/var/lib/axonwall"
+            - name: CLICKHOUSE_URL
+              value: "http://{{ $fullname }}-clickhouse:8123"
+            - name: CLICKHOUSE_USER
+              value: {{ .Values.clickhouse.username | quote }}
+            - name: CLICKHOUSE_DB
+              value: {{ .Values.clickhouse.database | quote }}
+            - name: CLICKHOUSE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "axonwall-analytics.secretName" . }}
+                  key: clickhouse-password
+            - name: VICTORIAMETRICS_URL
+              value: "http://{{ $fullname }}-vm:8428"
+            - name: VICTORIALOGS_URL
+              value: "http://{{ $fullname }}-vl:9428"
+            {{- if .Values.controller.enabled }}
+            - name: CONTROLLER_URL
+              value: "http://127.0.0.1:{{ .Values.controller.port }}"
+            {{- end }}
+          ports:
+            - name: ui
+              containerPort: {{ .Values.collector.ports.ui }}
+              protocol: TCP
+          resources:
+            {{- toYaml .Values.collector.ui.resources | nindent 12 }}
+          volumeMounts:
+            - name: runtime-sock
+              mountPath: /run/axonwall
+            - name: collector-state
+              mountPath: /var/lib/axonwall
+            - name: collector-config
+              mountPath: /etc/axonwall/managed
+              readOnly: true
+        {{- end }}
+        {{- if .Values.controller.enabled }}
+        - name: axonwall-controller
+          image: "{{ .Values.controller.image.repository }}:{{ .Values.controller.image.tag }}"
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          env:
+            - name: NODE_ENV
+              value: "production"
+            - name: CONTROLLER_PORT
+              value: {{ .Values.controller.port | quote }}
+            - name: AXONWALL_AGENT_API_SOCK
+              value: "/run/axonwall/agent-api.sock"
+            - name: AXONWALL_VM_IMPORT_URL
+              value: "http://{{ $fullname }}-vm:8428/api/v1/import/prometheus"
+            - name: AXONWALL_VL_INSERT_URL
+              value: "http://{{ $fullname }}-vl:9428/insert/jsonline"
+            - name: AXONWALL_AGENT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "axonwall-analytics.secretName" . }}
+                  key: agent-token
+            - name: AXONWALL_OBSERVABILITY_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "axonwall-analytics.secretName" . }}
+                  key: observability-ingest-token
+          ports:
+            - name: controller
+              containerPort: {{ .Values.controller.port }}
+              protocol: TCP
+          resources:
+            {{- toYaml .Values.controller.resources | nindent 12 }}
+          volumeMounts:
+            - name: runtime-sock
+              mountPath: /run/axonwall
+            - name: collector-state
+              mountPath: /var/lib/axonwall
+        {{- end }}
+      volumes:
+        - name: runtime-sock
+          emptyDir: {}
+        - name: collector-state
+          persistentVolumeClaim:
+            claimName: {{ $fullname }}-collector-state
+        - name: collector-config
+          configMap:
+            name: {{ $fullname }}-collector-config
+{{- end }}

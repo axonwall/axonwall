@@ -424,8 +424,16 @@ function redactDesiredStateForSession(state: DesiredState, session: UserSession)
     redacted.observability.s3.secretAccessKey = MASK;
   }
 
-  if (redacted.snmp?.community) {
-    redacted.snmp.community = MASK;
+  if (redacted.snmp) {
+    if (redacted.snmp.community) {
+      redacted.snmp.community = MASK;
+    }
+    if (Array.isArray(redacted.snmp.v3Users)) {
+      for (const u of redacted.snmp.v3Users) {
+        if (u?.authPassword) u.authPassword = MASK;
+        if (u?.privPassword) u.privPassword = MASK;
+      }
+    }
   }
 
   if (Array.isArray(redacted.virt?.vms)) {
@@ -569,8 +577,24 @@ function redactDesiredStateForSession(state: DesiredState, session: UserSession)
   if (redacted.ha?.mtlsKey) {
     redacted.ha.mtlsKey = MASK;
   }
-  if (redacted.observability?.alerting?.webhookUrl) {
-    redacted.observability.alerting.webhookUrl = MASK;
+  if (redacted.observability) {
+    if (redacted.observability.alerting?.webhookUrl) {
+      redacted.observability.alerting.webhookUrl = MASK;
+    }
+    if (redacted.observability.victoriaMetrics?.bearerToken) {
+      redacted.observability.victoriaMetrics.bearerToken = MASK;
+    }
+    if (redacted.observability.victoriaLogs?.bearerToken) {
+      redacted.observability.victoriaLogs.bearerToken = MASK;
+    }
+    if (redacted.observability.offload) {
+      if (redacted.observability.offload.ingestToken) {
+        redacted.observability.offload.ingestToken = MASK;
+      }
+      if (redacted.observability.offload.metrics?.scrapeToken) {
+        redacted.observability.offload.metrics.scrapeToken = MASK;
+      }
+    }
   }
   if (redacted.fleet && Array.isArray(redacted.fleet.nodes)) {
     for (const node of redacted.fleet.nodes) {
@@ -1014,9 +1038,66 @@ export async function applyDesiredState(
     normalizedState.netflow?.reporting?.webhookUrl === '********' ||
     normalizedState.netflow?.enrichment?.geoipCityDownloadUrl === '********' ||
     normalizedState.netflow?.enrichment?.geoipAsnDownloadUrl === '********' ||
-    Boolean(normalizedState.netflow?.alerting?.rules?.some((r) => r.webhookUrl === '********'));
+    Boolean(normalizedState.netflow?.alerting?.rules?.some((r) => r.webhookUrl === '********')) ||
+    normalizedState.observability?.clickhouse?.password === '********' ||
+    normalizedState.observability?.alerting?.webhookUrl === '********' ||
+    normalizedState.observability?.victoriaMetrics?.bearerToken === '********' ||
+    normalizedState.observability?.victoriaLogs?.bearerToken === '********' ||
+    normalizedState.observability?.offload?.ingestToken === '********' ||
+    normalizedState.observability?.offload?.metrics?.scrapeToken === '********' ||
+    normalizedState.snmp?.community === '********' ||
+    Boolean(
+      normalizedState.snmp?.v3Users?.some(
+        (u) => u.authPassword === '********' || u.privPassword === '********'
+      )
+    );
   if (needsExistingForMask) {
     const existing = await getDesiredStateInternal().catch(() => null);
+    if (normalizedState.observability && existing?.observability) {
+      if (normalizedState.observability.clickhouse?.password === '********') {
+        normalizedState.observability.clickhouse.password = existing.observability.clickhouse?.password;
+      }
+      if (normalizedState.observability.alerting?.webhookUrl === '********') {
+        normalizedState.observability.alerting.webhookUrl = existing.observability.alerting?.webhookUrl;
+      }
+      if (normalizedState.observability.victoriaMetrics?.bearerToken === '********') {
+        normalizedState.observability.victoriaMetrics.bearerToken =
+          existing.observability.victoriaMetrics?.bearerToken;
+      }
+      if (normalizedState.observability.victoriaLogs?.bearerToken === '********') {
+        normalizedState.observability.victoriaLogs.bearerToken =
+          existing.observability.victoriaLogs?.bearerToken;
+      }
+      if (normalizedState.observability.offload) {
+        if (normalizedState.observability.offload.ingestToken === '********') {
+          normalizedState.observability.offload.ingestToken =
+            existing.observability.offload?.ingestToken;
+        }
+        if (normalizedState.observability.offload.metrics?.scrapeToken === '********') {
+          normalizedState.observability.offload.metrics.scrapeToken =
+            existing.observability.offload?.metrics?.scrapeToken;
+        }
+      }
+    }
+    if (normalizedState.snmp && existing?.snmp) {
+      if (normalizedState.snmp.community === '********' && existing.snmp.community) {
+        normalizedState.snmp.community = existing.snmp.community;
+      }
+      if (normalizedState.snmp.v3Users?.length) {
+        const existingUsers = new Map((existing.snmp.v3Users ?? []).map((u) => [u.username, u]));
+        normalizedState.snmp.v3Users = normalizedState.snmp.v3Users.map((u) => ({
+          ...u,
+          authPassword:
+            u.authPassword === '********'
+              ? existingUsers.get(u.username)?.authPassword || u.authPassword
+              : u.authPassword,
+          privPassword:
+            u.privPassword === '********'
+              ? existingUsers.get(u.username)?.privPassword || u.privPassword
+              : u.privPassword,
+        }));
+      }
+    }
     if (normalizedState.netbox) {
       if (normalizedState.netbox.apiToken === '********') {
         normalizedState.netbox.apiToken = existing?.netbox?.apiToken;
@@ -8958,4 +9039,36 @@ export async function triggerNetFlowGeoIPUpdateAction(): Promise<{ success: bool
     success: false,
     error: res.kind === 'http_error' ? res.message : 'axonwalld daemon unreachable.',
   };
+}
+
+export async function getObservabilityStatusAction(): Promise<{
+  daemonDown: boolean;
+  daemon?: Record<string, unknown> | null;
+  error?: string;
+}> {
+  const session = await getSession();
+  assertActionPermitted(session);
+  const res = await callAgentApiDetailed<Record<string, unknown>>('/v1/observability/status', 'GET', undefined, 5_000);
+  if (res.kind === 'ok') {
+    return { daemonDown: false, daemon: res.data };
+  }
+  return {
+    daemonDown: res.kind !== 'http_error',
+    daemon: null,
+    error: res.kind === 'http_error' ? res.message : 'axonwalld daemon unreachable.',
+  };
+}
+
+export async function getNetFlowNodesAction(): Promise<
+  Array<{ nodeId: string; nodeName: string; exporterIp: string; flowsCount: number; lastSeenMs: number }>
+> {
+  const session = await getSession();
+  assertActionPermitted(session);
+  const res = await callAgentApiDetailed<{
+    nodes?: Array<{ nodeId: string; nodeName: string; exporterIp: string; flowsCount: number; lastSeenMs: number }>;
+  }>('/v1/netflow/nodes', 'GET', undefined, 5_000);
+  if (res.kind === 'ok' && Array.isArray(res.data?.nodes)) {
+    return res.data.nodes;
+  }
+  return [];
 }

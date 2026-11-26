@@ -191,6 +191,39 @@ if [ -f deploy/k8s/helm/axonwall/values.yaml ]; then
   sed -i -E "s/tag: \"v[0-9]+\.[0-9]+\.[0-9]+\"/tag: \"${TAG_NAME}\"/g" deploy/k8s/helm/axonwall/values.yaml
 fi
 
+if [ -f deploy/k8s/helm/axonwall-analytics/Chart.yaml ]; then
+  sed -i -E "s/^version: [0-9]+\.[0-9]+\.[0-9]+/version: ${NEW_VERSION}/" deploy/k8s/helm/axonwall-analytics/Chart.yaml
+  sed -i -E "s/^appVersion: \"?[0-9]+\.[0-9]+\.[0-9]+\"?/appVersion: \"${NEW_VERSION}\"/" deploy/k8s/helm/axonwall-analytics/Chart.yaml
+fi
+
+if [ -f deploy/k8s/helm/axonwall-analytics/values.yaml ]; then
+  node -e "
+    const fs = require('fs');
+    const p = 'deploy/k8s/helm/axonwall-analytics/values.yaml';
+    const lines = fs.readFileSync(p, 'utf8').split('\n');
+    let inAxonwallRepo = false;
+    for (let i = 0; i < lines.length; i++) {
+      if (/repository:\s*ghcr\.io\/axonwall\//.test(lines[i])) {
+        inAxonwallRepo = true;
+      } else if (/repository:/.test(lines[i])) {
+        inAxonwallRepo = false;
+      } else if (inAxonwallRepo && /\btag:\s*\"?v[0-9]+\.[0-9]+\.[0-9]+\"?/.test(lines[i])) {
+        lines[i] = lines[i].replace(/tag:\s*\"?v[0-9]+\.[0-9]+\.[0-9]+\"?/, 'tag: \"${TAG_NAME}\"');
+        inAxonwallRepo = false;
+      }
+    }
+    fs.writeFileSync(p, lines.join('\n'));
+  "
+fi
+
+if [ -f packaging/k3s-storage/02-axonwall-analytics-helmchart.yaml.example ]; then
+  sed -i -E "s/^([[:space:]]*version: \")[0-9]+\.[0-9]+\.[0-9]+(\")/\1${NEW_VERSION}\2/" packaging/k3s-storage/02-axonwall-analytics-helmchart.yaml.example
+fi
+
+if [ -f packaging/k3s-storage/axonwall-k3s-firstboot ]; then
+  sed -i -E "s/^([[:space:]]*version: \")[0-9]+\.[0-9]+\.[0-9]+(\")/\1${NEW_VERSION}\2/" packaging/k3s-storage/axonwall-k3s-firstboot
+fi
+
 echo ">> Staging and creating git commit..."
 git add VERSION \
         package.json \

@@ -1,0 +1,125 @@
+{{- $fullname := include "axonwall-analytics.fullname" . -}}
+{{- $ns := include "axonwall-analytics.namespace" . -}}
+{{- if .Values.clickhouse.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $fullname }}-clickhouse
+  namespace: {{ $ns }}
+  labels:
+    {{- include "axonwall-analytics.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: clickhouse
+  ports:
+    - name: http
+      port: 8123
+      targetPort: http
+    - name: native
+      port: 9000
+      targetPort: native
+---
+{{- end }}
+{{- if .Values.victoriametrics.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $fullname }}-vm
+  namespace: {{ $ns }}
+  labels:
+    {{- include "axonwall-analytics.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: victoriametrics
+  ports:
+    - name: http
+      port: 8428
+      targetPort: http
+---
+{{- end }}
+{{- if .Values.victorialogs.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $fullname }}-vl
+  namespace: {{ $ns }}
+  labels:
+    {{- include "axonwall-analytics.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: victorialogs
+  ports:
+    - name: http
+      port: 9428
+      targetPort: http
+---
+{{- end }}
+{{- if .Values.collector.enabled }}
+{{- if .Values.collector.ui.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $fullname }}-ui
+  namespace: {{ $ns }}
+  labels:
+    {{- include "axonwall-analytics.labels" . | nindent 4 }}
+  {{- with .Values.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.service.uiType }}
+  selector:
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: collector
+  ports:
+    - name: http
+      port: {{ .Values.collector.ports.ui }}
+      targetPort: ui
+    {{- if .Values.controller.enabled }}
+    - name: controller
+      port: {{ .Values.controller.port }}
+      targetPort: controller
+    {{- end }}
+---
+{{- end }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $fullname }}-ingest
+  namespace: {{ $ns }}
+  labels:
+    {{- include "axonwall-analytics.labels" . | nindent 4 }}
+  {{- with .Values.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.service.ingestType }}
+  selector:
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: collector
+  ports:
+    - name: netflow-udp
+      port: {{ .Values.collector.ports.netflowUdp }}
+      targetPort: netflow-udp
+      protocol: UDP
+    - name: ipfix-udp
+      port: {{ .Values.collector.ports.ipfixUdp }}
+      targetPort: ipfix-udp
+      protocol: UDP
+    - name: ipfix-tcp
+      port: {{ .Values.collector.ports.ipfixTls }}
+      targetPort: ipfix-tcp
+      protocol: TCP
+    - name: sflow-udp
+      port: {{ .Values.collector.ports.sflowUdp }}
+      targetPort: sflow-udp
+      protocol: UDP
+{{- end }}

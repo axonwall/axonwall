@@ -628,6 +628,114 @@ export async function GET() {
           },
         },
       },
+      '/observability/status': {
+        get: {
+          summary: 'Get edge-to-central observability offload status and spool telemetry',
+          responses: {
+            '200': { description: 'Observability offload status and buffer counters' },
+          },
+        },
+      },
+      '/observability/metrics': {
+        get: {
+          summary: 'Query centralized VictoriaMetrics time-series via PromQL',
+          responses: {
+            '200': { description: 'PromQL instant or range query result' },
+          },
+        },
+      },
+      '/observability/logs': {
+        get: {
+          summary: 'Query centralized VictoriaLogs streams via LogsQL',
+          responses: {
+            '200': { description: 'Matching structured security/firewall log records' },
+          },
+        },
+      },
+      '/observability/ingest': {
+        post: {
+          summary: 'Ingest scoped service-token edge telemetry batches into the central hub',
+          responses: {
+            '200': { description: 'Telemetry batch accepted' },
+          },
+        },
+      },
+      '/observability/mitigate': {
+        post: {
+          summary: 'Push bounded-TTL XDP mitigation block to an opt-in edge appliance',
+          responses: {
+            '200': { description: 'Edge XDP mitigation applied' },
+          },
+        },
+      },
+      '/netflow/nodes': {
+        get: {
+          summary: 'List reporting multi-node edge firewalls & IPFIX exporters with freshness status',
+          responses: {
+            '200': { description: 'Node directory and heartbeat states' },
+          },
+        },
+      },
+      '/netflow/metadata-sync': {
+        post: {
+          summary: 'Push edge node interface & host metadata to central NetFlow analytics',
+          responses: {
+            '200': { description: 'Metadata synchronized' },
+          },
+        },
+      },
+      '/system/service-tokens': {
+        get: {
+          summary: 'List redacted scoped service tokens (axw_svc_*)',
+          responses: {
+            '200': { description: 'Service token metadata list' },
+          },
+        },
+        post: {
+          summary: 'Mint a new scrypt-hashed scoped service token (axw_svc_*)',
+          responses: {
+            '200': { description: 'Created service token (secret shown once)' },
+          },
+        },
+      },
+      '/system/service-tokens/{id}': {
+        delete: {
+          summary: 'Revoke a scoped service token by ID',
+          responses: {
+            '200': { description: 'Service token revoked' },
+          },
+        },
+      },
+      '/vpn/mesh/wan-window': {
+        get: {
+          summary: 'Inspect Headscale WAN invite window state, expiry, and knocked-in IPs',
+          responses: {
+            '200': { description: 'Live WAN invite window state' },
+          },
+        },
+        post: {
+          summary: 'Sync, manually arm, or close the nftables WAN invite window gate',
+          responses: {
+            '200': { description: 'Updated WAN invite window state' },
+          },
+        },
+      },
+      '/vpn/mesh/invites/preview': {
+        get: {
+          summary: 'Preview validity and PIN requirement of a single-use Headscale invite token',
+          responses: {
+            '200': { description: 'Invite preview state' },
+          },
+        },
+      },
+      '/vpn/mesh/invites/redeem': {
+        post: {
+          summary: 'Redeem a single-use Headscale invite (with optional 6-digit PIN) and provision starter key',
+          responses: {
+            '200': { description: 'Activated user account, setup key, and connect command' },
+          },
+        },
+      },
     },
   };
 

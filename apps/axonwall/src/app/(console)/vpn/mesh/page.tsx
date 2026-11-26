@@ -6,9 +6,12 @@ import {
   AlertCircle,
   Check,
   CheckCircle2,
+  ChevronDown,
+  ChevronUp,
   Copy,
   Edit3,
   ExternalLink,
+  Globe,
   Key,
   Link2,
   Loader2,
@@ -58,7 +61,27 @@ interface InviteRow {
   expiresAt: string;
   createdBy: string;
   createStarterKey: boolean;
+  requiresPin?: boolean;
   effectiveStatus: 'pending' | 'redeemed' | 'revoked' | 'expired';
+}
+
+interface WanWindowStatus {
+  enabled: boolean;
+  autoWindow: boolean;
+  bindPort: number;
+  hostname: string;
+  windowOpen: boolean;
+  reason: 'disabled' | 'always_open' | 'pending_invites' | 'manual_arm' | 'closed';
+  pendingCount: number;
+  pendingExpiresAt?: string;
+  manualExpiresAt?: string;
+  effectiveExpiresAt?: string;
+  portKnockingEnabled: boolean;
+  knockProtocol?: string;
+  knockSequence?: number[];
+  knockedIPs: string[];
+  lastSyncError?: string;
+  daemonAvailable?: boolean;
 }
 
 export default function MeshVpnPage() {
@@ -75,6 +98,24 @@ export default function MeshVpnPage() {
   const [defaultKeyExpiryHours, setDefaultKeyExpiryHours] = useState(24);
   const [savingConfig, setSavingConfig] = useState(false);
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
+
+  // WAN Invite Access & Port Knocking config + live window status
+  const [wanSectionOpen, setWanSectionOpen] = useState(false);
+  const [wanInviteEnabled, setWanInviteEnabled] = useState(false);
+  const [wanHostname, setWanHostname] = useState('');
+  const [wanBindPort, setWanBindPort] = useState(8443);
+  const [wanCertName, setWanCertName] = useState('hub');
+  const [wanAutoWindow, setWanAutoWindow] = useState(true);
+  const [wanRequirePin, setWanRequirePin] = useState(false);
+  const [wanAllowedCidrsInput, setWanAllowedCidrsInput] = useState('');
+  const [wanExposeControl, setWanExposeControl] = useState(false);
+  const [knockEnabled, setKnockEnabled] = useState(false);
+  const [knockProtocol, setKnockProtocol] = useState<'udp' | 'tcp'>('udp');
+  const [knockSequenceInput, setKnockSequenceInput] = useState('41821, 52913, 38477');
+  const [knockStepTimeoutSec, setKnockStepTimeoutSec] = useState(15);
+  const [knockOpenDurationSec, setKnockOpenDurationSec] = useState(900);
+  const [wanWindowStatus, setWanWindowStatus] = useState<WanWindowStatus | null>(null);
+  const [updatingWanWindow, setUpdatingWanWindow] = useState(false);
 
   // People & Invites data
   const [headscaleAvailable, setHeadscaleAvailable] = useState(true);
@@ -103,6 +144,7 @@ export default function MeshVpnPage() {
   const [inviteMode, setInviteMode] = useState<'onboard' | 'reset'>('onboard');
   const [inviteExpiryHours, setInviteExpiryHours] = useState(48);
   const [starterKeyEnabled, setStarterKeyEnabled] = useState(true);
+  const [inviteRequirePin, setInviteRequirePin] = useState(false);
   const [autoGeneratePassword, setAutoGeneratePassword] = useState(true);
   const [directPassword, setDirectPassword] = useState('');
   const [submittingPerson, setSubmittingPerson] = useState(false);
@@ -152,6 +194,27 @@ export default function MeshVpnPage() {
           setPortalUrl(state.headscale.portalUrl || '');
           setAllowSelfRegistration(state.headscale.allowSelfRegistration !== false);
           setDefaultKeyExpiryHours(state.headscale.defaultKeyExpiryHours ?? 24);
+          const wan = state.headscale.wanInvite;
+          if (wan) {
+            setWanInviteEnabled(Boolean(wan.enabled));
+            setWanSectionOpen(Boolean(wan.enabled));
+            setWanHostname(wan.hostname || '');
+            setWanBindPort(wan.bindPort ?? 8443);
+            setWanCertName(wan.certName || 'hub');
+            setWanAutoWindow(wan.autoWindow !== false);
+            setWanRequirePin(Boolean(wan.requirePin));
+            setWanAllowedCidrsInput((wan.allowedCidrs ?? []).join(', '));
+            setWanExposeControl(Boolean(wan.exposeHeadscaleControl));
+            if (wan.portKnocking) {
+              setKnockEnabled(Boolean(wan.portKnocking.enabled));
+              setKnockProtocol(wan.portKnocking.protocol === 'tcp' ? 'tcp' : 'udp');
+              if (wan.portKnocking.sequence?.length) {
+                setKnockSequenceInput(wan.portKnocking.sequence.join(', '));
+              }
+              setKnockStepTimeoutSec(wan.portKnocking.stepTimeoutSec ?? 15);
+              setKnockOpenDurationSec(wan.portKnocking.openDurationSec ?? 900);
+            }
+          }
         }
       })
       .catch(() => {});
@@ -165,6 +228,16 @@ export default function MeshVpnPage() {
         }
       })
       .catch(() => {});
+  }, []);
+
+  const fetchWanWindowStatus = useCallback(async () => {
+    try {
+      const res = await fetch('/api/v1/vpn/mesh/wan-window', { cache: 'no-store' });
+      const json = await res.json().catch(() => null);
+      if (res.ok && json?.status === 'ok' && json.data) {
+        setWanWindowStatus(json.data);
+      }
+    } catch {}
   }, []);
 
   const fetchTabData = useCallback(async () => {
@@ -186,6 +259,7 @@ export default function MeshVpnPage() {
         setUsers(d.headscaleUsers || []);
         setEligibleExisting(d.eligibleExistingUsers || []);
         setInvites(d.invites || []);
+        void fetchWanWindowStatus();
       } else if (activeTab === 'machines') {
         const [mRes, uRes] = await Promise.all([
           fetch('/api/v1/vpn/mesh/machines', { cache: 'no-store' }),
@@ -220,7 +294,7 @@ export default function MeshVpnPage() {
     } finally {
       setLoading(false);
     }
-  }, [activeTab]);
+  }, [activeTab, fetchWanWindowStatus]);
 
   useEffect(() => {
     void fetchTabData();
@@ -242,6 +316,16 @@ export default function MeshVpnPage() {
       const cleanDomain = magicDnsDomain.trim() || 'tailnet.axonwall.local';
       const cleanServerUrl = serverUrl.trim().replace(/\/+$/, '');
       const cleanPortalUrl = portalUrl.trim().replace(/\/+$/, '');
+      const parsedAllowedCidrs = wanAllowedCidrsInput
+        .split(/[,\s]+/)
+        .map((c) => c.trim())
+        .filter(Boolean);
+      const parsedKnockSeq = knockSequenceInput
+        .split(/[,\s]+/)
+        .map((s) => Number.parseInt(s.trim(), 10))
+        .filter((n) => Number.isInteger(n) && n >= 1024 && n <= 65535)
+        .slice(0, 5);
+      const effectiveKnockSeq = parsedKnockSeq.length >= 2 ? parsedKnockSeq : [41821, 52913, 38477];
 
       const current = await getCurrentDesiredState();
       const nextState: DesiredState = {
@@ -253,6 +337,23 @@ export default function MeshVpnPage() {
           portalUrl: cleanPortalUrl,
           allowSelfRegistration,
           defaultKeyExpiryHours,
+          wanInvite: {
+            enabled: wanInviteEnabled,
+            hostname: wanHostname.trim().replace(/^https?:\/\//i, '').replace(/\/.*$/, '').replace(/:\d+$/, ''),
+            bindPort: Math.min(65535, Math.max(1, Math.round(Number(wanBindPort) || 8443))),
+            certName: wanCertName.trim() || 'hub',
+            autoWindow: wanAutoWindow,
+            requirePin: wanRequirePin,
+            allowedCidrs: parsedAllowedCidrs,
+            exposeHeadscaleControl: wanExposeControl,
+            portKnocking: {
+              enabled: knockEnabled,
+              protocol: knockProtocol,
+              sequence: effectiveKnockSeq,
+              stepTimeoutSec: Math.min(60, Math.max(3, Math.round(Number(knockStepTimeoutSec) || 15))),
+              openDurationSec: Math.min(86400, Math.max(60, Math.round(Number(knockOpenDurationSec) || 900))),
+            },
+          },
         },
       };
       setFullState(nextState);
@@ -283,11 +384,40 @@ export default function MeshVpnPage() {
         (res.message || 'Saved Headscale configuration to /etc/axonwall/vpn.yaml') + syncSuffix
       );
       void fetchTabData();
+      void fetchWanWindowStatus();
     } catch (err: any) {
       setFullState(prevFullState);
       setStatusMsg(`Error: ${err?.message || 'Failed to save Headscale settings'}`);
     } finally {
       setSavingConfig(false);
+    }
+  };
+
+  const handleWanWindowAction = async (action: 'arm' | 'close' | 'sync', durationSec = 1800) => {
+    setUpdatingWanWindow(true);
+    setError(null);
+    try {
+      const res = await fetch('/api/v1/vpn/mesh/wan-window', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action, durationSec }),
+      });
+      const json = await res.json().catch(() => null);
+      if (!res.ok || json?.status !== 'ok') {
+        throw new Error(json?.error || `Failed to update WAN window (${res.status})`);
+      }
+      setWanWindowStatus(json.data);
+      setStatusMsg(
+        action === 'close'
+          ? 'WAN invite manual window closed.'
+          : action === 'arm'
+            ? `WAN invite window manually armed for ${Math.round(durationSec / 60)} minutes.`
+            : 'Synced WAN invite window with active invites.'
+      );
+    } catch (err: any) {
+      setError(err?.message || 'Failed to update WAN invite window');
+    } finally {
+      setUpdatingWanWindow(false);
     }
   };
 
@@ -297,6 +427,7 @@ export default function MeshVpnPage() {
     setPersonUsername(opts?.username ?? '');
     setPersonDisplayName(opts?.displayName ?? '');
     setDirectPassword('');
+    setInviteRequirePin(wanRequirePin);
     setPersonModalError(null);
     setOnboardedResult(null);
     setIsAddPersonOpen(true);
@@ -316,6 +447,7 @@ export default function MeshVpnPage() {
               mode: inviteMode,
               expiryHours: inviteExpiryHours,
               createStarterKey: starterKeyEnabled,
+              requirePin: inviteRequirePin,
             }
           : {
               action: 'create_direct',
@@ -748,6 +880,316 @@ export default function MeshVpnPage() {
         </div>
       </div>
 
+      {/* WAN Invite Access & Port Knocking */}
+      <div className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden text-xs">
+        <div className="px-5 py-3.5 flex flex-wrap items-center justify-between gap-3 bg-slate-900/90">
+          <button
+            type="button"
+            onClick={() => setWanSectionOpen((prev) => !prev)}
+            className="flex items-center gap-2.5 text-left cursor-pointer"
+          >
+            <Globe className="w-4 h-4 text-emerald-400 shrink-0" />
+            <div>
+              <div className="font-semibold text-white flex flex-wrap items-center gap-2">
+                <span>WAN Invite Access &amp; Port Knocking</span>
+                <span
+                  className={`px-2 py-0.5 rounded-full text-[11px] font-medium border ${
+                    !wanInviteEnabled
+                      ? 'bg-slate-800 text-slate-400 border-slate-700'
+                      : wanWindowStatus?.windowOpen
+                        ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
+                        : 'bg-cyan-500/15 text-cyan-300 border-cyan-500/30'
+                  }`}
+                >
+                  {!wanInviteEnabled
+                    ? 'WAN Invite Disabled'
+                    : wanWindowStatus?.reason === 'always_open'
+                      ? `Open (Always On :${wanBindPort})`
+                      : wanWindowStatus?.windowOpen
+                        ? `Window Open (${wanWindowStatus.pendingCount} pending · :${wanWindowStatus.bindPort})`
+                        : 'Window Closed (0 open ports)'}
+                </span>
+                {wanInviteEnabled && knockEnabled && (
+                  <span className="px-2 py-0.5 rounded-full text-[11px] font-medium bg-amber-500/15 text-amber-300 border border-amber-500/30">
+                    Knock Required
+                  </span>
+                )}
+              </div>
+              <p className="text-[11px] text-slate-400 mt-0.5">
+                Exposes only <code className="text-emerald-400 font-mono">/invite/*</code> via SNI-pinned HAProxy while blocking{' '}
+                <code className="text-slate-300 font-mono">/login</code> and <code className="text-slate-300 font-mono">/vpn</code> from WAN. Remember to click <strong>Save Settings</strong> after edits.
+              </p>
+            </div>
+            {wanSectionOpen ? (
+              <ChevronUp className="w-4 h-4 text-slate-400 shrink-0" />
+            ) : (
+              <ChevronDown className="w-4 h-4 text-slate-400 shrink-0" />
+            )}
+          </button>
+
+          <div className="flex flex-wrap items-center gap-2">
+            {wanInviteEnabled && wanAutoWindow && (
+              <>
+                <button
+                  type="button"
+                  disabled={updatingWanWindow}
+                  onClick={() => void handleWanWindowAction('arm', 1800)}
+                  className="px-2.5 py-1 bg-slate-950 hover:bg-slate-800 disabled:opacity-50 border border-slate-700 rounded text-emerald-300 cursor-pointer"
+                >
+                  Open Window (30m)
+                </button>
+                <button
+                  type="button"
+                  disabled={updatingWanWindow}
+                  onClick={() => void handleWanWindowAction('close', 0)}
+                  className="px-2.5 py-1 bg-slate-950 hover:bg-slate-800 disabled:opacity-50 border border-slate-700 rounded text-amber-300 cursor-pointer"
+                >
+                  Close Now
+                </button>
+              </>
+            )}
+            <button
+              type="button"
+              onClick={() => {
+                const next = !wanInviteEnabled;
+                setWanInviteEnabled(next);
+                if (next) setWanSectionOpen(true);
+              }}
+              className={`px-2.5 py-1 rounded font-medium border cursor-pointer transition ${
+                wanInviteEnabled
+                  ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
+                  : 'bg-slate-800 text-slate-400 border-slate-700'
+              }`}
+            >
+              {wanInviteEnabled ? 'Enabled' : 'Disabled'}
+            </button>
+          </div>
+        </div>
+
+        {wanSectionOpen && (
+          <div className="p-5 pt-4 border-t border-slate-800 space-y-4">
+            {wanWindowStatus && wanInviteEnabled && (
+              <div className="bg-slate-950 border border-slate-800 rounded-lg px-3.5 py-2.5 flex flex-wrap items-center justify-between gap-3 text-[11px] text-slate-300">
+                <div className="flex flex-wrap items-center gap-4">
+                  <span>
+                    Active Pending Invites: <strong className="text-white">{wanWindowStatus.pendingCount}</strong>
+                  </span>
+                  {wanWindowStatus.effectiveExpiresAt && (
+                    <span>
+                      Auto-Closes: <strong className="text-emerald-300">{new Date(wanWindowStatus.effectiveExpiresAt).toLocaleString()}</strong>
+                    </span>
+                  )}
+                  {wanWindowStatus.portKnockingEnabled && (
+                    <span>
+                      Knocked-In IPs: <strong className="text-cyan-300">{wanWindowStatus.knockedIPs.length}</strong>
+                      {wanWindowStatus.knockedIPs.length > 0 && (
+                        <span className="text-slate-400 font-mono ml-1.5">
+                          ({wanWindowStatus.knockedIPs.slice(0, 3).join(', ')}{wanWindowStatus.knockedIPs.length > 3 ? '...' : ''})
+                        </span>
+                      )}
+                    </span>
+                  )}
+                </div>
+                {wanWindowStatus.lastSyncError && (
+                  <span className="text-amber-300">{wanWindowStatus.lastSyncError}</span>
+                )}
+              </div>
+            )}
+
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+              <div>
+                <label className="block text-[11px] font-medium text-slate-400 mb-1">
+                  Public Invite Hostname (SNI Pinned)
+                </label>
+                <input
+                  type="text"
+                  value={wanHostname}
+                  onChange={(e) => setWanHostname(e.target.value)}
+                  placeholder="join.example.com"
+                  className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-emerald-300 font-mono placeholder-slate-500 focus:outline-none focus:border-emerald-500"
+                />
+              </div>
+
+              <div>
+                <label className="block text-[11px] font-medium text-slate-400 mb-1">
+                  WAN HTTPS Bind Port
+                </label>
+                <input
+                  type="number"
+                  min={1}
+                  max={65535}
+                  value={wanBindPort}
+                  onChange={(e) => setWanBindPort(Number(e.target.value) || 8443)}
+                  className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-slate-100 font-mono focus:outline-none focus:border-emerald-500"
+                />
+              </div>
+
+              <div>
+                <label className="block text-[11px] font-medium text-slate-400 mb-1">
+                  TLS Certificate Name (/etc/axonwall/certs/&lt;name&gt;.pem)
+                </label>
+                <input
+                  type="text"
+                  value={wanCertName}
+                  onChange={(e) => setWanCertName(e.target.value)}
+                  placeholder="hub"
+                  className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-slate-100 font-mono focus:outline-none focus:border-emerald-500"
+                />
+              </div>
+
+              <div>
+                <label className="block text-[11px] font-medium text-slate-400 mb-1">
+                  Allowed Source CIDRs (optional comma list)
+                </label>
+                <input
+                  type="text"
+                  value={wanAllowedCidrsInput}
+                  onChange={(e) => setWanAllowedCidrsInput(e.target.value)}
+                  placeholder="Any IP when blank"
+                  className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-slate-200 font-mono placeholder-slate-500 focus:outline-none focus:border-emerald-500"
+                />
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+              <label className="flex items-center justify-between bg-slate-950 border border-slate-800 rounded-lg px-3.5 py-2.5 cursor-pointer">
+                <div>
+                  <span className="font-medium text-slate-200 block">Auto-Close Window (Zero Open Ports)</span>
+                  <span className="text-[11px] text-slate-400">Closes port automatically when 0 invites are pending</span>
+                </div>
+                <input
+                  type="checkbox"
+                  checked={wanAutoWindow}
+                  onChange={(e) => setWanAutoWindow(e.target.checked)}
+                  className="accent-emerald-500"
+                />
+              </label>
+
+              <label className="flex items-center justify-between bg-slate-950 border border-slate-800 rounded-lg px-3.5 py-2.5 cursor-pointer">
+                <div>
+                  <span className="font-medium text-slate-200 block">Require Out-of-Band 6-Digit PIN</span>
+                  <span className="text-[11px] text-slate-400">Default PIN gate for newly issued invites</span>
+                </div>
+                <input
+                  type="checkbox"
+                  checked={wanRequirePin}
+                  onChange={(e) => setWanRequirePin(e.target.checked)}
+                  className="accent-emerald-500"
+                />
+              </label>
+
+              <label className="flex items-center justify-between bg-slate-950 border border-slate-800 rounded-lg px-3.5 py-2.5 cursor-pointer">
+                <div>
+                  <span className="font-medium text-slate-200 block">Co-Host Headscale Control Plane</span>
+                  <span className="text-[11px] text-slate-400">
+                    Allows Tailscale client paths on this port{wanAutoWindow ? ' (blocked while window closed)' : ''}
+                  </span>
+                </div>
+                <input
+                  type="checkbox"
+                  checked={wanExposeControl}
+                  onChange={(e) => setWanExposeControl(e.target.checked)}
+                  className="accent-emerald-500"
+                />
+              </label>
+            </div>
+
+            {/* Optional Kernel-Native Port Knocking */}
+            <div className="bg-slate-950 border border-slate-800 rounded-lg p-4 space-y-3">
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <span className="font-semibold text-slate-200">
+                    Optional Stateful nftables Port Knocking
+                  </span>
+                  <p className="text-[11px] text-slate-400">
+                    Require WAN visitors to knock a stealth port sequence before the kernel accepts TLS packets to port {wanBindPort}.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setKnockEnabled(!knockEnabled)}
+                  className={`px-2.5 py-1 rounded font-medium border cursor-pointer transition ${
+                    knockEnabled
+                      ? 'bg-amber-500/15 text-amber-300 border-amber-500/30'
+                      : 'bg-slate-800 text-slate-400 border-slate-700'
+                  }`}
+                >
+                  {knockEnabled ? 'Knock Required' : 'Off'}
+                </button>
+              </div>
+
+              {knockEnabled && (
+                <div className="space-y-3 pt-2 border-t border-slate-800/80">
+                  <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+                    <div>
+                      <label className="block text-[11px] font-medium text-slate-400 mb-1">Protocol</label>
+                      <select
+                        value={knockProtocol}
+                        onChange={(e) => setKnockProtocol(e.target.value === 'tcp' ? 'tcp' : 'udp')}
+                        className="w-full bg-slate-900 border border-slate-800 rounded-lg px-3 py-1.5 text-slate-100"
+                      >
+                        <option value="udp">UDP (Stealth / Silent)</option>
+                        <option value="tcp">TCP SYN</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-[11px] font-medium text-slate-400 mb-1">
+                        Knock Port Sequence (2–5 ports)
+                      </label>
+                      <input
+                        type="text"
+                        value={knockSequenceInput}
+                        onChange={(e) => setKnockSequenceInput(e.target.value)}
+                        placeholder="41821, 52913, 38477"
+                        className="w-full bg-slate-900 border border-slate-800 rounded-lg px-3 py-1.5 text-amber-200 font-mono"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[11px] font-medium text-slate-400 mb-1">
+                        Step Timeout (3–60s)
+                      </label>
+                      <input
+                        type="number"
+                        min={3}
+                        max={60}
+                        value={knockStepTimeoutSec}
+                        onChange={(e) => setKnockStepTimeoutSec(Number(e.target.value) || 15)}
+                        className="w-full bg-slate-900 border border-slate-800 rounded-lg px-3 py-1.5 text-slate-100 font-mono"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[11px] font-medium text-slate-400 mb-1">
+                        Source Allow TTL (60–86400s)
+                      </label>
+                      <input
+                        type="number"
+                        min={60}
+                        max={86400}
+                        value={knockOpenDurationSec}
+                        onChange={(e) => setKnockOpenDurationSec(Number(e.target.value) || 900)}
+                        className="w-full bg-slate-900 border border-slate-800 rounded-lg px-3 py-1.5 text-slate-100 font-mono"
+                      />
+                    </div>
+                  </div>
+                  <div className="bg-slate-900 border border-slate-800 rounded-lg p-2.5 text-[11px]">
+                    <span className="text-slate-400 block mb-1">Client Knock Command Preview:</span>
+                    <code className="font-mono text-amber-300 break-all">
+                      {`for p in ${knockSequenceInput
+                        .split(/[,\s]+/)
+                        .map((s) => s.trim())
+                        .filter(Boolean)
+                        .join(' ')}; do ${
+                        knockProtocol === 'tcp' ? 'nc -z -w 1' : "printf 'knock' | nc -u -w 1"
+                      } ${wanHostname.trim() || '<INVITE_HOST>'} "$p" >/dev/null 2>&1 || true; sleep 0.25; done`}
+                    </code>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
+
       {/* Tabs */}
       <div className="border-b border-slate-800 flex items-center justify-between gap-4">
         <nav className="-mb-px flex space-x-6" aria-label="Tabs">
@@ -1018,6 +1460,11 @@ export default function MeshVpnPage() {
                           >
                             {inv.effectiveStatus}
                           </span>
+                          {inv.requiresPin && (
+                            <span className="ml-1.5 px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30 text-[10px]">
+                              PIN
+                            </span>
+                          )}
                         </td>
                         <td className="px-4 py-3 text-slate-400 tabular-nums">
                           {new Date(inv.expiresAt).toLocaleString()}
@@ -1432,6 +1879,45 @@ export default function MeshVpnPage() {
                   </div>
                 )}
 
+                {onboardedResult.invitePin && (
+                  <div className="bg-amber-500/10 border border-amber-500/30 rounded-lg p-3 space-y-1.5">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-semibold text-amber-200">
+                        Out-of-Band Verification PIN (Send via Separate Channel)
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => handleCopy(onboardedResult.invitePin, 'res-invite-pin')}
+                        className="shrink-0 px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-white rounded cursor-pointer"
+                      >
+                        {copiedId === 'res-invite-pin' ? 'Copied' : 'Copy PIN'}
+                      </button>
+                    </div>
+                    <div className="font-mono text-base font-bold tracking-widest text-amber-300">
+                      {onboardedResult.invitePin}
+                    </div>
+                  </div>
+                )}
+
+                {onboardedResult.knockCommands?.unix && (
+                  <div>
+                    <div className="flex items-center justify-between mb-1">
+                      <span className="text-slate-400">Port Knock Command (Run Before Opening Link)</span>
+                      <button
+                        type="button"
+                        onClick={() => handleCopy(onboardedResult.knockCommands.unix, 'res-knock-cmd')}
+                        className="text-amber-300 hover:text-amber-200 flex items-center gap-1 cursor-pointer"
+                      >
+                        {copiedId === 'res-knock-cmd' ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+                        <span>{copiedId === 'res-knock-cmd' ? 'Copied' : 'Copy Knock Cmd'}</span>
+                      </button>
+                    </div>
+                    <pre className="bg-slate-950 border border-slate-800 rounded-lg p-2.5 text-[11px] font-mono text-amber-200 whitespace-pre-wrap break-all">
+                      {onboardedResult.knockCommands.unix}
+                    </pre>
+                  </div>
+                )}
+
                 {onboardedResult.password && (
                   <div className="bg-slate-950 border border-slate-800 rounded-lg p-3 space-y-1.5">
                     <div className="flex justify-between">
@@ -1540,17 +2026,28 @@ export default function MeshVpnPage() {
                 </div>
 
                 {personFlow === 'invite' ? (
-                  <div>
-                    <label className="block text-slate-300 font-medium mb-1">Invite Expiration</label>
-                    <select
-                      value={inviteExpiryHours}
-                      onChange={(e) => setInviteExpiryHours(Number(e.target.value))}
-                      className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-sm text-white"
-                    >
-                      <option value={24}>24 hours</option>
-                      <option value={48}>48 hours</option>
-                      <option value={168}>7 days</option>
-                    </select>
+                  <div className="space-y-3">
+                    <div>
+                      <label className="block text-slate-300 font-medium mb-1">Invite Expiration</label>
+                      <select
+                        value={inviteExpiryHours}
+                        onChange={(e) => setInviteExpiryHours(Number(e.target.value))}
+                        className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-sm text-white"
+                      >
+                        <option value={24}>24 hours</option>
+                        <option value={48}>48 hours</option>
+                        <option value={168}>7 days</option>
+                      </select>
+                    </div>
+                    <label className="flex items-center gap-2 text-slate-200 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={inviteRequirePin}
+                        onChange={(e) => setInviteRequirePin(e.target.checked)}
+                        className="accent-emerald-500"
+                      />
+                      <span>Require 6-digit verification PIN (sent out-of-band)</span>
+                    </label>
                   </div>
                 ) : (
                   <div className="space-y-2">

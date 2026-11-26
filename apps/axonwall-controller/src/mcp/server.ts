@@ -40,6 +40,7 @@ import { acquireMcpLockFile, desiredStateLockPath } from './lockfile.js';
 export { desiredStateLockPath } from './lockfile.js';
 import { recordMcpAuditEntry, queryMcpAuditEntries } from './audit.js';
 import { readCanonicalConfig, writeCanonicalConfig, writeFileAtomicSync } from '../atomic-config.js';
+import { resolveControllerObservabilityTargets } from '../telemetry-bridge.js';
 
 function readAgentToken(): string {
   if (process.env.AXONWALL_AGENT_TOKEN) {
@@ -553,6 +554,20 @@ export const MCP_RESOURCES_CATALOG = [
     name: 'Libvirt XML Domain Definitions for KVM Virtual Machines',
     description:
       'Standard <domain type=\'kvm\'> Libvirt XML definitions exported for all registered KVM/QEMU virtual machines.',
+    mimeType: 'application/json',
+  },
+  {
+    uri: 'axonwall://observability/offload-status',
+    name: 'Observability & Telemetry Offload Status',
+    description:
+      'Live Edge-to-Central-Analytics offload queue depths, drop counters, last push timestamps, and configured VictoriaMetrics/VictoriaLogs/ClickHouse endpoints. Requires scope: mcp:telemetry:read.',
+    mimeType: 'application/json',
+  },
+  {
+    uri: 'axonwall://observability/nodes',
+    name: 'Multi-Node Analytics Node Directory',
+    description:
+      'All edge routers and satellites observed across ClickHouse netflow_flows and VictoriaMetrics (nodeId, nodeName, exporterIp, flow count, lastSeenMs). Requires scope: mcp:telemetry:read.',
     mimeType: 'application/json',
   },
 ];
@@ -1156,6 +1171,64 @@ export const MCP_TOOLS_CATALOG = [
       required: ['rawConfig'],
     },
   },
+  {
+    name: 'mcp_query_metrics',
+    description:
+      'Execute a PromQL instant or range query against the configured VictoriaMetrics time-series backend to inspect edge/satellite CPU, memory, interface throughput, conntrack, or SD-WAN RTT/loss metrics. Requires scope: mcp:telemetry:read.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'PromQL query expression (e.g. axonwall_up or avg_over_time(axonwall_cpu_usage_percent[5m]))' },
+        start: { type: 'number', description: 'Optional Unix timestamp (seconds) for range query start' },
+        end: { type: 'number', description: 'Optional Unix timestamp (seconds) for range query end' },
+        step: { type: 'number', default: 60, description: 'Optional range query step in seconds' },
+      },
+      required: ['query'],
+    },
+  },
+  {
+    name: 'mcp_query_logs',
+    description:
+      'Query VictoriaLogs using LogsQL across NFLOG firewall drops, journald, Suricata IDS, CrowdSec, Kea DHCP, and Unbound DNS logs. Requires scope: mcp:telemetry:read.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', default: '*', description: 'LogsQL filter string (default "*")' },
+        nodeId: { type: 'string', description: 'Optional node_id filter' },
+        source: { type: 'string', description: 'Optional source filter (nflog, journald, suricata, crowdsec, kea, unbound, satellite-firewall)' },
+        start: { type: 'string', description: 'Optional start timestamp or relative window (e.g. 1h, 24h, ISO8601)' },
+        limit: { type: 'number', default: 50, description: 'Max log entries to return (1-500)' },
+      },
+    },
+  },
+  {
+    name: 'mcp_query_historical_flows',
+    description:
+      'Query NetFlow/IPFIX flow records stored by axonwalld (in-memory ring buffer or ClickHouse netflow_flows lake) with FQL and multi-node filtering. Requires scope: mcp:telemetry:read.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        fql: { type: 'string', description: 'Optional Flow Query Language expression' },
+        nodeId: { type: 'string', description: 'Optional node_id / hostname filter' },
+        window: { type: 'string', default: '1h', description: 'Time window (e.g. 15m, 1h, 24h)' },
+        limit: { type: 'number', default: 100, description: 'Max flows to return (1-1000)' },
+      },
+    },
+  },
+  {
+    name: 'mcp_trigger_edge_mitigation',
+    description:
+      'Dispatch a bounded XDP block (respecting protected management/WireGuard anti-lockout CIDRs and max TTL caps) to the local edge node or via webhook/hub policy. Requires scope: mcp:firewall:write or mcp:traffic:blackhole.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        targetIp: { type: 'string', description: 'IPv4/IPv6 offender address to block via XDP' },
+        ttlSec: { type: 'number', default: 300, description: 'Bounded TTL in seconds (clamped by edge policy)' },
+        reason: { type: 'string', description: 'Audit reason for mitigation' },
+      },
+      required: ['targetIp', 'reason'],
+    },
+  },
 ];
 
 // ============================================================================
@@ -1193,6 +1266,8 @@ function getAllowedScopesForResourceUri(uri: string): McpScope[] {
       return ['mcp:k3s:read', 'mcp:telemetry:read'];
     case 'axonwall://nas/storage-telemetry':
       return ['mcp:nas:read', 'mcp:telemetry:read'];
+    case 'axonwall://observability/offload-status':
+    case 'axonwall://observability/nodes':
     default:
       return ['mcp:telemetry:read'];
   }
@@ -1483,6 +1558,34 @@ export async function handleMcpReadResource(
         ? res.data
         : {
             domains: [],
+            daemonDown: true,
+            error: res.data?.error || 'axonwalld unreachable',
+          };
+      break;
+    }
+
+    case 'axonwall://observability/offload-status': {
+      const res = await callAxonwalldApi('GET', '/v1/observability/status');
+      const targets = resolveControllerObservabilityTargets();
+      payload = {
+        daemonDown: !res.ok,
+        status: res.ok ? res.data : null,
+        endpoints: {
+          victoriaMetrics: Boolean(targets.vmImportUrl),
+          victoriaLogs: Boolean(targets.vlInsertUrl),
+          collectorIngest: targets.collectorIngestUrl || 'unix-socket',
+        },
+        ...(res.ok ? {} : { error: res.data?.error || 'axonwalld unreachable' }),
+      };
+      break;
+    }
+
+    case 'axonwall://observability/nodes': {
+      const res = await callAxonwalldApi('GET', '/v1/netflow/nodes');
+      payload = res.ok
+        ? res.data
+        : {
+            nodes: [],
             daemonDown: true,
             error: res.data?.error || 'axonwalld unreachable',
           };
@@ -3883,6 +3986,187 @@ export async function handleMcpCallTool(
             ),
           },
         ],
+      };
+    }
+
+    case 'mcp_query_metrics': {
+      const scopeErr = requireScope('mcp:telemetry:read');
+      if (scopeErr) return scopeErr;
+
+      const promql = typeof args.query === 'string' ? args.query.trim() : '';
+      if (!promql) {
+        return {
+          isError: true,
+          content: [{ type: 'text', text: JSON.stringify({ success: false, error: 'Missing required parameter: query' }) }],
+        };
+      }
+      const targets = resolveControllerObservabilityTargets();
+      if (!targets.vmImportUrl) {
+        return {
+          content: [{ type: 'text', text: JSON.stringify({ configured: false, error: 'VictoriaMetrics endpoint not configured' }) }],
+        };
+      }
+      const vmBase = targets.vmImportUrl.replace(/\/api\/v1\/import\/prometheus\/?$/, '');
+      const hasRange = typeof args.start === 'number' && typeof args.end === 'number';
+      const qs = new URLSearchParams({ query: promql });
+      if (hasRange) {
+        qs.set('start', String(Math.floor(args.start as number)));
+        qs.set('end', String(Math.floor(args.end as number)));
+        qs.set('step', String(typeof args.step === 'number' ? Math.max(5, Math.floor(args.step)) : 60));
+      }
+      const endpoint = `${vmBase}/api/v1/${hasRange ? 'query_range' : 'query'}?${qs.toString()}`;
+      let resultPayload: unknown;
+      try {
+        const res = await fetch(endpoint, {
+          headers: targets.bearerToken ? { Authorization: `Bearer ${targets.bearerToken}` } : undefined,
+          signal: AbortSignal.timeout(5000),
+        });
+        resultPayload = res.ok ? await res.json() : { status: 'error', httpStatus: res.status };
+      } catch (err: any) {
+        resultPayload = { status: 'error', error: err?.message || 'VictoriaMetrics unreachable' };
+      }
+      recordMcpAuditEntry({
+        keyId: env.key.id,
+        keyName: env.key.name,
+        agentType: env.key.agentType,
+        clientIp: env.clientIp,
+        toolName,
+        requiredScope: 'mcp:telemetry:read',
+        decision: 'allowed',
+        paramsSummary: { query: promql, hasRange },
+      });
+      return { content: [{ type: 'text', text: JSON.stringify(resultPayload, null, 2) }] };
+    }
+
+    case 'mcp_query_logs': {
+      const scopeErr = requireScope('mcp:telemetry:read');
+      if (scopeErr) return scopeErr;
+
+      const targets = resolveControllerObservabilityTargets();
+      if (!targets.vlInsertUrl) {
+        return {
+          content: [{ type: 'text', text: JSON.stringify({ configured: false, entries: [], error: 'VictoriaLogs endpoint not configured' }) }],
+        };
+      }
+      const vlBase = targets.vlInsertUrl.replace(/\/insert\/jsonline\/?$/, '');
+      const clauses: string[] = [];
+      if (typeof args.query === 'string' && args.query.trim()) clauses.push(args.query.trim());
+      if (typeof args.nodeId === 'string' && args.nodeId.trim()) {
+        clauses.push(`node_id:"${args.nodeId.trim().replace(/"/g, '\\"')}"`);
+      }
+      if (typeof args.source === 'string' && args.source.trim()) {
+        clauses.push(`source:"${args.source.trim().replace(/"/g, '\\"')}"`);
+      }
+      const logsql = clauses.length > 0 ? clauses.join(' ') : '*';
+      const limit = typeof args.limit === 'number' ? Math.min(500, Math.max(1, Math.floor(args.limit))) : 50;
+      const form = new URLSearchParams({ query: logsql, limit: String(limit) });
+      if (typeof args.start === 'string' && args.start.trim()) form.set('start', args.start.trim());
+
+      let outPayload: unknown;
+      try {
+        const res = await fetch(`${vlBase}/select/logsql/query`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded',
+            ...(targets.bearerToken ? { Authorization: `Bearer ${targets.bearerToken}` } : {}),
+          },
+          body: form.toString(),
+          signal: AbortSignal.timeout(5000),
+        });
+        if (!res.ok) {
+          outPayload = { status: 'error', httpStatus: res.status, entries: [] };
+        } else {
+          const rawText = await res.text();
+          const entries = rawText
+            .split('\n')
+            .map((l) => l.trim())
+            .filter(Boolean)
+            .map((l) => {
+              try { return JSON.parse(l); } catch { return { _msg: l }; }
+            });
+          outPayload = { status: 'ok', query: logsql, count: entries.length, entries };
+        }
+      } catch (err: any) {
+        outPayload = { status: 'error', entries: [], error: err?.message || 'VictoriaLogs unreachable' };
+      }
+      recordMcpAuditEntry({
+        keyId: env.key.id,
+        keyName: env.key.name,
+        agentType: env.key.agentType,
+        clientIp: env.clientIp,
+        toolName,
+        requiredScope: 'mcp:telemetry:read',
+        decision: 'allowed',
+        paramsSummary: { query: logsql, limit },
+      });
+      return { content: [{ type: 'text', text: JSON.stringify(outPayload, null, 2) }] };
+    }
+
+    case 'mcp_query_historical_flows': {
+      const scopeErr = requireScope('mcp:telemetry:read');
+      if (scopeErr) return scopeErr;
+
+      let fql = typeof args.fql === 'string' ? args.fql.trim() : '';
+      if (typeof args.nodeId === 'string' && args.nodeId.trim()) {
+        const nodeTerm = `node:"${args.nodeId.trim().replace(/"/g, '')}"`;
+        fql = fql ? `${fql} && ${nodeTerm}` : nodeTerm;
+      }
+      const limit = typeof args.limit === 'number' ? Math.min(1000, Math.max(1, Math.floor(args.limit))) : 100;
+      const windowStr = typeof args.window === 'string' && args.window.trim() ? args.window.trim() : '1h';
+      const res = await callAxonwalldApi('POST', '/v1/netflow/query', { fql, window: windowStr, limit });
+      recordMcpAuditEntry({
+        keyId: env.key.id,
+        keyName: env.key.name,
+        agentType: env.key.agentType,
+        clientIp: env.clientIp,
+        toolName,
+        requiredScope: 'mcp:telemetry:read',
+        decision: 'allowed',
+        paramsSummary: { fql, window: windowStr, limit },
+      });
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify(res.ok ? res.data : { flows: [], note: res.data?.error }, null, 2),
+          },
+        ],
+      };
+    }
+
+    case 'mcp_trigger_edge_mitigation': {
+      const { matched, err: scopeErr } = requireAnyScope(['mcp:firewall:write', 'mcp:traffic:blackhole']);
+      if (scopeErr) return scopeErr;
+
+      const targetIp = typeof args.targetIp === 'string' ? args.targetIp.trim() : '';
+      const reason = typeof args.reason === 'string' ? args.reason.trim() : 'MCP remote edge mitigation';
+      const ttlSec = typeof args.ttlSec === 'number' ? Math.max(60, Math.min(3600, Math.floor(args.ttlSec))) : 300;
+      const parsed = parseIpOrCidr(targetIp);
+      if (!parsed || !parsed.isSingleHost) {
+        return {
+          isError: true,
+          content: [{ type: 'text', text: JSON.stringify({ success: false, error: `Invalid host targetIp: '${targetIp}'` }) }],
+        };
+      }
+      const res = await callAxonwalldApi('POST', '/v1/observability/mitigate', {
+        targetIp: parsed.address,
+        ttlSec,
+        reason,
+      });
+      recordMcpAuditEntry({
+        keyId: env.key.id,
+        keyName: env.key.name,
+        agentType: env.key.agentType,
+        clientIp: env.clientIp,
+        toolName,
+        requiredScope: matched!,
+        decision: res.ok ? 'allowed' : 'denied',
+        denialReason: res.ok ? undefined : res.data?.error || 'mitigation rejected',
+        paramsSummary: { targetIp: parsed.address, ttlSec, reason },
+      });
+      return {
+        isError: !res.ok,
+        content: [{ type: 'text', text: JSON.stringify(res.data, null, 2) }],
       };
     }
 

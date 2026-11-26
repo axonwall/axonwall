@@ -1,0 +1,146 @@
+namespaceOverride: ""
+
+storageClass: "axonwall-zfs-local"
+
+global:
+  imagePullPolicy: IfNotPresent
+
+clickhouse:
+  enabled: true
+  image:
+    repository: clickhouse/clickhouse-server
+    tag: "24.8-alpine"
+  database: "axonwall"
+  username: "admin"
+  password: ""
+  retention:
+    rawDays: 30
+    rollupDays: 180
+  persistence:
+    enabled: true
+    size: 100Gi
+  resources:
+    requests:
+      cpu: "500m"
+      memory: "2Gi"
+    limits:
+      cpu: "4000m"
+      memory: "8Gi"
+
+victoriametrics:
+  enabled: true
+  image:
+    repository: victoriametrics/victoria-metrics
+    tag: "v1.156.0"
+  retentionPeriod: "90d"
+  persistence:
+    enabled: true
+    size: 50Gi
+  resources:
+    requests:
+      cpu: "250m"
+      memory: "512Mi"
+    limits:
+      cpu: "2000m"
+      memory: "4Gi"
+
+victorialogs:
+  enabled: true
+  image:
+    repository: victoriametrics/victoria-logs
+    tag: "v1.24.0-victorialogs"
+  retentionPeriod: "30d"
+  persistence:
+    enabled: true
+    size: 50Gi
+  resources:
+    requests:
+      cpu: "250m"
+      memory: "512Mi"
+    limits:
+      cpu: "2000m"
+      memory: "4Gi"
+
+collector:
+  enabled: true
+  replicas: 1
+  axonwalld:
+    image:
+      repository: ghcr.io/axonwall/axonwalld
+      tag: "v0.16.1"
+    resources:
+      requests:
+        cpu: "200m"
+        memory: "256Mi"
+      limits:
+        cpu: "2000m"
+        memory: "2Gi"
+  ui:
+    enabled: true
+    image:
+      repository: ghcr.io/axonwall/axonwall-ui
+      tag: "v0.16.1"
+    resources:
+      requests:
+        cpu: "200m"
+        memory: "256Mi"
+      limits:
+        cpu: "1000m"
+        memory: "1Gi"
+  ports:
+    ui: 3000
+    ipfixTls: 4739
+    netflowUdp: 2055
+    ipfixUdp: 4739
+    sflowUdp: 6343
+  persistence:
+    stateSize: 10Gi
+
+controller:
+  enabled: false
+  image:
+    repository: ghcr.io/axonwall/axonwall-controller
+    tag: "v0.16.1"
+  port: 2966
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "192Mi"
+    limits:
+      cpu: "500m"
+      memory: "512Mi"
+
+librenms:
+  enabled: false
+  image:
+    repository: librenms/librenms
+    tag: "latest"
+  timezone: "UTC"
+  persistence:
+    size: 20Gi
+  resources:
+    requests:
+      cpu: "200m"
+      memory: "512Mi"
+    limits:
+      cpu: "1000m"
+      memory: "2Gi"
+
+auth:
+  # Leave blank to auto-generate deterministic secrets at Helm install, or inject sealed secrets via existingSecret
+  existingSecret: ""
+  agentToken: ""
+  jwtSecret: ""
+  observabilityIngestToken: ""
+
+service:
+  uiType: ClusterIP
+  ingestType: ClusterIP
+  annotations: {}
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  host: "analytics.axonwall.local"
+  tlsSecretName: ""

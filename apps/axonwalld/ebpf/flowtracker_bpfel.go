@@ -14,25 +14,27 @@ import (
 )
 
 type FlowTrackerFlow6Key struct {
-	_        structs.HostLayout
-	SrcIp6   [16]uint8
-	DstIp6   [16]uint8
-	SrcPort  uint16
-	DstPort  uint16
-	VlanId   uint16
-	Protocol uint8
-	Pad      uint8
+	_              structs.HostLayout
+	SrcIp6         [16]uint8
+	DstIp6         [16]uint8
+	SrcPort        uint16
+	DstPort        uint16
+	VlanId         uint16
+	Protocol       uint8
+	Pad            uint8
+	IngressIfindex uint32
 }
 
 type FlowTrackerFlowKey struct {
-	_        structs.HostLayout
-	SrcIp    uint32
-	DstIp    uint32
-	SrcPort  uint16
-	DstPort  uint16
-	VlanId   uint16
-	Protocol uint8
-	Pad      uint8
+	_              structs.HostLayout
+	SrcIp          uint32
+	DstIp          uint32
+	SrcPort        uint16
+	DstPort        uint16
+	VlanId         uint16
+	Protocol       uint8
+	Pad            uint8
+	IngressIfindex uint32
 }
 
 type FlowTrackerFlowVal struct {

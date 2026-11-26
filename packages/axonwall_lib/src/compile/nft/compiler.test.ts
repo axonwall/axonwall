@@ -621,5 +621,44 @@ describe('Axonwall nftables Compiler — Device Validation and Flowtable Handlin
     expect(keaParsed.Dhcp4.subnet4).toHaveLength(1);
     expect(keaParsed.Dhcp4.subnet4[0].subnet).toBe('192.168.10.0/24');
   });
+
+  it('emits WireGuard wg0 tunnel input and forward rules in Firewall Mode (both default-accept and custom rule chains)', () => {
+    const baseState = DesiredStateSchema.parse({
+      interfaces: [
+        { name: 'wan', device: 'eth0', type: 'dhcp', role: 'wan', enabled: true },
+        { name: 'lan', device: 'eth1', type: 'static', role: 'lan', enabled: true, ipv4Address: '10.60.0.1/24' },
+      ],
+      wireguard: { enabled: true, listenPort: 51820, address: '10.8.0.1/24', peers: [] },
+    });
+
+    const defaultCompiled = compileNftables(baseState);
+    expect(defaultCompiled.nftScript).toContain('udp dport 51820 accept comment "wireguard-service"');
+    expect(defaultCompiled.nftScript).toContain('iifname "wg0" accept comment "wireguard-tunnel-input"');
+    expect(defaultCompiled.nftScript).toContain('iifname "wg0" accept comment "wireguard-forward"');
+    expect(defaultCompiled.nftScript).toContain('oifname "wg0" accept comment "wireguard-forward"');
+
+    const customRuleState = DesiredStateSchema.parse({
+      ...baseState,
+      rules: [
+        {
+          id: 'bbbbbbbb-1111-4111-8111-111111111111',
+          interface: 'wg0',
+          direction: 'in',
+          action: 'pass',
+          protocol: 'tcp',
+          destinationPort: '22',
+          enabled: true,
+          description: 'Allow SSH on wg0',
+        },
+      ],
+    });
+
+    const customCompiled = compileNftables(customRuleState);
+    expect(customCompiled.nftScript).toContain('iifname "wg0" jump input_wireguard');
+    expect(customCompiled.nftScript).toContain('iifname "wg0" jump forward_wireguard');
+    expect(customCompiled.nftScript).toContain('chain input_wireguard');
+    expect(customCompiled.nftScript).toContain('tcp dport 22 accept comment "Allow SSH on wg0"');
+    expect(customCompiled.nftScript).not.toContain('iifname "wg0" accept comment "wireguard-tunnel-input"');
+  });
 });
 

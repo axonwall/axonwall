@@ -68,6 +68,7 @@ type SDWanProber struct {
 	config *SDWanConfig
 	mu     sync.Mutex
 	active map[string]bool
+	stats  map[string]engine.GatewayProbeStats
 	cancel context.CancelFunc
 	// generation is bumped by ReloadConfig every time the config
 	// changes. triggerFailover snapshots it with the active map and
@@ -89,6 +90,7 @@ type SDWanProber struct {
 func NewSDWanProber() *SDWanProber {
 	return &SDWanProber{
 		active: make(map[string]bool),
+		stats:  make(map[string]engine.GatewayProbeStats),
 	}
 }
 
@@ -218,6 +220,54 @@ func (p *SDWanProber) evaluateFailover() {
 	p.triggerFailover(gateways, groups)
 }
 
+var (
+	pingLossRegex = regexp.MustCompile(`(\d+(?:\.\d+)?)%\s*packet loss`)
+	pingRttRegex  = regexp.MustCompile(`(?:rtt|round-trip)\s+min/avg/max(?:/(?:mdev|stddev))?\s*=\s*([0-9.]+)/([0-9.]+)/([0-9.]+)(?:/([0-9.]+))?\s*ms`)
+)
+
+// ParsePingOutput extracts average RTT (ms), jitter (ms), and packet loss (%) from
+// iputils or BusyBox ping output.
+func ParsePingOutput(out string) (rttMs, jitterMs, lossPct float64) {
+	if m := pingLossRegex.FindStringSubmatch(out); len(m) >= 2 {
+		if v, err := strconv.ParseFloat(m[1], 64); err == nil {
+			lossPct = v
+		}
+	} else {
+		lossPct = 100
+	}
+	if m := pingRttRegex.FindStringSubmatch(out); len(m) >= 4 {
+		minV, _ := strconv.ParseFloat(m[1], 64)
+		avgV, _ := strconv.ParseFloat(m[2], 64)
+		maxV, _ := strconv.ParseFloat(m[3], 64)
+		rttMs = avgV
+		if len(m) >= 5 && m[4] != "" {
+			jitterMs, _ = strconv.ParseFloat(m[4], 64)
+		} else if maxV >= minV {
+			jitterMs = (maxV - minV) / 2.0
+		}
+	}
+	return rttMs, jitterMs, lossPct
+}
+
+// Snapshot returns the most recent probe statistics for all tracked gateways.
+func (p *SDWanProber) Snapshot() []engine.GatewayProbeStats {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if len(p.stats) == 0 {
+		return nil
+	}
+	out := make([]engine.GatewayProbeStats, 0, len(p.stats))
+	for _, st := range p.stats {
+		out = append(out, st)
+	}
+	for i := 1; i < len(out); i++ {
+		for j := i; j > 0 && out[j].Name < out[j-1].Name; j-- {
+			out[j], out[j-1] = out[j-1], out[j]
+		}
+	}
+	return out
+}
+
 // markGatewayOffline records a gateway that could not be probed at
 // all as offline (A-M5). It is called from every skip branch of
 // probeAll, including a disabled gateway: a gateway that cannot be
@@ -225,6 +275,15 @@ func (p *SDWanProber) evaluateFailover() {
 func (p *SDWanProber) markGatewayOffline(name string, stateChanged *bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if p.stats == nil {
+		p.stats = make(map[string]engine.GatewayProbeStats)
+	}
+	st := p.stats[name]
+	st.Name = name
+	st.Up = false
+	st.PacketLossPct = 100
+	st.LastProbeUnix = time.Now().Unix()
+	p.stats[name] = st
 	if p.active[name] {
 		p.active[name] = false
 		*stateChanged = true
@@ -277,14 +336,31 @@ func (p *SDWanProber) probeAll(ctx context.Context) {
 			pingArgs = append([]string{"-6"}, pingArgs...)
 		}
 		cmd := exec.CommandContext(ctx, "ping", pingArgs...)
-		err := cmd.Run()
+		outBytes, err := cmd.CombinedOutput()
 		if ctx.Err() != nil {
 			return
 		}
+		rttMs, jitterMs, lossPct := ParsePingOutput(string(outBytes))
+		if err != nil && lossPct == 0 {
+			lossPct = 100
+		}
 
 		p.mu.Lock()
+		if p.stats == nil {
+			p.stats = make(map[string]engine.GatewayProbeStats)
+		}
 		wasActive := p.active[gw.Name]
 		isActive := err == nil
+		p.stats[gw.Name] = engine.GatewayProbeStats{
+			Name:          gw.Name,
+			Interface:     gw.Interface,
+			MonitorIP:     targetIP,
+			Up:            isActive,
+			RttMs:         rttMs,
+			JitterMs:      jitterMs,
+			PacketLossPct: lossPct,
+			LastProbeUnix: time.Now().Unix(),
+		}
 
 		if isActive && !wasActive {
 			slog.Info("SD-WAN Prober: Gateway came ONLINE", "gateway", gw.Name, "interface", gw.Interface, "device", resolvedDev)

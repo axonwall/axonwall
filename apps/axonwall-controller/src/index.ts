@@ -53,6 +53,10 @@ import { resolveControllerDirs, readAgentToken } from './dev-paths.js';
 import { readCanonicalConfig, writeCanonicalConfig } from './atomic-config.js';
 import { verifyToken } from '@axonwall/lib/ldap';
 import { isPluginEnabled } from '@axonwall/lib/plugins';
+import {
+  bridgeSatelliteFlowsAndLogs,
+  bridgeSatelliteMetricsToVM,
+} from './telemetry-bridge.js';
 import * as os from 'node:os';
 import * as child_process from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -2954,6 +2958,9 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
             if (txDelta > 0) satTxBytesGauge.inc({ satellite_id: satId }, txDelta);
 
             lastRxTxBytes.set(satId, { rx: currentRx, tx: currentTx });
+
+            const satHost = fleetNode?.name || satId;
+            void bridgeSatelliteMetricsToVM(satId, satHost, report.metrics);
           } else {
             console.log(`[Fleet Manager] Telemetry from ${satId} without metrics; keeping last-known metrics.`);
           }
@@ -2972,6 +2979,10 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
             state.edgeFirewallLogs = [...batch.firewallLogs, ...existingLogs].slice(0, 100);
             satFlowsCounter.inc({ satellite_id: satId }, batch.firewallLogs.length);
           }
+          const fleetNode = loadLocalDesiredState()?.fleet?.nodes?.find((n) => n.id === satId);
+          const satHost = fleetNode?.name || satId;
+          const exporterIp = state.wireguard?.tunnelIp || state.tunnelIp || state.ip || '';
+          void bridgeSatelliteFlowsAndLogs(satId, satHost, exporterIp, batch);
         }
       } catch {
         // Ping or non-JSON message
@@ -3117,6 +3128,13 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
     console.log(`[Axonwall Controller] Fleet Manager listening on 0.0.0.0:${port}`);
   });
 }
+
+export {
+  bridgeSatelliteFlowsAndLogs,
+  bridgeSatelliteMetricsToVM,
+  formatSatellitePromMetrics,
+  resolveControllerObservabilityTargets,
+} from './telemetry-bridge.js';
 
 const isDirectExecution = () => {
   if (process.env.NODE_ENV === 'test') return false;

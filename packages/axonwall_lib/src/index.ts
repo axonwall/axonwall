@@ -40,6 +40,7 @@ export * from './compile/netbox/index.js';
 export * from './compile/librenms/index.js';
 export * from './compile/topology/index.js';
 export * from './compile/netflow/index.js';
+export * from './compile/observability/index.js';
 export * from './yaml/index.js';
 export * from './cloudinit/index.js';
 export * from './mcp/index.js';

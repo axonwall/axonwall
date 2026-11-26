@@ -44,20 +44,21 @@ type XdpVerdictTelemetry struct {
 }
 
 type XdpFlowSnapshotEntry struct {
-	Family     int    `json:"family"`
-	SrcIP      string `json:"srcIp"`
-	DstIP      string `json:"dstIp"`
-	SrcPort    uint16 `json:"srcPort"`
-	DstPort    uint16 `json:"dstPort"`
-	VlanID     uint16 `json:"vlanId"`
-	Protocol   uint8  `json:"protocol"`
-	ProtoName  string `json:"protoName"`
-	Packets    uint64 `json:"packets"`
-	Bytes      uint64 `json:"bytes"`
-	SynPackets uint64 `json:"synPackets"`
-	RstPackets uint64 `json:"rstPackets"`
-	TcpFlags   string `json:"tcpFlags,omitempty"`
-	AgeMs      int64  `json:"ageMs"`
+	Family         int    `json:"family"`
+	SrcIP          string `json:"srcIp"`
+	DstIP          string `json:"dstIp"`
+	SrcPort        uint16 `json:"srcPort"`
+	DstPort        uint16 `json:"dstPort"`
+	VlanID         uint16 `json:"vlanId"`
+	IngressIfIndex uint32 `json:"ingressIfIndex,omitempty"`
+	Protocol       uint8  `json:"protocol"`
+	ProtoName      string `json:"protoName"`
+	Packets        uint64 `json:"packets"`
+	Bytes          uint64 `json:"bytes"`
+	SynPackets     uint64 `json:"synPackets"`
+	RstPackets     uint64 `json:"rstPackets"`
+	TcpFlags       string `json:"tcpFlags,omitempty"`
+	AgeMs          int64  `json:"ageMs"`
 }
 
 type XdpBlockSnapshotEntry struct {
@@ -353,8 +354,10 @@ func (m *EBPFManager) Start(interfaces []string) error {
 		m.mu.Unlock()
 	}
 
-	if err := m.initClickHouse(); err != nil {
-		log.Printf("Warning: failed to init ClickHouse: %v. Historical forensics will be disabled.", err)
+	if os.Getenv("AXONWALL_LEGACY_EBPF_CLICKHOUSE") == "1" {
+		if err := m.initClickHouse(); err != nil {
+			log.Printf("Warning: failed to init ClickHouse: %v. Historical forensics will be disabled.", err)
+		}
 	}
 
 	if err := ebpf.LoadFlowTrackerObjects(&m.objs, nil); err != nil {
@@ -983,63 +986,9 @@ func (m *EBPFManager) GetDataplaneSnapshot(maxFlows int) EbpfDataplaneSnapshot {
 	}
 
 	// 2. Collect IPv4 & IPv6 LRU flows
-	var flows []XdpFlowSnapshotEntry
-	if m.objs.FlowMap != nil {
-		iter := m.objs.FlowMap.Iterate()
-		var k ebpf.FlowTrackerFlowKey
-		var v ebpf.FlowTrackerFlowVal
-		for iter.Next(&k, &v) {
-			snap.TotalFlowCountV4++
-			ageMs := int64(0)
-			if nowKtime > 0 && v.LastSeenNs > 0 && nowKtime >= v.LastSeenNs {
-				ageMs = int64((nowKtime - v.LastSeenNs) / 1_000_000)
-			}
-			flows = append(flows, XdpFlowSnapshotEntry{
-				Family:     4,
-				SrcIP:      ipv4FromUint32(k.SrcIp).String(),
-				DstIP:      ipv4FromUint32(k.DstIp).String(),
-				SrcPort:    bits.ReverseBytes16(k.SrcPort),
-				DstPort:    bits.ReverseBytes16(k.DstPort),
-				VlanID:     k.VlanId,
-				Protocol:   k.Protocol,
-				ProtoName:  protocolName(k.Protocol),
-				Packets:    v.Packets,
-				Bytes:      v.Bytes,
-				SynPackets: v.SynPackets,
-				RstPackets: v.RstPackets,
-				TcpFlags:   formatTcpFlags(v.TcpFlags),
-				AgeMs:      ageMs,
-			})
-		}
-	}
-	if m.objs.Flow6Map != nil {
-		iter6 := m.objs.Flow6Map.Iterate()
-		var k6 ebpf.FlowTrackerFlow6Key
-		var v6 ebpf.FlowTrackerFlowVal
-		for iter6.Next(&k6, &v6) {
-			snap.TotalFlowCountV6++
-			ageMs := int64(0)
-			if nowKtime > 0 && v6.LastSeenNs > 0 && nowKtime >= v6.LastSeenNs {
-				ageMs = int64((nowKtime - v6.LastSeenNs) / 1_000_000)
-			}
-			flows = append(flows, XdpFlowSnapshotEntry{
-				Family:     6,
-				SrcIP:      net.IP(k6.SrcIp6[:]).String(),
-				DstIP:      net.IP(k6.DstIp6[:]).String(),
-				SrcPort:    bits.ReverseBytes16(k6.SrcPort),
-				DstPort:    bits.ReverseBytes16(k6.DstPort),
-				VlanID:     k6.VlanId,
-				Protocol:   k6.Protocol,
-				ProtoName:  protocolName(k6.Protocol),
-				Packets:    v6.Packets,
-				Bytes:      v6.Bytes,
-				SynPackets: v6.SynPackets,
-				RstPackets: v6.RstPackets,
-				TcpFlags:   formatTcpFlags(v6.TcpFlags),
-				AgeMs:      ageMs,
-			})
-		}
-	}
+	flows, v4Count, v6Count := m.collectFlowEntries(nowKtime)
+	snap.TotalFlowCountV4 = v4Count
+	snap.TotalFlowCountV6 = v6Count
 	snap.TotalFlowCount = snap.TotalFlowCountV4 + snap.TotalFlowCountV6
 	snap.ProtocolBreakdown, snap.TopPorts, snap.VlanBreakdown = summarizeXdpFlows(flows)
 	sort.Slice(flows, func(i, j int) bool { return flows[i].Bytes > flows[j].Bytes })
@@ -1252,6 +1201,90 @@ func (m *EBPFManager) GetDataplaneSnapshot(maxFlows int) EbpfDataplaneSnapshot {
 	m.blockMu.Unlock()
 
 	return snap
+}
+
+func (m *EBPFManager) collectFlowEntries(nowKtime uint64) ([]XdpFlowSnapshotEntry, int, int) {
+	var flows []XdpFlowSnapshotEntry
+	var v4Count, v6Count int
+	if m.objs.FlowMap != nil {
+		iter := m.objs.FlowMap.Iterate()
+		var k ebpf.FlowTrackerFlowKey
+		var v ebpf.FlowTrackerFlowVal
+		for iter.Next(&k, &v) {
+			v4Count++
+			ageMs := int64(0)
+			if nowKtime > 0 && v.LastSeenNs > 0 && nowKtime >= v.LastSeenNs {
+				ageMs = int64((nowKtime - v.LastSeenNs) / 1_000_000)
+			}
+			flows = append(flows, XdpFlowSnapshotEntry{
+				Family:         4,
+				SrcIP:          ipv4FromUint32(k.SrcIp).String(),
+				DstIP:          ipv4FromUint32(k.DstIp).String(),
+				SrcPort:        bits.ReverseBytes16(k.SrcPort),
+				DstPort:        bits.ReverseBytes16(k.DstPort),
+				VlanID:         k.VlanId,
+				IngressIfIndex: k.IngressIfindex,
+				Protocol:       k.Protocol,
+				ProtoName:      protocolName(k.Protocol),
+				Packets:        v.Packets,
+				Bytes:          v.Bytes,
+				SynPackets:     v.SynPackets,
+				RstPackets:     v.RstPackets,
+				TcpFlags:       formatTcpFlags(v.TcpFlags),
+				AgeMs:          ageMs,
+			})
+		}
+	}
+	if m.objs.Flow6Map != nil {
+		iter6 := m.objs.Flow6Map.Iterate()
+		var k6 ebpf.FlowTrackerFlow6Key
+		var v6 ebpf.FlowTrackerFlowVal
+		for iter6.Next(&k6, &v6) {
+			v6Count++
+			ageMs := int64(0)
+			if nowKtime > 0 && v6.LastSeenNs > 0 && nowKtime >= v6.LastSeenNs {
+				ageMs = int64((nowKtime - v6.LastSeenNs) / 1_000_000)
+			}
+			flows = append(flows, XdpFlowSnapshotEntry{
+				Family:         6,
+				SrcIP:          net.IP(k6.SrcIp6[:]).String(),
+				DstIP:          net.IP(k6.DstIp6[:]).String(),
+				SrcPort:        bits.ReverseBytes16(k6.SrcPort),
+				DstPort:        bits.ReverseBytes16(k6.DstPort),
+				VlanID:         k6.VlanId,
+				IngressIfIndex: k6.IngressIfindex,
+				Protocol:       k6.Protocol,
+				ProtoName:      protocolName(k6.Protocol),
+				Packets:        v6.Packets,
+				Bytes:          v6.Bytes,
+				SynPackets:     v6.SynPackets,
+				RstPackets:     v6.RstPackets,
+				TcpFlags:       formatTcpFlags(v6.TcpFlags),
+				AgeMs:          ageMs,
+			})
+		}
+	}
+	return flows, v4Count, v6Count
+}
+
+// GetAllFlowCounters returns up to maxFlows (clamped to [1, 16384]) active eBPF flow
+// entries without the 50-flow UI cap used by GetDataplaneSnapshot.
+func (m *EBPFManager) GetAllFlowCounters(maxFlows int) []XdpFlowSnapshotEntry {
+	if m == nil {
+		return nil
+	}
+	if maxFlows <= 0 {
+		maxFlows = 16384
+	}
+	if maxFlows > 16384 {
+		maxFlows = 16384
+	}
+	flows, _, _ := m.collectFlowEntries(ktimeMonotonicNs())
+	if len(flows) > maxFlows {
+		sort.Slice(flows, func(i, j int) bool { return flows[i].Bytes > flows[j].Bytes })
+		flows = flows[:maxFlows]
+	}
+	return flows
 }
 
 func (m *EBPFManager) Stop() {

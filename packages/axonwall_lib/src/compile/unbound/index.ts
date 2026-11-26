@@ -11,10 +11,15 @@ export interface UnboundConvergedRecord {
   comment?: string;
 }
 
+export interface UnboundCompileOptions {
+  logQueries?: boolean;
+}
+
 export function compileUnbound(
   dns: DnsConfig,
   headscale?: HeadscaleConfig,
   convergedRecords?: UnboundConvergedRecord[],
+  options?: UnboundCompileOptions,
 ): UnboundCompileResult {
   const lines: string[] = [];
 
@@ -39,6 +44,12 @@ export function compileUnbound(
   lines.push('  tls-cert-bundle: "/etc/ssl/certs/ca-certificates.crt"');
   if (dns.dnssec) {
     lines.push('  auto-trust-anchor-file: "/var/lib/unbound/root.key"');
+  }
+  if (Boolean(options?.logQueries ?? dns.logQueries)) {
+    lines.push('  log-queries: yes');
+    lines.push('  log-replies: yes');
+    lines.push('  log-tag-queryreply: yes');
+    lines.push('  use-syslog: yes');
   }
   lines.push('');
 

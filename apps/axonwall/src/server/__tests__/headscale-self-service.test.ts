@@ -19,15 +19,18 @@ import {
   type HeadscalePreAuthKeyRecord,
 } from '../headscale';
 import {
+  MAX_PIN_ATTEMPTS,
   checkInviteRateLimit,
   consumeHeadscaleInvite,
   createHeadscaleInvite,
+  getActivePendingInviteWindow,
   listHeadscaleInvites,
   previewHeadscaleInvite,
   resetInviteRateLimitForTests,
   revokeHeadscaleInvite,
   validateInviteUsername,
 } from '../headscale-invites';
+import { buildPortKnockCommands } from '../headscale-network';
 
 describe('Headscale username normalization & registration token parsing', () => {
   it('preserves safe Linux usernames and hashes external/email identities deterministically', () => {
@@ -201,6 +204,80 @@ describe('Headscale invite store lifecycle & rate limiting', () => {
     }
     expect(checkInviteRateLimit('203.0.113.5')).toBe(false);
     expect(checkInviteRateLimit('203.0.113.6')).toBe(true);
+  });
+
+  it('enforces hashed out-of-band 6-digit PINs, auto-revokes after 5 wrong attempts, and computes active window', async () => {
+    const { invite: pinInv, rawToken: pinTok, invitePin } = await createHeadscaleInvite({
+      username: 'eve',
+      requirePin: true,
+      expiryHours: 12,
+      createdBy: 'admin',
+    });
+    expect(invitePin).toMatch(/^\d{6}$/);
+    expect(pinInv.requiresPin).toBe(true);
+
+    const diskRaw = fs.readFileSync(invitesPath, 'utf8');
+    expect(diskRaw).not.toContain(invitePin!);
+    expect(diskRaw).toContain('pinHash');
+
+    const preview = previewHeadscaleInvite(pinTok);
+    expect(preview.status).toBe('valid');
+    expect(preview.invite?.requiresPin).toBe(true);
+    expect((preview.invite as any)?.pinHash).toBeUndefined();
+    expect((preview.invite as any)?.pinSalt).toBeUndefined();
+
+    // Missing or invalid PIN rejects cleanly without consuming invite on first 4 failures
+    await expect(
+      consumeHeadscaleInvite(pinTok, async () => 'should-not-run', { pin: '000000' === invitePin ? '111111' : '000000' })
+    ).rejects.toMatchObject({ code: 'INVALID_PIN', statusCode: 403 });
+    expect(previewHeadscaleInvite(pinTok).status).toBe('valid');
+
+    // Correct PIN succeeds before lockout
+    const ok = await consumeHeadscaleInvite(pinTok, async () => 'ok', { pin: invitePin });
+    expect(ok.result).toBe('ok');
+    expect(previewHeadscaleInvite(pinTok).status).toBe('used');
+
+    // Lockout after MAX_PIN_ATTEMPTS failed attempts
+    const { rawToken: lockTok, invitePin: lockPin } = await createHeadscaleInvite({
+      username: 'frank',
+      requirePin: true,
+      expiryHours: 24,
+      createdBy: 'admin',
+    });
+    const badPin = lockPin === '123456' ? '654321' : '123456';
+    for (let i = 1; i < MAX_PIN_ATTEMPTS; i++) {
+      await expect(
+        consumeHeadscaleInvite(lockTok, async () => 'nope', { pin: badPin })
+      ).rejects.toMatchObject({ code: 'INVALID_PIN' });
+      expect(previewHeadscaleInvite(lockTok).status).toBe('valid');
+    }
+    await expect(
+      consumeHeadscaleInvite(lockTok, async () => 'nope', { pin: badPin })
+    ).rejects.toMatchObject({ code: 'REVOKED', statusCode: 410 });
+    expect(previewHeadscaleInvite(lockTok).status).toBe('revoked');
+
+    // Window calculation across pending + expired + revoked
+    expect(getActivePendingInviteWindow().pendingCount).toBe(0);
+    await createHeadscaleInvite({ username: 'grace', expiryHours: 4, createdBy: 'admin' });
+    const { invite: hInv } = await createHeadscaleInvite({ username: 'heidi', expiryHours: 48, createdBy: 'admin' });
+    const win = getActivePendingInviteWindow();
+    expect(win.pendingCount).toBe(2);
+    expect(win.latestExpiresAt).toBe(new Date(Date.parse(hInv.expiresAt)).toISOString());
+    revokeHeadscaleInvite(hInv.id);
+    expect(getActivePendingInviteWindow().pendingCount).toBe(1);
+  });
+
+  it('formats sanitized UDP and TCP port-knock helper commands', () => {
+    const udp = buildPortKnockCommands('https://join.example.com:8443/invite', 'udp', [41821, 52913, 38477]);
+    expect(udp.unix).toContain('nc -u -w 1 join.example.com');
+    expect(udp.unix).toContain('41821 52913 38477');
+    expect(udp.powershell).toContain('UdpClient');
+    expect(udp.powershell).toContain('join.example.com');
+
+    const tcp = buildPortKnockCommands('join.example.com', 'tcp', [20111, 30222]);
+    expect(tcp.unix).toContain('nc -z -w 1 join.example.com');
+    expect(tcp.unix).toContain('20111 30222');
+    expect(tcp.powershell).toContain('TcpClient');
   });
 });
 

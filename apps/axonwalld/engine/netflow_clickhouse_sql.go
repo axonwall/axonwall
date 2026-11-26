@@ -237,6 +237,12 @@ func compileFqlPredCH(p fqlPred, args *[]any) (string, error) {
 		return chNumPred("retransmits", p, args)
 	case "version":
 		return chStringPred("version", p, args)
+	case "node", "node_id", "host_id":
+		return chStringPred("node_id", p, args)
+	case "host":
+		a, _ := chStringPred("node_id", p, args)
+		b, _ := chStringPred("node_name", p, args)
+		return fmt.Sprintf("(%s OR %s)", a, b), nil
 	default:
 		return "", fmt.Errorf("field %q requires local evaluation fallback", p.field)
 	}
@@ -281,7 +287,7 @@ func (s *FlowStore) queryClickHouse(req FlowQueryRequest, fqlAst fqlNode, startM
 
 	q := fmt.Sprintf(`
 		SELECT
-			timestamp, version, exporter_ip, src_ip, dst_ip, src_port, dst_port,
+			timestamp, version, exporter_ip, node_id, node_name, src_ip, dst_ip, src_port, dst_port,
 			protocol, app_name, direction, in_if_name, out_if_name, vlan_id,
 			bytes, packets, bps, src_country, dst_country, threat_match,
 			src_asn, dst_asn, src_city, dst_city, peer_as,
@@ -304,7 +310,7 @@ func (s *FlowStore) queryClickHouse(req FlowQueryRequest, fqlAst fqlNode, startM
 		var ts time.Time
 		var r FlowRecord
 		if scanErr := rows.Scan(
-			&ts, &r.Version, &r.ExporterIP, &r.SrcIP, &r.DstIP, &r.SrcPort, &r.DstPort,
+			&ts, &r.Version, &r.ExporterIP, &r.HostID, &r.HostName, &r.SrcIP, &r.DstIP, &r.SrcPort, &r.DstPort,
 			&r.Protocol, &r.AppName, &r.Direction, &r.InIfName, &r.OutIfName, &r.VlanID,
 			&r.Bytes, &r.Packets, &r.Bps, &r.SrcCountry, &r.DstCountry, &r.ThreatMatch,
 			&r.SrcAsn, &r.DstAsn, &r.SrcCity, &r.DstCity, &r.PeerAs,

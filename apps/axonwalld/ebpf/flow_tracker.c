@@ -81,6 +81,7 @@ struct flow_key {
 	__u16 vlan_id;
 	__u8  protocol;
 	__u8  pad;
+	__u32 ingress_ifindex;
 };
 
 struct flow6_key {
@@ -91,6 +92,7 @@ struct flow6_key {
 	__u16 vlan_id;
 	__u8  protocol;
 	__u8  pad;
+	__u32 ingress_ifindex;
 };
 
 struct flow_val {
@@ -411,6 +413,7 @@ int xdp_flow_tracker(struct xdp_md *ctx)
 		key.dst_ip = ip->daddr;
 		key.vlan_id = vlan_id;
 		key.protocol = ip->protocol;
+		key.ingress_ifindex = ctx->ingress_ifindex;
 
 		__u8 tcp_flags = 0;
 		__u64 is_syn = 0;
@@ -530,6 +533,7 @@ int xdp_flow_tracker(struct xdp_md *ctx)
 		__builtin_memcpy(key6.dst_ip6, &ip6->daddr, 16);
 		key6.vlan_id = vlan_id;
 		key6.protocol = nexthdr;
+		key6.ingress_ifindex = ctx->ingress_ifindex;
 
 		__u8 tcp_flags = 0;
 		__u64 is_syn = 0;

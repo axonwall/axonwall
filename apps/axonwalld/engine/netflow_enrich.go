@@ -51,25 +51,28 @@ type natTupleInfo struct {
 }
 
 type FlowEnricher struct {
-	mu             sync.RWMutex
-	cfg            NetFlowEnrichmentPayload
-	localHost      string
-	staticHosts    map[string]string
-	keaLeasesHosts map[string]string
-	dnsCache       map[string]cachedHostEntry
-	ifAliases      map[ifAliasKey]string
-	localIfByIndex map[uint32]string
-	internalNets   []netip.Prefix
-	threatNets     []threatPrefixEntry
-	k3sPodPrefix   netip.Prefix
-	k3sSvcPrefix   netip.Prefix
-	k3sIPMap       map[string]k3sWorkloadInfo
-	bgpRoutes      []bgpRouteEntry
-	natIndex       map[string]natTupleInfo
-	customApps     map[uint16]string
-	keaLastRead    time.Time
-	keaLeasesPath  string
-	lastGeoAutoUpd time.Time
+	mu                  sync.RWMutex
+	cfg                 NetFlowEnrichmentPayload
+	localHost           string
+	staticHosts         map[string]string
+	keaLeasesHosts      map[string]string
+	dnsCache            map[string]cachedHostEntry
+	ifAliases           map[ifAliasKey]string
+	remoteIfNamesByNode map[string]map[uint32]string
+	remoteHostsByNode   map[string]map[string]cachedHostEntry
+	remoteNodeHostnames map[string]string
+	localIfByIndex      map[uint32]string
+	internalNets        []netip.Prefix
+	threatNets          []threatPrefixEntry
+	k3sPodPrefix        netip.Prefix
+	k3sSvcPrefix        netip.Prefix
+	k3sIPMap            map[string]k3sWorkloadInfo
+	bgpRoutes           []bgpRouteEntry
+	natIndex            map[string]natTupleInfo
+	customApps          map[uint16]string
+	keaLastRead         time.Time
+	keaLeasesPath       string
+	lastGeoAutoUpd      time.Time
 
 	geoip    *GeoIPManager
 	librenms *LibreNMSManager
@@ -81,20 +84,23 @@ type FlowEnricher struct {
 
 func NewFlowEnricher(k3s *K3sManager, netbox *NetBoxManager, librenms *LibreNMSManager) *FlowEnricher {
 	e := &FlowEnricher{
-		staticHosts:    make(map[string]string),
-		keaLeasesHosts: make(map[string]string),
-		dnsCache:       make(map[string]cachedHostEntry),
-		ifAliases:      make(map[ifAliasKey]string),
-		localIfByIndex: make(map[uint32]string),
-		k3sIPMap:       make(map[string]k3sWorkloadInfo),
-		natIndex:       make(map[string]natTupleInfo),
-		customApps:     make(map[uint16]string),
-		keaLeasesPath:  "/var/lib/kea/kea-leases4.csv",
-		geoip:          NewGeoIPManager(),
-		librenms:       librenms,
-		netbox:         netbox,
-		k3s:            k3s,
-		ptrQueue:       make(chan string, 512),
+		staticHosts:         make(map[string]string),
+		keaLeasesHosts:      make(map[string]string),
+		dnsCache:            make(map[string]cachedHostEntry),
+		ifAliases:           make(map[ifAliasKey]string),
+		remoteIfNamesByNode: make(map[string]map[uint32]string),
+		remoteHostsByNode:   make(map[string]map[string]cachedHostEntry),
+		remoteNodeHostnames: make(map[string]string),
+		localIfByIndex:      make(map[uint32]string),
+		k3sIPMap:            make(map[string]k3sWorkloadInfo),
+		natIndex:            make(map[string]natTupleInfo),
+		customApps:          make(map[uint16]string),
+		keaLeasesPath:       "/var/lib/kea/kea-leases4.csv",
+		geoip:               NewGeoIPManager(),
+		librenms:            librenms,
+		netbox:              netbox,
+		k3s:                 k3s,
+		ptrQueue:            make(chan string, 512),
 	}
 	e.refreshLocalInterfaces()
 	go e.ptrWorker()
@@ -428,21 +434,29 @@ func (e *FlowEnricher) Enrich(f *FlowRecord) {
 	customApps := e.customApps
 	e.mu.RUnlock()
 
+	if f.HostName == "" && f.HostID != "" {
+		e.mu.RLock()
+		hn := e.remoteNodeHostnames[f.HostID]
+		e.mu.RUnlock()
+		if hn != "" {
+			f.HostName = hn
+		}
+	}
 	if f.AppName == "" {
 		f.AppName = classifyAppByPort(f.Protocol, f.DstPort, f.SrcPort, customApps)
 	}
 	if f.InIfName == "" && f.InIfIndex > 0 {
-		f.InIfName = e.lookupIfName(f.ExporterIP, f.InIfIndex)
+		f.InIfName = e.lookupIfNameForNode(f.HostID, f.ExporterIP, f.InIfIndex)
 	}
 	if f.OutIfName == "" && f.OutIfIndex > 0 {
-		f.OutIfName = e.lookupIfName(f.ExporterIP, f.OutIfIndex)
+		f.OutIfName = e.lookupIfNameForNode(f.HostID, f.ExporterIP, f.OutIfIndex)
 	}
 
 	if f.SrcHost == "" {
-		f.SrcHost = e.resolveHost(f.SrcIP, cfg.ReverseDNS)
+		f.SrcHost = e.resolveHostForNode(f.HostID, f.SrcIP, cfg.ReverseDNS)
 	}
 	if f.DstHost == "" {
-		f.DstHost = e.resolveHost(f.DstIP, cfg.ReverseDNS)
+		f.DstHost = e.resolveHostForNode(f.HostID, f.DstIP, cfg.ReverseDNS)
 	}
 
 	srcAddr, errS := netip.ParseAddr(f.SrcIP)
@@ -571,28 +585,104 @@ func (e *FlowEnricher) Enrich(f *FlowRecord) {
 	}
 }
 
+// ApplyRemoteNodeMetadata ingests interface names, static hosts, and DHCP leases pushed by a remote edge node.
+func (e *FlowEnricher) ApplyRemoteNodeMetadata(p RemoteNodeMetadataPayload) {
+	nodeKey := strings.TrimSpace(p.NodeID)
+	if nodeKey == "" {
+		nodeKey = strings.TrimSpace(p.Hostname)
+	}
+	if nodeKey == "" {
+		nodeKey = strings.TrimSpace(p.ExporterIP)
+	}
+	if nodeKey == "" {
+		return
+	}
+	exp := time.Now().Add(5 * time.Minute)
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	if p.Hostname != "" {
+		e.remoteNodeHostnames[nodeKey] = p.Hostname
+	}
+	if len(p.Interfaces) > 0 {
+		ifMap := make(map[uint32]string, len(p.Interfaces))
+		for _, ifc := range p.Interfaces {
+			if ifc.IfIndex > 0 && ifc.Name != "" {
+				ifMap[ifc.IfIndex] = ifc.Name
+				if p.ExporterIP != "" {
+					e.ifAliases[ifAliasKey{exporterIP: p.ExporterIP, ifIndex: ifc.IfIndex}] = ifc.Name
+				}
+			}
+		}
+		e.remoteIfNamesByNode[nodeKey] = ifMap
+	}
+	hostMap := e.remoteHostsByNode[nodeKey]
+	if hostMap == nil {
+		hostMap = make(map[string]cachedHostEntry)
+		e.remoteHostsByNode[nodeKey] = hostMap
+	}
+	now := time.Now()
+	for ip, entry := range hostMap {
+		if now.After(entry.expiresAt) {
+			delete(hostMap, ip)
+		}
+	}
+	for _, sh := range p.StaticHosts {
+		if sh.IP != "" && sh.Hostname != "" {
+			hostMap[sh.IP] = cachedHostEntry{name: sh.Hostname, expiresAt: exp}
+		}
+	}
+	for _, l := range p.DhcpLeases {
+		if l.IP != "" && l.Hostname != "" {
+			hostMap[l.IP] = cachedHostEntry{name: l.Hostname, expiresAt: exp}
+		}
+	}
+}
+
 func (e *FlowEnricher) lookupIfName(exporterIP string, ifIndex uint32) string {
+	return e.lookupIfNameForNode("", exporterIP, ifIndex)
+}
+
+func (e *FlowEnricher) lookupIfNameForNode(nodeID, exporterIP string, ifIndex uint32) string {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
-	if alias, ok := e.ifAliases[ifAliasKey{exporterIP: exporterIP, ifIndex: ifIndex}]; ok {
-		return alias
+	if nodeID != "" {
+		if m, ok := e.remoteIfNamesByNode[nodeID]; ok {
+			if n, ok := m[ifIndex]; ok && n != "" {
+				return n
+			}
+		}
 	}
-	if exporterIP == "127.0.0.1" || exporterIP == "::1" {
+	if exporterIP != "" {
+		if alias, ok := e.ifAliases[ifAliasKey{exporterIP: exporterIP, ifIndex: ifIndex}]; ok {
+			return alias
+		}
+	}
+	if exporterIP == "" || exporterIP == "127.0.0.1" || exporterIP == "::1" {
 		if n, ok := e.localIfByIndex[ifIndex]; ok {
 			return n
 		}
-	}
-	if n, ok := e.localIfByIndex[ifIndex]; ok {
-		return n
 	}
 	return fmt.Sprintf("if%d", ifIndex)
 }
 
 func (e *FlowEnricher) resolveHost(ip string, reverseDNS bool) string {
+	return e.resolveHostForNode("", ip, reverseDNS)
+}
+
+func (e *FlowEnricher) resolveHostForNode(nodeID, ip string, reverseDNS bool) string {
 	if ip == "" {
 		return ""
 	}
 	e.mu.RLock()
+	if nodeID != "" {
+		if rm, ok := e.remoteHostsByNode[nodeID]; ok {
+			if ce, ok := rm[ip]; ok && time.Now().Before(ce.expiresAt) {
+				e.mu.RUnlock()
+				return ce.name
+			}
+		}
+	}
 	if h, ok := e.staticHosts[ip]; ok {
 		e.mu.RUnlock()
 		return h

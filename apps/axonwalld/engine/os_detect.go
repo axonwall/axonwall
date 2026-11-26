@@ -26,6 +26,7 @@ const (
 	ModeAppliance RuntimeMode = "appliance"
 	ModeHost      RuntimeMode = "host"
 	ModeDev       RuntimeMode = "dev"
+	ModeCollector RuntimeMode = "collector"
 )
 
 // OSInfo captures normalized identity fields from /etc/os-release.
@@ -246,9 +247,9 @@ func HasAxonwallMarker(rootDir string) bool {
 	return false
 }
 
-// NormalizeRuntimeMode maps raw ("", "auto", "appliance", "host", "dev") into a
+// NormalizeRuntimeMode maps raw ("", "auto", "appliance", "host", "dev", "collector") into a
 // concrete RuntimeMode, resolving "auto" or unrecognized empty values via
-// hasAxonwallMarker.
+// AXONWALL_COLLECTOR_ONLY / hasAxonwallMarker.
 func NormalizeRuntimeMode(raw string, hasAxonwallMarker bool) RuntimeMode {
 	switch strings.ToLower(strings.TrimSpace(raw)) {
 	case string(ModeAppliance):
@@ -257,7 +258,12 @@ func NormalizeRuntimeMode(raw string, hasAxonwallMarker bool) RuntimeMode {
 		return ModeHost
 	case string(ModeDev):
 		return ModeDev
+	case string(ModeCollector):
+		return ModeCollector
 	default:
+		if strings.TrimSpace(os.Getenv("AXONWALL_COLLECTOR_ONLY")) == "1" {
+			return ModeCollector
+		}
 		if hasAxonwallMarker {
 			return ModeAppliance
 		}
@@ -279,10 +285,10 @@ func ParseRuntimeMode(raw string, devFlag bool, hasAxonwallMarker bool) (Runtime
 	switch norm {
 	case "", "auto":
 		return NormalizeRuntimeMode(norm, hasAxonwallMarker), nil
-	case string(ModeAppliance), string(ModeHost), string(ModeDev):
+	case string(ModeAppliance), string(ModeHost), string(ModeDev), string(ModeCollector):
 		return RuntimeMode(norm), nil
 	default:
-		return "", fmt.Errorf("invalid runtime mode %q (expected auto|appliance|host|dev)", raw)
+		return "", fmt.Errorf("invalid runtime mode %q (expected auto|appliance|host|dev|collector)", raw)
 	}
 }
 

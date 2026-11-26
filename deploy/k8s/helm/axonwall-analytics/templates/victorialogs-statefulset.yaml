@@ -1,0 +1,56 @@
+{{- if .Values.victorialogs.enabled }}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "axonwall-analytics.fullname" . }}-vl
+  namespace: {{ include "axonwall-analytics.namespace" . }}
+  labels:
+    {{- include "axonwall-analytics.labels" . | nindent 4 }}
+    app.kubernetes.io/component: victorialogs
+spec:
+  serviceName: {{ include "axonwall-analytics.fullname" . }}-vl
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: victorialogs
+  template:
+    metadata:
+      labels:
+        {{- include "axonwall-analytics.labels" . | nindent 8 }}
+        app.kubernetes.io/component: victorialogs
+    spec:
+      containers:
+        - name: victorialogs
+          image: "{{ .Values.victorialogs.image.repository }}:{{ .Values.victorialogs.image.tag }}"
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          args:
+            - "-retentionPeriod={{ .Values.victorialogs.retentionPeriod }}"
+            - "-storageDataPath=/vl-data"
+            - "-httpListenAddr=:9428"
+          ports:
+            - name: http
+              containerPort: 9428
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.victorialogs.resources | nindent 12 }}
+          volumeMounts:
+            - name: vl-data
+              mountPath: /vl-data
+  volumeClaimTemplates:
+    - metadata:
+        name: vl-data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- if .Values.storageClass }}
+        storageClassName: {{ .Values.storageClass | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.victorialogs.persistence.size | quote }}
+{{- end }}
