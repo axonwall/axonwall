@@ -315,7 +315,7 @@ export async function getAgentStatus(): Promise<AgentStatus> {
   const mockState = getMockApplyState();
   return {
     nodeId: `axonwall-${os.hostname()}`,
-    version: '0.16.1',
+    version: '0.16.2',
     uptimeSeconds: Math.floor(os.uptime()),
     activeBundleHash: mockState.activeBundleHash,
     pendingConfirm: mockState.pendingConfirm,
@@ -3126,7 +3126,7 @@ function getCurrentInstalledVersion(): string {
       }
     } catch {}
   }
-  return '0.16.1';
+  return '0.16.2';
 }
 
 function compareSemver(v1: string, v2: string): number {
@@ -3933,7 +3933,7 @@ export async function applySystemFirmwareUpdate(targetSlot: 'A' | 'B'): Promise<
 
     const currentVersion = getCurrentInstalledVersion();
     const release = await getReleaseInfo(true);
-    const targetVersion = (release.latestVersion || '0.16.1').replace(/[^0-9a-zA-Z._-]/g, '');
+    const targetVersion = (release.latestVersion || '0.16.2').replace(/[^0-9a-zA-Z._-]/g, '');
 
     // 1. Delegate privileged firmware update to root daemon (axonwalld) first
     const daemonResp = await callAgentApi<any>(

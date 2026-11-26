@@ -67,7 +67,7 @@ collector:
   axonwalld:
     image:
       repository: ghcr.io/axonwall/axonwalld
-      tag: "v0.16.1"
+      tag: "v0.16.2"
     resources:
       requests:
         cpu: "200m"
@@ -79,7 +79,7 @@ collector:
     enabled: true
     image:
       repository: ghcr.io/axonwall/axonwall-ui
-      tag: "v0.16.1"
+      tag: "v0.16.2"
     resources:
       requests:
         cpu: "200m"
@@ -100,7 +100,7 @@ controller:
   enabled: false
   image:
     repository: ghcr.io/axonwall/axonwall-controller
-    tag: "v0.16.1"
+    tag: "v0.16.2"
   port: 2966
   resources:
     requests:

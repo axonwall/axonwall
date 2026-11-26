@@ -639,7 +639,7 @@ metadata:
   namespace: kube-system
 spec:
   chart: oci://ghcr.io/axonwall/charts/axonwall-analytics
-  version: "0.16.1"
+  version: "0.16.2"
   targetNamespace: axonwall-analytics
   createNamespace: true
   valuesContent: |-
