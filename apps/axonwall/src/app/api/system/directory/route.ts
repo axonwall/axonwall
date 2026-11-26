@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSession } from '@/server/auth';
-import { assertActionPermitted } from '@/server/auth-guard';
+import { assertActionPermitted, assertInteractiveSession } from '@/server/auth-guard';
 import { checkPluginApiGuard } from '@/server/plugin-guard';
 import {
   getDirectoryStatus,
@@ -11,7 +11,8 @@ import {
 export async function GET() {
   try {
     const session = await getSession();
-    assertActionPermitted(session);
+    assertInteractiveSession(session);
+    assertActionPermitted(session, 'admin');
     const guard = await checkPluginApiGuard('directory-ldap');
     if (guard) return guard;
 
@@ -26,6 +27,7 @@ export async function GET() {
 export async function PUT(req: NextRequest) {
   try {
     const session = await getSession();
+    assertInteractiveSession(session);
     assertActionPermitted(session, 'admin');
     const guard = await checkPluginApiGuard('directory-ldap');
     if (guard) return guard;
@@ -42,6 +44,7 @@ export async function PUT(req: NextRequest) {
 export async function POST() {
   try {
     const session = await getSession();
+    assertInteractiveSession(session);
     assertActionPermitted(session, 'admin');
     const guard = await checkPluginApiGuard('directory-ldap');
     if (guard) return guard;

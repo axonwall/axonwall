@@ -436,27 +436,34 @@ describe('Phase 5 Web Console security & bug-hunt regressions', () => {
       'x-forwarded-host': 'gw.corp.example:2966',
       host: '127.0.0.1:3000',
     });
-    expect(resolvePublicOrigin(hdrs, 'http://127.0.0.1:3000')).toBe('https://gw.corp.example:2966');
-
-    const originalFetch = globalThis.fetch;
-    globalThis.fetch = vi.fn(async () => new Response(JSON.stringify({ id_token: 'header.payload.sig' }), { status: 200 })) as any;
+    const prevTrustProxy = process.env.AXONWALL_TRUST_PROXY;
+    const prevTrustedHosts = process.env.AXONWALL_TRUSTED_HOSTS;
+    delete process.env.AXONWALL_TRUST_PROXY;
+    delete process.env.AXONWALL_TRUSTED_HOSTS;
     try {
-      await expect(
-        exchangeCodeForIdentity(
-          cfg!,
-          {
-            authorization_endpoint: 'https://idp.example.com/auth',
-            token_endpoint: 'https://idp.example.com/token',
-            jwks_uri: 'https://idp.example.com/jwks',
-          },
-          'auth-code',
-          'https://fw.example.com:2966/api/auth/callback/oidc',
-          undefined
-        )
-      ).rejects.toThrow();
+      expect(resolvePublicOrigin(hdrs, 'http://127.0.0.1:3000')).toBe('http://127.0.0.1:3000');
+      process.env.AXONWALL_TRUST_PROXY = '1';
+      expect(resolvePublicOrigin(hdrs, 'http://127.0.0.1:3000')).toBe('https://gw.corp.example:2966');
     } finally {
-      globalThis.fetch = originalFetch;
+      if (prevTrustProxy === undefined) delete process.env.AXONWALL_TRUST_PROXY;
+      else process.env.AXONWALL_TRUST_PROXY = prevTrustProxy;
+      if (prevTrustedHosts === undefined) delete process.env.AXONWALL_TRUSTED_HOSTS;
+      else process.env.AXONWALL_TRUSTED_HOSTS = prevTrustedHosts;
     }
+
+    await expect(
+      exchangeCodeForIdentity(
+        cfg!,
+        {
+          authorization_endpoint: 'https://idp.example.com/auth',
+          token_endpoint: 'https://idp.example.com/token',
+          jwks_uri: 'https://idp.example.com/jwks',
+        },
+        'auth-code',
+        'https://fw.example.com:2966/api/auth/callback/oidc',
+        undefined
+      )
+    ).rejects.toThrow();
   });
 
   it('W-M9: CSRF middleware prefers X-Forwarded-Host and rejects cookie mutations lacking same-origin proof', async () => {

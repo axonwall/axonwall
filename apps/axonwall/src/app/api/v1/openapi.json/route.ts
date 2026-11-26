@@ -1,20 +1,16 @@
 import { NextResponse } from 'next/server';
 import { getSession } from '@/server/auth';
-import { isConsoleUser, isPasswordChangeEnforced } from '@/server/auth-guard';
+import { assertActionPermitted } from '@/server/auth-guard';
 
 export async function GET() {
   const session = await getSession();
-  const pwdEnforced = isPasswordChangeEnforced(session);
-  if (!session || pwdEnforced) {
+  try {
+    assertActionPermitted(session);
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : 'Unauthorized';
     return NextResponse.json(
-      { error: pwdEnforced ? 'Forbidden: Password change required' : 'Unauthorized' },
-      { status: pwdEnforced ? 403 : 401 }
-    );
-  }
-  if (!isConsoleUser(session)) {
-    return NextResponse.json(
-      { error: 'Forbidden: Console role required' },
-      { status: 403 }
+      { error: msg },
+      { status: msg === 'Unauthorized' ? 401 : 403 }
     );
   }
 

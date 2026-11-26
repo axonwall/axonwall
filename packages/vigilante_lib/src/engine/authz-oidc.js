@@ -1,43 +1,23 @@
 import * as jose from 'jose';
-import net from 'node:net';
+import { assertSafeOutboundTarget, classifyIpRange } from './ssrf.js';
 
 let cachedJwks = null;
 let cachedIssuer = null;
 
-function isLoopbackHost(hostname) {
-  const h = hostname.replace(/^\[|\]$/g, '').toLowerCase();
-  return h === 'localhost' || h === '127.0.0.1' || h === '::1';
+async function assertSafeOidcUrl(rawUrl, label, { allowLoopback = true } = {}) {
+  const { url } = await assertSafeOutboundTarget(rawUrl, {
+    label: `OIDC ${label}`,
+    allowHttpOnlyForLoopback: allowLoopback,
+    allowPrivate: false,
+    allowLoopback,
+    allowMetadata: false
+  });
+  return url;
 }
 
-function isDisallowedPrivateOrMetadataHost(hostname) {
-  const h = hostname.replace(/^\[|\]$/g, '').toLowerCase();
-  if (isLoopbackHost(h)) return false;
-  if (net.isIPv4(h)) {
-    const [a, b] = h.split('.').map(Number);
-    if (a === 169 && b === 254) return true; // cloud metadata / link-local
-    if (a === 10 || a === 127 || a === 0) return true;
-    if (a === 172 && b >= 16 && b <= 31) return true;
-    if (a === 192 && b === 168) return true;
-    if (a === 100 && b >= 64 && b <= 127) return true;
-  }
-  if (net.isIPv6(h)) {
-    if (h.startsWith('fe80:') || h.startsWith('fc') || h.startsWith('fd') || h === '::') {
-      return true;
-    }
-  }
-  return false;
-}
-
-function assertSafeOidcUrl(rawUrl, label) {
-  const parsed = new URL(rawUrl);
-  const loopback = isLoopbackHost(parsed.hostname);
-  if (parsed.protocol !== 'https:' && !(loopback && parsed.protocol === 'http:')) {
-    throw new Error(`Unsafe OIDC ${label} protocol '${parsed.protocol}'`);
-  }
-  if (!loopback && isDisallowedPrivateOrMetadataHost(parsed.hostname)) {
-    throw new Error(`Unsafe private/metadata host in OIDC ${label}: ${parsed.hostname}`);
-  }
-  return parsed;
+function isLoopbackHost(urlObj) {
+  const host = urlObj.hostname.replace(/^\[|\]$/g, '').split('%')[0].toLowerCase();
+  return host === 'localhost' || host.endsWith('.localhost') || classifyIpRange(host) === 'loopback';
 }
 
 /**
@@ -70,7 +50,7 @@ export async function verifyOidcToken(token, store) {
 
   try {
     if (!cachedJwks || cachedIssuer !== config.issuer) {
-      const safeIssuerUrl = assertSafeOidcUrl(config.issuer, 'issuer');
+      const safeIssuerUrl = await assertSafeOidcUrl(config.issuer, 'issuer');
       const wellKnownUrl = new URL(
         '.well-known/openid-configuration',
         safeIssuerUrl.toString().endsWith('/') ? safeIssuerUrl.toString() : `${safeIssuerUrl.toString()}/`
@@ -89,7 +69,9 @@ export async function verifyOidcToken(token, store) {
       if (!discovery.jwks_uri) {
         throw new Error('OIDC discovery response missing jwks_uri');
       }
-      const safeJwksUrl = assertSafeOidcUrl(discovery.jwks_uri, 'jwks_uri');
+      const safeJwksUrl = await assertSafeOidcUrl(discovery.jwks_uri, 'jwks_uri', {
+        allowLoopback: isLoopbackHost(safeIssuerUrl)
+      });
       cachedJwks = jose.createRemoteJWKSet(safeJwksUrl);
       cachedIssuer = config.issuer;
     }

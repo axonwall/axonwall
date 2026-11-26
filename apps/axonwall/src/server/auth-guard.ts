@@ -12,6 +12,9 @@ const ROLE_HIERARCHY: Record<string, number> = {
 
 export function isConsoleUser(session: UserSession | null): boolean {
   if (!session) return false;
+  if (session.source === 'service_token' && !session.scopes?.includes('*')) {
+    return false;
+  }
   if (session.privileges?.includes('*')) return true;
   const roles = session.roles || [];
   return roles.some((r) => r === 'admin' || r === 'operator' || r === 'readonly');
@@ -25,14 +28,35 @@ export function isVpnPortalOnlyUser(session: UserSession | null): boolean {
 }
 
 /**
+ * Rejects unauthenticated, password-change-pending, and non-interactive
+ * service-token sessions on interactive account/credential/backup routes.
+ */
+export function assertInteractiveSession(
+  session: UserSession | null
+): asserts session is UserSession {
+  if (!session) {
+    throw new Error('Unauthorized');
+  }
+  if (session.source === 'service_token') {
+    throw new Error('Forbidden: Service tokens cannot perform interactive administrative or account actions');
+  }
+  if (isPasswordChangeEnforced(session)) {
+    throw new Error('Forbidden: Password change required before performing this action');
+  }
+}
+
+/**
  * Asserts that a session is authorized to access Mesh VPN self-service APIs.
- * Permits vpn_user as well as console roles (readonly/operator/admin).
+ * Permits vpn_user as well as console roles (readonly/operator/admin), but never service tokens.
  */
 export function assertMeshSelfServicePermitted(
   session: UserSession | null
 ): asserts session is UserSession {
   if (!session) {
     throw new Error('Unauthorized');
+  }
+  if (session.source === 'service_token') {
+    throw new Error('Forbidden: Service tokens cannot access Mesh VPN self-service endpoints');
   }
   if (isPasswordChangeEnforced(session)) {
     throw new Error('Forbidden: Password change required before performing this action');
@@ -80,11 +104,12 @@ export function isPasswordChangeEnforced(session: UserSession | null): boolean {
 
 /**
  * Asserts that a valid authenticated session exists and that any
- * required roles or password changes are satisfied.
+ * required roles, service-token scopes, or password changes are satisfied.
  */
 export function assertActionPermitted(
   session: UserSession | null,
-  requiredRole?: string
+  requiredRole?: string,
+  requiredScope?: string | string[]
 ): asserts session is UserSession {
   if (!session) {
     throw new Error('Unauthorized');
@@ -93,12 +118,41 @@ export function assertActionPermitted(
   if (mustChangePassword && requiredRole && requiredRole !== 'readonly') {
     throw new Error('Forbidden: Password change required before performing this action');
   }
-  if (session.privileges?.includes('*')) {
-    return;
-  }
+
   const effectiveRole = requiredRole ?? 'readonly';
   const roles = session.roles || [];
   const requiredRank = ROLE_HIERARCHY[effectiveRole];
+
+  if (session.source === 'service_token') {
+    const roleOk =
+      requiredRank !== undefined
+        ? roles.some((r) => (ROLE_HIERARCHY[r] ?? -1) >= requiredRank)
+        : roles.includes(effectiveRole);
+    if (!roleOk) {
+      throw new Error(`Forbidden: ${effectiveRole} role required`);
+    }
+    const tokenScopes = Array.isArray(session.scopes) ? session.scopes : [];
+    if (tokenScopes.includes('*')) {
+      return;
+    }
+    const allowedScopes = Array.isArray(requiredScope)
+      ? requiredScope
+      : requiredScope
+        ? [requiredScope]
+        : [];
+    if (allowedScopes.length === 0 || !allowedScopes.some((s) => tokenScopes.includes(s))) {
+      throw new Error(
+        allowedScopes.length > 0
+          ? `Forbidden: Service token lacks required scope (${allowedScopes.join(' or ')})`
+          : 'Forbidden: Scoped service token is not permitted on this endpoint'
+      );
+    }
+    return;
+  }
+
+  if (session.privileges?.includes('*')) {
+    return;
+  }
   const isPermitted =
     requiredRank !== undefined
       ? roles.some((r) => (ROLE_HIERARCHY[r] ?? -1) >= requiredRank)

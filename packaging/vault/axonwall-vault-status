@@ -9,11 +9,16 @@
 set -u
 
 CONF_DIR="${VAULT_CONF_DIR:-/etc/axonwall}"
+[ -f "${CONF_DIR}/vault.env" ] && . "${CONF_DIR}/vault.env"
 BUCKET="${VAULT_BUCKET:-backups}"
 ENDPOINT="${VAULT_S3_ENDPOINT:-https://127.0.0.1:8333}"
 CACERT="${VAULT_S3_CACERT:-}"
-if [ -z "$CACERT" ] && [ -s "${CONF_DIR}/certs/ca.crt" ]; then
-    CACERT="${CONF_DIR}/certs/ca.crt"
+if [ -z "$CACERT" ]; then
+    if [ -s "${CONF_DIR}/certs/ca.crt" ]; then
+        CACERT="${CONF_DIR}/certs/ca.crt"
+    elif [ -s "${CONF_DIR}/certs/hub.crt" ]; then
+        CACERT="${CONF_DIR}/certs/hub.crt"
+    fi
 fi
 S3_HDRS=""
 trap '[ -n "${S3_HDRS:-}" ] && rm -f "$S3_HDRS"' EXIT

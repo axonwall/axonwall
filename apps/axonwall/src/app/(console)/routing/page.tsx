@@ -1,13 +1,18 @@
 'use client';
 
 import { Route, CheckCircle2, Plus, Trash2, RotateCcw, AlertTriangle, Loader2 } from 'lucide-react';
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { getCurrentDesiredState, getGatewaysTelemetry, type LiveGatewayInfo } from '@/server/agent';
 import { useDesiredStateApply } from '@/lib/use-desired-state-apply';
 import type { DesiredState, Gateway, StaticRoute } from '@axonwall/lib/schemas';
 
 export default function RoutingPage() {
-  const { applyState } = useDesiredStateApply();
+  const loadRoutingDataRef = useRef<((isManual?: boolean) => Promise<void>) | null>(null);
+  const { applyState, refreshFingerprint } = useDesiredStateApply({
+    onConfigChanged: () => {
+      void loadRoutingDataRef.current?.(false);
+    },
+  });
   const [fullState, setFullState] = useState<DesiredState | null>(null);
   const [gateways, setGateways] = useState<Gateway[]>([]);
   const [routes, setRoutes] = useState<StaticRoute[]>([]);
@@ -36,6 +41,7 @@ export default function RoutingPage() {
       const [state, live] = await Promise.all([
         getCurrentDesiredState(),
         getGatewaysTelemetry().catch(() => [] as LiveGatewayInfo[]),
+        refreshFingerprint(),
       ]);
       setFullState(state);
       setGateways(state.gateways || []);
@@ -49,7 +55,9 @@ export default function RoutingPage() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [refreshFingerprint]);
+
+  loadRoutingDataRef.current = loadRoutingData;
 
   useEffect(() => {
     loadRoutingData(false);

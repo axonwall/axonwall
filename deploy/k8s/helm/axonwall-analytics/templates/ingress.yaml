@@ -30,18 +30,18 @@ spec:
             pathType: Prefix
             backend:
               service:
-                name: {{ $fullname }}-vm
+                name: {{ $fullname }}-obs-proxy
                 port:
-                  number: 8428
+                  number: 8480
           {{- end }}
           {{- if .Values.victorialogs.enabled }}
           - path: /vl
             pathType: Prefix
             backend:
               service:
-                name: {{ $fullname }}-vl
+                name: {{ $fullname }}-obs-proxy
                 port:
-                  number: 9428
+                  number: 8480
           {{- end }}
           {{- if and .Values.collector.enabled .Values.collector.ui.enabled }}
           - path: /

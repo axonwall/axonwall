@@ -61,7 +61,7 @@ function compileSingleServer(server: OpenVpnServer): CompiledOpenVpnServer {
     'keepalive 10 120',
     'persist-key',
     'persist-tun',
-    `client-config-dir /var/lib/axonwall/openvpn/${safeName}/ccd`,
+    `client-config-dir /etc/openvpn/ccd/${safeName}`,
   ];
 
   if (server.dcoEnabled !== false) {

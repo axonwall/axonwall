@@ -267,27 +267,40 @@ static __always_inline void emit_lsm_event(__u32 hook_id, __u32 blocked,
 	bpf_ringbuf_submit(e, 0);
 }
 
+static __always_inline long clamp_lsm_ret(int ret)
+{
+	long r = (long)ret;
+	asm volatile("" : "+r"(r));
+	if (r > -1)
+		return -EPERM;
+	asm volatile("" : "+r"(r));
+	if (r < -4095)
+		return -EPERM;
+	return r;
+}
+
 /*
  * 1. Copy Fail (CVE-2026-31431) Mitigation:
  * Blocks bind(2) on AF_ALG sockets when alg.type == "aead" unless the
  * calling binary's (s_dev, i_ino) is allowlisted.
  */
 SEC("lsm/socket_bind")
-int BPF_PROG(copyfail_guard, struct socket *sock, struct sockaddr *address, int addrlen, int ret)
+long BPF_PROG(copyfail_guard, struct socket *sock, struct sockaddr *address, int addrlen, int ret)
 {
 	struct alg_addr alg = {};
 	struct lsm_exe_id id = {};
 
-	if (ret)
-		return ret;
+	if (ret != 0)
+		return clamp_lsm_ret(ret);
 
-	if (!address || address->sa_family != AF_ALG)
+	if (!address || addrlen < 25)
 		return 0;
 
-	if (addrlen < (int)sizeof(alg))
+	/* Read fixed 24-byte sockaddr_alg header (family, type, feat, mask) */
+	if (bpf_probe_read_kernel(&alg, 24, address) < 0)
 		return 0;
 
-	if (bpf_probe_read_kernel(&alg, sizeof(alg), address) < 0)
+	if (alg.family != AF_ALG)
 		return 0;
 
 	if (bpf_strncmp(alg.type, sizeof(alg.type), aead_type) != 0)
@@ -295,6 +308,14 @@ int BPF_PROG(copyfail_guard, struct socket *sock, struct sockaddr *address, int 
 
 	if (current_exe_has_flag(ALLOW_FLAG_AF_ALG_AEAD, &id))
 		return 0;
+
+	__u32 name_len = (__u32)(addrlen - 24);
+	if (name_len > SALG_NAME_LEN - 1)
+		name_len = SALG_NAME_LEN - 1;
+	asm volatile("" : "+r"(name_len));
+	if (name_len > 0 && name_len < SALG_NAME_LEN)
+		bpf_probe_read_kernel(alg.name, name_len, (const char *)address + 24);
+	alg.name[SALG_NAME_LEN - 1] = '\0';
 
 	int enforce = is_policy_enabled(POLICY_IDX_ENFORCE_COPYFAIL, 1);
 	emit_lsm_event(HOOK_ID_SOCKET_BIND_AEAD, enforce ? 1 : 0, &id, alg.name, 1);
@@ -310,12 +331,12 @@ int BPF_PROG(copyfail_guard, struct socket *sock, struct sockaddr *address, int 
  * Strictly blocks Ring-0 tracing/rootkit program types regardless of token.
  */
 SEC("lsm/bpf")
-int BPF_PROG(restrict_bpf_load, int cmd, union bpf_attr *attr, unsigned int size, int ret)
+long BPF_PROG(restrict_bpf_load, int cmd, union bpf_attr *attr, unsigned int size, int ret)
 {
 	struct lsm_exe_id id = {};
 
-	if (ret)
-		return ret;
+	if (ret != 0)
+		return clamp_lsm_ret(ret);
 
 	if (cmd != BPF_PROG_LOAD)
 		return 0;
@@ -370,13 +391,13 @@ int BPF_PROG(restrict_bpf_load, int cmd, union bpf_attr *attr, unsigned int size
  * Blocks creation of IORING_SETUP_SQPOLL kernel busy-polling threads.
  */
 SEC("lsm/uring_sqpoll")
-int BPF_PROG(block_uring_sqpoll, int ret)
+long BPF_PROG(block_uring_sqpoll, int ret)
 {
 	struct lsm_exe_id id = {};
 	const char detail[SALG_NAME_LEN] = "IORING_SETUP_SQPOLL";
 
-	if (ret)
-		return ret;
+	if (ret != 0)
+		return clamp_lsm_ret(ret);
 
 	read_current_exe_id(&id);
 	int enforce = is_policy_enabled(POLICY_IDX_ENFORCE_URING_SQPOLL, 1);
@@ -392,13 +413,13 @@ int BPF_PROG(block_uring_sqpoll, int ret)
  * mount accidentally delegated Ring-0 tracing/LSM program types or init_user_ns.
  */
 SEC("lsm/bpf_token_create")
-int BPF_PROG(guard_bpf_token_create, struct bpf_token *token, union bpf_attr *attr,
-	     const struct path *path, int ret)
+long BPF_PROG(guard_bpf_token_create, struct bpf_token *token, union bpf_attr *attr,
+	      const struct path *path, int ret)
 {
 	struct lsm_exe_id id = {};
 
-	if (ret)
-		return ret;
+	if (ret != 0)
+		return clamp_lsm_ret(ret);
 
 	read_current_exe_id(&id);
 
@@ -437,12 +458,12 @@ int BPF_PROG(guard_bpf_token_create, struct bpf_token *token, union bpf_attr *at
  * FORBIDDEN_RING0_TOKEN_PROG_MASK and active token delegation policy.
  */
 SEC("lsm/bpf_token_cmd")
-int BPF_PROG(audit_bpf_token_cmd, const struct bpf_token *token, enum bpf_cmd cmd, int ret)
+long BPF_PROG(audit_bpf_token_cmd, const struct bpf_token *token, enum bpf_cmd cmd, int ret)
 {
 	struct lsm_exe_id id = {};
 
-	if (ret)
-		return ret;
+	if (ret != 0)
+		return clamp_lsm_ret(ret);
 
 	if (!is_policy_enabled(POLICY_IDX_ALLOW_BPF_TOKENS, 1)) {
 		read_current_exe_id(&id);

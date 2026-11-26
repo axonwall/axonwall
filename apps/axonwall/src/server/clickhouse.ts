@@ -3,6 +3,7 @@ import type { DesiredState } from '@axonwall/lib/schemas';
 import { getSession } from './auth';
 import { assertActionPermitted } from './auth-guard';
 import { getDesiredStateInternal } from './desired-state-internal';
+import { assertSafeOutboundUrl } from './ssrf-guard';
 
 let client: ClickHouseClient | null = null;
 
@@ -106,10 +107,25 @@ export async function queryDataLakeMetrics(cfg?: {
   }
 
   const database = (useEnv ? process.env.CLICKHOUSE_DB : cfg?.database)?.trim() || 'axonwall';
+  const targetUrl = useEnv ? envUrl! : cfg!.url!.trim();
+  try {
+    await assertSafeOutboundUrl(targetUrl, { allowHttp: true, allowPrivate: true });
+  } catch (err: any) {
+    return {
+      configured: true,
+      unavailable: true,
+      reason: err?.message || 'ClickHouse endpoint blocked by SSRF policy.',
+      tables: [],
+      totalEvents24h: 0,
+      eventsPerSecond: 0,
+      storageUsedBytes: 0,
+      averageCompression: 'N/A',
+    };
+  }
   const ch = useEnv
     ? getEnvClient()!
     : createClient({
-        url: cfg!.url!.trim(),
+        url: targetUrl,
         username: cfg?.username?.trim() || 'admin',
         password: cfg?.password || '',
         database,
@@ -219,6 +235,16 @@ export async function getTopFlows(options?: {
   const limit = Math.max(1, Math.min(200, Math.floor(options?.limit ?? 10)));
   const windowHours = Math.max(1, Math.min(24 * 90, Math.floor(options?.windowHours ?? 24)));
   const nodeId = options?.nodeId?.trim() || '';
+  const targetUrl = (envClient ? process.env.CLICKHOUSE_URL?.trim() : resolved?.url) || '';
+  if (!targetUrl) {
+    return [];
+  }
+  try {
+    await assertSafeOutboundUrl(targetUrl, { allowHttp: true, allowPrivate: true });
+  } catch (err) {
+    console.error('ClickHouse SSRF guard blocked query:', err);
+    return [];
+  }
   const ch =
     envClient ??
     createClient({

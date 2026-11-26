@@ -592,19 +592,18 @@ secrets:
   # Required (at least one of these must be set for the backend to do useful work).
   anthropicApiKey: ""
 
-  # DB password. Materialized as POSTGRES_PASSWORD; db-init and app pods
-  # consume the discrete POSTGRES_* parts, not an assembled DSN.
-  postgresPassword: "change-me-before-production"
+  # DB password. Materialized as POSTGRES_PASSWORD when secrets.existingSecret is not set.
+  postgresPassword: ""
 
   # Required when DEV_MODE=false (see env.example). Generate with:
   #   python -c "import secrets; print(secrets.token_urlsafe(64))"
-  jwtSecretKey: "vigil_dev_jwt_secret_key_32_bytes_long_minimum!"
+  jwtSecretKey: ""
 
   # Shared secret the agent worker presents on the /internal endpoints. Required
   # to run a workflow: without it every /internal call answers 503. The worker
   # must be given the same value. Generate with:
   #   python -c "import secrets; print(secrets.token_urlsafe(48))"
-  agentInternalToken: "vigil_dev_agent_internal_token_secret_48_bytes!"
+  agentInternalToken: ""
 
   # Optional data-source integrations.
   splunkPassword: ""

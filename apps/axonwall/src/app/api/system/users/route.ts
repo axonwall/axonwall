@@ -2,14 +2,15 @@ import fs from 'node:fs';
 import { NextRequest, NextResponse } from 'next/server';
 import { isPluginEnabled } from '@axonwall/lib/plugins';
 import { getSession } from '@/server/auth';
-import { assertActionPermitted } from '@/server/auth-guard';
+import { assertActionPermitted, assertInteractiveSession } from '@/server/auth-guard';
 import { getDesiredStateInternal } from '@/server/desired-state-internal';
 import { getLocalUsers, getLocalGroups, createLocalUser, getDirectoryStatus } from '@/server/users';
 
 export async function GET() {
   try {
     const session = await getSession();
-    assertActionPermitted(session);
+    assertInteractiveSession(session);
+    assertActionPermitted(session, 'admin');
 
     const state = await getDesiredStateInternal();
     const ldapEnabled = isPluginEnabled('directory-ldap', state);
@@ -29,6 +30,7 @@ export async function GET() {
 export async function POST(req: NextRequest) {
   try {
     const session = await getSession();
+    assertInteractiveSession(session);
     assertActionPermitted(session, 'admin');
 
     const body = await req.json();

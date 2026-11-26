@@ -90,14 +90,16 @@ export function parseSigmaRule(input) {
         if (['detection', 'logsource', 'tags'].includes(key)) {
           currentSection = key;
           currentSubSection = null;
+          listField = null;
         } else {
           currentSection = null;
+          listField = null;
           rule[key] = val.replace(/^['"]|['"]$/g, '');
         }
       } else if (currentSection === 'tags' && line.startsWith('-')) {
         rule.tags.push(line.replace(/^-\s*/, '').replace(/^['"]|['"]$/g, ''));
       } else if (currentSection === 'detection') {
-        if ((rawLine.startsWith('  ') || rawLine.startsWith('\t')) && !rawLine.startsWith('    ') && line.includes(':')) {
+        if ((rawLine.startsWith('  ') || rawLine.startsWith('\t')) && !rawLine.startsWith('    ') && !line.startsWith('-') && line.includes(':')) {
           const [k, ...v] = line.split(':');
           const subKey = k.trim();
           if (FORBIDDEN_OBJECT_KEYS.has(subKey)) continue;
@@ -110,21 +112,50 @@ export function parseSigmaRule(input) {
             currentSubSection = subKey;
             rule.detection[currentSubSection] = subVal ? { _val: subVal.replace(/^['"]|['"]$/g, '') } : Object.create(null);
           }
-        } else if (currentSubSection && listField && line.startsWith('-')) {
-          // YAML list item under the current field: collect it instead of
-          // dropping it (a field with list values previously collapsed to
-          // an empty string and hunted for nothing).
-          const item = line.replace(/^-\s*/, '').replace(/^['"]|['"]$/g, '');
-          const cur = rule.detection[currentSubSection][listField];
-          if (Array.isArray(cur)) cur.push(item);
-          else rule.detection[currentSubSection][listField] = [item];
+        } else if (currentSubSection && line.startsWith('-')) {
+          const rawItem = line.replace(/^-\s*/, '').trim();
+          if (listField) {
+            // YAML list item under a field (e.g. selection.Image)
+            const item = rawItem.replace(/^['"]|['"]$/g, '');
+            const cur = rule.detection[currentSubSection][listField];
+            if (Array.isArray(cur)) cur.push(item);
+            else rule.detection[currentSubSection][listField] = [item];
+          } else {
+            // Direct list item under detection subsection (e.g. keywords list or list of field maps)
+            const mapMatch = /^([A-Za-z0-9_.|-]+)\s*:\s*(.*)$/.exec(rawItem);
+            if (mapMatch && !/^['"]/.test(rawItem)) {
+              const mapKey = mapMatch[1].trim();
+              if (!FORBIDDEN_OBJECT_KEYS.has(mapKey)) {
+                const mapVal = mapMatch[2].trim().replace(/^['"]|['"]$/g, '');
+                if (!Array.isArray(rule.detection[currentSubSection])) {
+                  rule.detection[currentSubSection] = [];
+                }
+                const entry = Object.create(null);
+                entry[mapKey] = mapVal;
+                rule.detection[currentSubSection].push(entry);
+              }
+            } else {
+              const item = rawItem.replace(/^['"]|['"]$/g, '');
+              if (!Array.isArray(rule.detection[currentSubSection])) {
+                rule.detection[currentSubSection] = [];
+              }
+              rule.detection[currentSubSection].push(item);
+            }
+          }
         } else if (currentSubSection && line.includes(':')) {
           const [k, ...v] = line.split(':');
           const field = k.trim().replace(/^-\s*/, '');
           if (FORBIDDEN_OBJECT_KEYS.has(field)) continue;
           const val = v.join(':').trim().replace(/^['"]|['"]$/g, '');
-          rule.detection[currentSubSection][field] = val;
-          listField = val === '' ? field : null;
+          if (Array.isArray(rule.detection[currentSubSection])) {
+            const last = rule.detection[currentSubSection][rule.detection[currentSubSection].length - 1];
+            if (last && typeof last === 'object' && !Array.isArray(last)) {
+              last[field] = val;
+            }
+          } else {
+            rule.detection[currentSubSection][field] = val;
+            listField = val === '' ? field : null;
+          }
         }
       }
     }
@@ -170,11 +201,21 @@ function sigmaLikePattern(value, { contains = false, startswith = false, endswit
   return pattern;
 }
 
+function transpileKeywordClause(value) {
+  if (value === null || value === undefined) return '0=1';
+  const pattern = sigmaLikePattern(String(value), { contains: true });
+  return `(raw_json LIKE ${quoteSqlString(pattern)} ESCAPE '\\' OR indicator LIKE ${quoteSqlString(pattern)} ESCAPE '\\')`;
+}
+
 function transpileFieldClause(field, value) {
   let [fieldName, ...modifiers] = field.split('|');
   const normalizedCol = SIGMA_FIELD_MAPPINGS[fieldName.toLowerCase()];
   const isDirectCol = Boolean(normalizedCol);
   const targetCol = isDirectCol ? normalizedCol : 'raw_json';
+
+  if (value === null || value === undefined) {
+    return isDirectCol ? `${targetCol} IS NULL` : '0=1';
+  }
 
   const stringVal = String(value);
   const hasContains = modifiers.includes('contains');
@@ -182,30 +223,41 @@ function transpileFieldClause(field, value) {
   const hasEndswith = modifiers.includes('endswith');
 
   if (targetCol === 'raw_json') {
-    // If not a direct column, search within raw_json or indicator. The
-    // field name and value are rule-supplied data: both are LIKE-escaped
-    // and the finished patterns are quoted as SQL literals, so neither
-    // can break out of the string and alter the WHERE clause.
     const fieldPattern = escapeLikeLiteral(fieldName);
-    const valuePattern = sigmaLikePattern(stringVal, { contains: true });
-    return `(raw_json LIKE ${quoteSqlString(`%"${fieldPattern}":"${valuePattern}"%`)} ESCAPE '\\' OR indicator LIKE ${quoteSqlString(valuePattern)} ESCAPE '\\' OR raw_json LIKE ${quoteSqlString(valuePattern)} ESCAPE '\\')`;
+    const jsonValPattern = sigmaLikePattern(stringVal, {
+      contains: hasContains,
+      startswith: hasStartswith,
+      endswith: hasEndswith
+    });
+    const genericPattern = sigmaLikePattern(stringVal, {
+      contains: hasContains || (!hasStartswith && !hasEndswith),
+      startswith: hasStartswith,
+      endswith: hasEndswith
+    });
+    return `(raw_json LIKE ${quoteSqlString(`%"${fieldPattern}":"${jsonValPattern}"%`)} ESCAPE '\\' OR indicator LIKE ${quoteSqlString(genericPattern)} ESCAPE '\\' OR raw_json LIKE ${quoteSqlString(genericPattern)} ESCAPE '\\')`;
   }
 
-  if (hasContains || stringVal.includes('*')) {
-    const pattern = sigmaLikePattern(stringVal, { contains: hasContains });
-    return `${targetCol} LIKE ${quoteSqlString(pattern)} ESCAPE '\\'`;
+  if (hasContains || hasStartswith || hasEndswith || stringVal.includes('*')) {
+    const pattern = sigmaLikePattern(stringVal, {
+      contains: hasContains,
+      startswith: hasStartswith,
+      endswith: hasEndswith
+    });
+    const colExpr = normalizedCol === 'dest_port' ? `CAST(${targetCol} AS VARCHAR)` : targetCol;
+    return `${colExpr} LIKE ${quoteSqlString(pattern)} ESCAPE '\\'`;
   }
 
-  if (hasStartswith) {
-    return `${targetCol} LIKE ${quoteSqlString(sigmaLikePattern(stringVal, { startswith: true }))} ESCAPE '\\'`;
+  if (normalizedCol === 'dest_port') {
+    const portNum = typeof value === 'number' ? value : (stringVal.trim() !== '' ? Number(stringVal) : NaN);
+    if (!Number.isInteger(portNum) || portNum < 0 || portNum > 65535) {
+      return '0=1';
+    }
+    return `${targetCol} = ${portNum}`;
   }
 
-  if (hasEndswith) {
-    return `${targetCol} LIKE ${quoteSqlString(sigmaLikePattern(stringVal, { endswith: true }))} ESCAPE '\\'`;
-  }
-
-  if (typeof value === 'number' || (!isNaN(Number(value)) && normalizedCol === 'dest_port')) {
-    return `${targetCol} = ${Number(value)}`;
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) return '0=1';
+    return `${targetCol} = ${value}`;
   }
 
   return `${targetCol} = ${quoteSqlString(stringVal)}`;
@@ -213,24 +265,49 @@ function transpileFieldClause(field, value) {
 
 /**
  * Transpile a SIGMA detection section selection into an SQL predicate
- * @param {Object} selection
+ * @param {Object|Array|string} selection
  * @returns {string}
  */
 function transpileSelection(selection) {
-  if (!selection || typeof selection !== 'object') return '1=1';
+  if (selection === null || selection === undefined) return '0=1';
+  if (typeof selection === 'string' || typeof selection === 'number') {
+    return transpileKeywordClause(selection);
+  }
+  if (Array.isArray(selection)) {
+    if (selection.length === 0) return '0=1';
+    const parts = selection.map((item) => {
+      if (item && typeof item === 'object') {
+        return `(${transpileSelection(item)})`;
+      }
+      return transpileKeywordClause(item);
+    });
+    return `(${parts.join(' OR ')})`;
+  }
+  if (typeof selection !== 'object') return '0=1';
 
   const clauses = [];
   for (const [key, val] of Object.entries(selection)) {
-    if (key === '_val') continue;
+    if (key === '_val') {
+      if (val !== '' && val !== null && val !== undefined) {
+        clauses.push(transpileKeywordClause(val));
+      }
+      continue;
+    }
+    const [, ...modifiers] = key.split('|');
+    const requireAll = modifiers.includes('all');
     if (Array.isArray(val)) {
-      const orClauses = val.map(v => transpileFieldClause(key, v));
-      clauses.push(`(${orClauses.join(' OR ')})`);
+      if (val.length === 0) {
+        clauses.push('0=1');
+      } else {
+        const subClauses = val.map(v => transpileFieldClause(key, v));
+        clauses.push(`(${subClauses.join(requireAll ? ' AND ' : ' OR ')})`);
+      }
     } else {
       clauses.push(transpileFieldClause(key, val));
     }
   }
 
-  return clauses.length > 0 ? clauses.join(' AND ') : '1=1';
+  return clauses.length > 0 ? clauses.join(' AND ') : '0=1';
 }
 
 /**
@@ -262,7 +339,7 @@ export function transpileSigmaToSql(ruleInput, options = {}) {
   // SQL keywords, string literals, subqueries, or condition-overwriting
   // selection values can be injected.
   const tokens = [];
-  const tokenRe = /\s+|(\(|\)|\b1\s+of\s+(?:selection\*|[a-zA-Z0-9_]+)\b|\ball\s+of\s+(?:selection\*|[a-zA-Z0-9_]+)\b|[a-zA-Z_][a-zA-Z0-9_]*)/gi;
+  const tokenRe = /\s+|(\(|\)|\b(?:1|all)\s+of\s+(?:them|[a-zA-Z0-9_]+\*?)|[a-zA-Z_][a-zA-Z0-9_]*)/gi;
   let lastIdx = 0;
   let match;
   while ((match = tokenRe.exec(condition)) !== null) {
@@ -294,14 +371,22 @@ export function transpileSigmaToSql(ruleInput, options = {}) {
     if (lower === 'or') return 'OR';
     if (lower === 'not') return 'NOT';
 
-    const ofMatch = /^(1|all)\s+of\s+(selection\*|[a-zA-Z0-9_]+)$/i.exec(tok);
+    const ofMatch = /^(1|all)\s+of\s+(them|[a-zA-Z0-9_]+\*?)$/i.exec(tok);
     if (ofMatch) {
       const joiner = ofMatch[1].toLowerCase() === '1' ? 'OR' : 'AND';
-      const prefix = ofMatch[2].endsWith('*') ? ofMatch[2].slice(0, -1) : ofMatch[2];
-      const matching = Object.keys(selectionClauses).filter((k) => k.startsWith(prefix));
+      const target = ofMatch[2];
+      let matching;
+      if (target.toLowerCase() === 'them') {
+        matching = Object.keys(selectionClauses);
+      } else if (target.endsWith('*')) {
+        const prefix = target.slice(0, -1);
+        matching = Object.keys(selectionClauses).filter((k) => k.startsWith(prefix));
+      } else {
+        matching = Object.prototype.hasOwnProperty.call(selectionClauses, target) ? [target] : [];
+      }
       const block = matching.length > 0
         ? matching.map((k) => `(${selectionClauses[k]})`).join(` ${joiner} `)
-        : '1=1';
+        : '0=1';
       return `(${block})`;
     }
 
@@ -316,7 +401,10 @@ export function transpileSigmaToSql(ruleInput, options = {}) {
 
   const sqlCondition = compiledTokens.join(' ');
 
-  const technique = (rule.tags || []).find(t => /^attack\.t\d{4}/i.test(t))?.replace(/^attack\./i, '').toUpperCase() || null;
+  const technique = (Array.isArray(rule.tags) ? rule.tags : [])
+    .find(t => /^attack\.t\d{4}/i.test(t))
+    ?.replace(/^attack\./i, '')
+    .toUpperCase() || null;
 
   const sql = `SELECT * FROM ${tableName} WHERE ${sqlCondition} ORDER BY timestamp DESC`;
 
@@ -355,7 +443,8 @@ export async function runSigmaThreatHunt(sigmaRules = []) {
         });
       }
     } catch (err) {
-      logger.warn('SIGMA', `Failed to execute rule: ${err.message}`);
+      logger.error('SIGMA', `Failed to execute rule: ${err.message}`);
+      throw err;
     }
   }
 

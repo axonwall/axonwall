@@ -4,8 +4,8 @@ import { fileURLToPath } from 'node:url';
 import { BaseModule } from '../base.js';
 import { execStream } from '../../utils/exec.js';
 import { applyK8sTlsSecret } from '../../engine/certs.js';
-import { ensureNamespace } from '../../engine/k8s.js';
-import { resolveChartValuesArgs } from '../../engine/helm.js';
+import { ensureNamespace, getClusterContextArgs, getHelmContextArgs, getKubeExecutionEnv } from '../../engine/k8s.js';
+import { resolveChartValuesArgs, cleanupHelmTempValues } from '../../engine/helm.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -72,6 +72,8 @@ export class FlamingoModule extends BaseModule {
     const chartPath = path.join(__dirname, 'charts', 'flamingo');
     const defaultValues = path.join(__dirname, 'values', 'flamingo.yaml');
 
+    const kubeEnv = getKubeExecutionEnv();
+    const helmCtxArgs = await getHelmContextArgs(clusterName);
     const valuesArgs = await resolveChartValuesArgs({
       moduleId: this.id,
       chartName: 'flamingo',
@@ -85,16 +87,21 @@ export class FlamingoModule extends BaseModule {
       onLog
     });
 
-    const helmArgs = [
-      'upgrade', '--install', releaseName, chartPath,
-      '--namespace', targetNamespace,
-      ...valuesArgs,
-      '--set', `ingress.hosts[0].host=${ingressHost}`,
-      '--set', `ingress.tls[0].secretName=${targetTlsSecret}`,
-      '--set', `ingress.tls[0].hosts[0]=${ingressHost}`
-    ];
+    try {
+      const helmArgs = [
+        'upgrade', '--install', releaseName, chartPath,
+        ...helmCtxArgs,
+        '--namespace', targetNamespace,
+        ...valuesArgs,
+        '--set', `ingress.hosts[0].host=${ingressHost}`,
+        '--set', `ingress.tls[0].secretName=${targetTlsSecret}`,
+        '--set', `ingress.tls[0].hosts[0]=${ingressHost}`
+      ];
 
-    await execStream('helm', helmArgs, { onLog });
+      await execStream('helm', helmArgs, { onLog, env: kubeEnv });
+    } finally {
+      await cleanupHelmTempValues(valuesArgs);
+    }
 
     if (onLog) {
       onLog(`[flamingo] Successfully deployed Flamingo in namespace '${targetNamespace}'! Ingress: https://${ingressHost}`);
@@ -109,10 +116,13 @@ export class FlamingoModule extends BaseModule {
     const targetNamespace = namespace || this.namespace;
     const isStandardNs = targetNamespace === 'default' || targetNamespace === 'flamingo';
     const releaseName = isStandardNs ? 'flamingo' : `${targetNamespace}-flamingo`;
+    const kubeEnv = getKubeExecutionEnv();
+    const helmCtxArgs = await getHelmContextArgs(clusterName);
+    const ctxArgs = await getClusterContextArgs(clusterName);
 
     if (onLog) onLog(`[flamingo] Uninstalling Flamingo Credential Harvester from namespace '${targetNamespace}'...`);
     try {
-      await execa('helm', ['uninstall', releaseName, '-n', targetNamespace]);
+      await execa('helm', ['uninstall', releaseName, '-n', targetNamespace, ...helmCtxArgs], { env: kubeEnv });
     } catch {
       // Ignore if already uninstalled
     }
@@ -122,8 +132,9 @@ export class FlamingoModule extends BaseModule {
         'delete', 'pvc',
         '-n', targetNamespace,
         '-l', 'app.kubernetes.io/name=flamingo',
+        ...ctxArgs,
         '--ignore-not-found=true'
-      ]);
+      ], { env: kubeEnv });
     } catch {
       // Ignore if the API is unreachable
     }
@@ -131,7 +142,7 @@ export class FlamingoModule extends BaseModule {
     if (deleteNamespace && targetNamespace !== 'default' && targetNamespace !== 'kube-system') {
       if (onLog) onLog(`[flamingo] Deleting namespace '${targetNamespace}'...`);
       try {
-        await execa('kubectl', ['delete', 'namespace', targetNamespace, '--timeout=60s']);
+        await execa('kubectl', ['delete', 'namespace', targetNamespace, '--timeout=60s', ...ctxArgs], { env: kubeEnv });
       } catch {
         // Ignore if already deleted
       }
@@ -145,14 +156,16 @@ export class FlamingoModule extends BaseModule {
     const targetNamespace = namespace || this.namespace;
 
     try {
+      const kubeEnv = getKubeExecutionEnv();
+      const ctxArgs = await getClusterContextArgs(clusterName);
       const { stdout: podsJson } = await execa('kubectl', [
         'get', 'pods',
         '-n', targetNamespace,
         '-l', 'app.kubernetes.io/name=flamingo',
-        '--context', `k3d-${clusterName}`,
+        ...ctxArgs,
         '--request-timeout=3s',
         '-o', 'json'
-      ]);
+      ], { env: kubeEnv });
       const parsed = JSON.parse(podsJson);
       const pods = (parsed.items || []).map(p => ({
         name: p.metadata.name,

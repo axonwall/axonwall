@@ -29,6 +29,11 @@ spec:
         size: 50Gi
     collector:
       enabled: true
+    controller:
+      # Set enabled: true (port 2966/tcp) to enable remote fleet ZTP / controller UI
+      enabled: false
     service:
-      uiType: NodePort
+      # K3s Klipper ServiceLB exposes UI (:3000) and ingest (:2055/4739/6343) on host nodes;
+      # use uiType: NodePort if opening 30000-32767/tcp instead (see nftables-analytics.conf.example).
+      uiType: LoadBalancer
       ingestType: LoadBalancer

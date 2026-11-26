@@ -1,13 +1,17 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -248,6 +252,149 @@ func keaHasActiveInterfaces6() bool {
 	return len(parsed.Dhcp6.InterfacesConfig.Interfaces) > 0
 }
 
+// wireguardConfDir and dhcpProcRoot are package variables so tests can
+// redirect them into temp directories; production defaults are unchanged.
+var (
+	wireguardConfDir = "/etc/wireguard"
+	dhcpProcRoot     = "/proc"
+)
+
+func normalizeCIDRList(raw []string) []string {
+	seen := make(map[string]bool, len(raw))
+	out := make([]string, 0, len(raw))
+	for _, entry := range raw {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		ip, ipNet, err := net.ParseCIDR(entry)
+		if err != nil || ip == nil || ipNet == nil {
+			continue
+		}
+		ones, _ := ipNet.Mask.Size()
+		norm := fmt.Sprintf("%s/%d", ip.String(), ones)
+		if !seen[norm] {
+			seen[norm] = true
+			out = append(out, norm)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+func parseWireGuardInterfaceAddrAndPort(confData []byte) (cidrs []string, listenPort string) {
+	inInterface := false
+	var rawAddrs []string
+	for _, line := range strings.Split(string(confData), "\n") {
+		line = strings.TrimSpace(line)
+		if idx := strings.IndexAny(line, "#;"); idx >= 0 {
+			line = strings.TrimSpace(line[:idx])
+		}
+		if line == "" {
+			continue
+		}
+		if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
+			inInterface = strings.EqualFold(line, "[Interface]")
+			continue
+		}
+		if !inInterface {
+			continue
+		}
+		parts := strings.SplitN(line, "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		key := strings.ToLower(strings.TrimSpace(parts[0]))
+		val := strings.TrimSpace(parts[1])
+		switch key {
+		case "address":
+			for _, part := range strings.Split(val, ",") {
+				if trimmed := strings.TrimSpace(part); trimmed != "" {
+					rawAddrs = append(rawAddrs, trimmed)
+				}
+			}
+		case "listenport":
+			listenPort = val
+		}
+	}
+	return normalizeCIDRList(rawAddrs), listenPort
+}
+
+func trySyncLiveWireGuard(ctx context.Context, iface string) ([]byte, bool, error) {
+	if !isSafeInstanceToken(iface) {
+		return nil, false, nil
+	}
+	wgPath, err := exec.LookPath("wg")
+	if err != nil {
+		return nil, false, nil
+	}
+	wgQuickPath, err := exec.LookPath("wg-quick")
+	if err != nil {
+		return nil, false, nil
+	}
+	confPath := filepath.Join(wireguardConfDir, iface+".conf")
+	confData, err := os.ReadFile(confPath)
+	if err != nil {
+		return nil, false, nil
+	}
+	portOut, err := exec.CommandContext(ctx, wgPath, "show", iface, "listen-port").Output()
+	if err != nil {
+		return nil, false, nil
+	}
+	livePort := strings.TrimSpace(string(portOut))
+
+	addrOut, err := exec.CommandContext(ctx, "ip", "-j", "addr", "show", "dev", iface).Output()
+	if err != nil {
+		return nil, false, nil
+	}
+	trimmedAddr := bytes.TrimSpace(addrOut)
+	if len(trimmedAddr) == 0 || trimmedAddr[0] != '[' {
+		return nil, false, nil
+	}
+	var parsedIfaces []ipAddrShowEntry
+	if err := json.Unmarshal(trimmedAddr, &parsedIfaces); err != nil {
+		return nil, false, nil
+	}
+	var rawLiveCIDRs []string
+	for _, entry := range parsedIfaces {
+		for _, a := range entry.AddrInfo {
+			if a.Local == "" || a.Scope == "link" || a.Scope == "host" {
+				continue
+			}
+			rawLiveCIDRs = append(rawLiveCIDRs, fmt.Sprintf("%s/%d", a.Local, a.Prefixlen))
+		}
+	}
+	liveCIDRs := normalizeCIDRList(rawLiveCIDRs)
+	confCIDRs, confPort := parseWireGuardInterfaceAddrAndPort(confData)
+
+	if confPort != livePort || !slices.Equal(confCIDRs, liveCIDRs) {
+		return nil, false, nil
+	}
+
+	stripOut, stripErr := exec.CommandContext(ctx, wgQuickPath, "strip", confPath).CombinedOutput()
+	if stripErr != nil {
+		return stripOut, true, fmt.Errorf("wg-quick strip %s: %w (%s)", iface, stripErr, strings.TrimSpace(string(stripOut)))
+	}
+	tmpFile, tmpErr := os.CreateTemp("", "axonwall-wg-sync-*")
+	if tmpErr != nil {
+		return nil, true, fmt.Errorf("wg syncconf temp file for %s: %w", iface, tmpErr)
+	}
+	tmpPath := tmpFile.Name()
+	defer os.Remove(tmpPath)
+	if _, wErr := tmpFile.Write(stripOut); wErr != nil {
+		_ = tmpFile.Close()
+		return nil, true, fmt.Errorf("wg syncconf temp write for %s: %w", iface, wErr)
+	}
+	_ = tmpFile.Chmod(0600)
+	_ = tmpFile.Close()
+
+	syncOut, syncErr := exec.CommandContext(ctx, wgPath, "syncconf", iface, tmpPath).CombinedOutput()
+	if syncErr != nil {
+		return syncOut, true, fmt.Errorf("wg syncconf %s: %w (%s)", iface, syncErr, strings.TrimSpace(string(syncOut)))
+	}
+	return syncOut, true, nil
+}
+
 func reloadOrRestartService(svc string) ([]byte, error) {
 	if !validServiceName(svc) {
 		return nil, fmt.Errorf("service %q is not in the managed-services allowlist", svc)
@@ -262,6 +409,12 @@ func reloadOrRestartService(svc string) ([]byte, error) {
 	resolvedSvc := resolveDistroServiceUnit(svc)
 	ctx, cancel := context.WithTimeout(context.Background(), serviceCommandTimeout)
 	defer cancel()
+	if strings.HasPrefix(unit, "wg-quick@") {
+		iface := strings.TrimPrefix(unit, "wg-quick@")
+		if out, handled, err := trySyncLiveWireGuard(ctx, iface); handled {
+			return out, err
+		}
+	}
 	if hasSystemdOrFakeSystemctl() {
 		return exec.CommandContext(ctx, "systemctl", "--no-ask-password", "reload-or-restart", resolvedSvc).CombinedOutput()
 	}
@@ -297,6 +450,7 @@ func stopSystemService(svc string) ([]byte, error) {
 func dhcpPidFilesForDev(dev string) []string {
 	return []string{
 		"/var/run/dhclient." + dev + ".pid",
+		"/run/dhclient." + dev + ".pid",
 		"/var/run/dhcpcd/" + dev + ".pid",
 		"/var/run/dhcpcd/" + dev + "-4.pid",
 		"/var/run/dhcpcd-" + dev + ".pid",
@@ -323,11 +477,40 @@ func pidBelongsToDhcpClient(pid int) bool {
 	if err := proc.Signal(syscall.Signal(0)); err != nil {
 		return false
 	}
-	cmdline, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
+	cmdline, err := os.ReadFile(filepath.Join(dhcpProcRoot, strconv.Itoa(pid), "cmdline"))
 	if err != nil {
 		return true
 	}
 	return strings.Contains(strings.ToLower(string(cmdline)), "dhcp")
+}
+
+// dhcpProcessHasNoGateway inspects /proc/<pid>/cmdline to determine whether pid
+// is a dhcpcd process and whether it was invoked with -G (no default route).
+func dhcpProcessHasNoGateway(pid int) (isDhcpcd bool, hasNoGateway bool) {
+	cmdline, err := os.ReadFile(filepath.Join(dhcpProcRoot, strconv.Itoa(pid), "cmdline"))
+	if err != nil || len(cmdline) == 0 {
+		return false, false
+	}
+	parts := strings.Split(string(cmdline), "\x00")
+	var args []string
+	for _, p := range parts {
+		if p != "" {
+			args = append(args, p)
+		}
+	}
+	if len(args) == 0 {
+		return false, false
+	}
+	for _, a := range args {
+		if strings.Contains(strings.ToLower(filepath.Base(a)), "dhcpcd") {
+			isDhcpcd = true
+			break
+		}
+	}
+	if !isDhcpcd {
+		return false, false
+	}
+	return true, slices.Contains(args, "-G")
 }
 
 // dhcpClientRunningForDev reports whether a DHCP client started by
@@ -362,41 +545,142 @@ func dhcpClientRunning(dev string) bool {
 }
 
 type dhcpLaunchRecord struct {
-	role      string
-	startedAt time.Time
+	role              string
+	allowDefaultRoute bool
+	startedAt         time.Time
+}
+
+type dhcpDevController struct {
+	opMu     sync.Mutex
+	cancelMu sync.Mutex
+	cancel   context.CancelFunc
+	done     chan struct{}
 }
 
 var (
-	dhcpLaunchMu     sync.Mutex
-	dhcpRecentLaunch = make(map[string]dhcpLaunchRecord)
-	dhcpRebindWindow = 5 * time.Second
+	dhcpLaunchMu       sync.Mutex
+	dhcpRecentLaunch   = make(map[string]dhcpLaunchRecord)
+	dhcpDevControllers = make(map[string]*dhcpDevController)
+	dhcpRebindWindow   = 5 * time.Second
 )
 
-func normalizeDhcpRole(roles []string) string {
-	role := "wan"
-	if len(roles) > 0 && strings.TrimSpace(roles[0]) != "" {
-		role = strings.ToLower(strings.TrimSpace(roles[0]))
+func getDhcpDevController(dev string) *dhcpDevController {
+	dhcpLaunchMu.Lock()
+	defer dhcpLaunchMu.Unlock()
+	ctrl := dhcpDevControllers[dev]
+	if ctrl == nil {
+		ctrl = &dhcpDevController{}
+		dhcpDevControllers[dev] = ctrl
 	}
-	return role
+	return ctrl
 }
 
-func startDhcpClientProcess(dev, role string) {
+func normalizeDhcpRole(role string) string {
+	r := strings.ToLower(strings.TrimSpace(role))
+	if r == "" {
+		return "wan"
+	}
+	return r
+}
+
+func dhcpClientNeedsRebindForPidFiles(dev, role string, allowDefaultRoute bool, pidFiles []string) bool {
+	role = normalizeDhcpRole(role)
+	wantNoGateway := !allowDefaultRoute && role != "wan"
+
+	for _, pidFile := range pidFiles {
+		data, err := os.ReadFile(pidFile)
+		if err != nil {
+			continue
+		}
+		pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+		if err != nil || pid <= 0 || !pidBelongsToDhcpClient(pid) {
+			continue
+		}
+		if isDhcpcd, hasNoGateway := dhcpProcessHasNoGateway(pid); isDhcpcd {
+			return hasNoGateway != wantNoGateway
+		}
+	}
+
+	dhcpLaunchMu.Lock()
+	rec, ok := dhcpRecentLaunch[dev]
+	dhcpLaunchMu.Unlock()
+	if ok {
+		recNoGateway := !rec.allowDefaultRoute && rec.role != "wan"
+		return recNoGateway != wantNoGateway || rec.role != role
+	}
+	return false
+}
+
+func dhcpClientNeedsRebind(dev, role string, allowDefaultRoute bool) bool {
+	return dhcpClientNeedsRebindForPidFiles(dev, role, allowDefaultRoute, dhcpPidFilesForDev(dev))
+}
+
+func cancelDhcpLaunch(ctrl *dhcpDevController) {
+	ctrl.cancelMu.Lock()
+	prevCancel := ctrl.cancel
+	prevDone := ctrl.done
+	ctrl.cancel = nil
+	ctrl.done = nil
+	ctrl.cancelMu.Unlock()
+
+	if prevCancel != nil {
+		prevCancel()
+	}
+	if prevDone != nil {
+		<-prevDone
+	}
+}
+
+func startDhcpClientProcess(dev, role string, allowDefaultRoute bool) {
 	if !isValidNetdev(dev) {
 		return
 	}
+	ctrl := getDhcpDevController(dev)
+	ctrl.opMu.Lock()
+	defer ctrl.opMu.Unlock()
+	startDhcpClientProcessLocked(ctrl, dev, role, allowDefaultRoute)
+}
+
+func startDhcpClientProcessLocked(ctrl *dhcpDevController, dev, role string, allowDefaultRoute bool) {
+	role = normalizeDhcpRole(role)
+	cancelDhcpLaunch(ctrl)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	ctrl.cancelMu.Lock()
+	ctrl.cancel = cancel
+	ctrl.done = done
+	ctrl.cancelMu.Unlock()
+
 	dhcpLaunchMu.Lock()
-	dhcpRecentLaunch[dev] = dhcpLaunchRecord{role: role, startedAt: time.Now()}
+	dhcpRecentLaunch[dev] = dhcpLaunchRecord{
+		role:              role,
+		allowDefaultRoute: allowDefaultRoute,
+		startedAt:         time.Now(),
+	}
 	dhcpLaunchMu.Unlock()
 
+	useNoGateway := !allowDefaultRoute && role != "wan"
+
 	go func() {
+		defer close(done)
+		defer cancel()
 		if dhcpcdPath, err := exec.LookPath("dhcpcd"); err == nil {
-			if role != "wan" {
-				_ = exec.Command(dhcpcdPath, "-4", "-G", "-C", "resolv.conf", dev).Run()
+			var cmd *exec.Cmd
+			if useNoGateway {
+				cmd = exec.CommandContext(ctx, dhcpcdPath, "-4", "-G", "-C", "resolv.conf", dev)
 			} else {
-				_ = exec.Command(dhcpcdPath, "-4", dev).Run()
+				cmd = exec.CommandContext(ctx, dhcpcdPath, "-4", dev)
 			}
+			cmd.WaitDelay = 500 * time.Millisecond
+			_ = cmd.Run()
 		} else if dhclientPath, err := exec.LookPath("dhclient"); err == nil {
-			_ = exec.Command(dhclientPath, "-1", "-v", dev).Run()
+			cmd := exec.CommandContext(ctx, dhclientPath, "-1", "-v", "-pf", "/run/dhclient."+dev+".pid", dev)
+			cmd.WaitDelay = 500 * time.Millisecond
+			_ = cmd.Run()
+		}
+		if ctx.Err() != nil {
+			return
 		}
 		// After DHCP client negotiates lease, re-reconcile static routes
 		if err := ReconcileStaticRoutes(); err != nil {
@@ -412,12 +696,25 @@ func stopDhcpClient(dev string) {
 	if !isValidNetdev(dev) {
 		return
 	}
+	ctrl := getDhcpDevController(dev)
+	ctrl.opMu.Lock()
+	defer ctrl.opMu.Unlock()
+	stopDhcpClientLocked(ctrl, dev)
+}
+
+func stopDhcpClientLocked(ctrl *dhcpDevController, dev string) {
+	cancelDhcpLaunch(ctrl)
+
 	dhcpLaunchMu.Lock()
 	delete(dhcpRecentLaunch, dev)
 	dhcpLaunchMu.Unlock()
 
 	if dhcpcdPath, err := exec.LookPath("dhcpcd"); err == nil {
-		_ = exec.Command(dhcpcdPath, "-x", dev).Run()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		cmd := exec.CommandContext(ctx, dhcpcdPath, "-x", dev)
+		cmd.WaitDelay = 500 * time.Millisecond
+		_ = cmd.Run()
+		cancel()
 	}
 	for _, pidFile := range []string{
 		"/var/run/dhclient." + dev + ".pid",
@@ -438,69 +735,84 @@ func stopDhcpClient(dev string) {
 	}
 }
 
-func triggerDhcpClient(dev string, roles ...string) {
+func triggerDhcpClient(dev, role string, allowDefaultRoute bool) {
 	if !isValidNetdev(dev) {
 		return
 	}
-	role := normalizeDhcpRole(roles)
-	dhcpLaunchMu.Lock()
-	rec, recentlyLaunched := dhcpRecentLaunch[dev]
-	if recentlyLaunched && rec.role == role && time.Since(rec.startedAt) < dhcpRebindWindow {
-		dhcpLaunchMu.Unlock()
-		return
-	}
-	dhcpLaunchMu.Unlock()
+	role = normalizeDhcpRole(role)
+	ctrl := getDhcpDevController(dev)
+	ctrl.opMu.Lock()
+	defer ctrl.opMu.Unlock()
 
-	if dhcpClientRunning(dev) {
-		log.Printf("[Agent] DHCP client already running on %s; not starting another", dev)
-		return
+	needsRebind := dhcpClientNeedsRebind(dev, role, allowDefaultRoute)
+	if !needsRebind {
+		dhcpLaunchMu.Lock()
+		rec, recentlyLaunched := dhcpRecentLaunch[dev]
+		dhcpLaunchMu.Unlock()
+		if recentlyLaunched && rec.role == role && rec.allowDefaultRoute == allowDefaultRoute && time.Since(rec.startedAt) < dhcpRebindWindow {
+			return
+		}
+		if dhcpClientRunning(dev) {
+			log.Printf("[Agent] DHCP client already running on %s; not starting another", dev)
+			return
+		}
+	} else if dhcpClientRunning(dev) {
+		stopDhcpClientLocked(ctrl, dev)
 	}
-	startDhcpClientProcess(dev, role)
+	startDhcpClientProcessLocked(ctrl, dev, role, allowDefaultRoute)
 }
 
 // rebindOrStartDhcpClient forces DHCP acquisition/rebind for dev under the
-// requested role, replacing any running DHCP client (whose -G / resolv.conf
-// flags may reflect a previous role or stale lease) while deduplicating rapid
-// back-to-back calls for the same device and role within dhcpRebindWindow.
-func rebindOrStartDhcpClient(dev string, roles ...string) {
+// requested role and default-route policy, replacing any running DHCP client
+// (whose -G / resolv.conf flags may reflect a previous role or topology) while
+// deduplicating rapid back-to-back calls with identical effective options.
+func rebindOrStartDhcpClient(dev, role string, allowDefaultRoute bool) {
 	if !isValidNetdev(dev) {
 		return
 	}
-	role := normalizeDhcpRole(roles)
-	dhcpLaunchMu.Lock()
-	rec, recentlyLaunched := dhcpRecentLaunch[dev]
-	if recentlyLaunched && rec.role == role && time.Since(rec.startedAt) < dhcpRebindWindow {
-		dhcpLaunchMu.Unlock()
-		return
-	}
-	dhcpRecentLaunch[dev] = dhcpLaunchRecord{role: role, startedAt: time.Now()}
-	dhcpLaunchMu.Unlock()
+	role = normalizeDhcpRole(role)
+	ctrl := getDhcpDevController(dev)
+	ctrl.opMu.Lock()
+	defer ctrl.opMu.Unlock()
 
-	if dhcpClientRunning(dev) {
-		if dhcpcdPath, err := exec.LookPath("dhcpcd"); err == nil {
-			_ = exec.Command(dhcpcdPath, "-x", dev).Run()
-		} else {
-			stopDhcpClient(dev)
-			dhcpLaunchMu.Lock()
-			dhcpRecentLaunch[dev] = dhcpLaunchRecord{role: role, startedAt: time.Now()}
-			dhcpLaunchMu.Unlock()
+	needsRebind := dhcpClientNeedsRebind(dev, role, allowDefaultRoute)
+	if !needsRebind {
+		dhcpLaunchMu.Lock()
+		rec, recentlyLaunched := dhcpRecentLaunch[dev]
+		dhcpLaunchMu.Unlock()
+		if recentlyLaunched && rec.role == role && rec.allowDefaultRoute == allowDefaultRoute && time.Since(rec.startedAt) < dhcpRebindWindow {
+			return
 		}
 	}
-	startDhcpClientProcess(dev, role)
+
+	if dhcpClientRunning(dev) {
+		stopDhcpClientLocked(ctrl, dev)
+	}
+	startDhcpClientProcessLocked(ctrl, dev, role, allowDefaultRoute)
 }
 
 func releaseDhcpLease(dev string) {
 	if !isValidNetdev(dev) {
 		return
 	}
+	ctrl := getDhcpDevController(dev)
+	ctrl.opMu.Lock()
+	defer ctrl.opMu.Unlock()
+
+	cancelDhcpLaunch(ctrl)
+
 	dhcpLaunchMu.Lock()
 	delete(dhcpRecentLaunch, dev)
 	dhcpLaunchMu.Unlock()
 	if dhcpcdPath, err := exec.LookPath("dhcpcd"); err == nil {
-		_ = exec.Command(dhcpcdPath, "-k", dev).Run()
-		_ = exec.Command(dhcpcdPath, "-x", dev).Run()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		_ = exec.CommandContext(ctx, dhcpcdPath, "-k", dev).Run()
+		_ = exec.CommandContext(ctx, dhcpcdPath, "-x", dev).Run()
+		cancel()
 	}
 	if dhclientPath, err := exec.LookPath("dhclient"); err == nil {
-		_ = exec.Command(dhclientPath, "-r", dev).Run()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		_ = exec.CommandContext(ctx, dhclientPath, "-r", dev).Run()
+		cancel()
 	}
 }

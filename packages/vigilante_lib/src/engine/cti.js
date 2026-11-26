@@ -47,6 +47,7 @@ export async function syncFeodoTrackerC2(options = {}) {
   const cacheFile = path.join(ctiDir, 'feodo_ips.json');
 
   let ips = [...SAMPLE_C2_IPS];
+  let cacheFresh = false;
 
   if (!options.forceRefresh && fsSync.existsSync(cacheFile)) {
     try {
@@ -54,12 +55,17 @@ export async function syncFeodoTrackerC2(options = {}) {
       const ageHours = (Date.now() - stats.mtimeMs) / (1000 * 60 * 60);
       if (ageHours < 12) {
         const raw = await fs.readFile(cacheFile, 'utf8');
-        ips = JSON.parse(raw);
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) {
+          ips = parsed;
+          cacheFresh = true;
+        }
       }
     } catch {
-      // fallback
+      // fallback to refresh
     }
-  } else {
+  }
+  if (!cacheFresh) {
     try {
       const resp = await fetchWithTimeout('https://feodotracker.abuse.ch/downloads/ipblocklist.json', 2500);
       if (resp.ok) {
@@ -104,15 +110,25 @@ export async function syncUrlhausThreats(options = {}) {
     'http://c2.malicious.io/beacon',
     'http://update-system-secure.biz/payload.sh'
   ];
+  let cacheFresh = false;
 
   if (!options.forceRefresh && fsSync.existsSync(cacheFile)) {
     try {
-      const raw = await fs.readFile(cacheFile, 'utf8');
-      urls = JSON.parse(raw);
+      const stats = await fs.stat(cacheFile);
+      const ageHours = (Date.now() - stats.mtimeMs) / (1000 * 60 * 60);
+      if (ageHours < 12) {
+        const raw = await fs.readFile(cacheFile, 'utf8');
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) {
+          urls = parsed;
+          cacheFresh = true;
+        }
+      }
     } catch {
       // fallback
     }
-  } else {
+  }
+  if (!cacheFresh) {
     try {
       const resp = await fetchWithTimeout('https://urlhaus.abuse.ch/downloads/json_recent/', 2500);
       if (resp.ok) {
@@ -153,6 +169,13 @@ export async function matchCtiIndicators(indicatorsInput = [], options = {}) {
   const feodoIps = new Set(feodoResult.ips || feodoResult.indicators.map(i => i.ip));
   const domainSet = new Set(SAMPLE_MALICIOUS_DOMAINS.map(d => d.toLowerCase()));
   const urlList = urlhausResult.urls || urlhausResult.indicators.map(i => i.url);
+  const urlExactMap = new Map();
+  for (const u of urlList) {
+    if (typeof u === 'string' && u.trim()) {
+      const norm = u.trim().replace(/\/+$/, '').toLowerCase();
+      urlExactMap.set(norm, u);
+    }
+  }
 
   let targetList = [];
   if (Array.isArray(indicatorsInput)) {
@@ -197,8 +220,24 @@ export async function matchCtiIndicators(indicatorsInput = [], options = {}) {
       continue;
     }
 
-    // Check URL match
-    const urlHit = urlList.find(u => u.includes(str) || str.includes(u));
+    // Check exact normalized URL or parsed host match (no arbitrary substring matching)
+    const normStr = str.replace(/\/+$/, '').toLowerCase();
+    let urlHit = urlExactMap.get(normStr) || null;
+    if (!urlHit) {
+      try {
+        const parsed = new URL(str);
+        const parsedNorm = parsed.toString().replace(/\/+$/, '').toLowerCase();
+        urlHit = urlExactMap.get(parsedNorm) || null;
+        if (!urlHit) {
+          const parsedHost = parsed.hostname.replace(/^\[|\]$/g, '').toLowerCase();
+          if (feodoIps.has(parsedHost) || domainSet.has(parsedHost)) {
+            urlHit = str;
+          }
+        }
+      } catch {
+        // not a full URL; do not substring-match bare strings
+      }
+    }
     if (urlHit) {
       matches.push({
         indicator: str,
@@ -212,10 +251,11 @@ export async function matchCtiIndicators(indicatorsInput = [], options = {}) {
     }
   }
 
-  // Attach metadata properties so both array usage and object usage work seamlessly
+  // Attach metadata properties without creating a circular array self-reference
+  const matchItems = matches.slice();
   matches.hasMatches = matches.length > 0;
   matches.matchesCount = matches.length;
-  matches.matches = matches;
+  matches.matches = matchItems;
   matches.checkedAt = new Date().toISOString();
 
   return matches;

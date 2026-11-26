@@ -11,6 +11,7 @@ import {
 } from 'lucide-react';
 import { formatBps, formatBytes } from '@axonwall/lib/compile/netflow';
 import { NetFlowConfigSchema, type DesiredState } from '@axonwall/lib/schemas';
+import { resolveNetFlowDraftConfig } from '@/lib/state-preservation';
 import {
   ackNetFlowAlertAction,
   getCurrentDesiredState,
@@ -40,7 +41,16 @@ import type {
 type StudioTab = 'explorer' | 'maps' | 'reports' | 'live' | 'exporters' | 'alerts' | 'config';
 
 export function NetFlowStudioWorkspace() {
-  const { applyState } = useDesiredStateApply();
+  const { applyState } = useDesiredStateApply({
+    onConfigChanged: () => {
+      void getCurrentDesiredState()
+        .then((s) => {
+          setLiveState(s);
+          setDraftState(structuredClone(s));
+        })
+        .catch(() => {});
+    },
+  });
   const [activeTab, setActiveTab] = useState<StudioTab>('explorer');
   const [liveState, setLiveState] = useState<DesiredState | null>(null);
   const [draftState, setDraftState] = useState<DesiredState | null>(null);
@@ -129,11 +139,22 @@ export function NetFlowStudioWorkspace() {
     const init = async () => {
       setLoading(true);
       try {
-        const s = await getCurrentDesiredState();
+        const [s, , initialQueryRes] = await Promise.all([
+          getCurrentDesiredState(),
+          refreshRuntime(),
+          queryNetFlowAction({
+            rangeMinutes: 60,
+            fql: '',
+            groupBy: 'protocol',
+            biflow: false,
+            scope: 'local',
+            limit: 200,
+          }),
+        ]);
         if (!active) return;
         setLiveState(s);
         setDraftState(structuredClone(s));
-        await Promise.all([refreshRuntime(), runQuery('')]);
+        setQueryRes(initialQueryRes);
       } catch (err) {
         if (active) {
           setBanner({
@@ -153,7 +174,7 @@ export function NetFlowStudioWorkspace() {
       active = false;
       clearInterval(timer);
     };
-  }, [refreshRuntime, runQuery]);
+  }, [refreshRuntime]);
 
   const hasUnsavedChanges = useMemo(
     () =>
@@ -167,12 +188,25 @@ export function NetFlowStudioWorkspace() {
 
   const handleSave = async () => {
     if (!draftState) return;
+    const parsed = NetFlowConfigSchema.safeParse(draftState.netflow ?? {});
+    if (!parsed.success) {
+      setBanner({
+        kind: 'err',
+        text: `Invalid NetFlow configuration: ${parsed.error.issues.map((i) => `${i.path.join('.') || 'netflow'}: ${i.message}`).join('; ')}`,
+      });
+      return;
+    }
     setSaving(true);
     setBanner(null);
     try {
-      const res = await applyState(draftState);
+      const normalizedState: DesiredState = {
+        ...draftState,
+        netflow: parsed.data,
+      };
+      const res = await applyState(normalizedState);
       if (res.success) {
-        setLiveState(structuredClone(draftState));
+        setLiveState(structuredClone(normalizedState));
+        setDraftState(structuredClone(normalizedState));
         setBanner({ kind: 'ok', text: res.message || 'Saved netflow.yaml and restarted pipeline cleanly.' });
         await refreshRuntime();
       } else {
@@ -424,7 +458,7 @@ export function NetFlowStudioWorkspace() {
           onSaveView={(name, fqlVal, rng, gb) => {
             setDraftState((prev) => {
               if (!prev) return prev;
-              const cur = NetFlowConfigSchema.parse(prev.netflow ?? {});
+              const cur = resolveNetFlowDraftConfig(prev.netflow);
               return {
                 ...prev,
                 netflow: {

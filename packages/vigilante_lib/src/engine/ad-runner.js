@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import http from 'node:http';
 import net from 'node:net';
+import { assertSafeOutboundTarget } from './ssrf.js';
 import { logger } from '../utils/logger.js';
 
 export const SLA_STATUS = {
@@ -283,22 +284,33 @@ export class AttackDefenseRunner {
     // Phase 4: POINT_CALCULATION (Defense, Attack & SLA scoring)
     // --------------------------------------------------------------------------
     this.currentPhase = AD_TICK_PHASES.POINT_CALCULATION;
+    // Award defense points for the PREVIOUS tick only after teams have had
+    // the full tick window to steal and submit its flags.
+    const prevRound = this.rounds.length > 0 ? this.rounds[this.rounds.length - 1] : null;
+    if (prevRound && !prevRound.defenseScored) {
+      for (const team of teams) {
+        for (const svc of this.services) {
+          const prevRec = prevRound.services[team.id]?.[svc.id];
+          if (!prevRec) continue;
+          const isUp = prevRec.slaStatus === SLA_STATUS.UP;
+          const wasCaptured = prevRec.capturedBy.length > 0;
+          if (isUp && !wasCaptured) {
+            prevRec.defensePoints = this.defensePointsPerTick;
+            team.adDefenseScore += this.defensePointsPerTick;
+            team.score += this.defensePointsPerTick;
+          }
+        }
+      }
+      prevRound.defenseScored = true;
+    }
+
     for (const team of teams) {
       for (const svc of this.services) {
         const sRecord = tickRecord.services[team.id][svc.id];
-        const isUp = sRecord.slaStatus === SLA_STATUS.UP;
         const isFaulty = sRecord.slaStatus === SLA_STATUS.FAULTY;
         const isDown = sRecord.slaStatus === SLA_STATUS.DOWN;
-        const wasCaptured = sRecord.capturedBy.length > 0;
 
-        // Defense points: Awarded if service passed SLA AND was not captured
-        if (isUp && !wasCaptured) {
-          sRecord.defensePoints = this.defensePointsPerTick;
-          team.adDefenseScore += this.defensePointsPerTick;
-          team.score += this.defensePointsPerTick;
-        }
-
-        // SLA penalties
+        // SLA penalties apply immediately for the current tick's probe result
         if (isDown) {
           sRecord.penalty = this.slaPenaltyDown;
           team.adSlaScore -= this.slaPenaltyDown;
@@ -343,11 +355,13 @@ export class AttackDefenseRunner {
     }
 
     return probeServiceSla({
-      host: '127.0.0.1',
+      host: team.host || team.ip || service.host || '127.0.0.1',
       port: service.port,
       serviceType: service.protocol || 'HTTP',
       path: service.healthEndpoint || '/',
-      timeoutMs: this.slaTimeoutMs
+      timeoutMs: this.slaTimeoutMs,
+      allowPrivate: true,
+      allowLoopback: true
     });
   }
 
@@ -431,11 +445,11 @@ export class AttackDefenseRunner {
       timestamp: new Date().toISOString()
     };
 
-    const curRound = this.rounds[this.rounds.length - 1];
-    if (curRound) {
-      curRound.captures.push(captureEvent);
-      if (curRound.services[victimTeamId]?.[serviceId]) {
-        curRound.services[victimTeamId][serviceId].capturedBy.push(attackerTeam.name);
+    const flagRound = this.rounds.find(r => r.tick === flagTick) || this.rounds[this.rounds.length - 1];
+    if (flagRound) {
+      flagRound.captures.push(captureEvent);
+      if (flagRound.services[victimTeamId]?.[serviceId]) {
+        flagRound.services[victimTeamId][serviceId].capturedBy.push(attackerTeam.name);
       }
     }
 
@@ -511,26 +525,19 @@ export async function probeServiceSla({
   port,
   serviceType = 'HTTP',
   path = '/health',
-  timeoutMs = 1500
+  timeoutMs = 1500,
+  allowPrivate,
+  allowLoopback
 } = {}) {
-  const cleanHost = String(host ?? '127.0.0.1').trim();
+  const rawHost = String(host ?? '127.0.0.1').trim();
+  const bareHost = rawHost.replace(/^\[|\]$/g, '');
   if (
-    !cleanHost ||
-    cleanHost.startsWith('-') ||
-    /[/?#@\s\u0000-\u001f\\]/.test(cleanHost) ||
-    (!net.isIP(cleanHost) && !/^[a-zA-Z0-9.-]+$/.test(cleanHost))
+    !rawHost ||
+    rawHost.startsWith('-') ||
+    /[/?#@\s\u0000-\u001f\\]/.test(rawHost) ||
+    (!net.isIP(bareHost) && !/^[a-zA-Z0-9.-]+$/.test(rawHost))
   ) {
     throw new Error(`Invalid SLA probe host '${host}'`);
-  }
-  const lowerHost = cleanHost.toLowerCase();
-  if (
-    lowerHost === 'metadata.google.internal' ||
-    lowerHost.startsWith('169.254.') ||
-    lowerHost.startsWith('::ffff:169.254.') ||
-    lowerHost.startsWith('fe80:') ||
-    lowerHost.startsWith('fe80%')
-  ) {
-    throw new Error(`Blocked link-local/metadata SLA probe host '${host}'`);
   }
 
   const portNum = Number(port);
@@ -542,6 +549,14 @@ export async function probeServiceSla({
   if (!cleanPath.startsWith('/') || /[\s\u0000-\u001f]/.test(cleanPath)) {
     throw new Error(`Invalid SLA probe path '${path}'`);
   }
+
+  const { hostname: cleanHost } = await assertSafeOutboundTarget(bareHost, {
+    label: 'SLA probe host',
+    allowBareHost: true,
+    allowPrivate,
+    allowLoopback,
+    allowMetadata: false
+  });
 
   const boundedTimeout = Math.max(50, Math.min(60000, Number.isFinite(Number(timeoutMs)) ? Number(timeoutMs) : 1500));
   const authority = net.isIP(cleanHost) === 6 ? `[${cleanHost}]` : cleanHost;

@@ -227,9 +227,11 @@ type TopologyK3sEdit struct {
 }
 
 type TopologyPeerEdit struct {
-	PeerID string          `json:"peerId"`
-	Name   string          `json:"name,omitempty"`
-	State  json.RawMessage `json:"state"`
+	PeerID   string          `json:"peerId"`
+	Name     string          `json:"name,omitempty"`
+	State    json.RawMessage `json:"state,omitempty"`
+	Patch    json.RawMessage `json:"patch,omitempty"`
+	Hostname string          `json:"hostname,omitempty"`
 }
 
 type TopologyApplyRequest struct {
@@ -238,6 +240,7 @@ type TopologyApplyRequest struct {
 	K3sEdits              []TopologyK3sEdit  `json:"k3sEdits,omitempty"`
 	PeerEdits             []TopologyPeerEdit `json:"peerEdits,omitempty"`
 	HasLocalChanges       bool               `json:"hasLocalChanges,omitempty"`
+	AutoConfirmPeers      bool               `json:"autoConfirmPeers,omitempty"`
 }
 
 type TopologyApplyTargetResult struct {
@@ -1164,6 +1167,73 @@ func (m *TopologyManager) ProbeFabric(ctx context.Context) *TopologyFabricSnapsh
 	return snap
 }
 
+func parseJSONObject(raw json.RawMessage) (map[string]any, error) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || trimmed[0] != '{' {
+		return nil, fmt.Errorf("expected JSON object")
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(trimmed, &obj); err != nil {
+		return nil, err
+	}
+	if obj == nil {
+		return nil, fmt.Errorf("expected non-null JSON object")
+	}
+	return obj, nil
+}
+
+func deepMergeJSONMaps(base, patch map[string]any) map[string]any {
+	out := make(map[string]any, len(base)+len(patch))
+	for k, v := range base {
+		out[k] = v
+	}
+	for k, pv := range patch {
+		if pv == nil {
+			delete(out, k)
+			continue
+		}
+		if patchSub, ok := pv.(map[string]any); ok {
+			if baseSub, ok2 := out[k].(map[string]any); ok2 {
+				out[k] = deepMergeJSONMaps(baseSub, patchSub)
+				continue
+			}
+		}
+		out[k] = pv
+	}
+	return out
+}
+
+func validatePeerEdit(pEdit TopologyPeerEdit) (isTargeted bool, err error) {
+	hasState := len(bytes.TrimSpace(pEdit.State)) > 0
+	hasPatch := len(bytes.TrimSpace(pEdit.Patch)) > 0
+	hostname := strings.TrimSpace(pEdit.Hostname)
+	hasHostname := hostname != ""
+
+	if !hasState && !hasPatch && !hasHostname {
+		return false, fmt.Errorf("peer edit for %q must specify state, patch, or hostname", pEdit.PeerID)
+	}
+	if hasState && (hasPatch || hasHostname) {
+		return false, fmt.Errorf("peer edit for %q cannot combine full state overwrite with targeted patch/hostname", pEdit.PeerID)
+	}
+	if hasState {
+		if _, err := parseJSONObject(pEdit.State); err != nil {
+			return false, fmt.Errorf("invalid state JSON for peer %q: %w", pEdit.PeerID, err)
+		}
+		return false, nil
+	}
+	if hasPatch {
+		if _, err := parseJSONObject(pEdit.Patch); err != nil {
+			return true, fmt.Errorf("invalid patch JSON for peer %q: %w", pEdit.PeerID, err)
+		}
+	}
+	if hasHostname {
+		if len(hostname) > 253 || strings.ContainsAny(hostname, " \t\r\n/\\") {
+			return true, fmt.Errorf("invalid target hostname %q for peer %q", hostname, pEdit.PeerID)
+		}
+	}
+	return true, nil
+}
+
 // ApplyFabricPlan executes preflight dry-run validation, Phase 2 K3s & peer applies, and rollback on failure.
 func (m *TopologyManager) ApplyFabricPlan(
 	ctx context.Context,
@@ -1252,6 +1322,11 @@ func (m *TopologyManager) ApplyFabricPlan(
 			res.Error = err.Error()
 			return res, err
 		}
+		if _, editErr := validatePeerEdit(pEdit); editErr != nil {
+			res.Success = false
+			res.Error = editErr.Error()
+			return res, editErr
+		}
 		if _, urlErr := validatePluginHTTPURL(peer.APIURL, "peer "+peer.Name); urlErr != nil {
 			res.Success = false
 			res.Error = urlErr.Error()
@@ -1267,7 +1342,7 @@ func (m *TopologyManager) ApplyFabricPlan(
 			TargetType: "peer",
 			TargetID:   pEdit.PeerID,
 			Success:    true,
-			Message:    "Preflight validated peer TLS & endpoint",
+			Message:    "Preflight validated peer TLS, endpoint & edit payload",
 		})
 	}
 
@@ -1387,9 +1462,83 @@ func (m *TopologyManager) ApplyFabricPlan(
 		client, _ := m.buildPeerHTTPClient(peer)
 		tok := peerTokens[peer.ID]
 
+		isTargeted, _ := validatePeerEdit(pEdit)
+		var statePayload json.RawMessage
+		if isTargeted {
+			stateReq, err := http.NewRequestWithContext(ctx, http.MethodGet, validURL+"/api/v1/state", nil)
+			if err != nil {
+				rollbackAppliedPeers()
+				res.Success = false
+				res.Error = err.Error()
+				return res, err
+			}
+			if tok != "" {
+				stateReq.Header.Set("Authorization", "Bearer "+tok)
+			}
+			stateResp, err := client.Do(stateReq)
+			if err != nil || stateResp.StatusCode < 200 || stateResp.StatusCode >= 300 {
+				if stateResp != nil {
+					_ = stateResp.Body.Close()
+				}
+				rollbackAppliedPeers()
+				msg := ""
+				if err != nil {
+					msg = err.Error()
+				} else {
+					msg = fmt.Sprintf("peer %s /api/v1/state returned HTTP %d", peer.Name, stateResp.StatusCode)
+				}
+				res.Success = false
+				res.Error = msg
+				res.Results = append(res.Results, TopologyApplyTargetResult{
+					Phase:      2,
+					TargetType: "peer",
+					TargetID:   peer.ID,
+					Success:    false,
+					Error:      msg,
+				})
+				return res, fmt.Errorf("peer state fetch failed (%s): %s", peer.Name, msg)
+			}
+			rawState, readErr := io.ReadAll(io.LimitReader(stateResp.Body, 8<<20))
+			_ = stateResp.Body.Close()
+			if readErr != nil {
+				rollbackAppliedPeers()
+				res.Success = false
+				res.Error = readErr.Error()
+				return res, readErr
+			}
+			baseObj, parseErr := parseJSONObject(rawState)
+			if parseErr != nil {
+				rollbackAppliedPeers()
+				msg := fmt.Sprintf("invalid peer %s /api/v1/state JSON: %v", peer.Name, parseErr)
+				res.Success = false
+				res.Error = msg
+				return res, fmt.Errorf("%s", msg)
+			}
+			patchObj := map[string]any{}
+			if len(bytes.TrimSpace(pEdit.Patch)) > 0 {
+				patchObj, _ = parseJSONObject(pEdit.Patch)
+			}
+			if h := strings.TrimSpace(pEdit.Hostname); h != "" {
+				patchObj = deepMergeJSONMaps(patchObj, map[string]any{
+					"system": map[string]any{"hostname": h},
+				})
+			}
+			merged := deepMergeJSONMaps(baseObj, patchObj)
+			mergedBytes, mErr := json.Marshal(merged)
+			if mErr != nil {
+				rollbackAppliedPeers()
+				res.Success = false
+				res.Error = mErr.Error()
+				return res, mErr
+			}
+			statePayload = json.RawMessage(mergedBytes)
+		} else {
+			statePayload = pEdit.State
+		}
+
 		bodyBytes, _ := json.Marshal(map[string]any{
 			"confirmTimeoutSeconds": timeout,
-			"state":                 pEdit.State,
+			"state":                 statePayload,
 		})
 		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, validURL+"/api/v1/apply", bytes.NewReader(bodyBytes))
 		if err != nil {
@@ -1427,12 +1576,16 @@ func (m *TopologyManager) ApplyFabricPlan(
 		}
 		_ = resp.Body.Close()
 		appliedPeers = append(appliedPeers, appliedPeerHandle{peer: peer, token: tok})
+		applyKind := "full state"
+		if isTargeted {
+			applyKind = "targeted update"
+		}
 		res.Results = append(res.Results, TopologyApplyTargetResult{
 			Phase:      2,
 			TargetType: "peer",
 			TargetID:   peer.ID,
 			Success:    true,
-			Message:    fmt.Sprintf("Applied on peer %s (confirm timer %ds)", peer.Name, timeout),
+			Message:    fmt.Sprintf("Applied %s on peer %s (confirm timer %ds)", applyKind, peer.Name, timeout),
 		})
 	}
 
@@ -1460,11 +1613,14 @@ func (m *TopologyManager) ApplyFabricPlan(
 		})
 	}
 
-	// Auto-confirm applied peers after reachability verification succeeds,
-	// ONLY when Phase 3 is finished (or there are no local changes). When
-	// localApplyFn == nil and HasLocalChanges is true, the caller runs Phase 3
-	// separately afterward and peers must retain their Commit-Confirm timer.
-	if !req.HasLocalChanges || localApplyFn != nil {
+	// Auto-confirm applied peers ONLY when:
+	// - Phase 3 ran in-process and succeeded (HasLocalChanges && localApplyFn != nil), OR
+	// - HasLocalChanges is false AND AutoConfirmPeers was explicitly requested.
+	// When HasLocalChanges is false without explicit AutoConfirmPeers, peers
+	// retain their Commit-Confirm rollback timer so remote full-state overwrites
+	// or unverified updates cannot silently cause permanent lockout.
+	shouldAutoConfirm := (req.HasLocalChanges && localApplyFn != nil) || (!req.HasLocalChanges && req.AutoConfirmPeers)
+	if shouldAutoConfirm {
 		for _, ap := range appliedPeers {
 			client, err := m.buildPeerHTTPClient(ap.peer)
 			if err != nil {

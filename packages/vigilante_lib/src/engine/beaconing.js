@@ -68,15 +68,23 @@ export function detectBeaconingPeriodicity(intervalsOrStats = [], options = {}) 
   let intervals;
 
   if (Array.isArray(intervalsOrStats)) {
-    intervals = intervalsOrStats;
-    stats = calculateInterArrivalTime(intervals.map((delta, i) => i * 1000 + delta * 1000));
-    stats.intervals = intervals;
+    intervals = intervalsOrStats.map(Number).filter(v => Number.isFinite(v) && v >= 0);
+    const count = intervals.length;
     const sum = intervals.reduce((a, b) => a + b, 0);
-    stats.mean = intervals.length > 0 ? sum / intervals.length : 0;
-    stats.variance = intervals.length > 0
-      ? intervals.reduce((acc, v) => acc + Math.pow(v - stats.mean, 2), 0) / intervals.length
+    const mean = count > 0 ? sum / count : 0;
+    const variance = count > 0
+      ? intervals.reduce((acc, v) => acc + Math.pow(v - mean, 2), 0) / count
       : 0;
-    stats.stdDev = Math.sqrt(stats.variance);
+    const stdDev = Math.sqrt(variance);
+    stats = {
+      intervals,
+      mean: Number(mean.toFixed(2)),
+      variance: Number(variance.toFixed(2)),
+      stdDev: Number(stdDev.toFixed(2)),
+      min: count > 0 ? Number(Math.min(...intervals).toFixed(2)) : 0,
+      max: count > 0 ? Number(Math.max(...intervals).toFixed(2)) : 0,
+      count
+    };
   } else {
     stats = intervalsOrStats || {};
     intervals = stats.intervals || [];
@@ -136,7 +144,10 @@ export function detectBeaconingPeriodicity(intervalsOrStats = [], options = {}) 
     confidence = Math.max(0, Math.round(40 * (1 - jitterRatio)));
   }
 
-  // Adjust by sample count
+  // Adjust by sample count and DFT spectral peak concentration
+  if (jitterRatio > 0.05 && spectralConcentration >= 0.5) {
+    confidence = Math.min(100, confidence + Math.round(spectralConcentration * 10));
+  }
   if (N >= 8) confidence = Math.min(100, confidence + 5);
 
   const isBeaconing = confidence >= (options.minConfidence || 65);
@@ -152,6 +163,7 @@ export function detectBeaconingPeriodicity(intervalsOrStats = [], options = {}) 
     confidence,
     dominantIntervalSec,
     jitterPercent,
+    spectralConcentration: Number(spectralConcentration.toFixed(3)),
     sampleCount: N,
     stats: {
       mean: stats.mean,
@@ -204,11 +216,12 @@ export function detectDnsTunneling(dnsQueries = [], options = {}) {
   const flagged = [];
 
   for (const item of dnsQueries) {
-    const query = typeof item === 'string' ? item : (item.domain || item.query || item.name || '');
+    const rawQuery = typeof item === 'string' ? item : (item.domain || item.query || item.name || '');
+    const query = String(rawQuery).trim().replace(/\.+$/, '');
     if (!query) continue;
 
     const parts = query.split('.');
-    if (parts.length < 2) continue;
+    if (parts.length < 3) continue;
 
     // Subdomain is everything except the root and TLD
     const subdomain = parts.slice(0, -2).join('.');

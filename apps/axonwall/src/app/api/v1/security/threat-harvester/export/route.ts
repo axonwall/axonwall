@@ -2,11 +2,14 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getSession } from '@/server/auth';
 import { assertActionPermitted } from '@/server/auth-guard';
 import { callAgentApiBinary } from '@/server/agent-client';
+import { checkPluginApiGuard } from '@/server/plugin-guard';
 
 export async function GET(req: NextRequest) {
   try {
     const session = await getSession();
     assertActionPermitted(session, 'admin');
+    const guard = await checkPluginApiGuard('ebpf-threat-harvester');
+    if (guard) return guard;
 
     const anonymize = req.nextUrl.searchParams.get('anonymize') !== 'false';
     const res = await callAgentApiBinary(

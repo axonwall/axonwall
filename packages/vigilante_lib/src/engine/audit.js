@@ -21,7 +21,15 @@ export function auditFileContent(arg1, arg2) {
   let content;
   let filePath;
 
-  if (typeof arg1 === 'string' && (arg1.endsWith('.yaml') || arg1.endsWith('.yml') || arg1.toLowerCase().includes('dockerfile')) && typeof arg2 === 'string') {
+  const isSingleLinePath = (s) => {
+    if (typeof s !== 'string') return false;
+    const trimmed = s.trim();
+    if (!trimmed || trimmed.includes('\n') || trimmed.includes('\r')) return false;
+    const base = path.basename(trimmed).toLowerCase();
+    return /\.(?:ya?ml)$/i.test(base) || base === 'dockerfile' || base.startsWith('dockerfile.') || base.endsWith('.dockerfile');
+  };
+
+  if (isSingleLinePath(arg1) && typeof arg2 === 'string') {
     filePath = arg1;
     content = arg2;
   } else {

@@ -28,6 +28,7 @@ import (
 
 func bughunt3Apply(t *testing.T, s *AgentServer, jobID, filePath string) *pb.ApplyBundleResponse {
 	t.Helper()
+	allowTestBundlePrefix(t, filepath.Dir(filePath))
 	resp, err := s.ApplyBundle(context.Background(), &pb.ApplyBundleRequest{
 		JobId:                 jobID,
 		NftScript:             batch4NftScript,
@@ -51,6 +52,7 @@ func TestBughunt3OverlappingApplyRejected(t *testing.T) {
 	batch4StopTimer(t, s)
 
 	dir := t.TempDir()
+	allowTestBundlePrefix(t, dir)
 	bughunt3Apply(t, s, "bughunt3-m1-job-a", filepath.Join(dir, "a.txt"))
 
 	// The first bundle is pending confirmation: a second apply for a
@@ -100,6 +102,7 @@ func TestBughunt3SameJobReapplyRejectedWhilePending(t *testing.T) {
 	batch4StopTimer(t, s)
 
 	dir := t.TempDir()
+	allowTestBundlePrefix(t, dir)
 	bughunt3Apply(t, s, "bughunt3-m1-job-a", filepath.Join(dir, "a.txt"))
 
 	// A retry of the same job id is rejected too: that job is
@@ -133,6 +136,7 @@ func TestBughunt3ApplyAfterRollbackTimerFires(t *testing.T) {
 	t.Cleanup(func() { _ = os.Remove("/run/axonwall/commit-confirm.pending") })
 
 	dir := t.TempDir()
+	allowTestBundlePrefix(t, dir)
 	// A 10 s confirm window (the daemon clamps the minimum to 10 s).
 	resp, err := s.ApplyBundle(context.Background(), &pb.ApplyBundleRequest{
 		JobId:                 "bughunt3-m1-job-a",

@@ -1,4 +1,5 @@
 import type { CaptivePortalConfig, CaptivePortalZone } from '../schemas/index.js';
+import { isValidCIDR, isValidIPv4, isValidIPv6, isValidMAC } from '../util/index.js';
 
 export interface CaptiveSession {
   sessionId: string;
@@ -26,8 +27,6 @@ export function compileCaptivePortal(config?: CaptivePortalConfig): CompiledCapt
   }
 
   const SAFE_IFACE = /^[a-zA-Z0-9_.:-]+$/;
-  const SAFE_MAC = /^([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$/;
-  const SAFE_IP_OR_CIDR = /^[0-9a-fA-F:.]+(\/\d{1,3})?$/;
   const nftRules: string[] = [];
 
   for (const zone of config.zones) {
@@ -42,14 +41,15 @@ export function compileCaptivePortal(config?: CaptivePortalConfig): CompiledCapt
     // Skip passthrough MACs
     for (const rawMac of zone.passThroughMacs) {
       const mac = String(rawMac).trim();
-      if (!SAFE_MAC.test(mac)) continue;
-      nftRules.push(`iifname "${iface}" ether saddr ${mac} accept comment "captive-passthrough-mac"`);
+      if (!isValidMAC(mac)) continue;
+      const normMac = mac.replace(/-/g, ':').toLowerCase();
+      nftRules.push(`iifname "${iface}" ether saddr ${normMac} accept comment "captive-passthrough-mac"`);
     }
 
     // Skip passthrough IPs
     for (const rawIp of zone.passThroughIps) {
       const ip = String(rawIp).trim();
-      if (!SAFE_IP_OR_CIDR.test(ip)) continue;
+      if (!(isValidIPv4(ip) || isValidIPv6(ip) || isValidCIDR(ip))) continue;
       const family = ip.includes(':') ? 'ip6' : 'ip';
       nftRules.push(`iifname "${iface}" ${family} saddr ${ip} accept comment "captive-passthrough-ip"`);
     }

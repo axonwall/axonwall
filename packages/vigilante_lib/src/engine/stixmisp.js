@@ -107,7 +107,12 @@ export function convertMispToStix(mispEvent = {}) {
   const event = mispEvent.Event || mispEvent;
   const eventUuid = event.uuid || crypto.randomUUID();
   const eventInfo = event.info || 'MISP Threat Event';
-  const timestamp = event.timestamp ? new Date(Number(event.timestamp) * 1000).toISOString() : new Date().toISOString();
+  const rawTs = event.timestamp;
+  const numTs = Number(rawTs);
+  const parsedDate = (rawTs !== undefined && rawTs !== null && String(rawTs).trim() !== '' && Number.isFinite(numTs))
+    ? new Date(numTs * 1000)
+    : (rawTs ? new Date(rawTs) : new Date());
+  const timestamp = !Number.isNaN(parsedDate.getTime()) ? parsedDate.toISOString() : new Date().toISOString();
 
   const stixObjects = [];
 
@@ -228,20 +233,26 @@ export function mergeThreatFeeds(feedList = []) {
     const indicators = feed.indicators || [];
     for (const ind of indicators) {
       const key = `${ind.iocType}:${ind.iocValue}`;
+      const indTs = ind.validFrom || new Date().toISOString();
+      const indConf = ind.confidence ?? 70;
       if (!iocMap.has(key)) {
         iocMap.set(key, {
           iocType: ind.iocType,
           iocValue: ind.iocValue,
           patterns: [ind.pattern],
           sourceFeedCount: 1,
-          maxConfidence: ind.confidence || 70,
-          firstSeen: ind.validFrom || new Date().toISOString(),
-          lastSeen: ind.validFrom || new Date().toISOString()
+          confidence: indConf,
+          maxConfidence: indConf,
+          firstSeen: indTs,
+          lastSeen: indTs
         });
       } else {
         const existing = iocMap.get(key);
         existing.sourceFeedCount += 1;
-        existing.maxConfidence = Math.max(existing.maxConfidence, ind.confidence || 70);
+        existing.maxConfidence = Math.max(existing.maxConfidence, indConf);
+        existing.confidence = existing.maxConfidence;
+        if (indTs < existing.firstSeen) existing.firstSeen = indTs;
+        if (indTs > existing.lastSeen) existing.lastSeen = indTs;
         if (!existing.patterns.includes(ind.pattern)) existing.patterns.push(ind.pattern);
       }
     }
@@ -259,7 +270,8 @@ export function mergeThreatFeeds(feedList = []) {
 export function filterIndicators(indicators = [], criteria = {}) {
   return indicators.filter(ind => {
     if (criteria.type && ind.iocType !== criteria.type) return false;
-    if (criteria.minConfidence && (ind.confidence || 0) < criteria.minConfidence) return false;
+    const score = ind.confidence ?? ind.maxConfidence ?? 0;
+    if (criteria.minConfidence && score < criteria.minConfidence) return false;
     if (criteria.query) {
       const q = criteria.query.toLowerCase();
       const valMatch = ind.iocValue && ind.iocValue.toLowerCase().includes(q);

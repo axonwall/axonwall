@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import Link from 'next/link';
 import { PluginAwareLink } from '@/components/PluginAwareLink';
 import {
@@ -19,7 +19,11 @@ import {
   analyzePmuLbrBranchStack,
   resolveHostDefenseConfig,
 } from '@axonwall/lib/compile/rootkit';
-import type { DesiredState, HostMalwareDefenseConfig } from '@axonwall/lib/schemas';
+import {
+  HostMalwareDefenseConfigSchema,
+  type DesiredState,
+  type HostMalwareDefenseConfig,
+} from '@axonwall/lib/schemas';
 import {
   ShieldAlert,
   ShieldCheck,
@@ -69,10 +73,18 @@ export default function RootkitHunterPage() {
       .catch(() => {});
   }, []);
 
-  const bundle = useMemo(
-    () => compileHostDefenseBundle({ ...(state ?? {}), hostDefense: config }),
-    [state, config]
-  );
+  const lastValidBundleRef = useRef<ReturnType<typeof compileHostDefenseBundle> | null>(null);
+  const { bundle, validationError } = useMemo(() => {
+    try {
+      const compiled = compileHostDefenseBundle({ ...(state ?? {}), hostDefense: config });
+      lastValidBundleRef.current = compiled;
+      return { bundle: compiled, validationError: null as string | null };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Invalid host defense configuration';
+      const fallback = lastValidBundleRef.current ?? compileHostDefenseBundle(state ?? {});
+      return { bundle: fallback, validationError: msg };
+    }
+  }, [state, config]);
 
   // Live or simulated io_uring rings (/proc/[pid]/fdinfo)
   const ioUringReports = useMemo(() => {
@@ -133,15 +145,23 @@ export default function RootkitHunterPage() {
 
   const handleSave = async () => {
     if (!state) return;
+    const parsedCfg = HostMalwareDefenseConfigSchema.safeParse(config);
+    if (!parsedCfg.success) {
+      setStatusBanner(
+        `Error saving policy: ${parsedCfg.error.issues.map((i) => `${i.path.join('.') || 'hostDefense'}: ${i.message}`).join('; ')}`
+      );
+      return;
+    }
     setSaving(true);
     setStatusBanner(null);
     try {
       const next: DesiredState = {
         ...state,
-        hostDefense: config,
+        hostDefense: parsedCfg.data,
       };
       await applyState(next);
       setState(next);
+      setConfig(parsedCfg.data);
       setStatusBanner(
         'Saved Host Malware, Rootkit & Ghost-in-the-Ring Kernel Lockdown policy to /etc/axonwall/security.yaml.'
       );
@@ -297,12 +317,21 @@ export default function RootkitHunterPage() {
               : 'bg-emerald-950/50 border-emerald-500/40 text-emerald-200'
           }`}
         >
-          {statusBanner.startsWith('CRITICAL') || statusBanner.startsWith('Not implemented') ? (
+          {statusBanner.startsWith('CRITICAL') ||
+          statusBanner.startsWith('Error') ||
+          statusBanner.startsWith('Not implemented') ? (
             <AlertTriangle className="w-5 h-5 text-red-400 shrink-0" />
           ) : (
             <CheckCircle2 className="w-5 h-5 text-emerald-400 shrink-0" />
           )}
           <span>{statusBanner}</span>
+        </div>
+      )}
+
+      {validationError && (
+        <div className="p-3.5 rounded-xl border border-amber-500/40 bg-amber-950/40 text-amber-200 text-xs font-mono flex items-center gap-2.5">
+          <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
+          <span>Draft contains incomplete/invalid values (artifacts preview showing last valid policy): {validationError}</span>
         </div>
       )}
 
@@ -529,13 +558,16 @@ export default function RootkitHunterPage() {
                 </label>
                 <input
                   type="number"
+                  min={0}
+                  max={65535}
                   value={config.ioUringAllowedGid}
-                  onChange={(e) =>
-                    setConfig((prev) => ({
-                      ...prev,
-                      ioUringAllowedGid: parseInt(e.target.value, 10) || 994,
-                    }))
-                  }
+                  onChange={(e) => {
+                    const v = e.target.value.trim();
+                    const n = v === '' ? 0 : Number.parseInt(v, 10);
+                    if (!Number.isNaN(n)) {
+                      setConfig((prev) => ({ ...prev, ioUringAllowedGid: n }));
+                    }
+                  }}
                   className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white font-mono"
                 />
               </div>

@@ -235,7 +235,7 @@ func ApplyCloudInitUserData(cfg *EdgeBootConfig, raw string, rootDir string) err
 				if stripLen > indent {
 					stripLen = indent
 				}
-				currentBlockBuilder.WriteString(rawLine[stripLen:] + "\n")
+				currentBlockBuilder.WriteString(stripLeadingColumns(rawLine, stripLen) + "\n")
 				continue
 			}
 			flushBlockScalar()
@@ -1550,6 +1550,31 @@ func countLeadingSpaces(s string) int {
 		}
 	}
 	return n
+}
+
+// stripLeadingColumns strips up to cols visual indentation columns (where '\t' is 2 columns)
+// safely by byte offset so tab-indented YAML block scalars cannot cause out-of-bounds slices.
+func stripLeadingColumns(s string, cols int) string {
+	if cols <= 0 {
+		return s
+	}
+	consumed := 0
+	i := 0
+	for i < len(s) && consumed < cols {
+		if s[i] == ' ' {
+			consumed++
+			i++
+		} else if s[i] == '\t' {
+			consumed += 2
+			i++
+		} else {
+			break
+		}
+	}
+	if consumed > cols {
+		return strings.Repeat(" ", consumed-cols) + s[i:]
+	}
+	return s[i:]
 }
 
 func unquoteYAML(s string) string {

@@ -84,6 +84,18 @@ export function generateCanaryServiceAccount(name = 'cluster-admin-backup', name
     },
     {
       apiVersion: 'rbac.authorization.k8s.io/v1',
+      kind: 'ClusterRole',
+      metadata: {
+        name: `vigilante-canary-role-${name}`,
+        labels: {
+          'vigilante.io/canary': 'true',
+          'vigilante.io/canary-id': canaryId
+        }
+      },
+      rules: []
+    },
+    {
+      apiVersion: 'rbac.authorization.k8s.io/v1',
       kind: 'ClusterRoleBinding',
       metadata: {
         name: `vigilante-canary-binding-${name}`,
@@ -101,7 +113,7 @@ export function generateCanaryServiceAccount(name = 'cluster-admin-backup', name
       ],
       roleRef: {
         kind: 'ClusterRole',
-        name: 'cluster-admin',
+        name: `vigilante-canary-role-${name}`,
         apiGroup: 'rbac.authorization.k8s.io'
       }
     }
@@ -343,7 +355,19 @@ export function detectCanaryTripped(events = [], registeredCanaries = []) {
       if (canary.tokenSignature && raw.includes(canary.tokenSignature)) {
         isMatch = true;
         matchedIndicator = `token:${canary.tokenSignature}`;
-      } else if (canary.name && raw.includes(canary.name) && (canary.type === 'SERVICE_ACCOUNT' || canary.type === 'DECOY_SERVICE')) {
+      } else if (canary.tokenData && typeof canary.tokenData === 'object') {
+        const tokenFields = ['accessKeyId', 'secretAccessKey', 'token', 'webhookUrl', 'clientCert'];
+        for (const field of tokenFields) {
+          const val = canary.tokenData[field];
+          if (typeof val === 'string' && val.length >= 8 && raw.includes(val)) {
+            isMatch = true;
+            matchedIndicator = `tokenData.${field}`;
+            break;
+          }
+        }
+      }
+
+      if (!isMatch && canary.name && raw.includes(canary.name) && (canary.type === 'SERVICE_ACCOUNT' || canary.type === 'DECOY_SERVICE')) {
         isMatch = true;
         matchedIndicator = `name:${canary.name}`;
       }
@@ -464,10 +488,12 @@ export async function generateCloudHoneytoken(tokenType = 'aws', options = {}) {
   const canaryId = `canary-cloud-${Date.now().toString(36)}-${crypto.randomBytes(3).toString('hex')}`;
   const label = options.label || `canary-${tokenType}`;
   let tokenData = {};
+  let tokenSignature = canaryId;
 
   if (tokenType === 'aws') {
     const accessKeyId = `AKIA${crypto.randomBytes(8).toString('hex').toUpperCase()}`;
     const secretAccessKey = crypto.randomBytes(20).toString('base64');
+    tokenSignature = accessKeyId;
     tokenData = {
       type: 'aws',
       accessKeyId,
@@ -477,6 +503,7 @@ export async function generateCloudHoneytoken(tokenType = 'aws', options = {}) {
     };
   } else if (tokenType === 'github') {
     const token = `ghp_${crypto.randomBytes(18).toString('hex')}`;
+    tokenSignature = token;
     tokenData = {
       type: 'github',
       token,
@@ -485,6 +512,7 @@ export async function generateCloudHoneytoken(tokenType = 'aws', options = {}) {
     };
   } else if (tokenType === 'slack') {
     const webhookUrl = `https://hooks.slack.com/services/T00000000/B00000000/${crypto.randomBytes(12).toString('hex')}?cid=${canaryId}`;
+    tokenSignature = webhookUrl;
     tokenData = {
       type: 'slack',
       webhookUrl,
@@ -492,11 +520,13 @@ export async function generateCloudHoneytoken(tokenType = 'aws', options = {}) {
       envSnippet: `SLACK_WEBHOOK_URL=${webhookUrl}`
     };
   } else if (tokenType === 'kubeconfig') {
+    const clientCert = `LS0tLS1CRUdJTi...${canaryId}`;
+    tokenSignature = clientCert;
     tokenData = {
       type: 'kubeconfig',
       clusterEndpoint: `https://canary-api.vigilante.local:6443?cid=${canaryId}`,
       canaryId,
-      clientCert: `LS0tLS1CRUdJTi...${canaryId}`
+      clientCert
     };
   }
 
@@ -504,6 +534,7 @@ export async function generateCloudHoneytoken(tokenType = 'aws', options = {}) {
     id: canaryId,
     name: label,
     type: `cloud-${tokenType}`,
+    tokenSignature,
     tokenData,
     createdAt: new Date().toISOString(),
     tripped: false
@@ -547,50 +578,108 @@ export function plantDecoyBreadcrumbs(targetFormat = 'env', honeytoken = {}) {
   return snippet;
 }
 
+function timingSafeEqualToken(provided, expected) {
+  if (typeof provided !== 'string' || typeof expected !== 'string' || !provided || !expected) {
+    return false;
+  }
+  const a = crypto.createHash('sha256').update(provided).digest();
+  const b = crypto.createHash('sha256').update(expected).digest();
+  return crypto.timingSafeEqual(a, b);
+}
+
 /**
  * Start an in-process HTTP webhook trap listener to catch incoming canary callbacks
  * @param {Object} [options={}]
- * @returns {Promise<{ server: import('node:http').Server, port: number, close: Function }>}
+ * @returns {Promise<{ server: import('node:http').Server, port: number, host: string, path: string, authToken: string, close: Function }>}
  */
 export async function startCanaryWebhookListener(options = {}) {
   const http = await import('node:http');
   const port = options.port || 0; // 0 chooses a random available port
+  const host = options.host || '127.0.0.1';
+  const rawPath = options.path ? String(options.path) : `/canary/${crypto.randomBytes(12).toString('hex')}`;
+  const expectedPath = rawPath.startsWith('/') ? rawPath : `/${rawPath}`;
+  const authToken = options.authToken ? String(options.authToken) : crypto.randomBytes(24).toString('hex');
 
   return new Promise((resolve, reject) => {
     const server = http.createServer(async (req, res) => {
-      const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
-      const cid = url.searchParams.get('cid') || url.pathname.replace(/^\/canary\/?/, '').trim();
-      const clientIp = req.socket.remoteAddress || '127.0.0.1';
+      try {
+        const url = new URL(req.url || '/', 'http://localhost');
+        const pathMatches =
+          url.pathname === expectedPath || url.pathname.startsWith(`${expectedPath}/`);
+        if (!pathMatches) {
+          res.writeHead(404, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Not found' }));
+          return;
+        }
 
-      if (cid) {
-        logger.warn('CANARY', `Incoming trap callback tripped on canaryId: ${cid} from ${clientIp}`);
-        try {
-          await triggerCanaryAlarm({
-            tripId: `trip-cb-${Date.now().toString(36)}`,
-            canaryId: cid,
-            canaryName: `Canary Trap (${cid})`,
-            canaryType: 'webhook',
-            sourcePod: 'external-intruder',
-            sourceIp: clientIp,
-            namespace: 'perimeter'
-          }, options.autoIsolate !== false);
-        } catch (err) {
-          logger.error('CANARY', `Failed to trigger alarm for callback: ${err.message}`);
+        const authHeader = String(req.headers.authorization || '');
+        const bearerToken = authHeader.toLowerCase().startsWith('bearer ')
+          ? authHeader.slice(7).trim()
+          : '';
+        const providedToken =
+          bearerToken ||
+          String(req.headers['x-canary-token'] || '') ||
+          String(url.searchParams.get('token') || '');
+
+        if (!timingSafeEqualToken(providedToken, authToken)) {
+          res.writeHead(401, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Unauthorized' }));
+          return;
+        }
+
+        const trailingCid = url.pathname.slice(expectedPath.length).replace(/^\/+/, '').trim();
+        const cid = (url.searchParams.get('cid') || trailingCid).trim();
+        const clientIp = req.socket?.remoteAddress || '127.0.0.1';
+
+        if (cid) {
+          logger.warn('CANARY', `Incoming trap callback tripped on canaryId: ${cid} from ${clientIp}`);
+          try {
+            await triggerCanaryAlarm({
+              tripId: `trip-cb-${Date.now().toString(36)}`,
+              canaryId: cid,
+              canaryName: `Canary Trap (${cid})`,
+              canaryType: 'webhook',
+              sourcePod: 'external-intruder',
+              sourceIp: clientIp,
+              namespace: 'perimeter'
+            }, { autoIsolate: options.autoIsolate !== false });
+          } catch (err) {
+            logger.error('CANARY', `Failed to trigger alarm for callback: ${err.message}`);
+          }
+        }
+
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ status: 'ok', received: true }));
+      } catch (err) {
+        logger.error('CANARY', `Canary webhook listener request error: ${err.message}`);
+        if (!res.headersSent) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Internal server error' }));
+        } else {
+          res.end();
         }
       }
-
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ status: 'ok', received: true }));
     });
 
     server.on('error', reject);
-    server.listen(port, () => {
+    server.listen(port, host, () => {
+      server.removeListener('error', reject);
+      server.on('error', (err) => {
+        logger.error('CANARY', `Canary webhook server error: ${err.message}`);
+      });
       const actualPort = server.address().port;
-      logger.info('CANARY', `Canary webhook listener listening on port ${actualPort}`);
+      logger.info('CANARY', `Canary webhook listener listening on ${host}:${actualPort}${expectedPath}`);
       resolve({
         server,
         port: actualPort,
-        close: () => new Promise(r => server.close(r))
+        host,
+        path: expectedPath,
+        authToken,
+        close: () =>
+          new Promise(r => {
+            server.closeAllConnections?.();
+            server.close(r);
+          })
       });
     });
   });

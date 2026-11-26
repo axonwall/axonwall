@@ -79,8 +79,13 @@ type FlowEnricher struct {
 	netbox   *NetBoxManager
 	k3s      *K3sManager
 
-	ptrQueue chan string
+	ptrMu     sync.RWMutex
+	ptrClosed bool
+	ptrQueue  chan string
+	ptrWg     sync.WaitGroup
 }
+
+const maxEnricherDNSCache = 8192
 
 func NewFlowEnricher(k3s *K3sManager, netbox *NetBoxManager, librenms *LibreNMSManager) *FlowEnricher {
 	e := &FlowEnricher{
@@ -103,8 +108,23 @@ func NewFlowEnricher(k3s *K3sManager, netbox *NetBoxManager, librenms *LibreNMSM
 		ptrQueue:            make(chan string, 512),
 	}
 	e.refreshLocalInterfaces()
+	e.ptrWg.Add(1)
 	go e.ptrWorker()
 	return e
+}
+
+// Stop shuts down background reverse-DNS workers and waits for them to exit.
+func (e *FlowEnricher) Stop() {
+	if e == nil {
+		return
+	}
+	e.ptrMu.Lock()
+	if !e.ptrClosed && e.ptrQueue != nil {
+		e.ptrClosed = true
+		close(e.ptrQueue)
+	}
+	e.ptrMu.Unlock()
+	e.ptrWg.Wait()
 }
 
 func (e *FlowEnricher) UpdateBundle(b *NetFlowRuntimeBundle) {
@@ -319,9 +339,10 @@ func (e *FlowEnricher) RefreshExternalCaches(ctx context.Context) {
 			}
 			e.mu.Lock()
 			for _, p := range snap.Ports {
-				if ip := devIPByID[p.DeviceID]; ip != "" && p.PortID > 0 && p.IfName != "" {
-					if _, exists := e.ifAliases[ifAliasKey{exporterIP: ip, ifIndex: uint32(p.PortID)}]; !exists {
-						e.ifAliases[ifAliasKey{exporterIP: ip, ifIndex: uint32(p.PortID)}] = p.IfName
+				if ip := devIPByID[p.DeviceID]; ip != "" && p.IfIndex > 0 && p.IfName != "" {
+					key := ifAliasKey{exporterIP: ip, ifIndex: uint32(p.IfIndex)}
+					if _, exists := e.ifAliases[key]; !exists {
+						e.ifAliases[key] = p.IfName
 					}
 				}
 			}
@@ -330,7 +351,33 @@ func (e *FlowEnricher) RefreshExternalCaches(ctx context.Context) {
 	}
 }
 
+func (e *FlowEnricher) pruneDNSCacheLocked(now time.Time) {
+	for k, v := range e.dnsCache {
+		if now.After(v.expiresAt) {
+			delete(e.dnsCache, k)
+		}
+	}
+	for len(e.dnsCache) >= maxEnricherDNSCache {
+		var oldestKey string
+		var oldestExp time.Time
+		first := true
+		for k, v := range e.dnsCache {
+			if first || v.expiresAt.Before(oldestExp) {
+				oldestKey = k
+				oldestExp = v.expiresAt
+				first = false
+			}
+		}
+		if !first {
+			delete(e.dnsCache, oldestKey)
+		} else {
+			break
+		}
+	}
+}
+
 func (e *FlowEnricher) ptrWorker() {
+	defer e.ptrWg.Done()
 	for ip := range e.ptrQueue {
 		ctx, cancel := context.WithTimeout(context.Background(), 1200*time.Millisecond)
 		names, err := net.DefaultResolver.LookupAddr(ctx, ip)
@@ -345,10 +392,12 @@ func (e *FlowEnricher) ptrWorker() {
 		if ttlSec <= 0 {
 			ttlSec = 3600
 		}
+		now := time.Now()
 		e.mu.Lock()
+		e.pruneDNSCacheLocked(now)
 		e.dnsCache[ip] = cachedHostEntry{
 			name:      name,
-			expiresAt: time.Now().Add(time.Duration(ttlSec) * time.Second),
+			expiresAt: now.Add(time.Duration(ttlSec) * time.Second),
 		}
 		e.mu.Unlock()
 	}
@@ -698,10 +747,14 @@ func (e *FlowEnricher) resolveHostForNode(nodeID, ip string, reverseDNS bool) st
 	e.mu.RUnlock()
 
 	if reverseDNS {
-		select {
-		case e.ptrQueue <- ip:
-		default:
+		e.ptrMu.RLock()
+		if !e.ptrClosed && e.ptrQueue != nil {
+			select {
+			case e.ptrQueue <- ip:
+			default:
+			}
 		}
+		e.ptrMu.RUnlock()
 	}
 	return ""
 }

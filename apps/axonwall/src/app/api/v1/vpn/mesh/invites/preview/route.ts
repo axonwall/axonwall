@@ -15,7 +15,15 @@ export async function GET(req: NextRequest) {
   }
 
   const token = req.nextUrl.searchParams.get('token') || '';
-  const preview = previewHeadscaleInvite(token);
+  let preview: ReturnType<typeof previewHeadscaleInvite>;
+  try {
+    preview = previewHeadscaleInvite(token);
+  } catch (err: any) {
+    return NextResponse.json(
+      { status: 'error', error: err?.message || 'Invite store unavailable' },
+      { status: 503 }
+    );
+  }
   const network = await resolveHeadscaleNetworkInfo(req);
 
   let minPasswordLength = 12;
@@ -37,6 +45,7 @@ export async function GET(req: NextRequest) {
       data: {
         status: preview.status,
         magicDnsDomain: network.magicDnsDomain,
+        portalUrl: network.portalUrl,
         minPasswordLength,
       },
     });
@@ -53,6 +62,7 @@ export async function GET(req: NextRequest) {
       createStarterKey: preview.invite.createStarterKey,
       requiresPin: Boolean(preview.invite.requiresPin),
       magicDnsDomain: network.magicDnsDomain,
+      portalUrl: network.portalUrl,
       minPasswordLength,
     },
   });

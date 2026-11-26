@@ -10,7 +10,7 @@ import {
   CardTitle,
 } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
-import { Shield, ShieldAlert, Zap, Loader2, CheckCircle2, Save } from 'lucide-react';
+import { Shield, ShieldAlert, Zap, Loader2, CheckCircle2, AlertTriangle, Save } from 'lucide-react';
 import { Switch } from '@/components/ui/switch';
 import { getRecentThreatAlerts,
   getSystemServicesStatus,
@@ -18,6 +18,7 @@ import { getRecentThreatAlerts,
   type ThreatAlert,
   type LiveServiceInfo } from '@/server/agent';
 import { useDesiredStateApply } from '@/lib/use-desired-state-apply';
+import { mergeSuricataConfig } from '@/lib/state-preservation';
 import type { DesiredState } from '@axonwall/lib/schemas';
 
 function IdsIpsPageContent() {
@@ -30,7 +31,7 @@ function IdsIpsPageContent() {
   const [suricataEnabled, setSuricataEnabled] = useState(false);
   const [suricataMode, setSuricataMode] = useState<'ids' | 'ips'>('ips');
   const [saving, setSaving] = useState(false);
-  const [statusMsg, setStatusMsg] = useState<string | null>(null);
+  const [statusMsg, setStatusMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
   useEffect(() => {
     Promise.all([getRecentThreatAlerts(), getSystemServicesStatus(), getCurrentDesiredState()])
@@ -64,30 +65,33 @@ function IdsIpsPageContent() {
       const current = await getCurrentDesiredState();
       const nextState: DesiredState = {
         ...current,
-        suricata: {
+        suricata: mergeSuricataConfig(current.suricata, {
           enabled: nextEnabled,
           mode: nextMode,
-          interfaces: current.suricata?.interfaces || ['wan'],
-          nfqueueFailOpen: current.suricata?.nfqueueFailOpen ?? true,
-          nfqueueBypass: current.suricata?.nfqueueBypass ?? true,
-          ruleSources: current.suricata?.ruleSources || [
+          defaultRuleSources: [
             {
               name: 'ET Open Ruleset',
               url: 'https://rules.emergingthreats.net/open/suricata-7.0/emerging.rules.tar.gz',
               enabled: true,
             },
           ],
-          homeNet: current.suricata?.homeNet || ['192.168.0.0/16', '10.0.0.0/8', '172.16.0.0/12'],
-        },
+          defaultHomeNet: ['192.168.0.0/16', '10.0.0.0/8', '172.16.0.0/12'],
+        }),
       };
       setFullState(nextState);
       const res = await applyState(nextState);
-      setStatusMsg(res.message || 'Saved Suricata configuration to /etc/axonwall/security.yaml');
+      setStatusMsg({
+        type: 'success',
+        text: res.message || 'Saved Suricata configuration to /etc/axonwall/security.yaml',
+      });
     } catch (err: any) {
       setSuricataEnabled(prevSuricataEnabled);
       setSuricataMode(prevSuricataMode);
       setFullState(prevFullState);
-      setStatusMsg(`Error: ${err?.message || 'Failed to save Suricata settings'}`);
+      setStatusMsg({
+        type: 'error',
+        text: err?.message || 'Failed to save Suricata settings',
+      });
     } finally {
       setSaving(false);
     }
@@ -133,9 +137,19 @@ function IdsIpsPageContent() {
       </div>
 
       {statusMsg && (
-        <div className="p-3 bg-emerald-500/10 border border-emerald-500/30 rounded-lg text-xs text-emerald-300 flex items-center gap-2">
-          <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
-          <span>{statusMsg}</span>
+        <div
+          className={`p-3 rounded-lg text-xs flex items-center gap-2 border ${
+            statusMsg.type === 'error'
+              ? 'bg-red-500/10 border-red-500/30 text-red-300'
+              : 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300'
+          }`}
+        >
+          {statusMsg.type === 'error' ? (
+            <AlertTriangle className="w-4 h-4 text-red-400 shrink-0" />
+          ) : (
+            <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+          )}
+          <span>{statusMsg.text}</span>
         </div>
       )}
 

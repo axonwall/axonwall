@@ -8,7 +8,7 @@ import type {
   DhcpSubnet,
   StaticRoute,
 } from '../../schemas/index.js';
-import type { ImportReport } from '../types.js';
+import type { ImportReport, ImportReviewItem } from '../types.js';
 
 export function tokenizeVyos(input: string): string[] {
   const tokens: string[] = [];
@@ -88,6 +88,20 @@ function assertSafeVyosKey(key: string): string {
   return key;
 }
 
+function flushVyosWords(result: any, words: string[]): void {
+  if (words.length === 0) return;
+  const key = assertSafeVyosKey(words[0]);
+  const val = words.length === 2 ? words[1] : words.slice(1).join(' ');
+  if (result[key] === undefined) {
+    result[key] = val;
+  } else if (Array.isArray(result[key])) {
+    result[key].push(val);
+  } else {
+    result[key] = [result[key], val];
+  }
+  words.length = 0;
+}
+
 export function parseVyosTokens(tokens: string[], index = 0, depth = 0): [any, number] {
   if (depth > MAX_VYOS_DEPTH) {
     throw new Error(`VyOS configuration exceeds maximum nesting depth of ${MAX_VYOS_DEPTH}`);
@@ -99,22 +113,13 @@ export function parseVyosTokens(tokens: string[], index = 0, depth = 0): [any, n
     const t = tokens[index];
 
     if (t === '}') {
+      // Flush trailing statement inside single-line blocks such as `source { address !10.0.0.0/8 }`.
+      flushVyosWords(result, words);
       return [result, index + 1];
     }
 
     if (t === ';') {
-      if (words.length > 0) {
-        const key = assertSafeVyosKey(words[0]);
-        const val = words.length === 2 ? words[1] : words.slice(1).join(' ');
-        if (result[key] === undefined) {
-          result[key] = val;
-        } else if (Array.isArray(result[key])) {
-          result[key].push(val);
-        } else {
-          result[key] = [result[key], val];
-        }
-        words.length = 0;
-      }
+      flushVyosWords(result, words);
       index++;
       continue;
     }
@@ -155,11 +160,7 @@ export function parseVyosTokens(tokens: string[], index = 0, depth = 0): [any, n
     index++;
   }
 
-  if (words.length > 0) {
-    const key = assertSafeVyosKey(words[0]);
-    const val = words.length === 2 ? words[1] : words.slice(1).join(' ');
-    result[key] = val;
-  }
+  flushVyosWords(result, words);
 
   return [result, index];
 }
@@ -290,6 +291,15 @@ export function importVyosConfig(configText: string): ImportReport {
 
   // 3. Firewall Filter Rules
   const rules: FirewallRule[] = [];
+  const reviewItems: ImportReviewItem[] = [];
+  const parseVyosNegation = (raw: unknown): { value: string; negated: boolean } => {
+    const trimmed = String(raw ?? '').trim();
+    if (trimmed.startsWith('!')) {
+      return { value: trimmed.slice(1).trim(), negated: true };
+    }
+    return { value: trimmed, negated: false };
+  };
+
   let sortOrder = 10;
   const fwChains = root.firewall?.name || root.firewall?.ipv4?.name || {};
   for (const [chainName, chainData] of Object.entries<any>(fwChains)) {
@@ -314,22 +324,88 @@ export function importVyosConfig(configText: string): ImportReport {
 
       let src = 'any';
       let srcPort = '';
+      let negatedSrc = false;
+      let negatedPort = false;
       if (r.source) {
-        if (r.source.address) src = String(r.source.address);
-        else if (r.source.group?.['address-group']) src = `$${String(r.source.group['address-group']).replace(/[^a-zA-Z0-9_]/g, '_')}`;
-        else if (r.source.group?.['network-group']) src = `$${String(r.source.group['network-group']).replace(/[^a-zA-Z0-9_]/g, '_')}`;
-        if (r.source.port) srcPort = String(r.source.port);
-        else if (r.source.group?.['port-group']) srcPort = `$${String(r.source.group['port-group']).replace(/[^a-zA-Z0-9_]/g, '_')}`;
+        if (r.source.address) {
+          const parsed = parseVyosNegation(r.source.address);
+          src = parsed.value || 'any';
+          negatedSrc = parsed.negated && src !== 'any';
+        } else if (r.source.group?.['address-group']) {
+          const parsed = parseVyosNegation(r.source.group['address-group']);
+          src = parsed.value ? `$${parsed.value.replace(/[^a-zA-Z0-9_]/g, '_')}` : 'any';
+          negatedSrc = parsed.negated && src !== 'any';
+        } else if (r.source.group?.['network-group']) {
+          const parsed = parseVyosNegation(r.source.group['network-group']);
+          src = parsed.value ? `$${parsed.value.replace(/[^a-zA-Z0-9_]/g, '_')}` : 'any';
+          negatedSrc = parsed.negated && src !== 'any';
+        }
+        if (r.source.port) {
+          const parsed = parseVyosNegation(r.source.port);
+          srcPort = parsed.value;
+          if (parsed.negated) negatedPort = true;
+        } else if (r.source.group?.['port-group']) {
+          const parsed = parseVyosNegation(r.source.group['port-group']);
+          srcPort = parsed.value ? `$${parsed.value.replace(/[^a-zA-Z0-9_]/g, '_')}` : '';
+          if (parsed.negated) negatedPort = true;
+        }
       }
 
       let dst = 'any';
       let dstPort = '';
+      let negatedDst = false;
       if (r.destination) {
-        if (r.destination.address) dst = String(r.destination.address);
-        else if (r.destination.group?.['address-group']) dst = `$${String(r.destination.group['address-group']).replace(/[^a-zA-Z0-9_]/g, '_')}`;
-        else if (r.destination.group?.['network-group']) dst = `$${String(r.destination.group['network-group']).replace(/[^a-zA-Z0-9_]/g, '_')}`;
-        if (r.destination.port) dstPort = String(r.destination.port);
-        else if (r.destination.group?.['port-group']) dstPort = `$${String(r.destination.group['port-group']).replace(/[^a-zA-Z0-9_]/g, '_')}`;
+        if (r.destination.address) {
+          const parsed = parseVyosNegation(r.destination.address);
+          dst = parsed.value || 'any';
+          negatedDst = parsed.negated && dst !== 'any';
+        } else if (r.destination.group?.['address-group']) {
+          const parsed = parseVyosNegation(r.destination.group['address-group']);
+          dst = parsed.value ? `$${parsed.value.replace(/[^a-zA-Z0-9_]/g, '_')}` : 'any';
+          negatedDst = parsed.negated && dst !== 'any';
+        } else if (r.destination.group?.['network-group']) {
+          const parsed = parseVyosNegation(r.destination.group['network-group']);
+          dst = parsed.value ? `$${parsed.value.replace(/[^a-zA-Z0-9_]/g, '_')}` : 'any';
+          negatedDst = parsed.negated && dst !== 'any';
+        }
+        if (r.destination.port) {
+          const parsed = parseVyosNegation(r.destination.port);
+          dstPort = parsed.value;
+          if (parsed.negated) negatedPort = true;
+        } else if (r.destination.group?.['port-group']) {
+          const parsed = parseVyosNegation(r.destination.group['port-group']);
+          dstPort = parsed.value ? `$${parsed.value.replace(/[^a-zA-Z0-9_]/g, '_')}` : '';
+          if (parsed.negated) negatedPort = true;
+        }
+      }
+
+      const hasNegation = negatedSrc || negatedDst || negatedPort;
+      const ruleIndex = rules.length;
+      const baseDesc = r.description || `Rule ${ruleId} (${chainName})`;
+      const finalDesc = hasNegation ? `[REVIEW: Negated match] ${baseDesc}` : baseDesc;
+      const isEnabled = hasNegation ? false : r.disable === undefined;
+
+      if (hasNegation) {
+        const reason: ImportReviewItem['reason'] =
+          negatedSrc && negatedDst
+            ? 'negated_both'
+            : negatedSrc
+              ? 'negated_source'
+              : negatedDst
+                ? 'negated_destination'
+                : 'manual_review';
+        const matchSummary = `${action.toUpperCase()} ${proto} from ${negatedSrc ? `!${src}` : src} to ${negatedDst ? `!${dst}` : dst}`;
+        const explanation = `VyOS rule "${baseDesc}" uses an inverted (!) match (${matchSummary}${negatedPort ? ' / negated port' : ''}). Imported with enabled: false so it cannot silently activate with unintended negated semantics.`;
+        const suggestedResolution = `Review the negated source/destination/port rules and split into explicit ordered rules before enabling.`;
+        warnings.push(explanation + ' ' + suggestedResolution);
+        reviewItems.push({
+          ruleId: `rule-${ruleIndex + 1}`,
+          ruleIndex,
+          reason,
+          originalMatchSummary: matchSummary,
+          explanation,
+          suggestedResolution,
+        });
       }
 
       rules.push({
@@ -339,12 +415,14 @@ export function importVyosConfig(configText: string): ImportReport {
         quick: true,
         protocol: proto,
         source: src,
+        ...(negatedSrc ? { invertSource: true } : {}),
         sourcePort: srcPort,
         destination: dst,
+        ...(negatedDst ? { invertDestination: true } : {}),
         destinationPort: dstPort,
         log: r.log === 'enable',
-        enabled: r.disable === undefined,
-        description: r.description || `Rule ${ruleId} (${chainName})`,
+        enabled: isEnabled,
+        description: finalDesc,
         sortOrder,
       });
       sortOrder += 10;
@@ -534,6 +612,7 @@ export function importVyosConfig(configText: string): ImportReport {
     dnsOverridesCount: 0,
     routesCount: routes.length,
     warnings,
+    reviewItems,
     state,
   };
 }

@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSession } from '@/server/auth';
-import { assertActionPermitted } from '@/server/auth-guard';
+import { assertActionPermitted, assertInteractiveSession } from '@/server/auth-guard';
 import { revokeServiceToken } from '@/server/service-tokens';
 
 function errStatus(err: unknown): number {
@@ -16,6 +16,7 @@ export async function DELETE(
 ) {
   try {
     const session = await getSession();
+    assertInteractiveSession(session);
     assertActionPermitted(session, 'admin');
     const { id } = await context.params;
     const revoked = revokeServiceToken(id);

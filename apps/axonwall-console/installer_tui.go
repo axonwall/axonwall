@@ -3245,11 +3245,13 @@ func RunNextGenInstallerTUI(reader *bufio.Reader) {
 		return
 	}
 
+	reinstallConfirmed := false
 	if !isLiveMode() {
 		clearScreen()
 		if !confirmReinstallFromInstalledSystem(reader, os.Stdout) {
 			return
 		}
+		reinstallConfirmed = true
 	}
 
 	cfg := DefaultInstallerConfig()
@@ -3499,7 +3501,7 @@ func RunNextGenInstallerTUI(reader *bufio.Reader) {
 					if !confirmTargetDiskOverwrite(disks, cfg, reader, os.Stdout) {
 						continue
 					}
-					executeLiveInstallation(cfg, eval, installerPath, reader)
+					executeLiveInstallation(cfg, eval, installerPath, reader, reinstallConfirmed, true)
 					return
 				}
 			case "Q", "ESC", "EOF":
@@ -4421,7 +4423,7 @@ func RunNextGenInstallerTUI(reader *bufio.Reader) {
 				if !confirmTargetDiskOverwrite(disks, cfg, reader, os.Stdout) {
 					continue
 				}
-				executeLiveInstallation(cfg, eval, installerPath, reader)
+				executeLiveInstallation(cfg, eval, installerPath, reader, reinstallConfirmed, true)
 				return
 			case "Q", "ESC", "EOF":
 				return
@@ -4430,8 +4432,36 @@ func RunNextGenInstallerTUI(reader *bufio.Reader) {
 	}
 }
 
+// buildLiveInstallCommand builds the axonwall-install --apply-config command,
+// forwarding explicit operator reinstall/overwrite confirmations via env and flags.
+func buildLiveInstallCommand(installerPath, cfgPath string, reinstallConfirmed, overwriteConfirmed bool) *exec.Cmd {
+	args := []string{installerPath, "--apply-config", cfgPath}
+	if overwriteConfirmed {
+		args = append(args, "--force-wipe")
+	}
+	cmd := exec.Command("/bin/sh", args...)
+	env := make([]string, 0, len(os.Environ())+3)
+	for _, entry := range os.Environ() {
+		if strings.HasPrefix(entry, "AXONWALL_INSTALL_BACKEND=") ||
+			strings.HasPrefix(entry, "AXONWALL_REINSTALL_CONFIRMED=") ||
+			strings.HasPrefix(entry, "ALLOW_WIPE_EXISTING=") {
+			continue
+		}
+		env = append(env, entry)
+	}
+	env = append(env, "AXONWALL_INSTALL_BACKEND=1")
+	if reinstallConfirmed {
+		env = append(env, "AXONWALL_REINSTALL_CONFIRMED=1")
+	}
+	if overwriteConfirmed {
+		env = append(env, "ALLOW_WIPE_EXISTING=1")
+	}
+	cmd.Env = env
+	return cmd
+}
+
 // executeLiveInstallation writes the config file, runs axonwall-install, and renders the live progress dashboard.
-func executeLiveInstallation(cfg InstallerConfig, eval HardwareEvaluation, installerPath string, reader *bufio.Reader) {
+func executeLiveInstallation(cfg InstallerConfig, eval HardwareEvaluation, installerPath string, reader *bufio.Reader, reinstallConfirmed, overwriteConfirmed bool) {
 	suppressConsoleNoise()
 	runDir := "/run/axonwall"
 	if err := os.MkdirAll(runDir, 0700); err != nil {
@@ -4574,8 +4604,7 @@ func executeLiveInstallation(cfg InstallerConfig, eval HardwareEvaluation, insta
 
 	drawProgress("Starting installation backend...", false, false)
 
-	cmd := exec.Command("/bin/sh", installerPath, "--apply-config", cfgPath)
-	cmd.Env = append(os.Environ(), "AXONWALL_INSTALL_BACKEND=1")
+	cmd := buildLiveInstallCommand(installerPath, cfgPath, reinstallConfirmed, overwriteConfirmed)
 	stdoutPipe, err := cmd.StdoutPipe()
 	if err != nil {
 		fmt.Printf("%s[!] Failed to attach stdout pipe: %v%s\n", colorRed, err, colorReset)

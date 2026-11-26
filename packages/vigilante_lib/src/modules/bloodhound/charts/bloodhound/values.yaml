@@ -1,3 +1,5 @@
+existingSecret: ""
+
 image:
   repository: specterops/bloodhound
   tag: "latest"
@@ -7,9 +9,10 @@ postgres:
   image:
     repository: postgres
     tag: "16-alpine"
+    pullPolicy: IfNotPresent
   database: bloodhound
   username: bloodhound
-  password: "BloodHoundPostgresSecret123!"
+  password: ""
   resources:
     requests:
       cpu: 100m
@@ -22,11 +25,11 @@ neo4j:
   image:
     repository: neo4j
     tag: "4.4.35"
-  password: "BloodHoundAdminSecret123!"
+  password: ""
 
 admin:
   principalName: admin
-  password: "BloodHoundAdminSecret123!"
+  password: ""
 
 service:
   type: ClusterIP

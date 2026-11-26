@@ -100,16 +100,31 @@ function compileInterfaceShaper(
 
       if (iface.queues && iface.queues.length > 0) {
         let classIndex = 10;
+        const usedPct = iface.queues.reduce((sum, q) => sum + (Number(q.bandwidthPercent) || 0), 0);
+        const defaultPct = Math.max(10, 100 - usedPct);
+        const defaultRateMbps = Math.max(
+          1,
+          Math.min(iface.uploadBandwidthMbps, Math.round((iface.uploadBandwidthMbps * defaultPct) / 100)),
+        );
         for (const q of iface.queues) {
           const rateMbps = Math.max(1, Math.round((iface.uploadBandwidthMbps * q.bandwidthPercent) / 100));
+          const prio = Math.max(1, Math.min(7, Math.trunc(Number(q.priority) || 3)));
           commands.push(
-            `tc class add dev ${dev} parent 1:1 classid 1:${classIndex} htb rate ${rateMbps}mbit ceil ${iface.uploadBandwidthMbps}mbit prio ${q.priority}`
+            `tc class add dev ${dev} parent 1:1 classid 1:${classIndex} htb rate ${rateMbps}mbit ceil ${iface.uploadBandwidthMbps}mbit prio ${prio}`
           );
           if (q.codel) {
             commands.push(`tc qdisc add dev ${dev} parent 1:${classIndex} handle ${classIndex}0: fq_codel`);
           }
+          commands.push(
+            `tc filter add dev ${dev} parent 1: protocol all prio ${prio} handle ${classIndex} fw flowid 1:${classIndex}`
+          );
           classIndex += 10;
         }
+        // Always ensure default fallback class 1:99 exists when HTB qdisc uses `default 99`
+        commands.push(
+          `tc class add dev ${dev} parent 1:1 classid 1:99 htb rate ${defaultRateMbps}mbit ceil ${iface.uploadBandwidthMbps}mbit prio 5`
+        );
+        commands.push(`tc qdisc add dev ${dev} parent 1:99 handle 990: fq_codel`);
       } else {
         // Default catch-all class
         commands.push(

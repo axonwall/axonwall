@@ -1,46 +1,47 @@
 import { NextResponse } from 'next/server';
 import { listPreAuthKeys, createPreAuthKey, expirePreAuthKey } from '../../../../../../server/headscale';
 import { getSession } from '../../../../../../server/auth';
-import { isPasswordChangeEnforced } from '../../../../../../server/auth-guard';
+import { assertActionPermitted } from '../../../../../../server/auth-guard';
+
+function mapMeshErrStatus(err: unknown): number {
+  if (err instanceof SyntaxError) return 400;
+  const msg = err instanceof Error ? err.message : String(err || '');
+  if (msg === 'Unauthorized') return 401;
+  if (msg.startsWith('Forbidden')) return 403;
+  if (/not found/i.test(msg)) return 404;
+  if (/invalid|required|cannot start|must be|json/i.test(msg)) return 400;
+  return 500;
+}
 
 export async function GET(req: Request) {
   try {
     const session = await getSession();
-    const pwdEnforced = isPasswordChangeEnforced(session);
-    if (!session || pwdEnforced || !session.roles.includes('admin')) {
-      return NextResponse.json(
-        { error: pwdEnforced ? 'Password change required' : 'Unauthorized' },
-        { status: pwdEnforced ? 403 : 401 }
-      );
-    }
+    assertActionPermitted(session, 'admin');
     const { searchParams } = new URL(req.url);
     const user = searchParams.get('user') || undefined;
     const keys = await listPreAuthKeys(user);
     return NextResponse.json({ status: 'ok', data: keys });
   } catch (err: any) {
-    return NextResponse.json({ status: 'error', error: err.message }, { status: 500 });
+    return NextResponse.json({ status: 'error', error: err?.message || 'Failed to list pre-auth keys' }, { status: mapMeshErrStatus(err) });
   }
 }
 
 export async function POST(req: Request) {
   try {
     const session = await getSession();
-    const pwdEnforced = isPasswordChangeEnforced(session);
-    if (!session || pwdEnforced || !session.roles.includes('admin')) {
-      return NextResponse.json(
-        { error: pwdEnforced ? 'Password change required' : 'Unauthorized' },
-        { status: pwdEnforced ? 403 : 401 }
-      );
-    }
+    assertActionPermitted(session, 'admin');
     const body = await req.json();
+    if (!body || typeof body !== 'object' || Array.isArray(body)) {
+      return NextResponse.json({ status: 'error', error: 'Invalid JSON request body' }, { status: 400 });
+    }
     const { action, user, reusable, ephemeral, expiration, key, keyId } = body;
     
     if (action === 'expire') {
       const keyTarget = key || keyId;
-      if (!keyTarget) {
+      if (!keyTarget || (typeof keyTarget !== 'string' && typeof keyTarget !== 'number')) {
         return NextResponse.json({ error: 'key or keyId is required' }, { status: 400 });
       }
-      await expirePreAuthKey(user || '', keyTarget, keyId);
+      await expirePreAuthKey(typeof user === 'string' ? user : '', keyTarget, keyId);
       return NextResponse.json({ status: 'ok' });
     }
 
@@ -56,7 +57,12 @@ export async function POST(req: Request) {
     }
 
     // Create new key
-    if (!user) return NextResponse.json({ error: 'user is required' }, { status: 400 });
+    if (typeof user !== 'string' || !user.trim()) {
+      return NextResponse.json({ error: 'user is required' }, { status: 400 });
+    }
+    if (expiration !== undefined && typeof expiration !== 'string') {
+      return NextResponse.json({ error: 'Invalid expiration timestamp' }, { status: 400 });
+    }
     const newKey = await createPreAuthKey(
       user, 
       !!reusable, 
@@ -65,6 +71,7 @@ export async function POST(req: Request) {
     );
     return NextResponse.json({ status: 'ok', data: newKey });
   } catch (err: any) {
-    return NextResponse.json({ status: 'error', error: err.message }, { status: 500 });
+    const message = err instanceof SyntaxError ? 'Invalid JSON request body' : err?.message || 'Pre-auth key operation failed';
+    return NextResponse.json({ status: 'error', error: message }, { status: mapMeshErrStatus(err) });
   }
 }

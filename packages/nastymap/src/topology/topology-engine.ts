@@ -258,7 +258,7 @@ export function filterTopology(graph: TopologyGraph, filter?: FilterOptions): {
 
     // Only open ports filter
     if (matches && filter.onlyOpenPorts) {
-      if (node.openPorts.length === 0 && node.nodeType === 'host') {
+      if (node.openPorts.length === 0 && Boolean(node.hostRef)) {
         matches = false;
       }
     }

@@ -13,6 +13,7 @@ import (
 
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 )
 
@@ -43,11 +44,122 @@ func (r *DesiredStateResource) Schema(ctx context.Context, req resource.SchemaRe
 	resp.Schema = schema.Schema{
 		Attributes: map[string]schema.Attribute{
 			"state_json": schema.StringAttribute{
-				MarkdownDescription: "The full DesiredState JSON payload",
+				MarkdownDescription: "The declarative DesiredState JSON payload",
 				Required:            true,
+				Sensitive:           true,
+				PlanModifiers: []planmodifier.String{
+					semanticJSONPlanModifier{},
+				},
 			},
 		},
 	}
+}
+
+type semanticJSONPlanModifier struct{}
+
+func (m semanticJSONPlanModifier) Description(ctx context.Context) string {
+	return "Suppresses plan diffs when state_json is semantically identical (ignoring whitespace and key ordering)."
+}
+
+func (m semanticJSONPlanModifier) MarkdownDescription(ctx context.Context) string {
+	return m.Description(ctx)
+}
+
+func (m semanticJSONPlanModifier) PlanModifyString(ctx context.Context, req planmodifier.StringRequest, resp *planmodifier.StringResponse) {
+	if req.PlanValue.IsNull() || req.PlanValue.IsUnknown() || req.StateValue.IsNull() || req.StateValue.IsUnknown() {
+		return
+	}
+	planObj, err1 := decodeJSONWithNumbers(req.PlanValue.ValueString())
+	stateObj, err2 := decodeJSONWithNumbers(req.StateValue.ValueString())
+	if err1 == nil && err2 == nil && jsonDeepEqual(planObj, stateObj) {
+		resp.PlanValue = req.StateValue
+	}
+}
+
+func decodeJSONWithNumbers(raw string) (interface{}, error) {
+	dec := json.NewDecoder(strings.NewReader(raw))
+	dec.UseNumber()
+	var v interface{}
+	if err := dec.Decode(&v); err != nil {
+		return nil, err
+	}
+	return v, nil
+}
+
+func jsonDeepEqual(a, b interface{}) bool {
+	if na, okA := a.(json.Number); okA {
+		if nb, okB := b.(json.Number); okB {
+			if na == nb {
+				return true
+			}
+			if ia, errA := na.Int64(); errA == nil {
+				if ib, errB := nb.Int64(); errB == nil {
+					return ia == ib
+				}
+			}
+			if fa, errA := na.Float64(); errA == nil {
+				if fb, errB := nb.Float64(); errB == nil {
+					return fa == fb
+				}
+			}
+			return false
+		}
+		return false
+	}
+	switch va := a.(type) {
+	case map[string]interface{}:
+		vb, ok := b.(map[string]interface{})
+		if !ok || len(va) != len(vb) {
+			return false
+		}
+		for k, subA := range va {
+			subB, exists := vb[k]
+			if !exists || !jsonDeepEqual(subA, subB) {
+				return false
+			}
+		}
+		return true
+	case []interface{}:
+		vb, ok := b.([]interface{})
+		if !ok || len(va) != len(vb) {
+			return false
+		}
+		for i := range va {
+			if !jsonDeepEqual(va[i], vb[i]) {
+				return false
+			}
+		}
+		return true
+	default:
+		return reflect.DeepEqual(a, b)
+	}
+}
+
+// projectManagedJSON restricts server-returned DesiredState fields to the keys managed
+// in prior so server-added default subsystems and unrequested defaults do not trigger
+// perpetual drift or copy unrelated appliance secrets into Terraform state.
+func projectManagedJSON(prior, server interface{}) interface{} {
+	priorMap, pIsMap := prior.(map[string]interface{})
+	serverMap, sIsMap := server.(map[string]interface{})
+	if pIsMap && sIsMap {
+		out := make(map[string]interface{}, len(priorMap))
+		for k, pVal := range priorMap {
+			if sVal, ok := serverMap[k]; ok {
+				out[k] = projectManagedJSON(pVal, sVal)
+			}
+		}
+		return out
+	}
+	priorArr, pIsArr := prior.([]interface{})
+	serverArr, sIsArr := server.([]interface{})
+	if pIsArr && sIsArr && len(priorArr) == len(serverArr) {
+		out := make([]interface{}, len(priorArr))
+		for i := range priorArr {
+			out[i] = projectManagedJSON(priorArr[i], serverArr[i])
+		}
+		return out
+	}
+	return server
 }
 
 func (r *DesiredStateResource) Configure(ctx context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
@@ -130,15 +242,25 @@ func (r *DesiredStateResource) Read(ctx context.Context, req resource.ReadReques
 		resp.Diagnostics.AddError("Failed to read /state response body", err.Error())
 		return
 	}
-	if len(bodyBytes) > 0 {
-		var jsonObj interface{}
-		if err := json.Unmarshal(bodyBytes, &jsonObj); err == nil {
-			var existingObj interface{}
-			if json.Unmarshal([]byte(data.StateJSON.ValueString()), &existingObj) != nil || !reflect.DeepEqual(jsonObj, existingObj) {
-				if normBytes, err := json.Marshal(jsonObj); err == nil {
-					data.StateJSON = types.StringValue(string(normBytes))
+	if len(bytes.TrimSpace(bodyBytes)) > 0 {
+		jsonObj, err := decodeJSONWithNumbers(string(bodyBytes))
+		if err != nil {
+			resp.Diagnostics.AddError("Invalid /state response JSON", err.Error())
+			return
+		}
+		if !data.StateJSON.IsNull() && strings.TrimSpace(data.StateJSON.ValueString()) != "" {
+			if existingObj, existingErr := decodeJSONWithNumbers(data.StateJSON.ValueString()); existingErr == nil {
+				projected := projectManagedJSON(existingObj, jsonObj)
+				if !jsonDeepEqual(projected, existingObj) {
+					if normBytes, err := json.Marshal(projected); err == nil {
+						data.StateJSON = types.StringValue(string(normBytes))
+					}
 				}
+			} else if normBytes, err := json.Marshal(jsonObj); err == nil {
+				data.StateJSON = types.StringValue(string(normBytes))
 			}
+		} else if normBytes, err := json.Marshal(jsonObj); err == nil {
+			data.StateJSON = types.StringValue(string(normBytes))
 		}
 	}
 
@@ -262,23 +384,32 @@ func (r *DesiredStateResource) applyState(ctx context.Context, stateJson string)
 	}
 
 	confirmRespBody, err := io.ReadAll(io.LimitReader(confirmResp.Body, 1<<20))
-	if err == nil && len(bytes.TrimSpace(confirmRespBody)) > 0 {
-		var confirmEnv struct {
-			Status string `json:"status"`
-			Error  string `json:"error"`
-			Data   *struct {
-				Success *bool  `json:"success"`
-				Message string `json:"message"`
-			} `json:"data"`
+	if err != nil {
+		return fmt.Errorf("failed to read /confirm response: %w", err)
+	}
+	if len(bytes.TrimSpace(confirmRespBody)) == 0 {
+		return fmt.Errorf("/confirm returned empty response body")
+	}
+	var confirmEnv struct {
+		Status string `json:"status"`
+		Error  string `json:"error"`
+		Data   *struct {
+			Success *bool  `json:"success"`
+			Message string `json:"message"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(confirmRespBody, &confirmEnv); err != nil {
+		return fmt.Errorf("invalid /confirm response JSON: %w", err)
+	}
+	if confirmEnv.Status != "ok" {
+		return fmt.Errorf("/confirm failed (status=%s): %s", confirmEnv.Status, confirmEnv.Error)
+	}
+	if confirmEnv.Data == nil || confirmEnv.Data.Success == nil || !*confirmEnv.Data.Success {
+		msg := ""
+		if confirmEnv.Data != nil {
+			msg = confirmEnv.Data.Message
 		}
-		if err := json.Unmarshal(confirmRespBody, &confirmEnv); err == nil {
-			if confirmEnv.Status != "" && confirmEnv.Status != "ok" {
-				return fmt.Errorf("/confirm failed (status=%s): %s", confirmEnv.Status, confirmEnv.Error)
-			}
-			if confirmEnv.Data != nil && confirmEnv.Data.Success != nil && !*confirmEnv.Data.Success {
-				return fmt.Errorf("/confirm rejected: %s", confirmEnv.Data.Message)
-			}
-		}
+		return fmt.Errorf("/confirm rejected: %s", msg)
 	}
 
 	return nil

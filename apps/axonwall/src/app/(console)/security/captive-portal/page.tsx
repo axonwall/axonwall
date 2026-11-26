@@ -2,9 +2,10 @@
 
 import { useState, useEffect } from 'react';
 import { PluginDisabledGate } from '@/components/PluginDisabledGate';
-import { Users, Wifi, Trash2, Plus, CheckCircle2, Clock, ArrowDown, ArrowUp } from 'lucide-react';
+import { Users, Wifi, Trash2, Plus, CheckCircle2, AlertCircle, Clock, ArrowDown, ArrowUp } from 'lucide-react';
 import { getCurrentDesiredState } from '@/server/agent';
 import { useDesiredStateApply } from '@/lib/use-desired-state-apply';
+import { mergeCaptivePortalConfig } from '@/lib/state-preservation';
 import type { DesiredState, CaptivePortalZone } from '@axonwall/lib/schemas';
 
 interface ActiveSessionView {
@@ -23,7 +24,7 @@ function CaptivePortalPageContent() {
   const [zones, setZones] = useState<CaptivePortalZone[]>([]);
   const [sessions, setSessions] = useState<ActiveSessionView[]>([]);
   const [saving, setSaving] = useState(false);
-  const [statusMsg, setStatusMsg] = useState<string | null>(null);
+  const [statusMsg, setStatusMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
   const [newName, setNewName] = useState('');
   const [newIface, setNewIface] = useState('opt1');
@@ -50,18 +51,21 @@ function CaptivePortalPageContent() {
       const current = await getCurrentDesiredState();
       const nextState: DesiredState = {
         ...current,
-        captivePortal: {
-          enabled: nextZones.length > 0,
-          zones: nextZones,
-        },
+        captivePortal: mergeCaptivePortalConfig(current.captivePortal, nextZones),
       };
       setFullState(nextState);
       const res = await applyState(nextState);
-      setStatusMsg(res.message || 'Saved Captive Portal zones to /etc/axonwall/services.yaml');
+      setStatusMsg({
+        type: 'success',
+        text: res.message || 'Saved Captive Portal zones to /etc/axonwall/services.yaml',
+      });
     } catch (err: any) {
       setZones(prevZones);
       setFullState(prevFullState);
-      setStatusMsg(`Error: ${err?.message || 'Failed to save Captive Portal zones'}`);
+      setStatusMsg({
+        type: 'error',
+        text: err?.message || 'Failed to save Captive Portal zones',
+      });
     } finally {
       setSaving(false);
     }
@@ -109,9 +113,19 @@ function CaptivePortalPageContent() {
       </div>
 
       {statusMsg && (
-        <div className="p-3 bg-emerald-500/10 border border-emerald-500/30 rounded-lg text-xs text-emerald-300 flex items-center gap-2">
-          <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
-          <span>{statusMsg}</span>
+        <div
+          className={`p-3 rounded-lg text-xs flex items-center gap-2 border ${
+            statusMsg.type === 'error'
+              ? 'bg-red-500/10 border-red-500/30 text-red-300'
+              : 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300'
+          }`}
+        >
+          {statusMsg.type === 'error' ? (
+            <AlertCircle className="w-4 h-4 text-red-400 shrink-0" />
+          ) : (
+            <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+          )}
+          <span>{statusMsg.text}</span>
         </div>
       )}
 

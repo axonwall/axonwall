@@ -404,7 +404,7 @@ export function NmapTopologyView({
             <span className={`px-1.5 py-0.2 rounded text-[10px] font-mono font-bold ${
               onlyOpenPorts ? 'bg-amber-400/30 text-amber-200' : 'bg-zinc-800 text-zinc-400'
             }`}>
-              {graph.nodes.filter((n) => n.nodeType === 'host' && n.openPorts.length > 0).length}/{graph.nodes.filter((n) => n.nodeType === 'host').length}
+              {graph.nodes.filter((n) => Boolean(n.hostRef) && n.openPorts.length > 0).length}/{graph.nodes.filter((n) => Boolean(n.hostRef)).length}
             </span>
           </button>
 
@@ -423,7 +423,7 @@ export function NmapTopologyView({
             <span className={`px-1.5 py-0.2 rounded text-[10px] font-mono font-bold ${
               onlyUpHosts ? 'bg-emerald-400/30 text-emerald-200' : 'bg-zinc-800 text-zinc-400'
             }`}>
-              {graph.nodes.filter((n) => n.nodeType === 'host' && n.status === 'up').length}/{graph.nodes.filter((n) => n.nodeType === 'host').length}
+              {graph.nodes.filter((n) => Boolean(n.hostRef) && n.status === 'up').length}/{graph.nodes.filter((n) => Boolean(n.hostRef)).length}
             </span>
           </button>
 

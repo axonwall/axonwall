@@ -2268,6 +2268,8 @@ if [ "${INSTALL_EDITION:-axonwall}" = "vault" ]; then
          /mnt/slot_a/usr/local/bin/axonwall-cloud-init \
          /mnt/slot_a/usr/local/bin/axonwall-import \
          /mnt/slot_a/etc/headscale \
+         /mnt/slot_a/usr/lib/sysusers.d/axonwall.conf \
+         /mnt/slot_a/usr/lib/tmpfiles.d/axonwall.conf \
          /mnt/slot_a/etc/systemd/system/suricata.service.d
 
   chroot /mnt/slot_a systemd-sysusers >/dev/null 2>&1 || \
@@ -2322,10 +2324,10 @@ elif [ "${INSTALL_EDITION:-axonwall}" = "k3s-storage" ]; then
   # Stage k3s-storage payload from /usr/share/axonwall/k3s-storage if installing from unified ISO
   if [ -d /mnt/slot_a/usr/share/axonwall/k3s-storage ]; then
     KSTAGE="/mnt/slot_a/usr/share/axonwall/k3s-storage"
-    # k3s lives in the core-k3s plugin dir now. The staged binary
-    # normally reaches the target with the live rootfs copy; this
-    # KSTAGE fallback only fires when a k3s binary was staged into
-    # /usr/share/axonwall/k3s-storage (no builder does that today).
+    # k3s lives in the core-k3s plugin dir now. On unified ISO builds,
+    # the pinned k3s binary is staged into /usr/share/axonwall/k3s-storage
+    # (just like SeaweedFS under /usr/share/axonwall/vault) and copied into
+    # /var/lib/axonwall/core-k3s/bin/k3s on k3s-storage installs.
     # A staged bundled.json comes along when present so the daemon's
     # verifyBundledBinaries passes without a re-download; when it is
     # absent (k3s copied without k9s) no record is written and the
@@ -2427,6 +2429,8 @@ elif [ "${INSTALL_EDITION:-axonwall}" = "k3s-storage" ]; then
          /mnt/slot_a/usr/local/bin/axonwall-cloud-init \
          /mnt/slot_a/usr/local/bin/axonwall-import \
          /mnt/slot_a/etc/headscale \
+         /mnt/slot_a/usr/lib/sysusers.d/axonwall.conf \
+         /mnt/slot_a/usr/lib/tmpfiles.d/axonwall.conf \
          /mnt/slot_a/etc/systemd/system/suricata.service.d
 
   if [ -z "${HOSTNAME_OVERRIDE:-}" ] || [ "${HOSTNAME_OVERRIDE:-}" = "axonwall" ]; then
@@ -2727,8 +2731,8 @@ elif [ "$INSTALL_MODE" = "btrfs" ]; then
     BTRFS_DATA_FSTAB_LINE="LABEL=axon_btrfs    /var/lib/axonwall   btrfs   subvol=@var_lib_axonwall,${BTRFS_FSTAB_OPTS} 0 0"
   fi
   cat << FSTAB_EOF > /mnt/slot_a/etc/fstab
-# /etc/fstab: Axonwall Btrfs + Snapper Root (subvol=@ with isolated snapshots, logs & data)
-LABEL=axon_btrfs    /                   btrfs   subvol=@,${BTRFS_FSTAB_OPTS}          0 0
+# /etc/fstab: Axonwall Btrfs + Snapper Root (subvol=@ mounted via GRUB rootflags=subvol=@; omit subvol= here for snapshot/rollback safety)
+LABEL=axon_btrfs    /                   btrfs   ${BTRFS_FSTAB_OPTS}          0 0
 LABEL=axon_btrfs    /.snapshots         btrfs   subvol=@snapshots,${BTRFS_FSTAB_OPTS} 0 0
 LABEL=axon_btrfs    /var/log            btrfs   subvol=@var_log,${BTRFS_FSTAB_OPTS}   0 0
 ${BTRFS_DATA_FSTAB_LINE}
@@ -2736,6 +2740,49 @@ LABEL=AXON_EFI      /boot/efi           vfat    umask=0077                      
 /var/lib/axonwall/home /home            none    bind,nofail                           0 0
 tmpfs               /tmp                tmpfs   nosuid,nodev                          0 0
 FSTAB_EOF
+
+  if [ "$OS_FAMILY" = "debian" ]; then
+    mkdir -p /mnt/slot_a/etc/initramfs-tools/scripts/init-bottom
+    if [ -f /mnt/slot_a/etc/initramfs-tools/modules ]; then
+      grep -qxF 'overlay' /mnt/slot_a/etc/initramfs-tools/modules 2>/dev/null || echo 'overlay' >> /mnt/slot_a/etc/initramfs-tools/modules
+    else
+      printf 'btrfs\noverlay\n' > /mnt/slot_a/etc/initramfs-tools/modules
+    fi
+    cat << 'BTRFS_OVERLAY_EOF' > /mnt/slot_a/etc/initramfs-tools/scripts/init-bottom/axonwall-btrfs-snapshot
+#!/bin/sh
+PREREQ=""
+prereqs() { echo "$PREREQ"; }
+case "$1" in prereqs) prereqs; exit 0 ;; esac
+
+grep -qE '(^|[[:space:]])axonwall\.btrfs_overlay=1($|[[:space:]])' /proc/cmdline 2>/dev/null || exit 0
+[ -n "${rootmnt:-}" ] || exit 0
+
+modprobe overlay 2>/dev/null || true
+mkdir -p /snap_lower /snap_tmpfs
+if ! mount -n --move "${rootmnt}" /snap_lower 2>/dev/null; then
+  exit 0
+fi
+if ! mount -n -t tmpfs -o mode=0755,nosuid,nodev tmpfs /snap_tmpfs 2>/dev/null; then
+  mount -n --move /snap_lower "${rootmnt}" 2>/dev/null || true
+  exit 0
+fi
+mkdir -p /snap_tmpfs/upper /snap_tmpfs/work
+if ! mount -n -t overlay -o "lowerdir=/snap_lower,upperdir=/snap_tmpfs/upper,workdir=/snap_tmpfs/work" overlay "${rootmnt}" 2>/dev/null; then
+  umount -n /snap_tmpfs 2>/dev/null || true
+  mount -n --move /snap_lower "${rootmnt}" 2>/dev/null || true
+  exit 0
+fi
+# Strip the root '/' line in the ephemeral upperdir fstab so systemd-remount-fs
+# does not fail trying to remount an overlay root with Btrfs mount options.
+if [ -f /snap_lower/etc/fstab ]; then
+  awk '$1 ~ /^#/ || $2 != "/" { print }' /snap_lower/etc/fstab > "${rootmnt}/etc/fstab" 2>/dev/null || true
+fi
+mkdir -p /run 2>/dev/null || true
+: > /run/axonwall-snapshot-overlay 2>/dev/null || true
+exit 0
+BTRFS_OVERLAY_EOF
+    chmod 0755 /mnt/slot_a/etc/initramfs-tools/scripts/init-bottom/axonwall-btrfs-snapshot
+  fi
 
   # Configure Snapper root profile offline (no running D-Bus required during install)
   mkdir -p /mnt/slot_a/etc/snapper/configs /mnt/slot_a/etc/default /mnt/slot_a/etc/conf.d /mnt/slot_a/usr/local/bin
@@ -2883,9 +2930,9 @@ import hashlib, os, sys
 try:
     with open(sys.argv[1], "r", encoding="utf-8") as f:
         pw = f.read().rstrip("\r\n")
-    salt = os.urandom(16)
-    h = hashlib.scrypt(pw.encode("utf-8"), salt=salt, n=16384, r=8, p=1, maxmem=0, dklen=64)
-    print("scrypt$" + salt.hex() + "$" + h.hex())
+    salt_hex = os.urandom(16).hex()
+    h = hashlib.scrypt(pw.encode("utf-8"), salt=salt_hex.encode("ascii"), n=16384, r=8, p=1, maxmem=0, dklen=64)
+    print("scrypt$" + salt_hex + "$" + h.hex())
 except Exception:
     sys.exit(1)
 ' "$PW_TMP" 2>/dev/null || true)"

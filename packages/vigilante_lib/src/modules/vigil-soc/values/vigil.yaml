@@ -114,5 +114,7 @@ ingress:
         - "vigil.{{DOMAIN}}"
 
 secrets:
-  anthropicApiKey: "dummy-key-for-local-dev"
-  postgresPassword: "vigil_dev_password_123"
+  # Provisioned automatically per deployment via Kubernetes Secret (secrets.existingSecret)
+  # or provided explicitly via custom override --values / ExternalSecrets.
+  existingSecret: ""
+  anthropicApiKey: ""

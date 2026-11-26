@@ -28,8 +28,10 @@ import { listInstances, loadInstanceMetadata, getDeployedNamespaces } from '../e
 import { listK3dClusters, getClusterInfo } from '../engine/cluster.js';
 import { checkCertificates } from '../engine/certs.js';
 import path from 'node:path';
+import net from 'node:net';
 import { loadConfig, getVigilanteConfigDir, getVigilantePlaybooksDir, resolvePathInside } from '../engine/config.js';
-import { loadAuthzStore, authenticateToken, decide } from '../engine/authz.js';
+import { assertSafeOutboundTarget, classifyIpRange } from '../engine/ssrf.js';
+import { loadAuthzStore, resolvePrincipalByToken, decide } from '../engine/authz.js';
 import { globalModuleRegistry } from '../modules/registry.js';
 import { listAvailablePlaybooks, executeThreatPlaybook } from '../engine/threats.js';
 import {
@@ -118,7 +120,7 @@ import { queryDataLake, runRetrospectiveThreatHunt, getDataLakeBackend } from '.
 import { auditWorkloadIdentity, auditCloudStorageExposure, calculateCloudRiskScore, generateCloudSecReport } from '../engine/cloudsec.js';
 import { listCarvedFiles } from '../engine/forensics.js';
 import { transpileSigmaToSql, runSigmaThreatHunt } from '../engine/sigma.js';
-import { simulateDynamicAttackChain } from '../engine/adversary.js';
+import { simulateDynamicAttackChain, findBloodHoundAttackPaths } from '../engine/adversary.js';
 import { detectMemoryAnomalies, parseProcessMemoryMaps } from '../engine/memdump.js';
 import { generateCloudHoneytoken, startCanaryWebhookListener } from '../engine/deception.js';
 import { generateCycloneDxSbom, generateSpdxSbom, verifyCosignSignature } from '../engine/supplychain.js';
@@ -150,7 +152,7 @@ import {
 import { FalcoModule } from '../modules/falco/index.js';
 
 const SENSITIVE_SYSTEM_PREFIXES = ['/etc', '/root', '/var', '/proc', '/sys', '/boot', '/usr', '/dev'];
-const SENSITIVE_VIGILANTE_CONFIG_FILES = new Set(['config.yaml', 'authz.yaml', 'federation/node.json']);
+const SENSITIVE_VIGILANTE_CONFIG_FILES = new Set(['config.yaml', 'authz.yaml', 'federation/node.json', 'ctf-sandboxes.json']);
 
 function canonicalizeWithMissingTail(targetPath) {
   const abs = path.resolve(targetPath);
@@ -176,6 +178,24 @@ function canonicalizeWithMissingTail(targetPath) {
   }
 }
 
+function isPathInsideDir(target, dir) {
+  return target === dir || target.startsWith(dir + path.sep);
+}
+
+function assertNotMetadataScanTarget(targetRaw, label) {
+  const hostPart = String(targetRaw || '').trim().split('/')[0].replace(/^\[|\]$/g, '').split('%')[0].replace(/\.+$/, '').toLowerCase();
+  if (!hostPart) return;
+  if (
+    hostPart === 'metadata.google.internal' ||
+    hostPart === 'metadata.goog' ||
+    hostPart === 'metadata' ||
+    hostPart === 'instance-data' ||
+    classifyIpRange(hostPart) === 'metadata'
+  ) {
+    throw new Error(`Blocked SSRF ${label}: metadata/link-local target '${targetRaw}' is forbidden`);
+  }
+}
+
 function assertConfinedMcpPath(inputPath, label = 'path', allowedBaseDir = null) {
   if (!inputPath || typeof inputPath !== 'string') {
     throw new Error(`Argument '${label}' must be a non-empty string`);
@@ -184,36 +204,130 @@ function assertConfinedMcpPath(inputPath, label = 'path', allowedBaseDir = null)
   if (normalizedRaw.split('/').includes('..')) {
     throw new Error(`Refusing '${label}': path traversal ('..') is not allowed`);
   }
-  const resolved = path.resolve(inputPath);
+  const baseForRelative = allowedBaseDir || process.cwd();
+  const resolved = path.isAbsolute(inputPath)
+    ? path.resolve(inputPath)
+    : path.resolve(baseForRelative, inputPath);
   const realResolved = canonicalizeWithMissingTail(resolved);
-  for (const prefix of SENSITIVE_SYSTEM_PREFIXES) {
-    if (
-      resolved === prefix ||
-      resolved.startsWith(`${prefix}/`) ||
-      realResolved === prefix ||
-      realResolved.startsWith(`${prefix}/`)
-    ) {
-      throw new Error(`Refusing '${label}': access to sensitive system directory '${prefix}' is forbidden`);
-    }
-  }
   const realCfgDir = canonicalizeWithMissingTail(getVigilanteConfigDir());
-  if (realResolved.startsWith(realCfgDir + path.sep)) {
+  const realAllowedBase = allowedBaseDir ? canonicalizeWithMissingTail(allowedBaseDir) : null;
+
+  if (isPathInsideDir(realResolved, realCfgDir)) {
     const relFromCfg = path.relative(realCfgDir, realResolved).replace(/\\/g, '/');
-    if (SENSITIVE_VIGILANTE_CONFIG_FILES.has(relFromCfg)) {
+    if (
+      SENSITIVE_VIGILANTE_CONFIG_FILES.has(relFromCfg) ||
+      /^instances\/[^/]+\/certs\/.*-key\.pem$/i.test(relFromCfg) ||
+      /-key\.pem$/i.test(relFromCfg) ||
+      /\.(?:key|db|sqlite3?|duckdb)$/i.test(relFromCfg)
+    ) {
       throw new Error(`Refusing '${label}': direct access to sensitive config file '${relFromCfg}' is forbidden`);
     }
   }
-  if (allowedBaseDir) {
-    const realBase = canonicalizeWithMissingTail(allowedBaseDir);
-    return resolvePathInside(realBase, realResolved);
+
+  const inCfg = isPathInsideDir(realResolved, realCfgDir);
+  const inAllowed = realAllowedBase ? isPathInsideDir(realResolved, realAllowedBase) : false;
+
+  if (!inCfg && !inAllowed) {
+    for (const prefix of SENSITIVE_SYSTEM_PREFIXES) {
+      if (
+        resolved === prefix ||
+        resolved.startsWith(`${prefix}/`) ||
+        realResolved === prefix ||
+        realResolved.startsWith(`${prefix}/`)
+      ) {
+        throw new Error(`Refusing '${label}': access to sensitive system directory '${prefix}' is forbidden`);
+      }
+    }
+  }
+
+  if (realAllowedBase) {
+    return resolvePathInside(realAllowedBase, realResolved);
   }
   const realCwd = canonicalizeWithMissingTail(process.cwd());
-  const inCwd = realResolved === realCwd || realResolved.startsWith(realCwd + path.sep);
-  const inCfg = realResolved === realCfgDir || realResolved.startsWith(realCfgDir + path.sep);
+  const inCwd = isPathInsideDir(realResolved, realCwd);
   if (!inCwd && !inCfg) {
     throw new Error(`Refusing '${label}': path '${resolved}' must reside within the workspace or Vigilante config directory`);
   }
   return realResolved;
+}
+
+function parseIpv4ToUint32(ip) {
+  const parts = ip.split('.').map(Number);
+  if (parts.length !== 4 || parts.some(n => !Number.isInteger(n) || n < 0 || n > 255)) return null;
+  return (((parts[0] << 24) | (parts[1] << 16) | (parts[2] << 8) | parts[3]) >>> 0);
+}
+
+function parseIpv6ToBigInt(ip) {
+  let clean = ip.toLowerCase().split('%')[0];
+  if (clean.includes('.')) {
+    const lastColon = clean.lastIndexOf(':');
+    const v4Int = parseIpv4ToUint32(clean.slice(lastColon + 1));
+    if (v4Int === null) return null;
+    const hi = ((v4Int >>> 16) & 0xffff).toString(16);
+    const lo = (v4Int & 0xffff).toString(16);
+    clean = `${clean.slice(0, lastColon)}:${hi}:${lo}`;
+  }
+  const halves = clean.split('::');
+  if (halves.length > 2) return null;
+  const left = halves[0] ? halves[0].split(':') : [];
+  const right = halves.length === 2 && halves[1] ? halves[1].split(':') : [];
+  const missing = halves.length === 2 ? 8 - (left.length + right.length) : 0;
+  if (missing < 0 || (halves.length === 1 && left.length !== 8)) return null;
+  const groups = [...left, ...Array(missing).fill('0'), ...right];
+  if (groups.length !== 8) return null;
+  let val = 0n;
+  for (const g of groups) {
+    if (!/^[0-9a-f]{1,4}$/.test(g)) return null;
+    val = (val << 16n) | BigInt(parseInt(g, 16));
+  }
+  return val;
+}
+
+function isIpInCidr(ipStr, cidrStr) {
+  if (!ipStr || !cidrStr) return false;
+  const cleanIp = String(ipStr).trim();
+  const rawCidr = String(cidrStr).trim();
+  const slashIdx = rawCidr.indexOf('/');
+  const netStr = slashIdx >= 0 ? rawCidr.slice(0, slashIdx) : rawCidr;
+  const prefixRaw = slashIdx >= 0 ? rawCidr.slice(slashIdx + 1) : null;
+
+  const ipFamily = net.isIP(cleanIp);
+  const netFamily = net.isIP(netStr);
+  if (!ipFamily || !netFamily) return false;
+
+  if (ipFamily === 6 && netFamily === 4) {
+    const v6 = parseIpv6ToBigInt(cleanIp);
+    if (v6 !== null && (v6 >> 32n) === 0xffffn) {
+      const v4 = Number(v6 & 0xffffffffn);
+      const mappedV4 = `${(v4 >>> 24) & 255}.${(v4 >>> 16) & 255}.${(v4 >>> 8) & 255}.${v4 & 255}`;
+      return isIpInCidr(mappedV4, cidrStr);
+    }
+    return false;
+  }
+
+  if (ipFamily === 4 && netFamily === 4) {
+    const prefix = prefixRaw === null ? 32 : Number(prefixRaw);
+    if (!Number.isInteger(prefix) || prefix < 0 || prefix > 32) return false;
+    const ipInt = parseIpv4ToUint32(cleanIp);
+    const netInt = parseIpv4ToUint32(netStr);
+    if (ipInt === null || netInt === null) return false;
+    if (prefix === 0) return true;
+    const mask = (~0 << (32 - prefix)) >>> 0;
+    return ((ipInt & mask) >>> 0) === ((netInt & mask) >>> 0);
+  }
+
+  if (ipFamily === 4 && netFamily === 6) {
+    return false;
+  }
+
+  const ip6 = parseIpv6ToBigInt(cleanIp);
+  const net6 = parseIpv6ToBigInt(netStr);
+  if (ip6 === null || net6 === null) return false;
+  const prefix = prefixRaw === null ? 128 : Number(prefixRaw);
+  if (!Number.isInteger(prefix) || prefix < 0 || prefix > 128) return false;
+  if (prefix === 0) return true;
+  const shift = BigInt(128 - prefix);
+  return (ip6 >> shift) === (net6 >> shift);
 }
 
 function redactRecursiveForMcp(node, seen = new WeakSet()) {
@@ -251,7 +365,7 @@ function assertMcpWriteAuthorized(toolName, permission, extraArgs = {}) {
   }
   if (loaded.state === 'ready' && loaded.store && Array.isArray(loaded.store.principals) && loaded.store.principals.length > 0) {
     const mcpToken = process.env.VIGILANTE_MCP_TOKEN || extraArgs.authToken || '';
-    const principal = mcpToken ? authenticateToken(loaded.store, mcpToken) : null;
+    const principal = mcpToken ? resolvePrincipalByToken(loaded.store, mcpToken) : null;
     const verdict = decide(loaded, principal, permission, {}, { source: 'loopback', authMethod: 'token' });
     if (!verdict.allowed) {
       throw new Error(`MCP write tool '${toolName}' denied by Vigilante authz (${verdict.reason})`);
@@ -263,6 +377,9 @@ function assertMcpWriteAuthorized(toolName, permission, extraArgs = {}) {
  * Creates and configures the Vigilante MCP Server
  */
 export function createVigilanteMcpServer() {
+  const activeCanaryListeners = new Set();
+  const activeHoneynetMeshes = new Set();
+
   const server = new Server(
     {
       name: 'vigilante-mcp-server',
@@ -275,6 +392,40 @@ export function createVigilanteMcpServer() {
       }
     }
   );
+
+  const cleanupManagedHandles = async () => {
+    const listeners = Array.from(activeCanaryListeners);
+    activeCanaryListeners.clear();
+    for (const listener of listeners) {
+      try {
+        await listener.close?.();
+      } catch {
+        // Ignore teardown errors
+      }
+    }
+    const meshes = Array.from(activeHoneynetMeshes);
+    activeHoneynetMeshes.clear();
+    for (const mesh of meshes) {
+      try {
+        await mesh.teardown?.();
+      } catch {
+        // Ignore teardown errors
+      }
+    }
+  };
+
+  const origClose = server.close.bind(server);
+  server.close = async (...closeArgs) => {
+    await cleanupManagedHandles();
+    return origClose(...closeArgs);
+  };
+  const origOnClose = server._onclose?.bind(server);
+  if (origOnClose) {
+    server._onclose = () => {
+      void cleanupManagedHandles();
+      return origOnClose();
+    };
+  }
 
   // -------------------------------------------------------------
   // 1. Resources: Static & Listable Data Feeds for LLMs
@@ -860,10 +1011,15 @@ export function createVigilanteMcpServer() {
     // OOB RAKP Hashes (vigilante://oob/hashes)
     if (uri === 'vigilante://oob/hashes') {
       const scans = await listSavedOobScans();
-      const allHashes = [];
+      const allHashes = new Set();
       for (const s of scans) {
-        if (s.rakpHashes && s.rakpHashes.length > 0) {
-          allHashes.push(...s.rakpHashes.map(h => h.hashcatLine));
+        if (Array.isArray(s.bmcs)) {
+          for (const b of s.bmcs) {
+            for (const r of (b.rakp || [])) {
+              const line = r.hashcat || r.hash;
+              if (line) allHashes.add(line);
+            }
+          }
         }
       }
       return {
@@ -871,7 +1027,7 @@ export function createVigilanteMcpServer() {
           {
             uri,
             mimeType: 'text/plain',
-            text: allHashes.join('\n')
+            text: Array.from(allHashes).join('\n')
           }
         ]
       };
@@ -2318,6 +2474,10 @@ export function createVigilanteMcpServer() {
               webhookPath: {
                 type: 'string',
                 description: 'URL path for canary trap (default: /api/v1/trap)'
+              },
+              autoContain: {
+                type: 'boolean',
+                description: 'Automatically isolate tripped source via SOAR (default: true)'
               }
             }
           }
@@ -2336,6 +2496,10 @@ export function createVigilanteMcpServer() {
               manifests: {
                 type: 'array',
                 description: 'List of package manifests or dependency items'
+              },
+              imageName: {
+                type: 'string',
+                description: 'Container image name'
               },
               componentName: {
                 type: 'string',
@@ -2834,8 +2998,7 @@ export function createVigilanteMcpServer() {
         );
       }
       if (args.subnet) {
-        const subnetPrefix = args.subnet.split('/')[0].replace(/\.[0-9]+$/, '');
-        results = results.filter(h => h.ip.startsWith(subnetPrefix));
+        results = results.filter(h => isIpInCidr(h.ip, args.subnet));
       }
 
       return {
@@ -2966,7 +3129,7 @@ export function createVigilanteMcpServer() {
       let networks = Array.isArray(vault) ? vault : [];
       if (args.network) {
         const cleanNet = args.network.replace(/\//g, '_');
-        networks = networks.filter(n => n.dirName === cleanNet || n.network === args.network || n.name === args.network);
+        networks = networks.filter(n => n.networkCidr === args.network || path.basename(n.networkDir || '') === cleanNet);
       }
 
       return {
@@ -2982,6 +3145,11 @@ export function createVigilanteMcpServer() {
     // Tool: run_diagnostic
     if (name === 'run_diagnostic') {
       const { tool, host, port, path: httpPath = '/', count = 4, network } = args;
+      if (!host) throw new Error("Argument 'host' is required.");
+      await assertSafeOutboundTarget(host, {
+        label: 'MCP diagnostic host',
+        allowBareHost: true
+      });
       let result;
 
       switch (tool) {
@@ -2992,7 +3160,7 @@ export function createVigilanteMcpServer() {
           result = await runMtr(host);
           break;
         case 'curl':
-          result = await runCurlHeaders(host, { port: port || 80, isHttps: port === 443 });
+          result = await runCurlHeaders(host, { port: port || 80, isHttps: port === 443, path: httpPath });
           break;
         case 'dns':
           result = await runDnsLookup(host);
@@ -3004,6 +3172,7 @@ export function createVigilanteMcpServer() {
           result = await runBenchmark(host, {
             port: port || 80,
             isHttps: port === 443,
+            path: httpPath,
             requests: count || 100,
             concurrency: 10
           });
@@ -3045,6 +3214,11 @@ export function createVigilanteMcpServer() {
     // Tool: run_triage_capture
     if (name === 'run_triage_capture') {
       const { network, host, ports = [] } = args;
+      if (!host) throw new Error("Argument 'host' is required.");
+      await assertSafeOutboundTarget(host, {
+        label: 'MCP triage host',
+        allowBareHost: true
+      });
       const triage = await runFullTriageCapture(host, { ports, networkCidr: network || 'default' });
 
       return {
@@ -3060,6 +3234,7 @@ export function createVigilanteMcpServer() {
     // Tool: run_nmap_scan
     if (name === 'run_nmap_scan') {
       const { target, profile = 'quick', customArgs = '' } = args;
+      assertNotMetadataScanTarget(target, 'MCP nmap target');
       const scanRes = await runNmapScan({
         target,
         profile,
@@ -3219,6 +3394,7 @@ export function createVigilanteMcpServer() {
 
     // Tool: run_threat_simulation
     if (name === 'run_threat_simulation') {
+      assertMcpWriteAuthorized('run_threat_simulation', 'simulations:run', args);
       const { scenario, namespace = 'opensearch', clusterName = 'vigilante-dev' } = args;
       const safeScenario =
         typeof scenario === 'string' &&
@@ -3282,6 +3458,7 @@ export function createVigilanteMcpServer() {
 
     // Tool: generate_nist_postmortem
     if (name === 'generate_nist_postmortem') {
+      assertMcpWriteAuthorized('generate_nist_postmortem', 'forensics:run', args);
       const {
         host,
         network = '10.0.1.0_24',
@@ -3678,6 +3855,7 @@ ${observation ? `Observation noted: ${observation}` : ''}`;
 
     // Tool: spawn_ctf_sandbox
     if (name === 'spawn_ctf_sandbox') {
+      assertMcpWriteAuthorized('spawn_ctf_sandbox', 'ctf:manage', args);
       const {
         challengeId,
         teamId = 'mcp-team',
@@ -3731,6 +3909,10 @@ ${observation ? `Observation noted: ${observation}` : ''}`;
       if (!targetHost || !targetPort) {
         throw new Error("Arguments 'targetHost' and 'targetPort' are required.");
       }
+      await assertSafeOutboundTarget(targetHost, {
+        label: 'MCP SLA check targetHost',
+        allowBareHost: true
+      });
       const sla = await probeServiceSla({
         host: targetHost,
         port: targetPort,
@@ -3856,6 +4038,7 @@ ${observation ? `Observation noted: ${observation}` : ''}`;
       if (!target) {
         throw new Error("Argument 'target' is required.");
       }
+      assertNotMetadataScanTarget(target, 'MCP oobscan target');
       const scanResult = await runOobScan({
         target,
         profile,
@@ -3905,6 +4088,7 @@ ${observation ? `Observation noted: ${observation}` : ''}`;
 
     // Tool: export_rakp_hashes
     if (name === 'export_rakp_hashes') {
+      assertMcpWriteAuthorized('export_rakp_hashes', 'scans:run', args);
       const result = await exportRakpHashes(args.outputFile);
       return {
         content: [
@@ -3920,6 +4104,10 @@ ${observation ? `Observation noted: ${observation}` : ''}`;
     if (name === 'run_recon_scan') {
       const { target, profile = 'fast-ports' } = args;
       if (!target) throw new Error("Argument 'target' is required.");
+      await assertSafeOutboundTarget(target, {
+        label: 'MCP recon target',
+        allowBareHost: true
+      });
       const result = await runReconScan(target, profile);
       return {
         content: [
@@ -3943,6 +4131,10 @@ ${observation ? `Observation noted: ${observation}` : ''}`;
     if (name === 'run_nuclei_scan') {
       const { target, profile = 'cves', severity } = args;
       if (!target) throw new Error("Argument 'target' is required.");
+      await assertSafeOutboundTarget(target, {
+        label: 'MCP nuclei target',
+        allowBareHost: true
+      });
       const result = await runNucleiScan(target, profile, { severity });
       return {
         content: [
@@ -4041,6 +4233,9 @@ ${observation ? `Observation noted: ${observation}` : ''}`;
     if (name === 'run_zap_scan') {
       const { targetUrl, profile = 'spider' } = args;
       if (!targetUrl) throw new Error("Argument 'targetUrl' is required.");
+      await assertSafeOutboundTarget(targetUrl, {
+        label: 'MCP ZAP targetUrl'
+      });
       const result = await runZapScan(targetUrl, profile);
       return {
         content: [
@@ -4155,6 +4350,7 @@ ${observation ? `Observation noted: ${observation}` : ''}`;
 
     // Tool: investigate_incident
     if (name === 'investigate_incident') {
+      assertMcpWriteAuthorized('investigate_incident', 'telemetry:write', args);
       const { target, incidentId, triggerAlert, automatedContainment = true } = args;
       const result = await runAgentSocInvestigation({
         target,
@@ -4232,6 +4428,7 @@ ${observation ? `Observation noted: ${observation}` : ''}`;
 
     // Tool: deploy_canary_asset
     if (name === 'deploy_canary_asset') {
+      assertMcpWriteAuthorized('deploy_canary_asset', 'simulations:run', args);
       const { type, name: assetName, namespace = 'default' } = args;
       let asset;
       if (type === 'secret') asset = generateCanarySecret(assetName || 'vault-prod-creds', namespace, 'aws_key');
@@ -4251,6 +4448,7 @@ ${observation ? `Observation noted: ${observation}` : ''}`;
 
     // Tool: run_purple_simulation
     if (name === 'run_purple_simulation') {
+      assertMcpWriteAuthorized('run_purple_simulation', 'simulations:run', args);
       const { scenario = 'lateral-smb-exfil' } = args;
       const sim = await runPurpleTeamSimulation(scenario);
       const scorecard = calculatePurpleScorecard(sim);
@@ -4333,16 +4531,22 @@ ${observation ? `Observation noted: ${observation}` : ''}`;
     // Tool: run_dynamic_adversary_simulation
     if (name === 'run_dynamic_adversary_simulation') {
       const { attackGraph, targetPrincipal, autoContain = false } = args;
-      const result = await simulateDynamicAttackChain(attackGraph, targetPrincipal, { apply: autoContain });
+      const paths = findBloodHoundAttackPaths(attackGraph || {}, targetPrincipal);
+      if (!paths || paths.length === 0) {
+        return {
+          content: [{ type: 'text', text: JSON.stringify({ simulated: false, target: targetPrincipal, totalPathsFound: 0, message: `No attack path found to '${targetPrincipal}'` }, null, 2) }]
+        };
+      }
+      const result = await simulateDynamicAttackChain(paths[0], { autoContain });
       return {
-        content: [{ type: 'text', text: JSON.stringify(result, null, 2) }]
+        content: [{ type: 'text', text: JSON.stringify({ ...result, shortestPath: paths[0], totalPathsFound: paths.length }, null, 2) }]
       };
     }
 
     // Tool: inspect_process_memory
     if (name === 'inspect_process_memory') {
-      const { pid, mapsContent } = args;
-      const anomalies = detectMemoryAnomalies(pid, mapsContent);
+      const { pid, mapsContent = '' } = args;
+      const anomalies = detectMemoryAnomalies(mapsContent, { pid });
       return {
         content: [{ type: 'text', text: JSON.stringify({ pid, anomaliesCount: anomalies.length, anomalies }, null, 2) }]
       };
@@ -4351,7 +4555,7 @@ ${observation ? `Observation noted: ${observation}` : ''}`;
     // Tool: generate_cloud_honeytoken
     if (name === 'generate_cloud_honeytoken') {
       const { provider, ...opts } = args;
-      const honeytoken = generateCloudHoneytoken(provider, opts);
+      const honeytoken = await generateCloudHoneytoken(provider, opts);
       return {
         content: [{ type: 'text', text: JSON.stringify(honeytoken, null, 2) }]
       };
@@ -4359,19 +4563,36 @@ ${observation ? `Observation noted: ${observation}` : ''}`;
 
     // Tool: start_canary_webhook_listener
     if (name === 'start_canary_webhook_listener') {
-      const { port = 9099, webhookPath = '/api/v1/trap' } = args;
-      const listener = await startCanaryWebhookListener({ port, path: webhookPath, autoContain: false });
+      assertMcpWriteAuthorized('start_canary_webhook_listener', 'simulations:run', args);
+      const { port = 9099, webhookPath = '/api/v1/trap', autoContain, autoIsolate } = args;
+      const resolvedAutoIsolate = autoIsolate !== undefined ? autoIsolate !== false : autoContain !== false;
+      const listener = await startCanaryWebhookListener({
+        port,
+        path: webhookPath,
+        autoIsolate: resolvedAutoIsolate
+      });
+      activeCanaryListeners.add(listener);
       return {
-        content: [{ type: 'text', text: JSON.stringify({ status: 'LISTENING', port: listener.port, path: listener.path }, null, 2) }]
+        content: [{
+          type: 'text',
+          text: JSON.stringify({
+            status: 'LISTENING',
+            port: listener.port,
+            host: listener.host,
+            path: listener.path,
+            authToken: listener.authToken
+          }, null, 2)
+        }]
       };
     }
 
     // Tool: generate_container_sbom
     if (name === 'generate_container_sbom') {
-      const { format = 'cyclonedx', manifests = [], componentName = 'vigilante-container' } = args;
+      const { format = 'cyclonedx', manifests = [], imageName, componentName = 'vigilante-container' } = args;
+      const targetImageName = imageName || componentName;
       const sbom = format === 'spdx'
-        ? generateSpdxSbom(manifests, { documentName: componentName })
-        : generateCycloneDxSbom(manifests, { componentName });
+        ? generateSpdxSbom(manifests, { imageName: targetImageName })
+        : generateCycloneDxSbom(manifests, { imageName: targetImageName });
       return {
         content: [{ type: 'text', text: JSON.stringify(sbom, null, 2) }]
       };
@@ -4407,6 +4628,7 @@ ${observation ? `Observation noted: ${observation}` : ''}`;
 
     // Tool: broadcast_mesh_threat
     if (name === 'broadcast_mesh_threat') {
+      assertMcpWriteAuthorized('broadcast_mesh_threat', 'telemetry:write', args);
       const { indicator, type = 'IP', severity = 'CRITICAL', reason = 'Manual alert', peers = [] } = args;
       const node = await createFederationNode({ peers });
       const envelope = signThreatRecord({ indicator, type, severity, reason }, node.privateKey, { nodeId: node.nodeId, publicKey: node.publicKey });
@@ -4486,6 +4708,7 @@ ${observation ? `Observation noted: ${observation}` : ''}`;
 
     // Tool: deploy_ransomware_canaries
     if (name === 'deploy_ransomware_canaries') {
+      assertMcpWriteAuthorized('deploy_ransomware_canaries', 'simulations:run', args);
       const safeDir = args.targetDirectory
         ? assertConfinedMcpPath(args.targetDirectory, 'targetDirectory')
         : path.join(getVigilanteConfigDir(), 'canary', 'ransomware');
@@ -4645,6 +4868,7 @@ ${observation ? `Observation noted: ${observation}` : ''}`;
     if (name === 'deploy_honeynet_mesh') {
       assertMcpWriteAuthorized('deploy_honeynet_mesh', 'simulations:run', args);
       const mesh = await createHoneynetMesh({ services: args.services });
+      activeHoneynetMeshes.add(mesh);
       return {
         content: [{ type: 'text', text: JSON.stringify({ meshId: mesh.meshId, status: mesh.status, decoys: mesh.decoys.map(d => ({ type: d.type, port: d.port })) }, null, 2) }]
       };
@@ -4652,6 +4876,7 @@ ${observation ? `Observation noted: ${observation}` : ''}`;
 
     // Tool: plant_deception_breadcrumbs
     if (name === 'plant_deception_breadcrumbs') {
+      assertMcpWriteAuthorized('plant_deception_breadcrumbs', 'simulations:run', args);
       const safeDir = args.targetDir
         ? assertConfinedMcpPath(args.targetDir, 'targetDir')
         : path.join(getVigilanteConfigDir(), 'canary', 'breadcrumbs');
@@ -4665,13 +4890,15 @@ ${observation ? `Observation noted: ${observation}` : ''}`;
     if (name === 'capture_container_snapshot') {
       const safeArgs = { ...args };
       delete safeArgs.sealingKey;
+      const snapshotOptions = {};
       if (safeArgs.rootfsDir) {
         safeArgs.rootfsDir = assertConfinedMcpPath(safeArgs.rootfsDir, 'rootfsDir');
       }
       if (safeArgs.outputDir) {
-        safeArgs.outputDir = assertConfinedMcpPath(safeArgs.outputDir, 'outputDir', getVigilanteConfigDir());
+        snapshotOptions.outputDir = assertConfinedMcpPath(safeArgs.outputDir, 'outputDir', getVigilanteConfigDir());
+        delete safeArgs.outputDir;
       }
-      const snap = await createForensicsSnapshot(safeArgs);
+      const snap = await createForensicsSnapshot(safeArgs, snapshotOptions);
       return {
         content: [{ type: 'text', text: JSON.stringify(snap, null, 2) }]
       };
@@ -4738,11 +4965,11 @@ ${observation ? `Observation noted: ${observation}` : ''}`;
 
     // Tool: simulate_falco_event
     if (name === 'simulate_falco_event') {
-      const event = simulateFalcoEvent(args.scenario || 'shell-spawn', {
-        pod: args.pod,
-        namespace: args.namespace,
-        cmdline: args.cmdline
-      });
+      const overrides = {};
+      if (args.pod !== undefined) overrides.pod = args.pod;
+      if (args.namespace !== undefined) overrides.namespace = args.namespace;
+      if (args.cmdline !== undefined) overrides.cmdline = args.cmdline;
+      const event = simulateFalcoEvent(args.scenario || 'shell-spawn', overrides);
       const soarAction = evaluateFalcoSoarAction(event);
       return {
         content: [{ type: 'text', text: JSON.stringify({ event, soarAction }, null, 2) }]

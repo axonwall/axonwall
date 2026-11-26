@@ -1,17 +1,17 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSession } from '@/server/auth';
-import { isPasswordChangeEnforced } from '@/server/auth-guard';
+import { assertActionPermitted } from '@/server/auth-guard';
 import { getCaptureFile } from '@/server/pcap';
 import { checkPluginApiGuard } from '@/server/plugin-guard';
 import fs from 'fs';
 
 export async function GET(request: NextRequest) {
   const session = await getSession();
-  if (!session || !session.roles.includes('admin')) {
-    return new NextResponse('Unauthorized: Admin credentials required', { status: 401 });
-  }
-  if (isPasswordChangeEnforced(session)) {
-    return new NextResponse('Forbidden: Password change required', { status: 403 });
+  try {
+    assertActionPermitted(session, 'admin');
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : 'Unauthorized';
+    return new NextResponse(msg, { status: msg === 'Unauthorized' ? 401 : 403 });
   }
   const guard = await checkPluginApiGuard('packet-diagnostics');
   if (guard) return guard;

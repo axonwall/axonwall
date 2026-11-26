@@ -4,8 +4,7 @@
  */
 
 import fsSync from 'node:fs';
-import path from 'node:path';
-import { getVigilanteDossiersDir } from '../config.js';
+import { getVigilanteDossiersDir, sanitizePathComponent, resolvePathInside } from '../config.js';
 
 function getSubnetFromIp(ip) {
   if (!ip || ip.includes(':')) return 'IPv6 / Other';
@@ -103,7 +102,7 @@ export function generateTopology(scan, options = {}) {
     } else {
       try {
         const dossiersDir = getVigilanteDossiersDir();
-        const dFile = path.join(dossiersDir, `${ip.replace(/[^a-zA-Z0-9.-]/g, '_')}.json`);
+        const dFile = resolvePathInside(dossiersDir, `${sanitizePathComponent(ip)}.json`);
         if (fsSync.existsSync(dFile)) {
           dossier = JSON.parse(fsSync.readFileSync(dFile, 'utf8'));
         }
@@ -133,8 +132,9 @@ export function generateTopology(scan, options = {}) {
     // 3. Connect Traceroute Hops or Subnet links
     if (host.trace && host.trace.hops && host.trace.hops.length > 0) {
       let prevHopId = scannerNodeId;
-      for (const hop of host.trace.hops) {
-        const hopId = hop.ipaddr || `hop-${hop.ttl}`;
+      const sortedHops = [...host.trace.hops].sort((a, b) => (Number(a.ttl) || 0) - (Number(b.ttl) || 0));
+      for (const hop of sortedHops) {
+        const hopId = hop.ipaddr || `hop-${ip}-${hop.ttl}`;
         if (!nodesMap.has(hopId)) {
           const hopNode = {
             id: hopId,

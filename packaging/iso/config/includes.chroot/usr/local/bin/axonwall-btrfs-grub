@@ -56,7 +56,7 @@ detect_kargs() {
     if [ -n "$_line" ]; then
       for _tok in $_line; do
         case "$_tok" in
-          linux|/@/boot/vmlinuz|ro|root=*|rootflags=*|rootfstype=*|slot=*) continue ;;
+          linux|/@/boot/vmlinuz|ro|root=*|rootflags=*|rootfstype=*|slot=*|axonwall.btrfs_overlay=*|fstab=*|rd.fstab=*|systemd.unit=*|single) continue ;;
           *) _extracted="${_extracted} ${_tok}" ;;
         esac
       done
@@ -194,10 +194,16 @@ cmd_sync() {
       fi
 
       cat << ENTRY_EOF >> "$_tmp_cfg"
-menuentry "Snapshot #${_id} (${_type}, ${_date}) — ${_desc} [Read-Only]" {
+menuentry "Snapshot #${_id} (${_type}, ${_date}) — ${_desc} [Live Overlay Rescue]" {
   insmod btrfs
   search --no-floppy --label --set=root ${BTRFS_LABEL}
-  linux /@snapshots/${_id}/snapshot/boot/${_kern} root=LABEL=${BTRFS_LABEL} rootflags=subvol=@snapshots/${_id}/snapshot ro rootfstype=btrfs ${_kargs}
+  linux /@snapshots/${_id}/snapshot/boot/${_kern} root=LABEL=${BTRFS_LABEL} rootflags=subvol=@snapshots/${_id}/snapshot ro rootfstype=btrfs axonwall.btrfs_overlay=1 ${_kargs}
+  initrd /@snapshots/${_id}/snapshot/boot/${_initrd}
+}
+menuentry "Snapshot #${_id} (${_type}, ${_date}) — ${_desc} [Read-Only Rescue Shell]" {
+  insmod btrfs
+  search --no-floppy --label --set=root ${BTRFS_LABEL}
+  linux /@snapshots/${_id}/snapshot/boot/${_kern} root=LABEL=${BTRFS_LABEL} rootflags=subvol=@snapshots/${_id}/snapshot ro rootfstype=btrfs fstab=no rd.fstab=no systemd.unit=rescue.target single ${_kargs}
   initrd /@snapshots/${_id}/snapshot/boot/${_initrd}
 }
 ENTRY_EOF

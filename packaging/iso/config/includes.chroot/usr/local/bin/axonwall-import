@@ -12,6 +12,9 @@ DO_APPLY="false"
 OUT_JSON=""
 OUT_NFT=""
 API_HOST="http://127.0.0.1:3000"
+API_HOST_EXPLICIT="false"
+API_TOKEN="${AXONWALL_API_TOKEN:-}"
+API_COOKIE="${AXONWALL_COOKIE:-}"
 
 show_help() {
   cat << EOF
@@ -28,13 +31,15 @@ Options:
   --json PATH            Save converted Axonwall DesiredState JSON to file
   --nft PATH             Save compiled Linux nftables ruleset (.nft) to file
   --api-url URL          Axonwall API URL (default: http://127.0.0.1:3000)
+  --token TOKEN          Bearer JWT / API token for authenticated /api/v1/import requests
+  --cookie COOKIE        Session cookie (value or 'axonwall_session=...') for /api/v1/import
   -h, --help             Show this help message
 
 Examples:
   axonwall-import -f /root/pfsense-backup.xml
   axonwall-import -f /root/vyos-config.boot --apply
   axonwall-import -f /root/mikrotik.rsc --json state.json --nft ruleset.nft
-  cat /etc/iptables/rules.v4 | axonwall-import -v iptables
+  cat /etc/iptables/rules.v4 | axonwall-import -v iptables --token "\$TOKEN"
 EOF
 }
 
@@ -62,6 +67,15 @@ while [ $# -gt 0 ]; do
       ;;
     --api-url)
       API_HOST="$2"
+      API_HOST_EXPLICIT="true"
+      shift 2
+      ;;
+    --token)
+      API_TOKEN="$2"
+      shift 2
+      ;;
+    --cookie)
+      API_COOKIE="$2"
       shift 2
       ;;
     -h|--help)
@@ -108,7 +122,150 @@ echo "  Vendor Mode : ${VENDOR}"
 echo "  Live Apply  : ${DO_APPLY}"
 echo "================================================================================"
 
-JSON_PAYLOAD="$(printf '%s' "$CONFIG_CONTENT" | node -e '
+echo "[+] Parsing and converting configuration..."
+RESPONSE=""
+if [ -z "$API_TOKEN" ] && [ -z "$API_COOKIE" ] && [ "$API_HOST_EXPLICIT" = "false" ]; then
+  # Local direct execution via @axonwall/lib (+ authenticated agent Unix socket / axonwallctl for --apply)
+  # avoids an unauthenticated HTTP 401 against localhost /api/v1/import.
+  RESPONSE="$(printf '%s' "$CONFIG_CONTENT" | node -e '
+const fs = require("fs");
+const path = require("path");
+const http = require("http");
+
+const libCandidates = [
+  "@axonwall/lib",
+  path.resolve(process.cwd(), "packages/axonwall_lib"),
+  "/opt/axonwall/packages/axonwall_lib",
+  "/opt/axonwall/node_modules/@axonwall/lib",
+  "/opt/axonwall/apps/axonwall/node_modules/@axonwall/lib",
+];
+
+async function loadLib() {
+  for (const base of libCandidates) {
+    try {
+      if (base.startsWith("/")) {
+        if (!fs.existsSync(base)) continue;
+        const imp = await import(path.join(base, "dist/import/index.js"));
+        const nft = await import(path.join(base, "dist/compile/nft/index.js"));
+        if (imp.importFirewallConfig && nft.compileNftables) return { imp, nft };
+      } else {
+        const imp = await import("@axonwall/lib/import");
+        const nft = await import("@axonwall/lib/compile/nft");
+        if (imp.importFirewallConfig && nft.compileNftables) return { imp, nft };
+      }
+    } catch {}
+  }
+  const pnpmRoot = "/opt/axonwall/node_modules/.pnpm";
+  if (fs.existsSync(pnpmRoot)) {
+    for (const ent of fs.readdirSync(pnpmRoot)) {
+      if (ent.startsWith("@axonwall+lib")) {
+        const pkgDir = path.join(pnpmRoot, ent, "node_modules/@axonwall/lib");
+        try {
+          const imp = await import(path.join(pkgDir, "dist/import/index.js"));
+          const nft = await import(path.join(pkgDir, "dist/compile/nft/index.js"));
+          if (imp.importFirewallConfig && nft.compileNftables) return { imp, nft };
+        } catch {}
+      }
+    }
+  }
+  return null;
+}
+
+function readAgentToken() {
+  if (process.env.AXONWALL_AGENT_TOKEN && process.env.AXONWALL_AGENT_TOKEN.trim()) {
+    return process.env.AXONWALL_AGENT_TOKEN.trim();
+  }
+  for (const p of [process.env.AXONWALL_AGENT_TOKEN_FILE, "/etc/axonwall/agent.token", "/var/lib/axonwall/agent.token"]) {
+    if (!p) continue;
+    try {
+      const v = fs.readFileSync(p, "utf8").trim();
+      if (v) return v;
+    } catch {}
+  }
+  return "";
+}
+
+function applyViaAgentSocket(files, confirmTimeoutSeconds) {
+  const sockPath = ["/run/axonwall/agent-api.sock", "/run/axonwall/agent.sock"].find((p) => fs.existsSync(p));
+  if (!sockPath) {
+    return Promise.reject(new Error("Agent Unix socket not found (/run/axonwall/agent-api.sock or /run/axonwall/agent.sock). Pass --token/--cookie to use the HTTP API instead."));
+  }
+  const token = readAgentToken();
+  const payload = JSON.stringify({ files, confirmTimeoutSeconds });
+  return new Promise((resolve, reject) => {
+    const r = http.request({
+      socketPath: sockPath,
+      path: "/v1/apply",
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Content-Length": Buffer.byteLength(payload),
+        ...(token ? { "X-Axonwall-Agent-Token": token } : {}),
+      },
+    }, (res) => {
+      let body = "";
+      res.on("data", (c) => body += c);
+      res.on("end", () => {
+        if (res.statusCode >= 200 && res.statusCode < 300) {
+          try { resolve(JSON.parse(body)); } catch { resolve({ raw: body }); }
+        } else {
+          reject(new Error(`Agent /v1/apply HTTP ${res.statusCode}: ${body}`));
+        }
+      });
+    });
+    r.on("error", reject);
+    r.write(payload);
+    r.end();
+  });
+}
+
+(async () => {
+  const configText = fs.readFileSync(0, "utf8");
+  const vendorArg = process.argv[1];
+  const doApply = process.argv[2] === "true";
+  const libs = await loadLib();
+  if (!libs) {
+    process.exit(42);
+  }
+  const vendor = vendorArg && vendorArg !== "auto" ? vendorArg : undefined;
+  const report = libs.imp.importFirewallConfig(configText, vendor);
+  const { nftScript } = libs.nft.compileNftables(report.state);
+  let applyResult = null;
+  if (doApply) {
+    applyResult = await applyViaAgentSocket(
+      [{ path: "/etc/nftables.conf", content: nftScript, fileMode: 0o600 }],
+      120
+    );
+  }
+  console.log(JSON.stringify({ status: "ok", report, compiledNft: nftScript, applied: doApply, applyResult }));
+})().catch((err) => {
+  console.log(JSON.stringify({ status: "error", error: err && err.message ? err.message : String(err) }));
+  process.exit(1);
+});
+' "$VENDOR" "$DO_APPLY" 2>/dev/null || true)"
+fi
+
+if [ -z "$RESPONSE" ]; then
+  if [ -z "$API_TOKEN" ] && [ -z "$API_COOKIE" ] && [ "$API_HOST_EXPLICIT" = "false" ] && [ -x /usr/local/bin/axonwallctl ]; then
+    TMP_IMP_SRC="$(mktemp /tmp/axonwall-import-XXXXXX)"
+    trap 'rm -f "$TMP_IMP_SRC"' EXIT
+    printf '%s' "$CONFIG_CONTENT" > "$TMP_IMP_SRC"
+    if [ "$VENDOR" != "auto" ]; then
+      if [ "$DO_APPLY" = "true" ]; then
+        exec /usr/local/bin/axonwallctl import "$TMP_IMP_SRC" --vendor "$VENDOR" --apply
+      else
+        exec /usr/local/bin/axonwallctl import "$TMP_IMP_SRC" --vendor "$VENDOR"
+      fi
+    else
+      if [ "$DO_APPLY" = "true" ]; then
+        exec /usr/local/bin/axonwallctl import "$TMP_IMP_SRC" --apply
+      else
+        exec /usr/local/bin/axonwallctl import "$TMP_IMP_SRC"
+      fi
+    fi
+  fi
+
+  JSON_PAYLOAD="$(printf '%s' "$CONFIG_CONTENT" | node -e '
 const fs = require("fs");
 const config = fs.readFileSync(0, "utf8");
 console.log(JSON.stringify({
@@ -119,10 +276,18 @@ console.log(JSON.stringify({
 }));
 ' "$VENDOR" "$DO_APPLY")"
 
-echo "[+] Parsing and converting configuration..."
-RESPONSE="$(printf '%s' "$JSON_PAYLOAD" | curl -s -S -X POST "${API_HOST}/api/v1/import" \
-  -H "Content-Type: application/json" \
-  --data-binary @-)"
+  set -- curl -s -S -X POST "${API_HOST}/api/v1/import" -H "Content-Type: application/json"
+  if [ -n "$API_TOKEN" ]; then
+    set -- "$@" -H "Authorization: Bearer ${API_TOKEN}"
+  fi
+  if [ -n "$API_COOKIE" ]; then
+    case "$API_COOKIE" in
+      *=*) set -- "$@" -H "Cookie: ${API_COOKIE}" ;;
+      *) set -- "$@" -H "Cookie: axonwall_session=${API_COOKIE}" ;;
+    esac
+  fi
+  RESPONSE="$(printf '%s' "$JSON_PAYLOAD" | "$@" --data-binary @-)"
+fi
 
 printf '%s' "$RESPONSE" | node -e '
 const fs = require("fs");

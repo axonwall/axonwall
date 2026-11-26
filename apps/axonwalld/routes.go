@@ -110,16 +110,16 @@ func LoadRoutingConfigFromBytes(data []byte) (*RoutingDomainConfig, error) {
 	return &RoutingDomainConfig{Routes: []StaticRouteConfig{}}, nil
 }
 
+var routingCandidatePaths = []string{
+	"/etc/axonwall/routing.yaml",
+	"/var/lib/axonwall/etc-axonwall/routing.yaml",
+	"/etc/axonwall/state.json",
+	"/var/lib/axonwall/state.json",
+}
+
 // LoadRoutingConfig reads the static route definitions from routing.yaml or state.json.
 func LoadRoutingConfig() (*RoutingDomainConfig, error) {
-	candidatePaths := []string{
-		"/etc/axonwall/routing.yaml",
-		"/var/lib/axonwall/etc-axonwall/routing.yaml",
-		"/etc/axonwall/state.json",
-		"/var/lib/axonwall/state.json",
-	}
-
-	for _, path := range candidatePaths {
+	for _, path := range routingCandidatePaths {
 		data, err := os.ReadFile(path)
 		if err != nil || len(data) == 0 {
 			continue
@@ -159,13 +159,19 @@ func isPlaceholderNetdev(dev string) bool {
 	return false
 }
 
+var (
+	interfaceConfCandidatePaths = []string{"/etc/axonwall/interfaces.conf", "/var/lib/axonwall/etc-axonwall/interfaces.conf"}
+	interfaceYamlCandidatePaths = []string{"/etc/axonwall/interfaces.yaml", "/var/lib/axonwall/etc-axonwall/interfaces.yaml"}
+	stateJsonCandidatePaths     = []string{"/var/lib/axonwall/state.json", "/etc/axonwall/state.json"}
+)
+
 // loadInterfaceDeviceMap builds a mapping from logical interface names (wan, lan, opt1, etc.)
 // to system kernel net devices (e.g. ens19, ens18, eth0, etc.).
 func loadInterfaceDeviceMap() map[string]string {
 	devMap := make(map[string]string)
 
 	// 1. Read /etc/axonwall/interfaces.conf
-	for _, confPath := range []string{"/etc/axonwall/interfaces.conf", "/var/lib/axonwall/etc-axonwall/interfaces.conf"} {
+	for _, confPath := range interfaceConfCandidatePaths {
 		if data, err := os.ReadFile(confPath); err == nil {
 			rawKv := make(map[string]string)
 			for _, line := range strings.Split(string(data), "\n") {
@@ -209,10 +215,12 @@ func loadInterfaceDeviceMap() map[string]string {
 	}
 
 	// 2. Read /etc/axonwall/interfaces.yaml if present
-	for _, path := range []string{"/etc/axonwall/interfaces.yaml", "/var/lib/axonwall/etc-axonwall/interfaces.yaml"} {
+	yamlLoaded := false
+	for _, path := range interfaceYamlCandidatePaths {
 		if data, err := os.ReadFile(path); err == nil && len(data) > 0 {
 			var ifCfg InterfacesConfigYaml
 			if err := yaml.Unmarshal(data, &ifCfg); err == nil {
+				yamlLoaded = true
 				for _, iface := range ifCfg.Interfaces {
 					name := strings.ToLower(strings.TrimSpace(iface.Name))
 					if name == "" {
@@ -229,30 +237,33 @@ func loadInterfaceDeviceMap() map[string]string {
 		}
 	}
 
-	// 3. Read /etc/axonwall/state.json if present (overrides stale interfaces.conf entries)
-	for _, path := range []string{"/etc/axonwall/state.json", "/var/lib/axonwall/state.json"} {
-		if data, err := os.ReadFile(path); err == nil && len(data) > 0 {
-			var state struct {
-				Interfaces []struct {
-					Name    string `json:"name"`
-					Device  string `json:"device"`
-					Enabled *bool  `json:"enabled"`
-				} `json:"interfaces"`
-			}
-			if err := json.Unmarshal(data, &state); err == nil {
-				for _, iface := range state.Interfaces {
-					name := strings.ToLower(strings.TrimSpace(iface.Name))
-					if name == "" {
-						continue
-					}
-					if (iface.Enabled != nil && !*iface.Enabled) || isPlaceholderNetdev(iface.Device) {
-						delete(devMap, name)
-						continue
-					}
-					devMap[name] = iface.Device
+	// 3. Only fall back to legacy state.json (preferring /var/lib/axonwall/state.json)
+	// when interfaces.yaml was not loaded.
+	if !yamlLoaded {
+		for _, path := range stateJsonCandidatePaths {
+			if data, err := os.ReadFile(path); err == nil && len(data) > 0 {
+				var state struct {
+					Interfaces []struct {
+						Name    string `json:"name"`
+						Device  string `json:"device"`
+						Enabled *bool  `json:"enabled"`
+					} `json:"interfaces"`
 				}
+				if err := json.Unmarshal(data, &state); err == nil {
+					for _, iface := range state.Interfaces {
+						name := strings.ToLower(strings.TrimSpace(iface.Name))
+						if name == "" {
+							continue
+						}
+						if (iface.Enabled != nil && !*iface.Enabled) || isPlaceholderNetdev(iface.Device) {
+							delete(devMap, name)
+							continue
+						}
+						devMap[name] = iface.Device
+					}
+				}
+				break
 			}
-			break
 		}
 	}
 
@@ -312,6 +323,7 @@ func reconcileStaticRoutesLocked() error {
 	devMap := loadInterfaceDeviceMap()
 	desiredRoutes := make(map[string]StaticRouteConfig)
 
+	ownedRoutes := loadOwnedStaticRoutes()
 	appliedCount := 0
 	// L2: destinations whose disabled-route delete fails, kept owned
 	// so the next reconcile retries the delete (same retained-list
@@ -397,14 +409,15 @@ func reconcileStaticRoutesLocked() error {
 				log.Printf("[Agent] Applied static route: %s via %s (dev=%s, onlink)", r.Network, r.Gateway, dev)
 			}
 		} else {
-			// If explicitly disabled, remove from kernel if present with proto static.
-			// A delete that fails once (route busy, transient
-			// netlink error) must stay owned and be retried next
-			// run; dropping it here left the route installed
-			// forever while the config said disabled.
+			// Only remove disabled routes that this reconciler owns so
+			// operator-installed routes are untouched. Treat an already-absent
+			// route ("No such process") as successfully deleted.
+			if !isOwnedStaticRoute(r.Network, ownedRoutes) {
+				continue
+			}
 			args := []string{family, "route", "del", r.Network, "proto", "static"}
-			if err := exec.Command("ip", args...).Run(); err != nil {
-				log.Printf("[Agent] Failed to delete disabled static route %s: %v; keeping it owned for retry", r.Network, err)
+			if out, err := exec.Command("ip", args...).CombinedOutput(); err != nil && !isRouteNoSuchProcess(string(out)) {
+				log.Printf("[Agent] Failed to delete disabled static route %s (%v): %s; keeping it owned for retry", r.Network, err, strings.TrimSpace(string(out)))
 				failedDeletes = append(failedDeletes, r.Network)
 			}
 		}
@@ -415,7 +428,6 @@ func reconcileStaticRoutesLocked() error {
 	// added by DHCP, keepalived, or an operator's `ip route` — is
 	// never this reconciler's to delete, and a config that failed to
 	// load never reaches this point (LoadRoutingConfig errors above).
-	ownedRoutes := loadOwnedStaticRoutes()
 	pruned4, retained4 := pruneObsoleteRoutes("-4", desiredRoutes, ownedRoutes)
 	pruned6, retained6 := pruneObsoleteRoutes("-6", desiredRoutes, ownedRoutes)
 	prunedCount := pruned4 + pruned6
@@ -512,6 +524,24 @@ func shouldPruneStaticRoute(dest string, desired map[string]StaticRouteConfig, o
 	return false
 }
 
+func isOwnedStaticRoute(dest string, owned map[string]bool) bool {
+	if owned[dest] {
+		return true
+	}
+	if strings.HasSuffix(dest, "/32") {
+		return owned[strings.TrimSuffix(dest, "/32")]
+	}
+	if strings.HasSuffix(dest, "/128") {
+		return owned[strings.TrimSuffix(dest, "/128")]
+	}
+	return false
+}
+
+func isRouteNoSuchProcess(output string) bool {
+	lower := strings.ToLower(output)
+	return strings.Contains(lower, "no such process")
+}
+
 func pruneObsoleteRoutes(family string, desired map[string]StaticRouteConfig, owned map[string]bool) (int, []string) {
 	out, err := exec.Command("ip", family, "route", "show", "proto", "static").CombinedOutput()
 	if err != nil {
@@ -545,7 +575,7 @@ func pruneObsoleteRoutes(family string, desired map[string]StaticRouteConfig, ow
 
 		log.Printf("[Agent] Pruning obsolete static route: %s (%s)", dest, family)
 		delCmd := exec.Command("ip", family, "route", "del", dest, "proto", "static")
-		if err := delCmd.Run(); err == nil {
+		if delOut, err := delCmd.CombinedOutput(); err == nil || isRouteNoSuchProcess(string(delOut)) {
 			pruned++
 		} else {
 			retained = append(retained, dest)

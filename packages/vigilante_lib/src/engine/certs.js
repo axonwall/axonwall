@@ -3,7 +3,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { getInstanceCertsDir, ensureVigilanteConfig } from './config.js';
 import { ensureInstanceDirs } from './instances.js';
-import { ensureNamespace, safeKubectlApply } from './k8s.js';
+import { ensureNamespace, safeKubectlApply, getKubeExecutionEnv } from './k8s.js';
 import { logger } from '../utils/logger.js';
 
 /**
@@ -161,7 +161,7 @@ export async function applyK8sTlsSecret({
     `--key=${keyPath}`,
     '-n', namespace,
     '--dry-run=client', '-o', 'yaml'
-  ]);
+  ], { env: getKubeExecutionEnv() });
 
   await safeKubectlApply(secretYaml, { onLog });
 

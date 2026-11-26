@@ -9,8 +9,10 @@ import (
 	"io"
 	"log"
 	"math"
+	"net"
 	"net/http"
 	"net/netip"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -83,8 +85,15 @@ func OpenMMDBBytes(raw []byte) (*MMDBReader, error) {
 	if r.meta.RecordSize != 24 && r.meta.RecordSize != 28 && r.meta.RecordSize != 32 {
 		return nil, fmt.Errorf("unsupported mmdb record_size %d", r.meta.RecordSize)
 	}
+	if len(raw) < 16 {
+		return nil, errors.New("mmdb search tree exceeds file length")
+	}
 	r.nodeByteSize = int(r.meta.RecordSize) / 4
-	r.searchTreeEnd = int(r.meta.NodeCount) * r.nodeByteSize
+	nodeBytes := uint64(r.nodeByteSize)
+	if nodeBytes == 0 || r.meta.NodeCount > uint64(len(raw)-16)/nodeBytes {
+		return nil, errors.New("mmdb search tree exceeds file length")
+	}
+	r.searchTreeEnd = int(r.meta.NodeCount * nodeBytes)
 	r.dataStart = r.searchTreeEnd + 16
 	if r.dataStart > len(raw) {
 		return nil, errors.New("mmdb search tree exceeds file length")
@@ -131,6 +140,10 @@ func (r *MMDBReader) readNode(node uint64, bit uint8) uint64 {
 // Lookup resolves an IPv4 or IPv6 address to its decoded MMDB map.
 func (r *MMDBReader) Lookup(addr netip.Addr) (map[string]any, bool) {
 	if r == nil || !addr.IsValid() || r.meta.NodeCount == 0 {
+		return nil, false
+	}
+	addr = addr.Unmap()
+	if !addr.IsValid() {
 		return nil, false
 	}
 	var ipBytes []byte
@@ -322,7 +335,15 @@ func (r *MMDBReader) decodeValue(off, baseDataStart, depth int) (any, int, error
 		}
 		return int32(u), off + payload, nil
 	case 7: // map
-		m := make(map[string]any, payload)
+		remaining := len(r.data) - off
+		if payload < 0 || payload > remaining/2 {
+			return nil, off, errors.New("mmdb map exceeds remaining data")
+		}
+		capHint := payload
+		if capHint > 1024 {
+			capHint = 1024
+		}
+		m := make(map[string]any, capHint)
 		cur := off
 		for i := 0; i < payload; i++ {
 			kAny, nextOff, err := r.decodeValue(cur, baseDataStart, depth+1)
@@ -340,7 +361,15 @@ func (r *MMDBReader) decodeValue(off, baseDataStart, depth int) (any, int, error
 		}
 		return m, cur, nil
 	case 11: // array
-		arr := make([]any, 0, payload)
+		remaining := len(r.data) - off
+		if payload < 0 || payload > remaining {
+			return nil, off, errors.New("mmdb array exceeds remaining data")
+		}
+		capHint := payload
+		if capHint > 1024 {
+			capHint = 1024
+		}
+		arr := make([]any, 0, capHint)
 		cur := off
 		for i := 0; i < payload; i++ {
 			item, nextOff, err := r.decodeValue(cur, baseDataStart, depth+1)
@@ -396,14 +425,16 @@ func asFloat64Any(v any) float64 {
 
 // GeoIPManager manages hot-reloading City & ASN MMDB databases plus scheduled HTTPS updates.
 type GeoIPManager struct {
-	mu           sync.RWMutex
-	cityPath     string
-	cityMtime    int64
-	cityReader   *MMDBReader
-	asnPath      string
-	asnMtime     int64
-	asnReader    *MMDBReader
-	lastUpdateAt time.Time
+	mu              sync.RWMutex
+	cityPath        string
+	cityMtime       int64
+	cityReader      *MMDBReader
+	asnPath         string
+	asnMtime        int64
+	asnReader       *MMDBReader
+	lastUpdateAt    time.Time
+	httpClient      *http.Client
+	allowedBaseDirs []string
 }
 
 func NewGeoIPManager() *GeoIPManager {
@@ -497,28 +528,153 @@ func (g *GeoIPManager) Status() (cityLoaded, asnLoaded bool, updatedAt string) {
 	return g.cityReader != nil, g.asnReader != nil, updatedAt
 }
 
+func isDisallowedExternalIP(ip net.IP) bool {
+	if ip == nil {
+		return true
+	}
+	return ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsPrivate() || ip.IsMulticast() || ip.IsUnspecified()
+}
+
+func validateGeoIPHTTPSURL(rawURL string, allowPrivate bool) error {
+	u, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil {
+		return fmt.Errorf("invalid GeoIP URL: %w", err)
+	}
+	if !strings.EqualFold(u.Scheme, "https") {
+		return fmt.Errorf("disallowed GeoIP URL scheme %q: https required", u.Scheme)
+	}
+	host := strings.TrimSpace(u.Hostname())
+	if host == "" {
+		return fmt.Errorf("disallowed GeoIP download host %q", host)
+	}
+	if !allowPrivate {
+		if strings.EqualFold(host, "localhost") {
+			return fmt.Errorf("disallowed GeoIP download host %q", host)
+		}
+		if ip := net.ParseIP(host); ip != nil && isDisallowedExternalIP(ip) {
+			return fmt.Errorf("disallowed non-public GeoIP target IP %s", host)
+		}
+	}
+	return nil
+}
+
+func resolvePathWithExistingSymlinks(p string) (string, error) {
+	abs, err := filepath.Abs(filepath.Clean(p))
+	if err != nil {
+		return "", err
+	}
+	var tail []string
+	cur := abs
+	for {
+		if _, err := os.Lstat(cur); err == nil {
+			resolved, err := filepath.EvalSymlinks(cur)
+			if err != nil {
+				return "", err
+			}
+			for i := len(tail) - 1; i >= 0; i-- {
+				resolved = filepath.Join(resolved, tail[i])
+			}
+			return filepath.Clean(resolved), nil
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			return abs, nil
+		}
+		tail = append(tail, filepath.Base(cur))
+		cur = parent
+	}
+}
+
+func confineGeoIPDBPath(dstPath string, allowedBases []string) (string, error) {
+	trimmed := strings.TrimSpace(dstPath)
+	if trimmed == "" || strings.HasSuffix(trimmed, string(os.PathSeparator)) {
+		return "", errors.New("invalid empty GeoIP destination path")
+	}
+	resolvedDst, err := resolvePathWithExistingSymlinks(trimmed)
+	if err != nil {
+		return "", fmt.Errorf("invalid GeoIP destination path %q: %w", dstPath, err)
+	}
+	if len(allowedBases) == 0 {
+		allowedBases = []string{"/var/lib/axonwall"}
+	}
+	for _, base := range allowedBases {
+		resolvedBase, err := resolvePathWithExistingSymlinks(base)
+		if err != nil {
+			continue
+		}
+		if resolvedDst != resolvedBase && strings.HasPrefix(resolvedDst, resolvedBase+string(os.PathSeparator)) {
+			return resolvedDst, nil
+		}
+	}
+	return "", fmt.Errorf("GeoIP path %q escapes allowed base directories", dstPath)
+}
+
+func newSafeGeoIPHTTPClient() *http.Client {
+	dialer := &net.Dialer{Timeout: 15 * time.Second}
+	transport := &http.Transport{
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			h, p, splitErr := net.SplitHostPort(addr)
+			if splitErr != nil {
+				return nil, splitErr
+			}
+			ips, lookupErr := net.DefaultResolver.LookupIPAddr(ctx, h)
+			if lookupErr != nil || len(ips) == 0 {
+				return nil, fmt.Errorf("failed to resolve GeoIP host %s: %v", h, lookupErr)
+			}
+			for _, ipAddr := range ips {
+				if isDisallowedExternalIP(ipAddr.IP) {
+					return nil, fmt.Errorf("disallowed resolved GeoIP IP %s for %s", ipAddr.IP.String(), h)
+				}
+			}
+			return dialer.DialContext(ctx, network, net.JoinHostPort(ips[0].IP.String(), p))
+		},
+	}
+	return &http.Client{
+		Timeout:   45 * time.Second,
+		Transport: transport,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 5 {
+				return errors.New("too many GeoIP redirects")
+			}
+			return validateGeoIPHTTPSURL(req.URL.String(), false)
+		},
+	}
+}
+
 // UpdateFromURLs downloads valid .mmdb payloads atomically without disturbing running lookups on failure.
 func (g *GeoIPManager) UpdateFromURLs(ctx context.Context, cityURL, asnURL, cityPath, asnPath string) error {
 	var errs []string
+	g.mu.RLock()
+	client := g.httpClient
+	allowedBases := append([]string(nil), g.allowedBaseDirs...)
+	g.mu.RUnlock()
+	allowPrivateForTestClient := client != nil
+	if client == nil {
+		client = newSafeGeoIPHTTPClient()
+	}
+
 	downloadOne := func(rawURL, dstPath string) error {
 		if rawURL == "" || dstPath == "" {
 			return nil
 		}
-		if !strings.HasPrefix(rawURL, "https://") && !strings.HasPrefix(rawURL, "http://") {
-			return fmt.Errorf("invalid GeoIP download URL scheme for %s", dstPath)
+		if err := validateGeoIPHTTPSURL(rawURL, allowPrivateForTestClient); err != nil {
+			return fmt.Errorf("invalid GeoIP download URL for %s: %w", dstPath, err)
 		}
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+		safeDst, err := confineGeoIPDBPath(dstPath, allowedBases)
 		if err != nil {
 			return err
 		}
-		client := &http.Client{Timeout: 45 * time.Second}
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimSpace(rawURL), nil)
+		if err != nil {
+			return err
+		}
 		resp, err := client.Do(req)
 		if err != nil {
 			return err
 		}
 		defer resp.Body.Close()
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			return fmt.Errorf("HTTP %d downloading %s", resp.StatusCode, dstPath)
+			return fmt.Errorf("HTTP %d downloading %s", resp.StatusCode, safeDst)
 		}
 		raw, err := io.ReadAll(io.LimitReader(resp.Body, 128<<20))
 		if err != nil {
@@ -527,14 +683,36 @@ func (g *GeoIPManager) UpdateFromURLs(ctx context.Context, cityURL, asnURL, city
 		if _, err := OpenMMDBBytes(raw); err != nil {
 			return fmt.Errorf("downloaded file failed MMDB validation: %w", err)
 		}
-		if err := os.MkdirAll(filepath.Dir(dstPath), 0750); err != nil {
+		if err := os.MkdirAll(filepath.Dir(safeDst), 0750); err != nil {
 			return err
 		}
-		tmp := dstPath + ".tmp"
-		if err := os.WriteFile(tmp, raw, 0644); err != nil {
+		tmpFile, err := os.CreateTemp(filepath.Dir(safeDst), filepath.Base(safeDst)+".tmp-*")
+		if err != nil {
 			return err
 		}
-		return os.Rename(tmp, dstPath)
+		tmp := tmpFile.Name()
+		cleanupTmp := true
+		defer func() {
+			if cleanupTmp {
+				_ = os.Remove(tmp)
+			}
+		}()
+		if _, err := tmpFile.Write(raw); err != nil {
+			_ = tmpFile.Close()
+			return err
+		}
+		if err := tmpFile.Chmod(0644); err != nil {
+			_ = tmpFile.Close()
+			return err
+		}
+		if err := tmpFile.Close(); err != nil {
+			return err
+		}
+		if err := os.Rename(tmp, safeDst); err != nil {
+			return err
+		}
+		cleanupTmp = false
+		return nil
 	}
 
 	if cityURL != "" && cityURL != netflowMaskedPlaceholder {

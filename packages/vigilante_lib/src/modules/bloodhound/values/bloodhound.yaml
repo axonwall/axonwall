@@ -8,8 +8,9 @@ ingress:
       hosts:
         - bloodhound.vigilante.local
 
-neo4j:
-  password: "CustomNeo4jSecurePassword!"
+# Credentials are generated per deployment in a Kubernetes Secret (existingSecret)
+# or supplied via custom Helm --values override.
+existingSecret: ""
 
 resources:
   requests:

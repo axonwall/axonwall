@@ -146,6 +146,7 @@ type xdpBlockMeta struct {
 }
 
 type EBPFManager struct {
+	objsMu           sync.RWMutex
 	objs             ebpf.FlowTrackerObjects
 	links            []link.Link
 	attachedIfaces   []string
@@ -156,6 +157,7 @@ type EBPFManager struct {
 	monitorStarted   atomic.Bool
 	synFloodLimitPps atomic.Uint64
 	prevPackets      map[ebpf.FlowTrackerFlowKey]uint64
+	prevBytes        map[ebpf.FlowTrackerFlowKey]uint64
 	prevPackets6     map[ebpf.FlowTrackerFlow6Key]uint64
 	blockedUntil     map[uint32]time.Time
 	blockMetaV4      map[uint32]xdpBlockMeta
@@ -177,6 +179,7 @@ func NewEBPFManager() *EBPFManager {
 		stopChan:     make(chan struct{}),
 		doneChan:     make(chan struct{}),
 		prevPackets:  make(map[ebpf.FlowTrackerFlowKey]uint64),
+		prevBytes:    make(map[ebpf.FlowTrackerFlowKey]uint64),
 		prevPackets6: make(map[ebpf.FlowTrackerFlow6Key]uint64),
 		blockedUntil: make(map[uint32]time.Time),
 		blockMetaV4:  make(map[uint32]xdpBlockMeta),
@@ -333,10 +336,13 @@ func (m *EBPFManager) initClickHouse() error {
 	ORDER BY (timestamp, src_ip, dst_ip)
 	`
 	if err := conn.Exec(ctx, query); err != nil {
+		_ = conn.Close()
 		return err
 	}
 
+	m.mu.Lock()
 	m.ch = conn
+	m.mu.Unlock()
 	return nil
 }
 
@@ -348,9 +354,21 @@ func (m *EBPFManager) Start(interfaces []string) error {
 	}
 	m.running = true
 	m.mu.Unlock()
+	closeCH := func() {
+		m.mu.Lock()
+		ch := m.ch
+		m.ch = nil
+		m.mu.Unlock()
+		if ch != nil {
+			_ = ch.Close()
+		}
+	}
 	clearRunning := func() {
 		m.mu.Lock()
 		m.running = false
+		m.stopChan = nil
+		m.doneChan = nil
+		m.attachedIfaces = nil
 		m.mu.Unlock()
 	}
 
@@ -360,7 +378,11 @@ func (m *EBPFManager) Start(interfaces []string) error {
 		}
 	}
 
-	if err := ebpf.LoadFlowTrackerObjects(&m.objs, nil); err != nil {
+	m.objsMu.Lock()
+	err := ebpf.LoadFlowTrackerObjects(&m.objs, nil)
+	m.objsMu.Unlock()
+	if err != nil {
+		closeCH()
 		clearRunning()
 		return fmt.Errorf("loading objects: %w", err)
 	}
@@ -377,7 +399,10 @@ func (m *EBPFManager) Start(interfaces []string) error {
 	}
 
 	var attached []string
+	var links []link.Link
 	seenIf := make(map[string]bool)
+	m.objsMu.RLock()
+	xdpProg := m.objs.XdpFlowTracker
 	for _, rawIf := range interfaces {
 		iface := strings.TrimSpace(rawIf)
 		if iface == "" || iface == "lo" || seenIf[iface] {
@@ -391,26 +416,17 @@ func (m *EBPFManager) Start(interfaces []string) error {
 		}
 
 		l, err := link.AttachXDP(link.XDPOptions{
-			Program:   m.objs.XdpFlowTracker,
+			Program:   xdpProg,
 			Interface: ifaceObj.Index,
 		})
 		if err != nil {
 			log.Printf("Warning: could not attach XDP to %s: %v", iface, err)
 			continue
 		}
-		m.links = append(m.links, l)
+		links = append(links, l)
 		attached = append(attached, iface)
 	}
-
-	m.mu.Lock()
-	m.attachedIfaces = attached
-	if m.stopChan == nil {
-		m.stopChan = make(chan struct{})
-	}
-	if m.doneChan == nil {
-		m.doneChan = make(chan struct{})
-	}
-	m.mu.Unlock()
+	m.objsMu.RUnlock()
 
 	// A-H3 (round 3): Start used to return nil with zero interfaces
 	// attached, leaving running=true while the kernel enforced
@@ -418,17 +434,29 @@ func (m *EBPFManager) Start(interfaces []string) error {
 	// A manager with no XDP program attached enforces nothing, so
 	// fail loudly instead of reporting a live dataplane.
 	if len(attached) == 0 {
-		for _, l := range m.links {
-			l.Close()
+		for _, l := range links {
+			_ = l.Close()
 		}
-		m.links = nil
-		m.objs.Close()
+		m.objsMu.Lock()
+		_ = m.objs.Close()
+		m.objs = ebpf.FlowTrackerObjects{}
+		m.objsMu.Unlock()
+		closeCH()
 		clearRunning()
 		return fmt.Errorf("eBPF XDP attach failed on all %d interface(s): no XDP program attached, dataplane not enforced", len(interfaces))
 	}
 
+	stopCh := make(chan struct{})
+	doneCh := make(chan struct{})
+	m.mu.Lock()
+	m.links = links
+	m.attachedIfaces = attached
+	m.stopChan = stopCh
+	m.doneChan = doneCh
 	m.monitorStarted.Store(true)
-	go m.monitorFlows()
+	m.mu.Unlock()
+
+	go m.monitorFlows(stopCh, doneCh)
 
 	return nil
 }
@@ -445,6 +473,8 @@ func (m *EBPFManager) SetSynFloodLimitPps(maxSynPps uint64) error {
 		return fmt.Errorf("maxSynPps %d exceeds maximum supported limit (10,000,000)", maxSynPps)
 	}
 	m.synFloodLimitPps.Store(maxSynPps)
+	m.objsMu.RLock()
+	defer m.objsMu.RUnlock()
 	if m.objs.SynFloodCfgMap != nil {
 		enabled := uint32(0)
 		if maxSynPps > 0 {
@@ -461,10 +491,10 @@ func (m *EBPFManager) SetSynFloodLimitPps(maxSynPps uint64) error {
 	return nil
 }
 
-func (m *EBPFManager) monitorFlows() {
+func (m *EBPFManager) monitorFlows(stopCh, doneCh chan struct{}) {
 	defer func() {
-		if m.doneChan != nil {
-			close(m.doneChan)
+		if doneCh != nil {
+			close(doneCh)
 		}
 	}()
 	ticker := time.NewTicker(10 * time.Second)
@@ -472,216 +502,240 @@ func (m *EBPFManager) monitorFlows() {
 
 	for {
 		select {
-		case <-m.stopChan:
+		case <-stopCh:
 			return
 		case <-ticker.C:
-			if m.objs.FlowMap == nil {
-				continue
+			m.sweepFlowsOnce()
+		}
+	}
+}
+
+func (m *EBPFManager) sweepFlowsOnce() {
+	m.objsMu.RLock()
+	defer m.objsMu.RUnlock()
+	if m.objs.FlowMap == nil {
+		return
+	}
+
+	m.mu.Lock()
+	ch := m.ch
+	m.mu.Unlock()
+
+	var batch driver.Batch
+	if ch != nil {
+		ctx := context.Background()
+		var err error
+		batch, err = ch.PrepareBatch(ctx, "INSERT INTO flows (timestamp, src_ip, dst_ip, protocol, packets, bytes)")
+		if err != nil {
+			log.Printf("ClickHouse prepare batch error: %v", err)
+			batch = nil
+		}
+	}
+
+	now := time.Now()
+	nowKtime := ktimeMonotonicNs()
+	count := 0
+
+	// 1. Process cooldown expirations on IPv4/IPv6 host & LPM CIDR XDP blocklists
+	m.blockMu.Lock()
+	if m.objs.BlocklistMap != nil {
+		for ipUint, expiry := range m.blockedUntil {
+			if now.After(expiry) {
+				_ = m.objs.BlocklistMap.Delete(ipUint)
+				delete(m.blockedUntil, ipUint)
+				delete(m.blockMetaV4, ipUint)
+				log.Printf("XDP Mitigation: Cooldown expired for IP %s. Removed from XDP blocklist", ipv4FromUint32(ipUint).String())
 			}
-
-			var batch driver.Batch
-			if m.ch != nil {
-				ctx := context.Background()
-				var err error
-				batch, err = m.ch.PrepareBatch(ctx, "INSERT INTO flows (timestamp, src_ip, dst_ip, protocol, packets, bytes)")
-				if err != nil {
-					log.Printf("ClickHouse prepare batch error: %v", err)
-					batch = nil
-				}
+		}
+	}
+	if m.objs.Blocklist6Map != nil {
+		for ip6Arr, meta := range m.blockMetaV6 {
+			if !meta.expiresAt.IsZero() && now.After(meta.expiresAt) {
+				_ = m.objs.Blocklist6Map.Delete(ebpf.FlowTrackerIpv6AddrKey{Addr: ip6Arr})
+				delete(m.blockMetaV6, ip6Arr)
+				log.Printf("XDP Mitigation: Cooldown expired for IPv6 %s. Removed from XDP blocklist", net.IP(ip6Arr[:]).String())
 			}
+		}
+	}
+	for lpm4, meta := range m.cidrMetaV4 {
+		if !meta.expiresAt.IsZero() && now.After(meta.expiresAt) {
+			if m.objs.CidrBlock4Map != nil {
+				_ = m.objs.CidrBlock4Map.Delete(lpm4)
+			}
+			delete(m.cidrMetaV4, lpm4)
+		}
+	}
+	for lpm6, meta := range m.cidrMetaV6 {
+		if !meta.expiresAt.IsZero() && now.After(meta.expiresAt) {
+			if m.objs.CidrBlock6Map != nil {
+				_ = m.objs.CidrBlock6Map.Delete(lpm6)
+			}
+			delete(m.cidrMetaV6, lpm6)
+		}
+	}
+	m.blockMu.Unlock()
 
-			now := time.Now()
-			nowKtime := ktimeMonotonicNs()
-			count := 0
+	ddosEnabled := os.Getenv("AXONWALL_DDOS_MITIGATION_ENABLED") != "false"
+	ddosThreshold := uint64(500000) // 50,000 packets/sec
+	if val := os.Getenv("AXONWALL_DDOS_THRESHOLD_10S"); val != "" {
+		if parsed, err := strconv.ParseUint(val, 10, 64); err == nil && parsed > 0 {
+			ddosThreshold = parsed
+		}
+	}
+	ddosCooldown := 60 * time.Second
+	if val := os.Getenv("AXONWALL_DDOS_COOLDOWN_SECONDS"); val != "" {
+		if sec, err := strconv.Atoi(val); err == nil && sec > 0 {
+			ddosCooldown = time.Duration(sec) * time.Second
+		}
+	}
 
-			// 1. Process cooldown expirations on IPv4/IPv6 host & LPM CIDR XDP blocklists
-			m.blockMu.Lock()
-			if m.objs.BlocklistMap != nil {
-				for ipUint, expiry := range m.blockedUntil {
-					if now.After(expiry) {
-						_ = m.objs.BlocklistMap.Delete(ipUint)
-						delete(m.blockedUntil, ipUint)
-						delete(m.blockMetaV4, ipUint)
-						log.Printf("XDP Mitigation: Cooldown expired for IP %s. Removed from XDP blocklist", ipv4FromUint32(ipUint).String())
+	iter := m.objs.FlowMap.Iterate()
+	var key ebpf.FlowTrackerFlowKey
+	var val ebpf.FlowTrackerFlowVal
+	var keysToDelete []ebpf.FlowTrackerFlowKey
+	nextPrev := make(map[ebpf.FlowTrackerFlowKey]uint64)
+	nextPrevBytes := make(map[ebpf.FlowTrackerFlowKey]uint64)
+
+	for iter.Next(&key, &val) {
+		srcIP := ipv4FromUint32(key.SrcIp)
+		dstIP := ipv4FromUint32(key.DstIp)
+		srcPort := bits.ReverseBytes16(key.SrcPort)
+		dstPort := bits.ReverseBytes16(key.DstPort)
+
+		deltaPackets := val.Packets
+		if prev, ok := m.prevPackets[key]; ok && val.Packets >= prev {
+			deltaPackets = val.Packets - prev
+		}
+		deltaBytes := val.Bytes
+		if prevB, ok := m.prevBytes[key]; ok && val.Bytes >= prevB {
+			deltaBytes = val.Bytes - prevB
+		}
+		nextPrev[key] = val.Packets
+		nextPrevBytes[key] = val.Bytes
+
+		isServerResponsePort := srcPort == 80 || srcPort == 443 || srcPort == 8080 || srcPort == 8443 || srcPort == 53 || srcPort == 853 || srcPort == 123 || srcPort == 22
+		isReturnTraffic := isServerResponsePort || (dstPort >= 1024 && srcPort < 1024)
+
+		if ddosEnabled && !isReturnTraffic && deltaPackets > ddosThreshold {
+			if _, _, _, err := ValidateTargetSafety(srcIP.String(), "", 0, 24, 64); err == nil {
+				log.Printf("DDoS Mitigation: Volumetric threshold exceeded (%d packets/10s on port %d -> %d). Blocking IP %s via XDP for %v cooldown", deltaPackets, srcPort, dstPort, srcIP.String(), ddosCooldown)
+				if m.objs.BlocklistMap != nil {
+					expTime := now.Add(ddosCooldown)
+					expNs := uint64(0)
+					if nowKtime > 0 {
+						expNs = nowKtime + uint64(ddosCooldown.Nanoseconds())
 					}
-				}
-			}
-			if m.objs.Blocklist6Map != nil {
-				for ip6Arr, meta := range m.blockMetaV6 {
-					if !meta.expiresAt.IsZero() && now.After(meta.expiresAt) {
-						_ = m.objs.Blocklist6Map.Delete(ebpf.FlowTrackerIpv6AddrKey{Addr: ip6Arr})
-						delete(m.blockMetaV6, ip6Arr)
-						log.Printf("XDP Mitigation: Cooldown expired for IPv6 %s. Removed from XDP blocklist", net.IP(ip6Arr[:]).String())
+					blkVal := ebpf.FlowTrackerXdpBlockVal{
+						ExpiresNs:  expNs,
+						ReasonCode: XdpReasonAutoDdos,
+						Active:     1,
 					}
-				}
-			}
-			for lpm4, meta := range m.cidrMetaV4 {
-				if !meta.expiresAt.IsZero() && now.After(meta.expiresAt) {
-					if m.objs.CidrBlock4Map != nil {
-						_ = m.objs.CidrBlock4Map.Delete(lpm4)
+					m.blockMu.Lock()
+					_ = m.objs.BlocklistMap.Put(key.SrcIp, blkVal)
+					m.blockedUntil[key.SrcIp] = expTime
+					m.blockMetaV4[key.SrcIp] = xdpBlockMeta{
+						expiresAt: expTime,
+						reason:    "Volumetric XDP Auto-DDoS Mitigation",
 					}
-					delete(m.cidrMetaV4, lpm4)
+					m.blockMu.Unlock()
 				}
 			}
-			for lpm6, meta := range m.cidrMetaV6 {
-				if !meta.expiresAt.IsZero() && now.After(meta.expiresAt) {
-					if m.objs.CidrBlock6Map != nil {
-						_ = m.objs.CidrBlock6Map.Delete(lpm6)
+		}
+		if batch != nil {
+			err := batch.Append(
+				now,
+				srcIP.String(),
+				dstIP.String(),
+				key.Protocol,
+				deltaPackets,
+				deltaBytes,
+			)
+			if err == nil {
+				count++
+			}
+		}
+
+		if nowKtime == 0 || val.LastSeenNs == 0 || (nowKtime > val.LastSeenNs && nowKtime-val.LastSeenNs > uint64(30*time.Second)) {
+			keysToDelete = append(keysToDelete, key)
+		}
+	}
+
+	for i := range keysToDelete {
+		if err := m.objs.FlowMap.Delete(&keysToDelete[i]); err == nil {
+			delete(nextPrev, keysToDelete[i])
+			delete(nextPrevBytes, keysToDelete[i])
+		}
+	}
+	m.prevPackets = nextPrev
+	m.prevBytes = nextPrevBytes
+
+	// Sweep IPv6 LRU flows for volumetric DDoS mitigation & idle eviction
+	if m.objs.Flow6Map != nil {
+		iter6 := m.objs.Flow6Map.Iterate()
+		var k6 ebpf.FlowTrackerFlow6Key
+		var v6 ebpf.FlowTrackerFlowVal
+		var keys6ToDelete []ebpf.FlowTrackerFlow6Key
+		nextPrev6 := make(map[ebpf.FlowTrackerFlow6Key]uint64)
+
+		for iter6.Next(&k6, &v6) {
+			srcIP6 := net.IP(k6.SrcIp6[:])
+			srcPort := bits.ReverseBytes16(k6.SrcPort)
+			dstPort := bits.ReverseBytes16(k6.DstPort)
+
+			deltaPackets := v6.Packets
+			if prev, ok := m.prevPackets6[k6]; ok && v6.Packets >= prev {
+				deltaPackets = v6.Packets - prev
+			}
+			nextPrev6[k6] = v6.Packets
+
+			isServerResponsePort := srcPort == 80 || srcPort == 443 || srcPort == 8080 || srcPort == 8443 || srcPort == 53 || srcPort == 853 || srcPort == 123 || srcPort == 22
+			isReturnTraffic := isServerResponsePort || (dstPort >= 1024 && srcPort < 1024)
+
+			if ddosEnabled && !isReturnTraffic && deltaPackets > ddosThreshold {
+				if _, _, _, err := ValidateTargetSafety(srcIP6.String(), "", 0, 24, 64); err == nil && m.objs.Blocklist6Map != nil {
+					expTime := now.Add(ddosCooldown)
+					expNs := uint64(0)
+					if nowKtime > 0 {
+						expNs = nowKtime + uint64(ddosCooldown.Nanoseconds())
 					}
-					delete(m.cidrMetaV6, lpm6)
-				}
-			}
-			m.blockMu.Unlock()
-
-			ddosEnabled := os.Getenv("AXONWALL_DDOS_MITIGATION_ENABLED") != "false"
-			ddosThreshold := uint64(500000) // 50,000 packets/sec
-			if val := os.Getenv("AXONWALL_DDOS_THRESHOLD_10S"); val != "" {
-				if parsed, err := strconv.ParseUint(val, 10, 64); err == nil && parsed > 0 {
-					ddosThreshold = parsed
-				}
-			}
-			ddosCooldown := 60 * time.Second
-			if val := os.Getenv("AXONWALL_DDOS_COOLDOWN_SECONDS"); val != "" {
-				if sec, err := strconv.Atoi(val); err == nil && sec > 0 {
-					ddosCooldown = time.Duration(sec) * time.Second
-				}
-			}
-
-			iter := m.objs.FlowMap.Iterate()
-			var key ebpf.FlowTrackerFlowKey
-			var val ebpf.FlowTrackerFlowVal
-			var keysToDelete []ebpf.FlowTrackerFlowKey
-
-			for iter.Next(&key, &val) {
-				srcIP := ipv4FromUint32(key.SrcIp)
-				dstIP := ipv4FromUint32(key.DstIp)
-				srcPort := bits.ReverseBytes16(key.SrcPort)
-				dstPort := bits.ReverseBytes16(key.DstPort)
-
-				deltaPackets := val.Packets
-				if prev, ok := m.prevPackets[key]; ok && val.Packets >= prev {
-					deltaPackets = val.Packets - prev
-				}
-				m.prevPackets[key] = val.Packets
-
-				isServerResponsePort := srcPort == 80 || srcPort == 443 || srcPort == 8080 || srcPort == 8443 || srcPort == 53 || srcPort == 853 || srcPort == 123 || srcPort == 22
-				isReturnTraffic := isServerResponsePort || (dstPort >= 1024 && srcPort < 1024)
-
-				if ddosEnabled && !isReturnTraffic && deltaPackets > ddosThreshold {
-					if _, _, _, err := ValidateTargetSafety(srcIP.String(), "", 0, 24, 64); err == nil {
-						log.Printf("DDoS Mitigation: Volumetric threshold exceeded (%d packets/10s on port %d -> %d). Blocking IP %s via XDP for %v cooldown", deltaPackets, srcPort, dstPort, srcIP.String(), ddosCooldown)
-						if m.objs.BlocklistMap != nil {
-							expTime := now.Add(ddosCooldown)
-							expNs := uint64(0)
-							if nowKtime > 0 {
-								expNs = nowKtime + uint64(ddosCooldown.Nanoseconds())
-							}
-							blkVal := ebpf.FlowTrackerXdpBlockVal{
-								ExpiresNs:  expNs,
-								ReasonCode: XdpReasonAutoDdos,
-								Active:     1,
-							}
-							m.blockMu.Lock()
-							_ = m.objs.BlocklistMap.Put(key.SrcIp, blkVal)
-							m.blockedUntil[key.SrcIp] = expTime
-							m.blockMetaV4[key.SrcIp] = xdpBlockMeta{
-								expiresAt: expTime,
-								reason:    "Volumetric XDP Auto-DDoS Mitigation",
-							}
-							m.blockMu.Unlock()
-						}
+					blkVal := ebpf.FlowTrackerXdpBlockVal{
+						ExpiresNs:  expNs,
+						ReasonCode: XdpReasonAutoDdos,
+						Active:     1,
 					}
-				}
-				if batch != nil {
-					err := batch.Append(
-						now,
-						srcIP.String(),
-						dstIP.String(),
-						key.Protocol,
-						deltaPackets,
-						val.Bytes,
-					)
-					if err == nil {
-						count++
+					m.blockMu.Lock()
+					_ = m.objs.Blocklist6Map.Put(ebpf.FlowTrackerIpv6AddrKey{Addr: k6.SrcIp6}, blkVal)
+					m.blockMetaV6[k6.SrcIp6] = xdpBlockMeta{
+						expiresAt: expTime,
+						reason:    "Volumetric IPv6 XDP Auto-DDoS Mitigation",
 					}
-				}
-
-				if nowKtime == 0 || val.LastSeenNs == 0 || (nowKtime > val.LastSeenNs && nowKtime-val.LastSeenNs > uint64(30*time.Second)) {
-					keysToDelete = append(keysToDelete, key)
+					m.blockMu.Unlock()
 				}
 			}
 
-			for i := range keysToDelete {
-				if err := m.objs.FlowMap.Delete(&keysToDelete[i]); err == nil {
-					delete(m.prevPackets, keysToDelete[i])
-				}
+			if nowKtime == 0 || v6.LastSeenNs == 0 || (nowKtime > v6.LastSeenNs && nowKtime-v6.LastSeenNs > uint64(30*time.Second)) {
+				keys6ToDelete = append(keys6ToDelete, k6)
 			}
-
-			// Sweep IPv6 LRU flows for volumetric DDoS mitigation & idle eviction
-			if m.objs.Flow6Map != nil {
-				iter6 := m.objs.Flow6Map.Iterate()
-				var k6 ebpf.FlowTrackerFlow6Key
-				var v6 ebpf.FlowTrackerFlowVal
-				var keys6ToDelete []ebpf.FlowTrackerFlow6Key
-
-				for iter6.Next(&k6, &v6) {
-					srcIP6 := net.IP(k6.SrcIp6[:])
-					srcPort := bits.ReverseBytes16(k6.SrcPort)
-					dstPort := bits.ReverseBytes16(k6.DstPort)
-
-					deltaPackets := v6.Packets
-					if prev, ok := m.prevPackets6[k6]; ok && v6.Packets >= prev {
-						deltaPackets = v6.Packets - prev
-					}
-					m.prevPackets6[k6] = v6.Packets
-
-					isServerResponsePort := srcPort == 80 || srcPort == 443 || srcPort == 8080 || srcPort == 8443 || srcPort == 53 || srcPort == 853 || srcPort == 123 || srcPort == 22
-					isReturnTraffic := isServerResponsePort || (dstPort >= 1024 && srcPort < 1024)
-
-					if ddosEnabled && !isReturnTraffic && deltaPackets > ddosThreshold {
-						if _, _, _, err := ValidateTargetSafety(srcIP6.String(), "", 0, 24, 64); err == nil && m.objs.Blocklist6Map != nil {
-							expTime := now.Add(ddosCooldown)
-							expNs := uint64(0)
-							if nowKtime > 0 {
-								expNs = nowKtime + uint64(ddosCooldown.Nanoseconds())
-							}
-							blkVal := ebpf.FlowTrackerXdpBlockVal{
-								ExpiresNs:  expNs,
-								ReasonCode: XdpReasonAutoDdos,
-								Active:     1,
-							}
-							m.blockMu.Lock()
-							_ = m.objs.Blocklist6Map.Put(ebpf.FlowTrackerIpv6AddrKey{Addr: k6.SrcIp6}, blkVal)
-							m.blockMetaV6[k6.SrcIp6] = xdpBlockMeta{
-								expiresAt: expTime,
-								reason:    "Volumetric IPv6 XDP Auto-DDoS Mitigation",
-							}
-							m.blockMu.Unlock()
-						}
-					}
-
-					if nowKtime == 0 || v6.LastSeenNs == 0 || (nowKtime > v6.LastSeenNs && nowKtime-v6.LastSeenNs > uint64(30*time.Second)) {
-						keys6ToDelete = append(keys6ToDelete, k6)
-					}
-				}
-				for i := range keys6ToDelete {
-					if err := m.objs.Flow6Map.Delete(&keys6ToDelete[i]); err == nil {
-						delete(m.prevPackets6, keys6ToDelete[i])
-					}
-				}
+		}
+		for i := range keys6ToDelete {
+			if err := m.objs.Flow6Map.Delete(&keys6ToDelete[i]); err == nil {
+				delete(nextPrev6, keys6ToDelete[i])
 			}
+		}
+		m.prevPackets6 = nextPrev6
+	} else {
+		m.prevPackets6 = make(map[ebpf.FlowTrackerFlow6Key]uint64)
+	}
 
-			if batch != nil {
-				if count > 0 {
-					if err := batch.Send(); err != nil {
-						log.Printf("ClickHouse send batch error: %v", err)
-					} else {
-						log.Printf("Exported %d flow records to ClickHouse", count)
-					}
-				} else {
-					_ = batch.Abort()
-				}
+	if batch != nil {
+		if count > 0 {
+			if err := batch.Send(); err != nil {
+				log.Printf("ClickHouse send batch error: %v", err)
+			} else {
+				log.Printf("Exported %d flow records to ClickHouse", count)
 			}
+		} else {
+			_ = batch.Abort()
 		}
 	}
 }
@@ -758,6 +812,8 @@ func (m *EBPFManager) AddXdpBlock(ipOrCidr string, ttlSeconds int, reasonCode ui
 			if err := m.requireXdpEnforcing(); err != nil {
 				return err
 			}
+			m.objsMu.RLock()
+			defer m.objsMu.RUnlock()
 			m.blockMu.Lock()
 			defer m.blockMu.Unlock()
 
@@ -819,6 +875,8 @@ func (m *EBPFManager) AddXdpBlock(ipOrCidr string, ttlSeconds int, reasonCode ui
 	if err := m.requireXdpEnforcing(); err != nil {
 		return err
 	}
+	m.objsMu.RLock()
+	defer m.objsMu.RUnlock()
 	m.blockMu.Lock()
 	defer m.blockMu.Unlock()
 
@@ -866,6 +924,8 @@ func (m *EBPFManager) RemoveXdpBlock(ipOrCidr string) error {
 		if (bitsLen == 32 && ones == 32) || (bitsLen == 128 && ones == 128) {
 			raw = ip.String()
 		} else {
+			m.objsMu.RLock()
+			defer m.objsMu.RUnlock()
 			m.blockMu.Lock()
 			defer m.blockMu.Unlock()
 			if ip4 := ipNet.IP.To4(); ip4 != nil && bitsLen == 32 {
@@ -899,6 +959,8 @@ func (m *EBPFManager) RemoveXdpBlock(ipOrCidr string) error {
 		return fmt.Errorf("invalid IP address %q", ipOrCidr)
 	}
 
+	m.objsMu.RLock()
+	defer m.objsMu.RUnlock()
 	m.blockMu.Lock()
 	defer m.blockMu.Unlock()
 
@@ -952,6 +1014,9 @@ func (m *EBPFManager) GetDataplaneSnapshot(maxFlows int) EbpfDataplaneSnapshot {
 
 	nowKtime := ktimeMonotonicNs()
 
+	m.objsMu.RLock()
+	defer m.objsMu.RUnlock()
+
 	// 1. Sum per-CPU XDP stats and capture per-core distribution
 	if m.objs.XdpStatsMap != nil {
 		var perCpu []ebpf.FlowTrackerXdpDatastats
@@ -986,7 +1051,7 @@ func (m *EBPFManager) GetDataplaneSnapshot(maxFlows int) EbpfDataplaneSnapshot {
 	}
 
 	// 2. Collect IPv4 & IPv6 LRU flows
-	flows, v4Count, v6Count := m.collectFlowEntries(nowKtime)
+	flows, v4Count, v6Count := m.collectFlowEntriesLocked(nowKtime)
 	snap.TotalFlowCountV4 = v4Count
 	snap.TotalFlowCountV6 = v6Count
 	snap.TotalFlowCount = snap.TotalFlowCountV4 + snap.TotalFlowCountV6
@@ -1204,6 +1269,12 @@ func (m *EBPFManager) GetDataplaneSnapshot(maxFlows int) EbpfDataplaneSnapshot {
 }
 
 func (m *EBPFManager) collectFlowEntries(nowKtime uint64) ([]XdpFlowSnapshotEntry, int, int) {
+	m.objsMu.RLock()
+	defer m.objsMu.RUnlock()
+	return m.collectFlowEntriesLocked(nowKtime)
+}
+
+func (m *EBPFManager) collectFlowEntriesLocked(nowKtime uint64) ([]XdpFlowSnapshotEntry, int, int) {
 	var flows []XdpFlowSnapshotEntry
 	var v4Count, v6Count int
 	if m.objs.FlowMap != nil {
@@ -1288,39 +1359,51 @@ func (m *EBPFManager) GetAllFlowCounters(maxFlows int) []XdpFlowSnapshotEntry {
 }
 
 func (m *EBPFManager) Stop() {
+	if m == nil {
+		return
+	}
 	m.mu.Lock()
 	wasRunning := m.running
 	stopChan := m.stopChan
 	doneChan := m.doneChan
+	monitorStarted := m.monitorStarted.Load()
+	m.running = false
+	m.stopChan = nil
+	m.doneChan = nil
+	m.attachedIfaces = nil
+	m.monitorStarted.Store(false)
+	links := m.links
+	m.links = nil
+	ch := m.ch
+	m.ch = nil
 	m.mu.Unlock()
 
 	if wasRunning && stopChan != nil {
 		close(stopChan)
-		if doneChan != nil && m.monitorStarted.Load() {
+		if doneChan != nil && monitorStarted {
 			<-doneChan
-			m.monitorStarted.Store(false)
 		}
-		m.mu.Lock()
-		m.stopChan = nil
-		m.doneChan = nil
-		m.running = false
-		m.attachedIfaces = nil
-		m.mu.Unlock()
 	}
-	for _, l := range m.links {
-		l.Close()
+	for _, l := range links {
+		if l != nil {
+			_ = l.Close()
+		}
 	}
-	m.links = nil
+	m.objsMu.Lock()
 	m.blockMu.Lock()
-	m.objs.Close()
+	_ = m.objs.Close()
+	m.objs = ebpf.FlowTrackerObjects{}
 	m.blockMu.Unlock()
-	if m.ch != nil {
-		_ = m.ch.Close()
+	m.objsMu.Unlock()
+	if ch != nil {
+		_ = ch.Close()
 	}
 }
 
 // ClearBlocklist purges all currently active XDP host & LPM CIDR blocks from the eBPF maps.
 func (m *EBPFManager) ClearBlocklist() {
+	m.objsMu.RLock()
+	defer m.objsMu.RUnlock()
 	m.blockMu.Lock()
 	defer m.blockMu.Unlock()
 	cleared := 0

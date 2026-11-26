@@ -25,6 +25,7 @@ import {
 import { enableStarterPack, getStarterPackPluginIdsWithDeps } from '@axonwall/lib/plugins';
 import { getMcpServerStatus, saveMcpSettings, validateVirtWorkloadSafety } from '@axonwall/lib/mcp';
 import { acquireMcpLockFile, desiredStateLockPath } from './mcp/lockfile.js';
+import { writeFileAtomicSync } from './atomic-config.js';
 import { readAgentToken, resolveControllerDirs } from './dev-paths.js';
 import type { DesiredState } from '@axonwall/lib/schemas';
 import { App as NastyMapApp } from './tui/nastymap/App.js';
@@ -303,11 +304,8 @@ export function saveStateToDisk(state: DesiredState): { daemonFiles: Record<stri
         fs.mkdirSync(dir, { recursive: true, mode: 0o775 });
         for (const [fn, content] of Object.entries(serialized)) {
           const filePath = path.join(dir, fn);
-          fs.writeFileSync(filePath, content, { encoding: 'utf-8', mode: 0o660 });
+          writeFileAtomicSync(filePath, content, 0o660);
           anyWriteSucceeded = true;
-          try {
-            fs.chmodSync(filePath, 0o660);
-          } catch {}
         }
         const ciOverride = path.join(dir, 'conf.d', '99-cloudinit.yaml');
         if (fs.existsSync(ciOverride)) {
@@ -319,12 +317,8 @@ export function saveStateToDisk(state: DesiredState): { daemonFiles: Record<stri
     daemonFiles[path.join(ETC_CONFIG_DIR, 'state.json')] = serializedJson;
     for (const jsonTarget of [STATE_JSON_PATH, path.join(VAR_ETC_CONFIG_DIR, 'state.json'), path.join(ETC_CONFIG_DIR, 'state.json')]) {
       try {
-        fs.mkdirSync(path.dirname(jsonTarget), { recursive: true, mode: 0o775 });
-        fs.writeFileSync(jsonTarget, serializedJson, { encoding: 'utf-8', mode: 0o660 });
+        writeFileAtomicSync(jsonTarget, serializedJson, 0o660);
         anyWriteSucceeded = true;
-        try {
-          fs.chmodSync(jsonTarget, 0o660);
-        } catch {}
       } catch {}
     }
     if (!anyWriteSucceeded) return null;
@@ -332,6 +326,22 @@ export function saveStateToDisk(state: DesiredState): { daemonFiles: Record<stri
   } finally {
     release?.();
   }
+}
+
+export function classifyTuiApplyResponse(resp: any): 'timeout' | 'applied' | 'offline' | 'rejected' {
+  if (resp?.errorKind === 'timeout') {
+    return 'timeout';
+  }
+  if (resp && (resp.success || resp.status === 'applied_pending_confirm' || resp.status === 'applied')) {
+    return 'applied';
+  }
+  if (resp?.errorKind === 'offline' || resp?.errorKind === 'malformed') {
+    return 'offline';
+  }
+  if (resp && (resp.error || resp.success === false)) {
+    return 'rejected';
+  }
+  return 'offline';
 }
 
 // B2-M6: callDaemon used to resolve `null` for every failure —
@@ -739,24 +749,24 @@ export function AxonwallTuiApp({
     // also carry .error. Offline/malformed likewise keep the
     // disk-only save (no restore); only an explicit daemon
     // rejection restores.
-    if (resp?.errorKind === 'timeout') {
+    const verdict = classifyTuiApplyResponse(resp);
+    if (verdict === 'timeout') {
       setStatusMessage('✖ Apply status unknown — the daemon did not answer in time; the bundle may still be pending on the daemon. Check the daemon\'s pending job before retrying.');
-    } else if (resp && (resp.success || resp.status === 'applied_pending_confirm' || resp.status === 'applied')) {
+    } else if (verdict === 'applied') {
       setStatusMessage('✔ Applied to live daemon! Press [c] within 120s to confirm, or [r] to rollback.');
       await refreshAll();
-    } else if (resp?.errorKind === 'offline' || resp?.errorKind === 'malformed') {
+    } else if (verdict === 'offline') {
       setStatusMessage('✔ Saved to /etc/axonwall/*.yaml (daemon socket offline or standalone mode).');
-    } else if (resp?.error) {
+    } else {
       // B2-M4 follow-up: the restore takes the same lock; a restore
       // that cannot take it must not claim to have restored anything.
       const restored = restoreTuiConfigSnapshotLocked(diskSnapshot);
+      const reason = resp?.message || resp?.error || 'Daemon rejected bundle';
       setStatusMessage(
         restored
-          ? `✖ Apply rejected by daemon: ${resp.message || resp.error} (previous on-disk configuration restored)`
-          : `✖ Apply rejected by daemon: ${resp.message || resp.error} (could NOT restore the previous on-disk configuration — the DesiredState lock is held by another save; check /etc/axonwall/*.yaml before retrying)`,
+          ? `✖ Apply rejected by daemon: ${reason} (previous on-disk configuration restored)`
+          : `✖ Apply rejected by daemon: ${reason} (could NOT restore the previous on-disk configuration — the DesiredState lock is held by another save; check /etc/axonwall/*.yaml before retrying)`,
       );
-    } else {
-      setStatusMessage('✔ Saved to /etc/axonwall/*.yaml (daemon socket offline or standalone mode).');
     }
   };
 
@@ -814,15 +824,23 @@ export function AxonwallTuiApp({
         Object.assign(next, depRes.state);
       }
     }
-    return roleId === 'core-firewall'
-      ? nextCaps.firewallEnabled
-      : roleId === 'core-nas'
-        ? nextCaps.nasEnabled
-        : roleId === 'core-k3s'
-          ? nextCaps.k3sEnabled
-          : roleId === 'core-virt'
-            ? nextCaps.virtEnabled
-            : nextCaps.vigilanteEnabled;
+    const nextEnabled =
+      roleId === 'core-firewall'
+        ? nextCaps.firewallEnabled
+        : roleId === 'core-nas'
+          ? nextCaps.nasEnabled
+          : roleId === 'core-k3s'
+            ? nextCaps.k3sEnabled
+            : roleId === 'core-virt'
+              ? nextCaps.virtEnabled
+              : nextCaps.vigilanteEnabled;
+    if (Array.isArray(next.plugins)) {
+      const existingIdx = next.plugins.findIndex((p) => p.id === roleId);
+      if (existingIdx >= 0) {
+        next.plugins[existingIdx] = { ...next.plugins[existingIdx]!, enabled: nextEnabled };
+      }
+    }
+    return nextEnabled;
   };
 
   const toggleExtensionPluginInState = async (pluginId: string) => {
@@ -1278,7 +1296,7 @@ export function AxonwallTuiApp({
       }
       handleConfirm();
       return;
-    } else if (input === 'r') {
+    } else if (input === 'r' && activeTab !== 'updates') {
       if (readOnly) {
         setStatusMessage('Read-only operator session: configuration rollback is disabled.');
         return;
@@ -1364,6 +1382,18 @@ export function AxonwallTuiApp({
       }
     }
 
+    const commitInlineStateEdit = (next: DesiredState, successMsg: string, onSaved?: () => void): boolean => {
+      if (!saveStateToDisk(next)) {
+        setStatusMessage('✖ Could not save DesiredState — lock held or disk write failed; change was not saved.');
+        void refreshAll();
+        return false;
+      }
+      setState(next);
+      onSaved?.();
+      setStatusMessage(successMsg);
+      return true;
+    };
+
     // Tab-specific hotkeys
     if (activeTab === 'interfaces' && !readOnly && ifSubView === 'interfaces' && state.interfaces.length > 0) {
       const idx = cursorIdx % state.interfaces.length;
@@ -1374,18 +1404,15 @@ export function AxonwallTuiApp({
         if (target.type === 'static' && !target.ipv4Address) {
           target.ipv4Address = '192.168.10.1/24';
         }
-        setState(next);
-        saveStateToDisk(next);
-        setStatusMessage(`Switched ${target.name} (${target.device}) mode to ${target.type.toUpperCase()}. Press [a] to apply.`);
+        commitInlineStateEdit(next, `Switched ${target.name} (${target.device}) mode to ${target.type.toUpperCase()}. Press [a] to apply.`);
         return;
       }
       if (input === 'd') {
         const next = structuredClone(state);
         const target = next.interfaces[idx]!;
         target.dhcpServer = !target.dhcpServer;
-        setState(next);
-        saveStateToDisk(next);
-        setStatusMessage(
+        commitInlineStateEdit(
+          next,
           `Toggled DHCPv4 Server on ${target.name} -> ${target.dhcpServer ? 'ENABLED' : 'DISABLED'}. Press [a] to apply.`
         );
         return;
@@ -1399,18 +1426,14 @@ export function AxonwallTuiApp({
         const rule = next.rules[idx]!;
         const order: Array<'pass' | 'block' | 'reject'> = ['pass', 'block', 'reject'];
         rule.action = order[(order.indexOf(rule.action as any) + 1) % order.length]!;
-        setState(next);
-        saveStateToDisk(next);
-        setStatusMessage(`Rule '${rule.description || rule.id}' action -> ${rule.action.toUpperCase()}. Press [a] to apply.`);
+        commitInlineStateEdit(next, `Rule '${rule.description || rule.id}' action -> ${rule.action.toUpperCase()}. Press [a] to apply.`);
         return;
       }
       if (input === 'l') {
         const next = structuredClone(state);
         const rule = next.rules[idx]!;
         rule.log = !rule.log;
-        setState(next);
-        saveStateToDisk(next);
-        setStatusMessage(`Rule '${rule.description || rule.id}' logging -> ${rule.log ? 'ON' : 'OFF'}. Press [a] to apply.`);
+        commitInlineStateEdit(next, `Rule '${rule.description || rule.id}' logging -> ${rule.log ? 'ON' : 'OFF'}. Press [a] to apply.`);
         return;
       }
       if ((input === '+' || input === 'K') && idx > 0) {
@@ -1418,10 +1441,7 @@ export function AxonwallTuiApp({
         const tmp = next.rules[idx - 1]!;
         next.rules[idx - 1] = next.rules[idx]!;
         next.rules[idx] = tmp;
-        setState(next);
-        saveStateToDisk(next);
-        setCursorIdx(idx - 1);
-        setStatusMessage(`Moved firewall rule up to priority #${idx}. Press [a] to apply.`);
+        commitInlineStateEdit(next, `Moved firewall rule up to priority #${idx}. Press [a] to apply.`, () => setCursorIdx(idx - 1));
         return;
       }
       if ((input === '-' || input === 'J') && idx < state.rules.length - 1) {
@@ -1429,10 +1449,7 @@ export function AxonwallTuiApp({
         const tmp = next.rules[idx + 1]!;
         next.rules[idx + 1] = next.rules[idx]!;
         next.rules[idx] = tmp;
-        setState(next);
-        saveStateToDisk(next);
-        setCursorIdx(idx + 1);
-        setStatusMessage(`Moved firewall rule down to priority #${idx + 2}. Press [a] to apply.`);
+        commitInlineStateEdit(next, `Moved firewall rule down to priority #${idx + 2}. Press [a] to apply.`, () => setCursorIdx(idx + 1));
         return;
       }
     }
@@ -1534,12 +1551,14 @@ export function AxonwallTuiApp({
         const vm = liveVms[cursorIdx % liveVms.length]!;
         if (input === 's' || input === 'x' || input === 'b') {
           const action = input === 's' ? 'start' : input === 'x' ? 'stop' : 'reset';
-          // B-M5: the compute-tab stop posted straight to the daemon
-          // with no anti-lockout guard (the MCP tool is the only
-          // caller that had one). Refuse a guarded stop here — the
-          // daemon has no backstop either — before anything is posted.
-          if (action === 'stop') {
-            const safetyCheck = validateVirtWorkloadSafety(vm.name, 'stop', state.hostedEdge?.enabled, vm.vmid);
+          // B-M5: guard both stop and reset (reboot) on Hosted Edge VMs before posting.
+          if (action === 'stop' || action === 'reset') {
+            const safetyCheck = validateVirtWorkloadSafety(
+              vm.name,
+              action === 'reset' ? 'reboot' : 'stop',
+              state.hostedEdge?.enabled,
+              vm.vmid
+            );
             if (!safetyCheck.valid) {
               setStatusMessage(`✖ ${safetyCheck.reason || 'Virtualization action blocked by anti-lockout guard'}`);
               return;
@@ -1760,6 +1779,10 @@ export function AxonwallTuiApp({
           return;
         }
         if (input === 'r' && allBtrfsSnapshots.length > 0) {
+          if (readOnly) {
+            setStatusMessage('Read-only operator session: Btrfs snapshot rollback is disabled.');
+            return;
+          }
           const targetSnap = allBtrfsSnapshots[cursorIdx % allBtrfsSnapshots.length]!;
           setStatusMessage(`Promoting Snapper snapshot #${targetSnap.id} to @...`);
           callDaemon(
@@ -1897,9 +1920,8 @@ export function AxonwallTuiApp({
           const next = structuredClone(state);
           const target = next.interfaces[cursorIdx % next.interfaces.length]!;
           target.enabled = !target.enabled;
-          setState(next);
-          saveStateToDisk(next);
-          setStatusMessage(
+          commitInlineStateEdit(
+            next,
             `Toggled interface '${target.name}' (${target.device}) -> ${target.enabled ? 'ENABLED' : 'DISABLED'}. Press [a] to apply.`
           );
         }
@@ -1908,27 +1930,24 @@ export function AxonwallTuiApp({
           const next = structuredClone(state);
           const rule = next.rules[cursorIdx % next.rules.length]!;
           rule.enabled = !rule.enabled;
-          setState(next);
-          saveStateToDisk(next);
-          setStatusMessage(
+          commitInlineStateEdit(
+            next,
             `Toggled firewall rule '${rule.description || rule.id}' -> ${rule.enabled ? 'ENABLED' : 'DISABLED'}. Press [a] to apply.`
           );
         } else if (fwSubView === 'nat' && (state.nat?.length || 0) > 0) {
           const next = structuredClone(state);
           const nr = next.nat![cursorIdx % next.nat!.length]!;
           nr.enabled = !nr.enabled;
-          setState(next);
-          saveStateToDisk(next);
-          setStatusMessage(
+          commitInlineStateEdit(
+            next,
             `Toggled NAT rule '${nr.description || nr.id}' -> ${nr.enabled ? 'ENABLED' : 'DISABLED'}. Press [a] to apply.`
           );
         } else if (fwSubView === 'aliases' && (state.aliases?.length || 0) > 0) {
           const next = structuredClone(state);
           const al = next.aliases![cursorIdx % next.aliases!.length]!;
           al.enabled = !al.enabled;
-          setState(next);
-          saveStateToDisk(next);
-          setStatusMessage(
+          commitInlineStateEdit(
+            next,
             `Toggled alias '${al.name}' -> ${al.enabled ? 'ENABLED' : 'DISABLED'}. Press [a] to apply.`
           );
         } else if (fwSubView === 'shaper') {
@@ -1938,9 +1957,8 @@ export function AxonwallTuiApp({
             interfaces: next.trafficShaper?.interfaces || [],
             enabled: nextEnabled,
           };
-          setState(next);
-          saveStateToDisk(next);
-          setStatusMessage(
+          commitInlineStateEdit(
+            next,
             `Toggled QoS Traffic Shaper -> ${nextEnabled ? 'ENABLED' : 'DISABLED'}. Press [a] to apply.`
           );
         }
@@ -1949,33 +1967,31 @@ export function AxonwallTuiApp({
           const next = structuredClone(state);
           const rt = next.routes![cursorIdx % next.routes!.length]!;
           rt.enabled = rt.enabled === false ? true : false;
-          setState(next);
-          saveStateToDisk(next);
-          setStatusMessage(
+          commitInlineStateEdit(
+            next,
             `Toggled static route '${rt.network} via ${rt.gateway}' -> ${rt.enabled ? 'ENABLED' : 'DISABLED'}. Press [a] to apply.`
           );
         } else if (rtSubView === 'gateways' && (state.gateways?.length || 0) > 0) {
           const next = structuredClone(state);
           const gw = next.gateways![cursorIdx % next.gateways!.length]!;
           gw.enabled = !gw.enabled;
-          setState(next);
-          saveStateToDisk(next);
-          setStatusMessage(
+          commitInlineStateEdit(
+            next,
             `Toggled upstream gateway '${gw.name}' (${gw.gatewayIp}) -> ${gw.enabled ? 'ENABLED' : 'DISABLED'}. Press [a] to apply.`
           );
         } else if (rtSubView === 'frr') {
           const next = structuredClone(state);
           const frrObj = (next.frr || { bgp: { enabled: false, asNumber: 65001, neighbors: [] }, ospf: { enabled: false, areas: [] } }) as any;
+          let frrMsg = '';
           if (cursorIdx % 2 === 0) {
             frrObj.bgp = { ...(frrObj.bgp || { asNumber: 65001, neighbors: [] }), enabled: !frrObj.bgp?.enabled };
-            setStatusMessage(`Toggled FRR BGP -> ${frrObj.bgp.enabled ? 'ENABLED' : 'DISABLED'}. Press [a] to apply.`);
+            frrMsg = `Toggled FRR BGP -> ${frrObj.bgp.enabled ? 'ENABLED' : 'DISABLED'}. Press [a] to apply.`;
           } else {
             frrObj.ospf = { ...(frrObj.ospf || { areas: [] }), enabled: !frrObj.ospf?.enabled };
-            setStatusMessage(`Toggled FRR OSPF -> ${frrObj.ospf.enabled ? 'ENABLED' : 'DISABLED'}. Press [a] to apply.`);
+            frrMsg = `Toggled FRR OSPF -> ${frrObj.ospf.enabled ? 'ENABLED' : 'DISABLED'}. Press [a] to apply.`;
           }
           next.frr = frrObj;
-          setState(next);
-          saveStateToDisk(next);
+          commitInlineStateEdit(next, frrMsg);
         }
       } else if (activeTab === 'services') {
         const row = serviceRows[cursorIdx % serviceRows.length]!;
@@ -2096,15 +2112,12 @@ export function AxonwallTuiApp({
           next.ups = { ...(next.ups || ({} as any)), enabled: !next.ups?.enabled };
         else if (row.id === 'ha')
           next.ha = { ...(next.ha || ({} as any)), enabled: !next.ha?.enabled };
-        setState(next);
-        saveStateToDisk(next);
-        setStatusMessage(`Toggled ${row.name}. Press [a] to compile & apply.`);
+        commitInlineStateEdit(next, `Toggled ${row.name}. Press [a] to compile & apply.`);
       } else if (activeTab === 'storage') {
         const next = structuredClone(state);
         const nowEnabled = toggleCoreRoleInState(next, 'core-nas');
-        setState(next);
-        saveStateToDisk(next);
-        setStatusMessage(
+        commitInlineStateEdit(
+          next,
           `Toggled Enterprise Grade ZFS NAS (core-nas) -> ${nowEnabled ? 'ENABLED' : 'DISABLED'}. Press [a] to apply.`
         );
       } else if (activeTab === 'compute') {
@@ -2114,9 +2127,7 @@ export function AxonwallTuiApp({
           if (CORE_ROLE_PLUGIN_IDS.has(roleId)) {
             const next = structuredClone(state);
             const nowEnabled = toggleCoreRoleInState(next, roleId);
-            setState(next);
-            saveStateToDisk(next);
-            setStatusMessage(`Toggled ${roleId} -> ${nowEnabled ? 'ENABLED' : 'DISABLED'}. Press [a] to apply.`);
+            commitInlineStateEdit(next, `Toggled ${roleId} -> ${nowEnabled ? 'ENABLED' : 'DISABLED'}. Press [a] to apply.`);
           } else {
             toggleExtensionPluginInState(roleId);
           }
@@ -2126,9 +2137,8 @@ export function AxonwallTuiApp({
         if (CORE_ROLE_PLUGIN_IDS.has(plg.id)) {
           const next = structuredClone(state);
           const nowEnabled = toggleCoreRoleInState(next, plg.id);
-          setState(next);
-          saveStateToDisk(next);
-          setStatusMessage(
+          commitInlineStateEdit(
+            next,
             `Toggled Core Role '${plg.id}' -> ${nowEnabled ? 'ENABLED' : 'DISABLED'}. Press [a] to apply.`
           );
         } else {

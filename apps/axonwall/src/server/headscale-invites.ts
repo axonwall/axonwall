@@ -6,6 +6,7 @@ import { getStateDir } from './dev-paths';
 
 export type HeadscaleInviteMode = 'onboard' | 'reset';
 export type HeadscaleInviteStatus = 'pending' | 'redeemed' | 'revoked';
+export type InternalInviteStatus = HeadscaleInviteStatus | 'redeeming';
 export type HeadscaleInviteEffectiveStatus = HeadscaleInviteStatus | 'expired';
 
 interface StoredInviteRecord {
@@ -18,7 +19,9 @@ interface StoredInviteRecord {
   expiresAt: string;
   createdBy: string;
   createStarterKey: boolean;
-  status: HeadscaleInviteStatus;
+  status: InternalInviteStatus;
+  redeemingAt?: string;
+  redeemingClaimId?: string;
   redeemedAt?: string;
   revokedAt?: string;
   pinSalt?: string;
@@ -62,7 +65,14 @@ const RESERVED_USERNAMES = new Set([
 ]);
 
 const MAX_STORED_INVITES = 500;
-const redeemingHashes = new Set<string>();
+const REDEEMING_STALE_MS = 2 * 60 * 1000;
+const LOCK_STALE_MS = 30_000;
+const LOCK_TIMEOUT_MS = 5_000;
+const SLEEP_BUF = new Int32Array(new SharedArrayBuffer(4));
+
+function sleepSyncMs(ms: number): void {
+  Atomics.wait(SLEEP_BUF, 0, 0, ms);
+}
 
 const INVITE_RATE_WINDOW_MS = 5 * 60 * 1000;
 const INVITE_RATE_MAX_ATTEMPTS = 20;
@@ -79,10 +89,14 @@ export function checkInviteRateLimit(clientKey: string): boolean {
   }
   const existing = inviteRateLimits.get(key);
   if (!existing || existing.resetAt <= now) {
-    while (inviteRateLimits.size >= INVITE_RATE_MAX_KEYS) {
-      const oldest = inviteRateLimits.keys().next().value;
-      if (oldest === undefined) break;
-      inviteRateLimits.delete(oldest);
+    if (inviteRateLimits.size >= INVITE_RATE_MAX_KEYS) {
+      // Never evict actively rate-limited entries under map pressure.
+      for (const [k, rec] of inviteRateLimits) {
+        if (inviteRateLimits.size < INVITE_RATE_MAX_KEYS) break;
+        if (rec.count < INVITE_RATE_MAX_ATTEMPTS) {
+          inviteRateLimits.delete(k);
+        }
+      }
     }
     inviteRateLimits.set(key, { count: 1, resetAt: now + INVITE_RATE_WINDOW_MS });
     return true;
@@ -133,7 +147,9 @@ function constantTimeHashMatch(a: string, b: string): boolean {
 }
 
 function computeEffectiveStatus(record: StoredInviteRecord, now = Date.now()): HeadscaleInviteEffectiveStatus {
-  if (record.status !== 'pending') return record.status;
+  if (record.status !== 'pending' && record.status !== 'redeeming') {
+    return record.status;
+  }
   const expMs = Date.parse(record.expiresAt);
   if (!Number.isFinite(expMs) || now >= expMs) {
     return 'expired';
@@ -147,24 +163,82 @@ function toPublicInvite(record: StoredInviteRecord, now = Date.now()): PublicInv
     pinSalt: _omitPinSalt,
     pinHash: _omitPinHash,
     failedPinAttempts: _omitPinAttempts,
+    redeemingAt: _omitRedeemingAt,
+    redeemingClaimId: _omitClaimId,
     ...rest
   } = record;
+  const publicStatus: HeadscaleInviteStatus =
+    rest.status === 'redeeming' ? 'pending' : rest.status;
   return {
     ...rest,
+    status: publicStatus,
     requiresPin: Boolean(record.pinHash && record.pinSalt),
     effectiveStatus: computeEffectiveStatus(record, now),
   };
 }
 
+function withInviteStoreLock<T>(fn: () => T): T {
+  const filePath = getInvitesFilePath();
+  const lockPath = `${filePath}.lock`;
+  const dir = path.dirname(filePath);
+  fs.mkdirSync(dir, { recursive: true, mode: 0o750 });
+
+  const deadline = Date.now() + LOCK_TIMEOUT_MS;
+  let fd: number | null = null;
+  while (fd === null) {
+    try {
+      fd = fs.openSync(lockPath, 'wx', 0o600);
+    } catch (err: any) {
+      if (err?.code !== 'EEXIST') throw err;
+      try {
+        const st = fs.statSync(lockPath);
+        if (Date.now() - st.mtimeMs > LOCK_STALE_MS) {
+          fs.unlinkSync(lockPath);
+          continue;
+        }
+      } catch {}
+      if (Date.now() >= deadline) {
+        throw new Error('Timed out acquiring invite store lock');
+      }
+      sleepSyncMs(10);
+    }
+  }
+
+  try {
+    fs.writeSync(fd, `${process.pid}\n`);
+    return fn();
+  } finally {
+    try {
+      fs.closeSync(fd);
+    } catch {}
+    try {
+      fs.unlinkSync(lockPath);
+    } catch {}
+  }
+}
+
 function readInviteStore(): StoredInviteRecord[] {
   const filePath = getInvitesFilePath();
+  let raw: string;
   try {
-    if (!fs.existsSync(filePath)) return [];
-    const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8'));
-    return Array.isArray(parsed) ? (parsed as StoredInviteRecord[]) : [];
-  } catch {
-    return [];
+    raw = fs.readFileSync(filePath, 'utf8');
+  } catch (err: any) {
+    if (err?.code === 'ENOENT') {
+      return [];
+    }
+    throw new Error(`Failed to read invite store: ${err?.message || 'unknown error'}`);
   }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error('Invite store contains corrupt JSON; refusing to overwrite existing invites');
+  }
+  if (!Array.isArray(parsed)) {
+    throw new Error('Invite store has invalid non-array format; refusing to overwrite existing invites');
+  }
+  return parsed as StoredInviteRecord[];
 }
 
 function writeInviteStore(records: StoredInviteRecord[]): void {
@@ -183,11 +257,30 @@ function writeInviteStore(records: StoredInviteRecord[]): void {
   }
 
   const tmpPath = path.join(dir, `.headscale-invites-${process.pid}-${crypto.randomBytes(6).toString('hex')}.tmp`);
-  fs.writeFileSync(tmpPath, JSON.stringify(pruned, null, 2) + '\n', { mode: 0o600 });
+  let fd: number | null = null;
   try {
-    fs.chmodSync(tmpPath, 0o600);
-  } catch {}
-  fs.renameSync(tmpPath, filePath);
+    fd = fs.openSync(tmpPath, 'wx', 0o600);
+    fs.writeFileSync(fd, JSON.stringify(pruned, null, 2) + '\n', 'utf8');
+    try {
+      fs.fsyncSync(fd);
+    } catch {}
+    fs.closeSync(fd);
+    fd = null;
+    try {
+      fs.chmodSync(tmpPath, 0o600);
+    } catch {}
+    fs.renameSync(tmpPath, filePath);
+  } catch (err) {
+    if (fd !== null) {
+      try {
+        fs.closeSync(fd);
+      } catch {}
+    }
+    try {
+      if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath);
+    } catch {}
+    throw err;
+  }
 }
 
 export async function createHeadscaleInvite(params: {
@@ -213,15 +306,6 @@ export async function createHeadscaleInvite(params: {
   const nowIso = now.toISOString();
   const expiresAt = new Date(now.getTime() + expiryHours * 3600 * 1000).toISOString();
 
-  const records = readInviteStore();
-  // Supersede any existing pending invite for the same username
-  for (const r of records) {
-    if (r.username === username && r.status === 'pending') {
-      r.status = 'revoked';
-      r.revokedAt = nowIso;
-    }
-  }
-
   let invitePin: string | undefined;
   let pinSalt: string | undefined;
   let pinHash: string | undefined;
@@ -246,8 +330,20 @@ export async function createHeadscaleInvite(params: {
     ...(pinSalt && pinHash ? { pinSalt, pinHash, failedPinAttempts: 0 } : {}),
   };
 
-  records.push(record);
-  writeInviteStore(records);
+  withInviteStoreLock(() => {
+    const records = readInviteStore();
+    // Supersede any existing pending/in-flight invite for the same username
+    for (const r of records) {
+      if (r.username === username && (r.status === 'pending' || r.status === 'redeeming')) {
+        r.status = 'revoked';
+        r.revokedAt = nowIso;
+        delete r.redeemingAt;
+        delete r.redeemingClaimId;
+      }
+    }
+    records.push(record);
+    writeInviteStore(records);
+  });
 
   return {
     invite: toPublicInvite(record, now.getTime()),
@@ -258,25 +354,29 @@ export async function createHeadscaleInvite(params: {
 
 export function listHeadscaleInvites(): PublicInviteRecord[] {
   const now = Date.now();
-  return readInviteStore()
+  return withInviteStoreLock(() => readInviteStore())
     .map((r) => toPublicInvite(r, now))
     .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt));
 }
 
 export function revokeHeadscaleInvite(inviteId: string): PublicInviteRecord {
-  const records = readInviteStore();
-  const rec = records.find((r) => r.id === inviteId);
-  if (!rec) {
-    const err = new Error('Invite not found');
-    (err as any).code = 'NOT_FOUND';
-    throw err;
-  }
-  if (rec.status === 'pending') {
-    rec.status = 'revoked';
-    rec.revokedAt = new Date().toISOString();
-    writeInviteStore(records);
-  }
-  return toPublicInvite(rec);
+  return withInviteStoreLock(() => {
+    const records = readInviteStore();
+    const rec = records.find((r) => r.id === inviteId);
+    if (!rec) {
+      const err = new Error('Invite not found');
+      (err as any).code = 'NOT_FOUND';
+      throw err;
+    }
+    if (rec.status === 'pending' || rec.status === 'redeeming') {
+      rec.status = 'revoked';
+      rec.revokedAt = new Date().toISOString();
+      delete rec.redeemingAt;
+      delete rec.redeemingClaimId;
+      writeInviteStore(records);
+    }
+    return toPublicInvite(rec);
+  });
 }
 
 export function previewHeadscaleInvite(rawToken: string): {
@@ -288,7 +388,7 @@ export function previewHeadscaleInvite(rawToken: string): {
     return { status: 'invalid' };
   }
   const targetHash = hashInviteToken(token);
-  const records = readInviteStore();
+  const records = withInviteStoreLock(() => readInviteStore());
   const rec = records.find((r) => constantTimeHashMatch(r.tokenHash, targetHash));
   if (!rec) {
     return { status: 'invalid' };
@@ -316,14 +416,10 @@ export async function consumeHeadscaleInvite<T>(
   }
 
   const targetHash = hashInviteToken(token);
-  if (redeemingHashes.has(targetHash)) {
-    const err = new Error('Invite activation is already in progress');
-    (err as any).code = 'CONFLICT';
-    throw err;
-  }
+  const claimId = crypto.randomUUID();
 
-  redeemingHashes.add(targetHash);
-  try {
+  // Phase 1: Under exclusive file lock, validate status/PIN and transition pending -> redeeming on disk.
+  const { recordId, publicBefore } = withInviteStoreLock(() => {
     const records = readInviteStore();
     const rec = records.find((r) => constantTimeHashMatch(r.tokenHash, targetHash));
     if (!rec) {
@@ -332,7 +428,8 @@ export async function consumeHeadscaleInvite<T>(
       throw err;
     }
 
-    const eff = computeEffectiveStatus(rec);
+    const nowMs = Date.now();
+    const eff = computeEffectiveStatus(rec, nowMs);
     if (eff === 'redeemed') {
       const err = new Error('This invite link has already been used');
       (err as any).code = 'ALREADY_USED';
@@ -347,6 +444,15 @@ export async function consumeHeadscaleInvite<T>(
       const err = new Error('This invite link has expired');
       (err as any).code = 'EXPIRED';
       throw err;
+    }
+
+    if (rec.status === 'redeeming') {
+      const startedMs = rec.redeemingAt ? Date.parse(rec.redeemingAt) : 0;
+      if (!Number.isNaN(startedMs) && nowMs - startedMs < REDEEMING_STALE_MS) {
+        const err = new Error('Invite activation is already in progress');
+        (err as any).code = 'CONFLICT';
+        throw err;
+      }
     }
 
     if (rec.pinHash && rec.pinSalt) {
@@ -377,33 +483,61 @@ export async function consumeHeadscaleInvite<T>(
       }
     }
 
-    const publicBefore = toPublicInvite(rec);
-    const result = await provisionFn(publicBefore);
+    rec.status = 'redeeming';
+    rec.redeemingAt = new Date(nowMs).toISOString();
+    rec.redeemingClaimId = claimId;
+    writeInviteStore(records);
 
-    // Re-read before marking redeemed so concurrent revocations or store updates are preserved
+    return { recordId: rec.id, publicBefore: toPublicInvite(rec, nowMs) };
+  });
+
+  // Phase 2: Execute provisioning outside lock; on failure revert redeeming -> pending, on success commit redeemed.
+  let result: T;
+  try {
+    result = await provisionFn(publicBefore);
+  } catch (err) {
+    try {
+      withInviteStoreLock(() => {
+        const latestRecords = readInviteStore();
+        const target = latestRecords.find((r) => r.id === recordId);
+        if (target && target.status === 'redeeming' && target.redeemingClaimId === claimId) {
+          target.status = 'pending';
+          delete target.redeemingAt;
+          delete target.redeemingClaimId;
+          writeInviteStore(latestRecords);
+        }
+      });
+    } catch {
+      // Do not mask original provisioning failure if cleanup fails.
+    }
+    throw err;
+  }
+
+  const redeemedPublic = withInviteStoreLock(() => {
     const latestRecords = readInviteStore();
-    const target = latestRecords.find((r) => r.id === rec.id);
+    const target = latestRecords.find((r) => r.id === recordId);
     if (!target) {
       const err = new Error('Invite record disappeared during redemption');
       (err as any).code = 'INVALID_TOKEN';
       throw err;
     }
-    if (target.status !== 'pending') {
+    if (target.status !== 'redeeming' || target.redeemingClaimId !== claimId) {
       const err = new Error('Invite is no longer pending');
       (err as any).code = 'CONFLICT';
       throw err;
     }
     target.status = 'redeemed';
     target.redeemedAt = new Date().toISOString();
+    delete target.redeemingAt;
+    delete target.redeemingClaimId;
     writeInviteStore(latestRecords);
+    return toPublicInvite(target);
+  });
 
-    return {
-      invite: toPublicInvite(target),
-      result,
-    };
-  } finally {
-    redeemingHashes.delete(targetHash);
-  }
+  return {
+    invite: redeemedPublic,
+    result,
+  };
 }
 
 export function getActivePendingInviteWindow(now = Date.now()): {

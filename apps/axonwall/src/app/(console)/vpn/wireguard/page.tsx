@@ -8,6 +8,7 @@ import { isPluginEnabled } from '@axonwall/lib/plugins';
 import { getCurrentDesiredState } from '@/server/agent';
 import { getWireGuardServerPublicKey } from '@/server/wg';
 import { useDesiredStateApply } from '@/lib/use-desired-state-apply';
+import { mergeWireGuardPeers } from '@/lib/state-preservation';
 import type { DesiredState } from '@axonwall/lib/schemas';
 
 export default function WireGuardPage() {
@@ -29,6 +30,7 @@ export default function WireGuardPage() {
       id?: string;
       name: string;
       publicKey: string;
+      presharedKey?: string;
       allowedIps: string[];
       endpoint?: string;
       persistentKeepalive: number;
@@ -76,6 +78,7 @@ export default function WireGuardPage() {
     setStatusMsg(null);
     try {
       const current = await getCurrentDesiredState();
+      const mergedPeers = mergeWireGuardPeers(nextWg.peers, current.wireguard?.peers);
       const nextState: DesiredState = {
         ...current,
         wireguard: {
@@ -89,17 +92,10 @@ export default function WireGuardPage() {
           // schema validation loudly (save refused with an error)
           // instead of being silently dropped.
           privateKey: nextWg.privateKey || undefined,
-          peers: nextWg.peers.map((p) => ({
-            id: p.id,
-            name: p.name,
-            publicKey: p.publicKey,
-            allowedIps: p.allowedIps,
-            endpoint: p.endpoint || undefined,
-            persistentKeepalive: p.persistentKeepalive ?? 25,
-            enabled: p.enabled ?? true,
-          })),
+          peers: mergedPeers,
         },
       };
+      setServerConfig({ ...nextWg, peers: mergedPeers });
       setFullState(nextState);
       const res = await applyState(nextState);
       setStatusMsg(res.message || 'Saved WireGuard configuration to /etc/axonwall/vpn.yaml');

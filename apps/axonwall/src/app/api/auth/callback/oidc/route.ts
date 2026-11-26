@@ -91,6 +91,9 @@ export async function GET(request: NextRequest) {
     const claimKey = cfg.groupClaim || 'groups';
     const rawGroups = (claims as Record<string, unknown>)[claimKey] ?? claims.groups;
     const role = roleFromGroups(rawGroups, cfg.roleMappings);
+    if (!role) {
+      return fail(publicOrigin, 'Your SSO account is not authorized for any Axonwall role');
+    }
     const roleObj = DEFAULT_ROLES[role];
 
     const session: UserSession = {

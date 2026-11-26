@@ -30,7 +30,7 @@ import {
   type McpGuardContext,
   type McpScope,
 } from '@axonwall/lib/mcp';
-import { DesiredStateSchema, type BpfTokenDelegationSpec, type DesiredState } from '@axonwall/lib/schemas';
+import { DesiredStateSchema, inferInterfaceRole, type BpfTokenDelegationSpec, type DesiredState } from '@axonwall/lib/schemas';
 import { importFirewallConfig, mergeFirewallConfigs } from '@axonwall/lib/import';
 import { compileNftables } from '@axonwall/lib/compile/nft';
 import { compileLxcContainer } from '@axonwall/lib/compile/virt';
@@ -386,6 +386,237 @@ metadata:
 spec:
 ${indented}
 `;
+}
+
+function readTailLines(filePath: string, maxBytes = 1024 * 1024): string[] {
+  if (!fs.existsSync(filePath)) return [];
+  const fd = fs.openSync(filePath, 'r');
+  try {
+    const stat = fs.fstatSync(fd);
+    if (stat.size <= 0) return [];
+    const readSize = Math.min(stat.size, maxBytes);
+    const startOffset = stat.size - readSize;
+    const buf = Buffer.allocUnsafe(readSize);
+    const bytesRead = fs.readSync(fd, buf, 0, readSize, startOffset);
+    const lines = buf.subarray(0, bytesRead).toString('utf8').split('\n');
+    // If we started reading mid-file, drop the likely partial first line.
+    if (startOffset > 0 && lines.length > 0) {
+      lines.shift();
+    }
+    return lines;
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+function suricataEvePath(): string {
+  return process.env.AXONWALL_SURICATA_EVE_PATH?.trim() || '/var/log/suricata/eve.json';
+}
+
+function validateFirewallRuleAgainstGuard(
+  rule: DesiredState['rules'][number],
+  state: DesiredState,
+  ctx: McpGuardContext
+): string | null {
+  const isBlockOrReject = rule.action === 'block' || rule.action === 'reject';
+
+  // Inverted endpoints (`ip saddr != X` / `ip daddr != X`) match virtually every host
+  // except X, so on block/reject rules they exclude LAN, gateway, HA, and caller IPs.
+  if (isBlockOrReject && (rule.invertSource || rule.invertDestination)) {
+    return `Inverted endpoints (invertSource/invertDestination) on ${rule.action} rule act as global exclusions and are prohibited by MCP anti-lockout guard`;
+  }
+
+  const checkEndpoint = (endpointVal: string | undefined, label: 'source' | 'destination', disallowWildcard: boolean): string | null => {
+    if (!endpointVal || endpointVal === 'any') {
+      if (disallowWildcard) {
+        return `Wildcard '${endpointVal || 'any'}' ${label} on ${rule.action} rule exceeds blast-radius policy and is prohibited via MCP`;
+      }
+      return null;
+    }
+    if (endpointVal === 'self' || endpointVal === 'wan_ip') {
+      if (isBlockOrReject) {
+        return `Targeting appliance endpoint '${endpointVal}' in ${label} on ${rule.action} rule is prohibited by anti-lockout guard`;
+      }
+      return null;
+    }
+    if (endpointVal === 'lan_net') {
+      if (isBlockOrReject) {
+        return `Targeting entire '${endpointVal}' in ${label} on ${rule.action} rule is prohibited by anti-lockout guard`;
+      }
+      return null;
+    }
+    if (endpointVal.startsWith('$')) {
+      const aliasName = endpointVal.slice(1);
+      const aliasObj = (state.aliases ?? []).find((a) => a.name === aliasName);
+      if (!aliasObj || !aliasObj.entries || aliasObj.entries.length === 0) {
+        return `Referenced alias '${endpointVal}' in ${label} does not exist or has no entries`;
+      }
+      for (const entry of aliasObj.entries) {
+        if (isBlockOrReject) {
+          const entryCheck = validateMcpTarget(entry, ctx);
+          if (!entryCheck.valid) {
+            return `Alias '${endpointVal}' entry '${entry}' in ${label} rejected by guard: ${entryCheck.reason}`;
+          }
+        }
+      }
+      return null;
+    }
+    if (isBlockOrReject) {
+      const directCheck = validateMcpTarget(endpointVal, ctx);
+      if (!directCheck.valid) {
+        return `Rule ${label} rejected by guard: ${directCheck.reason}`;
+      }
+    }
+    return null;
+  };
+
+  if (!isBlockOrReject) {
+    const srcErr = checkEndpoint(rule.source, 'source', false);
+    if (srcErr) return srcErr;
+    const dstErr = checkEndpoint(rule.destination, 'destination', false);
+    if (dstErr) return dstErr;
+
+    const ruleIface = (rule.interface || 'any').trim().toLowerCase();
+    const matchedIface = (state.interfaces ?? []).find((i) => i.name.toLowerCase() === ruleIface);
+    const isWanIface = matchedIface ? inferInterfaceRole(matchedIface) === 'wan' : /^wan\d*$/i.test(ruleIface);
+    const isWanOrFloatingOrAny = ruleIface === 'wan' || ruleIface === 'any' || ruleIface === 'floating' || isWanIface;
+
+    const rawSrc = (rule.source || '').trim().toLowerCase();
+    const rawDst = (rule.destination || '').trim().toLowerCase();
+    const rawPassDport = (rule.destinationPort || '').trim().toLowerCase().replace(/:/g, '-');
+    const isWildcardAddr = (v: string) => v === '' || v === 'any' || v === '0.0.0.0/0' || v === '::/0';
+    const isWildcardPort = (v: string) =>
+      v === '' || v === 'any' || v === '0-65535' || v === '1-65535' || v === '*';
+
+    // Inverted endpoints on a pass rule effectively match every address except one exclusion.
+    const effectiveWildcardSrc = Boolean(rule.invertSource) || isWildcardAddr(rawSrc);
+    const effectiveWildcardDst =
+      Boolean(rule.invertDestination) || isWildcardAddr(rawDst) || rawDst === 'self' || rawDst === 'wan_ip';
+
+    if (isWanOrFloatingOrAny && effectiveWildcardSrc && effectiveWildcardDst && isWildcardPort(rawPassDport)) {
+      return `Unscoped wildcard pass rule on '${ruleIface}' is prohibited via MCP`;
+    }
+    return null;
+  }
+
+  const srcErr = checkEndpoint(rule.source, 'source', true);
+  if (srcErr) return srcErr;
+  if (rule.destination && rule.destination !== 'any') {
+    const dstErr = checkEndpoint(rule.destination, 'destination', false);
+    if (dstErr) return dstErr;
+  }
+
+  const protectedTcpPorts = ctx.antiLockoutPorts ?? [2966, 22, 9876];
+  const protectedUdpPorts = [53, 67, 68, 51820];
+  const rawDport = (rule.destinationPort || '').trim();
+  const proto = (rule.protocol || 'any').toLowerCase();
+  const affectsTcp = proto === 'any' || proto === 'tcp' || proto === 'tcp_udp';
+  const affectsUdp = proto === 'any' || proto === 'udp' || proto === 'tcp_udp';
+  const protectedPorts = Array.from(
+    new Set([
+      ...(affectsTcp ? protectedTcpPorts : []),
+      ...(affectsUdp ? protectedUdpPorts : []),
+    ])
+  );
+
+  if ((affectsTcp || affectsUdp) && (!rawDport || rawDport === 'any')) {
+    return `Wildcard/empty destinationPort on ${rule.action} rule covers protected ports (${protectedPorts.join(', ')})`;
+  }
+  const validatePortToken = (part: string): string | null => {
+    if (/^\d+$/.test(part)) {
+      const portNum = Number(part);
+      if (portNum < 1 || portNum > 65535) {
+        return `Invalid destinationPort '${part}'`;
+      }
+      if (protectedPorts.includes(portNum)) {
+        return `Blocking protected port ${portNum} is prohibited`;
+      }
+      return null;
+    }
+    const rangeMatch = part.match(/^(\d+)\s*[-:]\s*(\d+)$/);
+    if (rangeMatch) {
+      const start = Math.min(Number(rangeMatch[1]), Number(rangeMatch[2]));
+      const end = Math.max(Number(rangeMatch[1]), Number(rangeMatch[2]));
+      if (start < 1 || end > 65535) {
+        return `Invalid port range '${part}'`;
+      }
+      const hit = protectedPorts.find((p) => p >= start && p <= end);
+      if (hit !== undefined) {
+        return `Port range ${part} overlaps protected port ${hit}`;
+      }
+      return null;
+    }
+    return `Invalid or unresolvable destinationPort token '${part}'`;
+  };
+  if (rawDport && rawDport !== 'any') {
+    if (rawDport.startsWith('$')) {
+      const aliasName = rawDport.slice(1);
+      const aliasObj = (state.aliases ?? []).find((a) => a.name === aliasName && a.type === 'port');
+      if (!aliasObj || !aliasObj.entries || aliasObj.entries.length === 0) {
+        return `Referenced port alias '${rawDport}' in destinationPort does not exist or has no entries`;
+      }
+      for (const entry of aliasObj.entries) {
+        const portErr = validatePortToken(entry.trim());
+        if (portErr) return portErr;
+      }
+    } else {
+      for (const part of rawDport.split(',').map((s) => s.trim()).filter(Boolean)) {
+        const portErr = validatePortToken(part);
+        if (portErr) return portErr;
+      }
+    }
+  }
+  return null;
+}
+
+function escapeLogsQlString(raw: string): string {
+  return raw.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+}
+
+function splitLogsQlFirstPipe(query: string): { filterPart: string; pipeTail: string } {
+  let inSingle = false;
+  let inDouble = false;
+  let escaped = false;
+  for (let i = 0; i < query.length; i++) {
+    const ch = query[i]!;
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (ch === '\\') {
+      escaped = true;
+      continue;
+    }
+    if (ch === "'" && !inDouble) {
+      inSingle = !inSingle;
+      continue;
+    }
+    if (ch === '"' && !inSingle) {
+      inDouble = !inDouble;
+      continue;
+    }
+    if (ch === '|' && !inSingle && !inDouble) {
+      return {
+        filterPart: query.slice(0, i).trim(),
+        pipeTail: query.slice(i).trim(),
+      };
+    }
+  }
+  return { filterPart: query.trim(), pipeTail: '' };
+}
+
+function parseWindowToMinutes(raw: string): number {
+  const m = raw.trim().match(/^(\d+)\s*([smhdw]?)$/i);
+  if (!m) return 60;
+  const n = Number(m[1]);
+  if (!Number.isFinite(n) || n <= 0) return 60;
+  const unit = (m[2] || 'm').toLowerCase();
+  let minutes = n;
+  if (unit === 's') minutes = Math.ceil(n / 60);
+  else if (unit === 'h') minutes = n * 60;
+  else if (unit === 'd') minutes = n * 1440;
+  else if (unit === 'w') minutes = n * 10080;
+  return Math.min(525600, Math.max(1, Math.floor(minutes)));
 }
 
 async function buildGuardContext(key: McpApiKey, clientIp: string): Promise<{
@@ -1338,14 +1569,17 @@ export async function handleMcpReadResource(
     case 'axonwall://telemetry/alerts/suricata': {
       const alerts: unknown[] = [];
       try {
-        if (fs.existsSync('/var/log/suricata/eve.json')) {
-          const lines = fs.readFileSync('/var/log/suricata/eve.json', 'utf8').trim().split('\n');
-          for (const line of lines.slice(-50).reverse()) {
-            try {
-              alerts.push(JSON.parse(line));
-            } catch {
-              // ignore
+        const lines = readTailLines(suricataEvePath(), 1024 * 1024);
+        for (let i = lines.length - 1; i >= 0 && alerts.length < 50; i--) {
+          const line = lines[i]?.trim();
+          if (!line) continue;
+          try {
+            const ev = JSON.parse(line);
+            if (ev?.event_type === 'alert') {
+              alerts.push(ev);
             }
+          } catch {
+            // ignore
           }
         }
       } catch {
@@ -1618,7 +1852,7 @@ export async function handleMcpReadResource(
   };
 }
 
-const SENSITIVE_AUDIT_KEY_RE = /^(keymaterial|password|passphrase|token|secret|privatekey|authkey|apikey|mtlskey|radiussecret|ztptoken)$/i;
+const SENSITIVE_AUDIT_KEY_RE = /^(keymaterial|password|passphrase|token|secret|privatekey|authkey|apikey|mtlskey|radiussecret|ztptoken|rawconfig)$/i;
 
 function redactSensitiveArgs(value: unknown, depth = 0): unknown {
   if (depth > 8 || value === null || typeof value !== 'object') {
@@ -1732,23 +1966,22 @@ export async function handleMcpCallTool(
 
       const matchingAlerts: any[] = [];
       try {
-        if (fs.existsSync('/var/log/suricata/eve.json')) {
-          const lines = fs.readFileSync('/var/log/suricata/eve.json', 'utf8').trim().split('\n');
-          for (let i = lines.length - 1; i >= 0 && matchingAlerts.length < limit; i--) {
-            const line = lines[i];
-            if (!line) continue;
-            try {
-              const ev = JSON.parse(line);
-              if (srcFilter && ev.src_ip !== srcFilter) continue;
-              if (dstFilter && ev.dest_ip !== dstFilter) continue;
-              if (sigFilter) {
-                const sig = String(ev.alert?.signature || '').toLowerCase();
-                if (!sig.includes(sigFilter)) continue;
-              }
-              matchingAlerts.push(ev);
-            } catch {
-              // skip
+        const lines = readTailLines(suricataEvePath(), 1024 * 1024);
+        for (let i = lines.length - 1; i >= 0 && matchingAlerts.length < limit; i--) {
+          const line = lines[i]?.trim();
+          if (!line) continue;
+          try {
+            const ev = JSON.parse(line);
+            if (ev?.event_type !== 'alert') continue;
+            if (srcFilter && ev.src_ip !== srcFilter) continue;
+            if (dstFilter && ev.dest_ip !== dstFilter) continue;
+            if (sigFilter) {
+              const sig = String(ev.alert?.signature || '').toLowerCase();
+              if (!sig.includes(sigFilter)) continue;
             }
+            matchingAlerts.push(ev);
+          } catch {
+            // skip
           }
         }
       } catch {
@@ -2257,7 +2490,9 @@ export async function handleMcpCallTool(
                 ? 'mcp:traffic:shape'
                 : targetLease.kind === 'redirect' || targetLease.kind === 'dns_sinkhole'
                   ? 'mcp:traffic:redirect'
-                  : null;
+                  : targetLease.kind === 'xdp_drop'
+                    ? 'mcp:ebpf:manage'
+                    : null;
           if (requiredForKind && !hasMcpScope(env.key, requiredForKind)) {
             return deny(requiredForKind, `MCP key lacks required scope '${requiredForKind}' to revert ${targetLease.kind} lease '${leaseId}'`);
           }
@@ -2418,155 +2653,9 @@ export async function handleMcpCallTool(
       }
 
       const { ctx } = await buildGuardContext(env.key, env.clientIp);
-      const checkEndpoint = (endpointVal: string | undefined, label: 'source' | 'destination', disallowWildcard: boolean): string | null => {
-        if (!endpointVal || endpointVal === 'any') {
-          if (disallowWildcard) {
-            return `Wildcard '${endpointVal || 'any'}' ${label} on ${req.rule.action} rule exceeds blast-radius policy and is prohibited via MCP`;
-          }
-          return null;
-        }
-        if (endpointVal === 'self' || endpointVal === 'wan_ip') {
-          if (req.rule.action === 'block' || req.rule.action === 'reject') {
-            return `Targeting appliance endpoint '${endpointVal}' in ${label} on ${req.rule.action} rule is prohibited by anti-lockout guard`;
-          }
-          return null;
-        }
-        if (endpointVal === 'lan_net') {
-          if (req.rule.action === 'block' || req.rule.action === 'reject') {
-            return `Targeting entire '${endpointVal}' in ${label} on ${req.rule.action} rule is prohibited by anti-lockout guard`;
-          }
-          return null;
-        }
-        if (endpointVal.startsWith('$')) {
-          const aliasName = endpointVal.slice(1);
-          const aliasObj = (state.aliases ?? []).find((a) => a.name === aliasName);
-          if (!aliasObj || !aliasObj.entries || aliasObj.entries.length === 0) {
-            return `Referenced alias '${endpointVal}' in ${label} does not exist or has no entries`;
-          }
-          for (const entry of aliasObj.entries) {
-            if (req.rule.action === 'block' || req.rule.action === 'reject') {
-              const entryCheck = validateMcpTarget(entry, ctx);
-              if (!entryCheck.valid) {
-                return `Alias '${endpointVal}' entry '${entry}' in ${label} rejected by guard: ${entryCheck.reason}`;
-              }
-            }
-          }
-          return null;
-        }
-        if (req.rule.action === 'block' || req.rule.action === 'reject') {
-          const directCheck = validateMcpTarget(endpointVal, ctx);
-          if (!directCheck.valid) {
-            return `Rule ${label} rejected by guard: ${directCheck.reason}`;
-          }
-        }
-        return null;
-      };
-
-      const isBlockOrReject = req.rule.action === 'block' || req.rule.action === 'reject';
-      if (!isBlockOrReject) {
-        const srcErr = checkEndpoint(req.rule.source, 'source', false);
-        if (srcErr) return deny('mcp:firewall:write', srcErr, req.audit);
-        const dstErr = checkEndpoint(req.rule.destination, 'destination', false);
-        if (dstErr) return deny('mcp:firewall:write', dstErr, req.audit);
-        const ruleIface = (req.rule.interface || 'any').toLowerCase();
-        const isWanOrAny = ruleIface === 'wan' || ruleIface === 'any';
-        const rawSrc = (req.rule.source || '').trim().toLowerCase();
-        const rawDst = (req.rule.destination || '').trim().toLowerCase();
-        const rawPassDport = (req.rule.destinationPort || '').trim().toLowerCase().replace(/:/g, '-');
-        const isWildcardAddr = (v: string) => v === '' || v === 'any' || v === '0.0.0.0/0' || v === '::/0';
-        const isWildcardPort = (v: string) =>
-          v === '' || v === 'any' || v === '0-65535' || v === '1-65535' || v === '*';
-        if (
-          isWanOrAny &&
-          isWildcardAddr(rawSrc) &&
-          (isWildcardAddr(rawDst) || rawDst === 'self' || rawDst === 'wan_ip') &&
-          isWildcardPort(rawPassDport)
-        ) {
-          return deny(
-            'mcp:firewall:write',
-            `Unscoped wildcard pass rule on '${ruleIface}' is prohibited via MCP`,
-            req.audit,
-          );
-        }
-      }
-
-      if (isBlockOrReject) {
-        const srcErr = checkEndpoint(req.rule.source, 'source', true);
-        if (srcErr) return deny('mcp:firewall:write', srcErr, req.audit);
-        if (req.rule.destination && req.rule.destination !== 'any') {
-          const dstErr = checkEndpoint(req.rule.destination, 'destination', false);
-          if (dstErr) return deny('mcp:firewall:write', dstErr, req.audit);
-        }
-
-        const protectedTcpPorts = ctx.antiLockoutPorts ?? [2966, 22, 9876];
-        const protectedUdpPorts = [53, 67, 68, 51820];
-        const rawDport = (req.rule.destinationPort || '').trim();
-        const affectsTcp =
-          req.rule.protocol === 'any' || req.rule.protocol === 'tcp' || req.rule.protocol === 'tcp_udp';
-        const affectsUdp =
-          req.rule.protocol === 'any' || req.rule.protocol === 'udp' || req.rule.protocol === 'tcp_udp';
-        const protectedPorts = Array.from(
-          new Set([
-            ...(affectsTcp ? protectedTcpPorts : []),
-            ...(affectsUdp ? protectedUdpPorts : []),
-          ])
-        );
-
-        if ((affectsTcp || affectsUdp) && (!rawDport || rawDport === 'any')) {
-          return deny(
-            'mcp:firewall:write',
-            `Wildcard/empty destinationPort on ${req.rule.action} rule covers protected ports (${protectedPorts.join(', ')})`,
-            req.audit,
-          );
-        }
-        const validatePortToken = (part: string): string | null => {
-          if (/^\d+$/.test(part)) {
-            const portNum = Number(part);
-            if (portNum < 1 || portNum > 65535) {
-              return `Invalid destinationPort '${part}'`;
-            }
-            if (protectedPorts.includes(portNum)) {
-              return `Blocking protected port ${portNum} is prohibited`;
-            }
-            return null;
-          }
-          const rangeMatch = part.match(/^(\d+)\s*[-:]\s*(\d+)$/);
-          if (rangeMatch) {
-            const start = Math.min(Number(rangeMatch[1]), Number(rangeMatch[2]));
-            const end = Math.max(Number(rangeMatch[1]), Number(rangeMatch[2]));
-            if (start < 1 || end > 65535) {
-              return `Invalid port range '${part}'`;
-            }
-            const hit = protectedPorts.find((p) => p >= start && p <= end);
-            if (hit !== undefined) {
-              return `Port range ${part} overlaps protected port ${hit}`;
-            }
-            return null;
-          }
-          return `Invalid or unresolvable destinationPort token '${part}'`;
-        };
-        if (rawDport && rawDport !== 'any') {
-          if (rawDport.startsWith('$')) {
-            const aliasName = rawDport.slice(1);
-            const aliasObj = (state.aliases ?? []).find((a) => a.name === aliasName && a.type === 'port');
-            if (!aliasObj || !aliasObj.entries || aliasObj.entries.length === 0) {
-              return deny(
-                'mcp:firewall:write',
-                `Referenced port alias '${rawDport}' in destinationPort does not exist or has no entries`,
-                req.audit,
-              );
-            }
-            for (const entry of aliasObj.entries) {
-              const portErr = validatePortToken(entry.trim());
-              if (portErr) return deny('mcp:firewall:write', portErr, req.audit);
-            }
-          } else {
-            for (const part of rawDport.split(',').map((s) => s.trim()).filter(Boolean)) {
-              const portErr = validatePortToken(part);
-              if (portErr) return deny('mcp:firewall:write', portErr, req.audit);
-            }
-          }
-        }
+      const ruleGuardErr = validateFirewallRuleAgainstGuard(req.rule, state, ctx);
+      if (ruleGuardErr) {
+        return deny('mcp:firewall:write', ruleGuardErr, req.audit);
       }
 
       // B2-M4: serialize the load -> mutate -> persist window with
@@ -3166,11 +3255,14 @@ export async function handleMcpCallTool(
         }
       }
 
-      // B-M5: pass the workload id as well as the name — the guard
-      // matches the compiled hosted-edge VM identity (vmid 100, id
-      // 'edge') so a renamed edge VM is still recognised, and refuses
-      // outright when the name could not be resolved at all.
-      const safetyCheck = validateVirtWorkloadSafety(workloadName, req.action, localState?.hostedEdge?.enabled, req.id);
+      // B-M5: pass the workload id ONLY for VMs — LXC containers share
+      // the numeric namespace starting at 100 and are never the Hosted Edge VM.
+      const safetyCheck = validateVirtWorkloadSafety(
+        workloadName,
+        req.action,
+        localState?.hostedEdge?.enabled,
+        req.workloadType === 'vm' ? req.id : undefined,
+      );
       if (!safetyCheck.valid) {
         return deny('mcp:virt:manage', safetyCheck.reason || 'Virtualization action blocked by anti-lockout guard', req.audit);
       }
@@ -3929,6 +4021,9 @@ export async function handleMcpCallTool(
           if (nErr) return nErr;
         }
 
+        const { ctx } = await buildGuardContext(env.key, env.clientIp);
+        const importedRules = report.state.rules ?? [];
+
         let releaseLock: (() => void) | null = null;
         try {
           try {
@@ -3938,6 +4033,32 @@ export async function handleMcpCallTool(
           }
           const active = loadLocalDesiredState();
           const nextState = active ? mergeFirewallConfigs(active, report.state) : report.state;
+          for (const importedRule of importedRules) {
+            const ruleErr = validateFirewallRuleAgainstGuard(importedRule, nextState, ctx);
+            if (ruleErr) {
+              return deny('mcp:firewall:write', `Imported rule rejected by MCP safety guard: ${ruleErr}`, req.audit);
+            }
+          }
+          // Preserve existing antiLockout protections so imported settings cannot disable or strip them.
+          if (active?.system?.antiLockout && active.system.antiLockout.enabled !== false) {
+            const prevAl = active.system.antiLockout;
+            const nextAl = nextState.system?.antiLockout;
+            const mergedIfaces = Array.from(
+              new Set([...(prevAl.interfaces ?? [prevAl.interface || 'lan']), ...(nextAl?.interfaces ?? [])])
+            ).filter(Boolean);
+            const mergedPorts = Array.from(
+              new Set([...(prevAl.ports ?? [22, 80, 443, 2966, 3000]), ...(nextAl?.ports ?? [])])
+            );
+            nextState.system = {
+              ...nextState.system,
+              antiLockout: {
+                enabled: true,
+                interface: prevAl.interface || mergedIfaces[0] || 'lan',
+                interfaces: mergedIfaces,
+                ports: mergedPorts,
+              },
+            };
+          }
           // B-M4: fail closed when the import cannot be persisted —
           // staging must not be reported for a merge disk never recorded.
           if (!persistDesiredStateToDisk(nextState)) {
@@ -4015,10 +4136,11 @@ export async function handleMcpCallTool(
         qs.set('step', String(typeof args.step === 'number' ? Math.max(5, Math.floor(args.step)) : 60));
       }
       const endpoint = `${vmBase}/api/v1/${hasRange ? 'query_range' : 'query'}?${qs.toString()}`;
+      const vmToken = targets.vmBearerToken || targets.bearerToken;
       let resultPayload: unknown;
       try {
         const res = await fetch(endpoint, {
-          headers: targets.bearerToken ? { Authorization: `Bearer ${targets.bearerToken}` } : undefined,
+          headers: vmToken ? { Authorization: `Bearer ${vmToken}` } : undefined,
           signal: AbortSignal.timeout(5000),
         });
         resultPayload = res.ok ? await res.json() : { status: 'error', httpStatus: res.status };
@@ -4049,26 +4171,36 @@ export async function handleMcpCallTool(
         };
       }
       const vlBase = targets.vlInsertUrl.replace(/\/insert\/jsonline\/?$/, '');
-      const clauses: string[] = [];
-      if (typeof args.query === 'string' && args.query.trim()) clauses.push(args.query.trim());
+      const prefixClauses: string[] = [];
       if (typeof args.nodeId === 'string' && args.nodeId.trim()) {
-        clauses.push(`node_id:"${args.nodeId.trim().replace(/"/g, '\\"')}"`);
+        prefixClauses.push(`node_id:"${escapeLogsQlString(args.nodeId.trim())}"`);
       }
       if (typeof args.source === 'string' && args.source.trim()) {
-        clauses.push(`source:"${args.source.trim().replace(/"/g, '\\"')}"`);
+        prefixClauses.push(`source:"${escapeLogsQlString(args.source.trim())}"`);
       }
-      const logsql = clauses.length > 0 ? clauses.join(' ') : '*';
+      const rawQuery = typeof args.query === 'string' ? args.query.trim() : '';
+      let logsql: string;
+      if (prefixClauses.length > 0) {
+        const { filterPart, pipeTail } = splitLogsQlFirstPipe(rawQuery);
+        const prefix = prefixClauses.join(' ');
+        const combinedFilter =
+          filterPart && filterPart !== '*' ? `${prefix} (${filterPart})` : prefix;
+        logsql = pipeTail ? `${combinedFilter} ${pipeTail}` : combinedFilter;
+      } else {
+        logsql = rawQuery || '*';
+      }
       const limit = typeof args.limit === 'number' ? Math.min(500, Math.max(1, Math.floor(args.limit))) : 50;
       const form = new URLSearchParams({ query: logsql, limit: String(limit) });
       if (typeof args.start === 'string' && args.start.trim()) form.set('start', args.start.trim());
 
+      const vlToken = targets.vlBearerToken || targets.bearerToken;
       let outPayload: unknown;
       try {
         const res = await fetch(`${vlBase}/select/logsql/query`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/x-www-form-urlencoded',
-            ...(targets.bearerToken ? { Authorization: `Bearer ${targets.bearerToken}` } : {}),
+            ...(vlToken ? { Authorization: `Bearer ${vlToken}` } : {}),
           },
           body: form.toString(),
           signal: AbortSignal.timeout(5000),
@@ -4108,12 +4240,17 @@ export async function handleMcpCallTool(
 
       let fql = typeof args.fql === 'string' ? args.fql.trim() : '';
       if (typeof args.nodeId === 'string' && args.nodeId.trim()) {
-        const nodeTerm = `node:"${args.nodeId.trim().replace(/"/g, '')}"`;
-        fql = fql ? `${fql} && ${nodeTerm}` : nodeTerm;
+        const cleanNodeId = args.nodeId.trim();
+        if (/["'\r\n\0]/.test(cleanNodeId)) {
+          return deny('mcp:telemetry:read', `Invalid nodeId '${cleanNodeId}': quotes and control characters are prohibited`);
+        }
+        const nodeTerm = `node="${cleanNodeId}"`;
+        fql = fql ? `(${fql}) && (${nodeTerm})` : nodeTerm;
       }
       const limit = typeof args.limit === 'number' ? Math.min(1000, Math.max(1, Math.floor(args.limit))) : 100;
       const windowStr = typeof args.window === 'string' && args.window.trim() ? args.window.trim() : '1h';
-      const res = await callAxonwalldApi('POST', '/v1/netflow/query', { fql, window: windowStr, limit });
+      const rangeMinutes = parseWindowToMinutes(windowStr);
+      const res = await callAxonwalldApi('POST', '/v1/netflow/query', { fql, rangeMinutes, limit });
       recordMcpAuditEntry({
         keyId: env.key.id,
         keyName: env.key.name,
@@ -4122,7 +4259,7 @@ export async function handleMcpCallTool(
         toolName,
         requiredScope: 'mcp:telemetry:read',
         decision: 'allowed',
-        paramsSummary: { fql, window: windowStr, limit },
+        paramsSummary: { fql, window: windowStr, rangeMinutes, limit },
       });
       return {
         content: [
@@ -4135,21 +4272,35 @@ export async function handleMcpCallTool(
     }
 
     case 'mcp_trigger_edge_mitigation': {
-      const { matched, err: scopeErr } = requireAnyScope(['mcp:firewall:write', 'mcp:traffic:blackhole']);
+      const { matched, err: scopeErr } = requireAnyScope(['mcp:ebpf:manage', 'mcp:traffic:blackhole']);
       if (scopeErr) return scopeErr;
 
       const targetIp = typeof args.targetIp === 'string' ? args.targetIp.trim() : '';
-      const reason = typeof args.reason === 'string' ? args.reason.trim() : 'MCP remote edge mitigation';
-      const ttlSec = typeof args.ttlSec === 'number' ? Math.max(60, Math.min(3600, Math.floor(args.ttlSec))) : 300;
+      const reason = typeof args.reason === 'string' && args.reason.trim() ? args.reason.trim() : 'MCP remote edge mitigation';
       const parsed = parseIpOrCidr(targetIp);
       if (!parsed || !parsed.isSingleHost) {
-        return {
-          isError: true,
-          content: [{ type: 'text', text: JSON.stringify({ success: false, error: `Invalid host targetIp: '${targetIp}'` }) }],
-        };
+        return deny(matched!, `Invalid host targetIp: '${targetIp}'`);
       }
+
+      const { ctx, activeLeasesCount } = await buildGuardContext(env.key, env.clientIp);
+      if (activeLeasesCount >= env.key.policyLimits.maxActiveLeases) {
+        return deny(
+          matched!,
+          `Maximum active tactical leases (${env.key.policyLimits.maxActiveLeases}) reached for key '${env.key.name}'`
+        );
+      }
+
+      const targetCheck = validateMcpTarget(parsed.address, ctx);
+      if (!targetCheck.valid) {
+        return deny(matched!, targetCheck.reason || 'Target rejected by anti-lockout / blast-radius guard');
+      }
+
+      const policyMaxTtl = Math.max(1, Math.min(3600, env.key.policyLimits.maxTtlSeconds));
+      const requestedTtl = typeof args.ttlSec === 'number' && Number.isFinite(args.ttlSec) ? Math.floor(args.ttlSec) : 300;
+      const ttlSec = Math.min(policyMaxTtl, Math.max(Math.min(60, policyMaxTtl), requestedTtl));
+
       const res = await callAxonwalldApi('POST', '/v1/observability/mitigate', {
-        targetIp: parsed.address,
+        targetIp: targetCheck.normalizedTarget || parsed.address,
         ttlSec,
         reason,
       });
@@ -4162,7 +4313,7 @@ export async function handleMcpCallTool(
         requiredScope: matched!,
         decision: res.ok ? 'allowed' : 'denied',
         denialReason: res.ok ? undefined : res.data?.error || 'mitigation rejected',
-        paramsSummary: { targetIp: parsed.address, ttlSec, reason },
+        paramsSummary: { targetIp: targetCheck.normalizedTarget || parsed.address, ttlSec, reason },
       });
       return {
         isError: !res.ok,

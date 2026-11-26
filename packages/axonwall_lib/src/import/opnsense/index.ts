@@ -48,7 +48,7 @@ export function importOpnsenseConfig(xmlContent: string): ImportReport {
     attributeNamePrefix: '@_',
     parseTagValue: false,
     isArray: (name) => {
-      return ['alias', 'rule', 'staticmap', 'hosts'].includes(name);
+      return ['alias', 'rule', 'staticmap', 'hosts', 'vlan', 'tag'].includes(name);
     },
   });
 
@@ -100,7 +100,28 @@ export function importOpnsenseConfig(xmlContent: string): ImportReport {
     }
   }
 
-  // 2. Aliases
+  // 2. VLANs
+  const vlans: Vlan[] = [];
+  const rawVlanEntries = root.vlans?.vlan || root.vlans?.tag;
+  if (rawVlanEntries) {
+    const rawTags = Array.isArray(rawVlanEntries) ? rawVlanEntries : [rawVlanEntries];
+    for (const t of rawTags) {
+      if (!t?.tag) continue;
+      const tagNum = Number.parseInt(String(t.tag), 10);
+      if (!Number.isInteger(tagNum) || tagNum < 1 || tagNum > 4094) continue;
+      const parentIf = t.if || 'lan';
+      const vlanIf = t.vlanif || `${parentIf}.${tagNum}`;
+      vlans.push({
+        tag: tagNum,
+        parentInterface: parentIf,
+        vlanInterface: vlanIf,
+        priority: 0,
+        description: t.descr ? String(t.descr) : `VLAN ${tagNum}`,
+      });
+    }
+  }
+
+  // 3. Aliases
   const aliases: Alias[] = [];
   const aliasMap = new Map<string, string>();
   if (root.aliases?.alias) {
@@ -225,7 +246,9 @@ export function importOpnsenseConfig(xmlContent: string): ImportReport {
         sourcePort: srcPort,
         destination: dst,
         destinationPort: dstPort,
-        log: Boolean(r.log),
+        ...(negatedSrc ? { invertSource: true } : {}),
+        ...(negatedDst ? { invertDestination: true } : {}),
+        log: isXmlFlagSet(r.log),
         enabled: isEnabled,
         description: finalDescr,
         sortOrder,
@@ -254,7 +277,7 @@ export function importOpnsenseConfig(xmlContent: string): ImportReport {
         destinationPort: normalizeXmlPort(n.destination?.port || n.local_port || '', aliasMap),
         targetIp: n.target ? String(n.target) : '',
         targetPort: normalizeXmlPort(n.local_port || '', aliasMap),
-        log: Boolean(n.log),
+        log: isXmlFlagSet(n.log),
         enabled: !isXmlFlagSet(n.disabled),
         description: n.descr ? String(n.descr) : '',
         sortOrder,
@@ -333,7 +356,7 @@ export function importOpnsenseConfig(xmlContent: string): ImportReport {
     nat,
     gateways: [],
     gatewayGroups: [],
-    vlans: [],
+    vlans,
     bridges: [],
     bonds: [],
     virtualIps: [],
@@ -359,7 +382,7 @@ export function importOpnsenseConfig(xmlContent: string): ImportReport {
     version: root['@_version'] || 'unknown',
     sourceFormat: 'OPNsense XML (config.xml)',
     interfacesCount: interfaces.length,
-    vlansCount: 0,
+    vlansCount: vlans.length,
     aliasesCount: aliases.length,
     rulesCount: rules.length,
     natRulesCount: nat.length,

@@ -81,7 +81,9 @@ describe('Phase 4: High Availability Compilers', () => {
     const output = compileKeepalived(mockHaConfig, 'axon-node-1');
     expect(output).toContain('router_id axon-node-1');
     expect(output).toContain('vrrp_instance VI_WAN');
-    expect(output).toContain('state MASTER');
+    expect(output).toContain('state BACKUP');
+    expect(output).toContain('nopreempt');
+    expect(output).not.toContain('state MASTER');
     expect(output).toContain('priority 150');
     expect(output).toContain('virtual_router_id 51');
     expect(output).toContain('192.168.1.254/24');

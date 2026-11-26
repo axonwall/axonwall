@@ -418,7 +418,9 @@ int xdp_flow_tracker(struct xdp_md *ctx)
 		__u8 tcp_flags = 0;
 		__u64 is_syn = 0;
 		__u64 is_rst = 0;
-		parse_l4_ports_and_flags(l4, data_end, ip->protocol, &key.src_port, &key.dst_port, &tcp_flags, &is_syn, &is_rst);
+		if ((ip->frag_off & bpf_htons(0x1FFF)) == 0) {
+			parse_l4_ports_and_flags(l4, data_end, ip->protocol, &key.src_port, &key.dst_port, &tcp_flags, &is_syn, &is_rst);
+		}
 
 		if (is_syn) {
 			if (stats)
@@ -498,6 +500,7 @@ int xdp_flow_tracker(struct xdp_md *ctx)
 
 		__u8 nexthdr = ip6->nexthdr;
 		void *l4 = (void *)(ip6 + 1);
+		__u8 is_noninitial_frag6 = 0;
 
 		#pragma unroll
 		for (int i = 0; i < 4; i++) {
@@ -514,6 +517,8 @@ int xdp_flow_tracker(struct xdp_md *ctx)
 				struct ipv6_frag_hdr_wire *frag = l4;
 				if ((void *)(frag + 1) > data_end)
 					break;
+				if ((frag->frag_off & bpf_htons(0xFFF8)) != 0)
+					is_noninitial_frag6 = 1;
 				nexthdr = frag->nexthdr;
 				l4 = (void *)(frag + 1);
 			} else if (nexthdr == NEXTHDR_AUTH) {
@@ -538,7 +543,9 @@ int xdp_flow_tracker(struct xdp_md *ctx)
 		__u8 tcp_flags = 0;
 		__u64 is_syn = 0;
 		__u64 is_rst = 0;
-		parse_l4_ports_and_flags(l4, data_end, nexthdr, &key6.src_port, &key6.dst_port, &tcp_flags, &is_syn, &is_rst);
+		if (!is_noninitial_frag6) {
+			parse_l4_ports_and_flags(l4, data_end, nexthdr, &key6.src_port, &key6.dst_port, &tcp_flags, &is_syn, &is_rst);
+		}
 
 		if (is_syn) {
 			if (stats)

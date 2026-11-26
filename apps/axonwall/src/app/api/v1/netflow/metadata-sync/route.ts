@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getSession } from '@/server/auth';
 import { assertActionPermitted } from '@/server/auth-guard';
 import { callAgentApiDetailed } from '@/server/agent-client';
+import { checkPluginApiGuard } from '@/server/plugin-guard';
 import { hasServiceTokenScope } from '@/server/service-tokens';
 
 function errStatus(err: unknown): number {
@@ -14,7 +15,7 @@ function errStatus(err: unknown): number {
 export async function POST(req: NextRequest) {
   try {
     const session = await getSession();
-    assertActionPermitted(session, 'operator');
+    assertActionPermitted(session, 'operator', ['observability:ingest', 'netflow:ingest']);
     if (
       !hasServiceTokenScope(session, 'observability:ingest') &&
       !hasServiceTokenScope(session, 'netflow:ingest')
@@ -24,6 +25,8 @@ export async function POST(req: NextRequest) {
         { status: 403 }
       );
     }
+    const guard = await checkPluginApiGuard('netflow-collector');
+    if (guard) return guard;
 
     const body = (await req.json().catch(() => null)) as Record<string, unknown> | null;
     if (!body || typeof body !== 'object') {
@@ -32,7 +35,11 @@ export async function POST(req: NextRequest) {
 
     let exporterIp = typeof body.exporterIp === 'string' ? body.exporterIp.trim() : '';
     if (!exporterIp) {
-      const xff = req.headers.get('x-forwarded-for')?.split(',')[0]?.trim();
+      const xffParts = (req.headers.get('x-forwarded-for') || '')
+        .split(',')
+        .map((p) => p.trim())
+        .filter(Boolean);
+      const xff = xffParts[xffParts.length - 1];
       const realIp = req.headers.get('x-real-ip')?.trim();
       exporterIp = xff || realIp || '';
     }

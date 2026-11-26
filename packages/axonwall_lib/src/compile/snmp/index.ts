@@ -2,7 +2,7 @@ import type { SnmpPluginConfig } from '../../schemas/index.js';
 import { isValidIPv4, isValidIPv6 } from '../../util/index.js';
 
 function sanitizeSnmpToken(raw: string): string {
-  return raw.split(/[\r\n]/)[0].trim().replace(/[\r\n"]/g, '');
+  return raw.split(/[\r\n]/)[0].trim().replace(/[\r\n"\\]/g, '');
 }
 
 /**
@@ -11,7 +11,7 @@ function sanitizeSnmpToken(raw: string): string {
  */
 export function compileSnmpd(config: SnmpPluginConfig): string {
   const lines: string[] = [];
-  const safeCommunity = config.community.split(/[\r\n]/)[0].trim().replace(/[\r\n\s]+/g, '');
+  const safeCommunity = sanitizeSnmpToken(config.community).replace(/\s+/g, '');
   const safeLocation = config.sysLocation.split(/[\r\n]/)[0].trim();
   const safeContact = config.sysContact.split(/[\r\n]/)[0].trim();
   const port = Math.max(1, Math.min(65535, Number(config.listenPort) || 161));
@@ -52,7 +52,7 @@ export function compileSnmpd(config: SnmpPluginConfig): string {
         lines.push(`rouser ${user} priv -V all`);
       }
     }
-  } else {
+  } else if (safeCommunity) {
     lines.push(`rocommunity ${safeCommunity} default -V all`);
   }
   lines.push('');

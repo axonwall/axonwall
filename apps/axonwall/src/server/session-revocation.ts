@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { getEtcConfigDir, getStateDir } from './dev-paths';
@@ -27,24 +28,61 @@ import type { UserSession } from '@axonwall/lib/rbac';
  * (e.g. the OIDC callback) also need.
  */
 
-const EPOCH_PATHS = Array.from(
-  new Set([path.join(getStateDir(), 'session-epoch'), path.join(getEtcConfigDir(), 'session-epoch')])
-);
-const USER_EPOCH_PATHS = Array.from(
-  new Set([
-    path.join(getStateDir(), 'user-session-epochs.json'),
-    path.join(getEtcConfigDir(), 'user-session-epochs.json'),
-  ])
-);
-const REVOKED_PATHS = Array.from(
-  new Set([path.join(getStateDir(), 'revoked-jtis'), path.join(getEtcConfigDir(), 'revoked-jtis')])
-);
-const MAX_REVOKED_ENTRIES = 500;
+function getEpochPaths(): string[] {
+  return Array.from(
+    new Set([path.join(getStateDir(), 'session-epoch'), path.join(getEtcConfigDir(), 'session-epoch')])
+  );
+}
+function getUserEpochPaths(): string[] {
+  return Array.from(
+    new Set([
+      path.join(getStateDir(), 'user-session-epochs.json'),
+      path.join(getEtcConfigDir(), 'user-session-epochs.json'),
+    ])
+  );
+}
+function getRevokedPaths(): string[] {
+  return Array.from(
+    new Set([path.join(getStateDir(), 'revoked-jtis'), path.join(getEtcConfigDir(), 'revoked-jtis')])
+  );
+}
+const DEFAULT_REVOKED_TTL_SEC = 8 * 3600;
 const MAX_USER_EPOCHS = 2000;
 
 let memoryEpoch = 0;
 const memoryUserEpochs = new Map<string, number>();
-const memoryRevokedJtis = new Set<string>();
+const memoryRevokedJtis = new Map<string, number>();
+
+function writeRevocationFileAtomic(filePath: string, content: string, mode = 0o660): void {
+  const dir = path.dirname(filePath);
+  fs.mkdirSync(dir, { recursive: true, mode: 0o750 });
+  const base = path.basename(filePath);
+  const tmpPath = path.join(dir, `.${base}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`);
+  let fd: number | null = null;
+  try {
+    fd = fs.openSync(tmpPath, 'wx', mode);
+    fs.writeFileSync(fd, content, 'utf8');
+    try {
+      fs.fsyncSync(fd);
+    } catch {}
+    fs.closeSync(fd);
+    fd = null;
+    try {
+      fs.chmodSync(tmpPath, mode);
+    } catch {}
+    fs.renameSync(tmpPath, filePath);
+  } catch (err) {
+    if (fd !== null) {
+      try {
+        fs.closeSync(fd);
+      } catch {}
+    }
+    try {
+      if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath);
+    } catch {}
+    throw err;
+  }
+}
 
 function normalizeEpochUserKey(username: string): string {
   return username.trim().toLowerCase();
@@ -52,7 +90,7 @@ function normalizeEpochUserKey(username: string): string {
 
 function readUserEpochMap(): Map<string, number> {
   const combined = new Map<string, number>(memoryUserEpochs);
-  for (const p of USER_EPOCH_PATHS) {
+  for (const p of getUserEpochPaths()) {
     try {
       const parsed = JSON.parse(fs.readFileSync(p, 'utf-8')) as Record<string, unknown>;
       if (!parsed || typeof parsed !== 'object') continue;
@@ -93,10 +131,9 @@ export function bumpUserSessionEpoch(username: string): number {
   memoryUserEpochs.delete(key);
   memoryUserEpochs.set(key, nextVal);
   const serialized = JSON.stringify(Object.fromEntries(combined)) + '\n';
-  for (const p of USER_EPOCH_PATHS) {
+  for (const p of getUserEpochPaths()) {
     try {
-      fs.mkdirSync(path.dirname(p), { recursive: true });
-      fs.writeFileSync(p, serialized, { mode: 0o660 });
+      writeRevocationFileAtomic(p, serialized, 0o660);
     } catch {}
   }
   return nextVal;
@@ -104,7 +141,7 @@ export function bumpUserSessionEpoch(username: string): number {
 
 export function currentSessionEpoch(): number {
   let maxEpoch = memoryEpoch;
-  for (const p of EPOCH_PATHS) {
+  for (const p of getEpochPaths()) {
     try {
       const value = Number(fs.readFileSync(p, 'utf-8').trim());
       if (Number.isFinite(value) && value > maxEpoch) {
@@ -127,37 +164,66 @@ export function bumpSessionEpoch(): void {
   const nextVal = Math.max(Date.now(), currentSessionEpoch() + 1);
   memoryEpoch = nextVal;
   const next = String(nextVal);
-  for (const p of EPOCH_PATHS) {
+  for (const p of getEpochPaths()) {
     try {
-      fs.writeFileSync(p, next, { mode: 0o660 });
+      writeRevocationFileAtomic(p, next, 0o660);
     } catch {}
   }
 }
 
-function readRevokedJtis(): string[] {
-  const combined = new Set<string>(memoryRevokedJtis);
-  for (const p of REVOKED_PATHS) {
+function readRevokedJtiMap(nowSec = Math.floor(Date.now() / 1000)): Map<string, number> {
+  const combined = new Map<string, number>();
+  for (const [jti, exp] of memoryRevokedJtis) {
+    if (exp <= nowSec) {
+      memoryRevokedJtis.delete(jti);
+    } else {
+      combined.set(jti, exp);
+    }
+  }
+  for (const p of getRevokedPaths()) {
     try {
       const lines = fs
         .readFileSync(p, 'utf-8')
         .split('\n')
         .map((l) => l.trim())
         .filter(Boolean);
-      for (const l of lines) combined.add(l);
+      for (const line of lines) {
+        const lastColon = line.lastIndexOf(':');
+        let jti = line;
+        let exp = nowSec + DEFAULT_REVOKED_TTL_SEC;
+        if (lastColon > 0) {
+          const maybeExp = line.slice(lastColon + 1);
+          if (/^\d+$/.test(maybeExp)) {
+            jti = line.slice(0, lastColon);
+            exp = Number(maybeExp);
+          }
+        }
+        if (!jti || exp <= nowSec) continue;
+        const prev = combined.get(jti) ?? 0;
+        if (exp > prev) combined.set(jti, exp);
+      }
     } catch {}
   }
-  return Array.from(combined);
+  return combined;
 }
 
-/** Revoke one token by its jti (logout). */
-export function revokeTokenJti(jti: string): void {
+/** Revoke one token by its jti (logout) until its JWT expiry. */
+export function revokeTokenJti(jti: string, expSec?: number): void {
   if (!jti) return;
-  memoryRevokedJtis.add(jti);
-  const entries = readRevokedJtis().slice(-MAX_REVOKED_ENTRIES);
-  const content = entries.join('\n') + '\n';
-  for (const p of REVOKED_PATHS) {
+  const nowSec = Math.floor(Date.now() / 1000);
+  const effectiveExp =
+    typeof expSec === 'number' && Number.isFinite(expSec) && expSec > nowSec
+      ? Math.floor(expSec)
+      : nowSec + DEFAULT_REVOKED_TTL_SEC;
+  memoryRevokedJtis.set(jti, Math.max(effectiveExp, memoryRevokedJtis.get(jti) ?? 0));
+  const combined = readRevokedJtiMap(nowSec);
+  const content =
+    Array.from(combined.entries())
+      .map(([id, exp]) => `${id}:${exp}`)
+      .join('\n') + '\n';
+  for (const p of getRevokedPaths()) {
     try {
-      fs.writeFileSync(p, content, { mode: 0o660 });
+      writeRevocationFileAtomic(p, content, 0o660);
     } catch {}
   }
 }
@@ -166,6 +232,6 @@ export function revokeTokenJti(jti: string): void {
 export function isSessionRevoked(session: UserSession): boolean {
   if ((session.sessionEpoch ?? 0) !== currentSessionEpoch()) return true;
   if ((session.userSessionEpoch ?? 0) < currentUserSessionEpoch(session.username)) return true;
-  if (session.jti && readRevokedJtis().includes(session.jti)) return true;
+  if (session.jti && readRevokedJtiMap().has(session.jti)) return true;
   return false;
 }

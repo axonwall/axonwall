@@ -328,18 +328,15 @@ export async function verifyEvidenceBundle(bundleDir, options = {}) {
   const itemsPayload = manifest.evidenceItems.map(i => i.sha256).sort().join('');
   const calculatedAggregate = crypto.createHash('sha256').update(itemsPayload).digest('hex');
 
-  const imprintMatches = manifest.rfc3161Token.tstInfo.messageImprint.hashedMessage === calculatedAggregate;
-  if (!imprintMatches) {
-    failures.push('RFC 3161 Message Imprint does not match calculated aggregate evidence hash');
-  }
-
-  // Verify the time-stamp token's HMAC signature. The imprint check alone
-  // is self-consistent: anyone can rewrite the files, the manifest hashes,
-  // and the imprint together. Only the keyed signature binds the bundle to
-  // the TSA key holder, so an unverifiable token fails verification.
+  // Verify the time-stamp token's existence and HMAC signature before dereferencing tstInfo fields.
   if (!manifest.rfc3161Token || !manifest.rfc3161Token.tstInfo || !manifest.rfc3161Token.signature) {
     failures.push('RFC 3161 token is missing or incomplete');
   } else {
+    const hashedMsg = manifest.rfc3161Token.tstInfo?.messageImprint?.hashedMessage;
+    if (hashedMsg !== calculatedAggregate) {
+      failures.push('RFC 3161 Message Imprint does not match calculated aggregate evidence hash');
+    }
+
     const tsaKey = resolveTsaKey(options.signingKey);
     if (!tsaKey) {
       failures.push('TSA key not configured: RFC 3161 token signature cannot be verified (set VIGILANTE_TSA_KEY or evidencepack.tsaKey in config.yaml)');
@@ -348,7 +345,7 @@ export async function verifyEvidenceBundle(bundleDir, options = {}) {
         .update(JSON.stringify(manifest.rfc3161Token.tstInfo))
         .digest('hex');
       const expectedBuf = Buffer.from(expectedSignature);
-      const actualBuf = Buffer.from(manifest.rfc3161Token.signature);
+      const actualBuf = Buffer.from(String(manifest.rfc3161Token.signature));
       if (expectedBuf.length !== actualBuf.length || !crypto.timingSafeEqual(expectedBuf, actualBuf)) {
         failures.push('RFC 3161 token signature verification failed');
       }
@@ -363,6 +360,6 @@ export async function verifyEvidenceBundle(bundleDir, options = {}) {
     caseNumber: manifest.caseNumber,
     totalItems: manifest.evidenceItems.length,
     failures,
-    rfc3161Timestamp: manifest.rfc3161Token.tstInfo.genTime
+    rfc3161Timestamp: manifest.rfc3161Token?.tstInfo?.genTime || null
   };
 }

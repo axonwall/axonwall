@@ -31,10 +31,7 @@ export function ConsoleHeader({
   const [isPending, setIsPending] = useState<boolean>(initialPending);
   const [deadline, setDeadline] = useState<number>(initialDeadline);
   const [daemonDown, setDaemonDown] = useState<boolean>(initialDaemonDown);
-  const [timeLeft, setTimeLeft] = useState<number>(() => {
-    if (!initialDeadline) return 0;
-    return Math.max(0, initialDeadline - Math.floor(Date.now() / 1000));
-  });
+  const [timeLeft, setTimeLeft] = useState<number | null>(null);
   const [isOperating, setIsOperating] = useState<boolean>(false);
   const [feedback, setFeedback] = useState<string | null>(null);
   // C23: once the deadline passes, the expiry re-check fires once and
@@ -43,7 +40,9 @@ export function ConsoleHeader({
   const [expiryChecked, setExpiryChecked] = useState<boolean>(false);
   const wasPendingRef = useRef<boolean>(initialPending);
 
-  // Sync with prop updates from Server Component
+  // Sync with prop updates from Server Component and compute remaining seconds
+  // strictly on the client so SSR and initial hydration never diverge across a
+  // second boundary.
   useEffect(() => {
     setIsPending(initialPending);
     wasPendingRef.current = initialPending;
@@ -52,6 +51,8 @@ export function ConsoleHeader({
     setExpiryChecked(false);
     if (initialDeadline) {
       setTimeLeft(Math.max(0, initialDeadline - Math.floor(Date.now() / 1000)));
+    } else {
+      setTimeLeft(0);
     }
   }, [initialPending, initialDeadline, initialDaemonDown]);
 
@@ -220,6 +221,10 @@ export function ConsoleHeader({
                 {expiryChecked && timeLeft === 0 ? (
                   <>
                     <strong>Commit-Confirm Active:</strong> Deadline passed — status pending re-check.
+                  </>
+                ) : timeLeft === null ? (
+                  <>
+                    <strong>Commit-Confirm Active:</strong> Syncing rollback timer…
                   </>
                 ) : (
                   <>

@@ -81,7 +81,7 @@ outputs:
             extended: yes
 
 nfq:
-  mode: ${isIps ? 'accept' : 'repeat'}
+  mode: repeat
   repeat-mark: 1
   repeat-mask: 1
   bypass: ${config.nfqueueBypass ? 'yes' : 'no'}
@@ -108,9 +108,10 @@ rule-files:
 `;
 
   // nftables NFQUEUE rules
-  // In IDS (repeat) mode Suricata re-injects packets with mark 0x1/0x1; skip already-marked packets to prevent infinite queueing loops.
+  // Suricata re-injects accepted packets in repeat mode with mark 0x1/0x1; skip already-marked packets to prevent queueing loops
+  // while ensuring NF_ACCEPT/bypass never terminates upstream nftables filter evaluation prematurely.
   const nftRules: string[] = [];
-  const loopGuard = isIps ? '' : 'meta mark & 0x1 == 0 ';
+  const loopGuard = 'meta mark & 0x1 == 0 ';
   const modeTag = isIps ? 'ips' : 'ids';
   for (const rawIface of config.interfaces) {
     const iface = rawIface.split(/[\r\n\s";]/)[0].trim().replace(/[^a-zA-Z0-9_.-]/g, '');

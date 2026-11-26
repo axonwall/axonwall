@@ -3,19 +3,30 @@
  * Compares baseline and target Nmap scans for breach analysis and change detection.
  */
 
+function portCompositeKey(p) {
+  return `${p.portid}/${(p.protocol || 'tcp').toLowerCase()}`;
+}
+
 function compareHostPorts(portsA = [], portsB = []) {
   const mapA = new Map();
   const mapB = new Map();
 
-  for (const p of portsA) mapA.set(p.portid, p);
-  for (const p of portsB) mapB.set(p.portid, p);
+  for (const p of portsA) mapA.set(portCompositeKey(p), p);
+  for (const p of portsB) mapB.set(portCompositeKey(p), p);
 
-  const allPortIds = Array.from(new Set([...mapA.keys(), ...mapB.keys()])).sort((a, b) => a - b);
+  const allKeys = Array.from(new Set([...mapA.keys(), ...mapB.keys()])).sort((a, b) => {
+    const [pidA, protoA] = a.split('/');
+    const [pidB, protoB] = b.split('/');
+    const numDiff = Number(pidA) - Number(pidB);
+    return numDiff !== 0 ? numDiff : protoA.localeCompare(protoB);
+  });
   const diffs = [];
 
-  for (const pid of allPortIds) {
-    const pA = mapA.get(pid);
-    const pB = mapB.get(pid);
+  for (const key of allKeys) {
+    const pA = mapA.get(key);
+    const pB = mapB.get(key);
+    const refPort = pB || pA;
+    const pid = refPort.portid;
 
     if (!pA && pB) {
       // Port was added in scan B

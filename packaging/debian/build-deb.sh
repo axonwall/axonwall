@@ -673,18 +673,20 @@ for dropin_dir in plymouth-quit.service.d plymouth-quit-wait.service.d; do
   fi
 done
 
-if [[ -f "${CHROOT_SRC}/usr/lib/sysusers.d/axonwall.conf" ]]; then
-  if [[ "${EDITION}" == "minimal" ]]; then
-    grep -v 'headscale' "${CHROOT_SRC}/usr/lib/sysusers.d/axonwall.conf" > "${WORK_DIR}/usr/lib/sysusers.d/axonwall.conf"
-  else
-    cp "${CHROOT_SRC}/usr/lib/sysusers.d/axonwall.conf" "${WORK_DIR}/usr/lib/sysusers.d/"
+if [[ "${EDITION}" == "axonwall" || "${EDITION}" == "minimal" ]]; then
+  if [[ -f "${CHROOT_SRC}/usr/lib/sysusers.d/axonwall.conf" ]]; then
+    if [[ "${EDITION}" == "minimal" ]]; then
+      grep -v 'headscale' "${CHROOT_SRC}/usr/lib/sysusers.d/axonwall.conf" > "${WORK_DIR}/usr/lib/sysusers.d/axonwall.conf"
+    else
+      cp "${CHROOT_SRC}/usr/lib/sysusers.d/axonwall.conf" "${WORK_DIR}/usr/lib/sysusers.d/"
+    fi
   fi
-fi
-if [[ -f "${CHROOT_SRC}/usr/lib/tmpfiles.d/axonwall.conf" ]]; then
-  if [[ "${EDITION}" == "minimal" ]]; then
-    grep -v 'headscale' "${CHROOT_SRC}/usr/lib/tmpfiles.d/axonwall.conf" > "${WORK_DIR}/usr/lib/tmpfiles.d/axonwall.conf"
-  else
-    cp "${CHROOT_SRC}/usr/lib/tmpfiles.d/axonwall.conf" "${WORK_DIR}/usr/lib/tmpfiles.d/"
+  if [[ -f "${CHROOT_SRC}/usr/lib/tmpfiles.d/axonwall.conf" ]]; then
+    if [[ "${EDITION}" == "minimal" ]]; then
+      grep -v 'headscale' "${CHROOT_SRC}/usr/lib/tmpfiles.d/axonwall.conf" > "${WORK_DIR}/usr/lib/tmpfiles.d/axonwall.conf"
+    else
+      cp "${CHROOT_SRC}/usr/lib/tmpfiles.d/axonwall.conf" "${WORK_DIR}/usr/lib/tmpfiles.d/"
+    fi
   fi
 fi
 # D-M9: the vault ships its own sysusers/tmpfiles (the axonwall-vault

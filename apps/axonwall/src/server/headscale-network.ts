@@ -99,8 +99,15 @@ export async function resolveHeadscaleNetworkInfo(
 }
 
 export function resolveClientIp(req: Request): string {
-  const fwd = req.headers.get('x-forwarded-for')?.split(',')[0]?.trim();
-  if (fwd) return fwd;
+  const rawXff = req.headers.get('x-forwarded-for');
+  if (rawXff) {
+    const parts = rawXff
+      .split(',')
+      .map((p) => p.trim())
+      .filter(Boolean);
+    const rightmost = parts[parts.length - 1];
+    if (rightmost) return rightmost;
+  }
   const realIp = req.headers.get('x-real-ip')?.trim();
   if (realIp) return realIp;
   return 'unknown';

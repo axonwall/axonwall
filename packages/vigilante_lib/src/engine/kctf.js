@@ -6,6 +6,7 @@ import http from 'node:http';
 import path from 'node:path';
 import { logger } from '../utils/logger.js';
 import { getCtfSandboxesFile, requireCtfFlagSecret, assertDnsLabel, isValidHostname } from './config.js';
+import { getClusterContextArgs, getKubeExecutionEnv } from './k8s.js';
 
 export const CHALLENGE_CATEGORIES = [
   { id: 'web', name: 'Web Exploitation', icon: '🌐', color: 'blue', description: 'HTTP/HTTPS vulnerabilities, auth bypass, injection & token flaws' },
@@ -502,13 +503,16 @@ export async function spinUpChallenge({
       onLog(`[kctf] Applying Challenge '${name}' into namespace '${cleanNamespace}' on cluster '${cleanCluster}'...`);
     }
 
+    const kubeEnv = getKubeExecutionEnv();
+    const ctxArgs = await getClusterContextArgs(cleanCluster);
     await execa('kubectl', [
       'apply',
-      '--context', `k3d-${cleanCluster}`,
+      ...ctxArgs,
       '-n', cleanNamespace,
       '-f', '-'
     ], {
-      input: manifest
+      input: manifest,
+      env: kubeEnv
     });
 
     if (onLog) {
@@ -557,19 +561,18 @@ export async function listActiveChallenges({
   const challenges = [];
 
   try {
+    const kubeEnv = getKubeExecutionEnv();
+    const ctxArgs = cleanCluster ? await getClusterContextArgs(cleanCluster) : [];
+
     // 1. Query kctf Challenge CRDs
-    const chalArgs = ['get', 'challenges.kctf.dev', '-n', cleanNamespace];
-    if (cleanCluster) chalArgs.push('--context', `k3d-${cleanCluster}`);
-    chalArgs.push('--request-timeout=4s', '-o', 'json');
-    const { stdout: chalJson } = await execa('kubectl', chalArgs).catch(() => ({ stdout: '{"items":[]}' }));
+    const chalArgs = ['get', 'challenges.kctf.dev', '-n', cleanNamespace, ...ctxArgs, '--request-timeout=4s', '-o', 'json'];
+    const { stdout: chalJson } = await execa('kubectl', chalArgs, { env: kubeEnv }).catch(() => ({ stdout: '{"items":[]}' }));
 
     const parsedChals = JSON.parse(chalJson);
 
     // 2. Query Pods in namespace
-    const podArgs = ['get', 'pods', '-n', cleanNamespace];
-    if (cleanCluster) podArgs.push('--context', `k3d-${cleanCluster}`);
-    podArgs.push('--request-timeout=4s', '-o', 'json');
-    const { stdout: podJson } = await execa('kubectl', podArgs).catch(() => ({ stdout: '{"items":[]}' }));
+    const podArgs = ['get', 'pods', '-n', cleanNamespace, ...ctxArgs, '--request-timeout=4s', '-o', 'json'];
+    const { stdout: podJson } = await execa('kubectl', podArgs, { env: kubeEnv }).catch(() => ({ stdout: '{"items":[]}' }));
 
     const parsedPods = JSON.parse(podJson);
 
@@ -663,30 +666,32 @@ export async function deleteChallenge({
 
   try {
     const appLabel = `chal-${cleanName}`;
+    const kubeEnv = getKubeExecutionEnv();
+    const ctxArgs = await getClusterContextArgs(cleanCluster);
 
     // 1. Delete Challenge CRD
     await execa('kubectl', [
       'delete', 'challenge.kctf.dev', cleanName,
       '-n', cleanNamespace,
-      '--context', `k3d-${cleanCluster}`,
+      ...ctxArgs,
       '--ignore-not-found=true'
-    ]);
+    ], { env: kubeEnv });
 
     // 2. Delete Deployment
     await execa('kubectl', [
       'delete', 'deployment', appLabel,
       '-n', cleanNamespace,
-      '--context', `k3d-${cleanCluster}`,
+      ...ctxArgs,
       '--ignore-not-found=true'
-    ]);
+    ], { env: kubeEnv });
 
     // 3. Delete Service
     await execa('kubectl', [
       'delete', 'service', appLabel,
       '-n', cleanNamespace,
-      '--context', `k3d-${cleanCluster}`,
+      ...ctxArgs,
       '--ignore-not-found=true'
-    ]);
+    ], { env: kubeEnv });
 
     if (onLog) {
       onLog(`[kctf] Challenge '${cleanName}' and associated resources deleted successfully.`);
@@ -716,21 +721,23 @@ export async function toggleChallengeStatus({
   try {
     const appLabel = `chal-${cleanName}`;
     const replicas = isDeployed ? '1' : '0';
+    const kubeEnv = getKubeExecutionEnv();
+    const ctxArgs = await getClusterContextArgs(cleanCluster);
 
     await execa('kubectl', [
       'scale', 'deployment', appLabel,
       `--replicas=${replicas}`,
       '-n', cleanNamespace,
-      '--context', `k3d-${cleanCluster}`
-    ]);
+      ...ctxArgs
+    ], { env: kubeEnv });
 
     await execa('kubectl', [
       'patch', 'challenge.kctf.dev', cleanName,
       '--type=merge',
       `-p=${JSON.stringify({ spec: { deployed: isDeployed } })}`,
       '-n', cleanNamespace,
-      '--context', `k3d-${cleanCluster}`
-    ]).catch(() => {});
+      ...ctxArgs
+    ], { env: kubeEnv }).catch(() => {});
 
     return { success: true, name: cleanName, deployed: isDeployed };
   } catch (err) {
@@ -799,14 +806,24 @@ export async function getChallengeLogs({
   clusterName = 'vigilante-dev',
   lines = 40
 } = {}) {
+  const cleanName = assertDnsLabel(challengeName, 'challengeName');
+  const cleanNamespace = assertDnsLabel(namespace, 'namespace');
+  const cleanCluster = clusterName ? assertDnsLabel(clusterName, 'clusterName') : '';
+  const lineCount = Number(lines);
+  if (!Number.isInteger(lineCount) || lineCount < 1 || lineCount > 10000) {
+    throw new Error(`Invalid lines '${lines}': expected integer between 1 and 10000`);
+  }
+
   try {
+    const kubeEnv = getKubeExecutionEnv();
+    const ctxArgs = cleanCluster ? await getClusterContextArgs(cleanCluster) : [];
     const { stdout } = await execa('kubectl', [
       'logs',
-      `-l=kctf.dev/challenge=${challengeName}`,
-      '-n', namespace,
-      '--context', `k3d-${clusterName}`,
-      `--tail=${lines}`
-    ]);
+      `-l=kctf.dev/challenge=${cleanName}`,
+      '-n', cleanNamespace,
+      ...ctxArgs,
+      `--tail=${lineCount}`
+    ], { env: kubeEnv });
     return stdout || '(No logs emitted yet)';
   } catch (err) {
     return `Error fetching logs: ${err.message}`;
@@ -833,19 +850,68 @@ export const MAX_SANDBOX_TTL_MINUTES = 120;
 export const activeSandboxesRegistry = new Map();
 
 let sandboxRegistryLoaded = false;
+let sandboxRegistryLoadedFile = '';
+let sandboxRegistryDiskIds = new Set();
+const sandboxRegistryLocks = new Map();
 
-async function ensureSandboxRegistryLoaded() {
-  if (sandboxRegistryLoaded) return;
+async function withSandboxRegistryLock(fn) {
+  const file = path.resolve(getCtfSandboxesFile());
+  const prev = sandboxRegistryLocks.get(file) || Promise.resolve();
+  const next = prev.then(
+    () => fn(file),
+    () => fn(file)
+  );
+  const tracked = next.then(
+    () => {
+      if (sandboxRegistryLocks.get(file) === tracked) {
+        sandboxRegistryLocks.delete(file);
+      }
+    },
+    () => {
+      if (sandboxRegistryLocks.get(file) === tracked) {
+        sandboxRegistryLocks.delete(file);
+      }
+    }
+  );
+  sandboxRegistryLocks.set(file, tracked);
+  return next;
+}
+
+async function ensureSandboxRegistryLoaded({ forceDiskSync = false } = {}) {
+  const currentFile = path.resolve(getCtfSandboxesFile());
+  if (sandboxRegistryLoaded && sandboxRegistryLoadedFile !== currentFile) {
+    activeSandboxesRegistry.clear();
+    sandboxRegistryDiskIds.clear();
+    sandboxRegistryLoaded = false;
+  }
+  if (sandboxRegistryLoaded && !forceDiskSync) return;
   sandboxRegistryLoaded = true;
+  sandboxRegistryLoadedFile = currentFile;
+
   try {
-    const raw = await fs.readFile(getCtfSandboxesFile(), 'utf8');
+    const raw = await fs.readFile(currentFile, 'utf8');
     const records = JSON.parse(raw);
     if (Array.isArray(records)) {
+      const seenDiskIds = new Set();
       for (const rec of records) {
-        if (rec && rec.id && !activeSandboxesRegistry.has(rec.id)) {
-          activeSandboxesRegistry.set(rec.id, rec);
+        if (rec && rec.id) {
+          seenDiskIds.add(rec.id);
+          const existing = activeSandboxesRegistry.get(rec.id);
+          if (!existing) {
+            activeSandboxesRegistry.set(rec.id, redactSandboxRecord(rec));
+          } else {
+            // Merge non-secret updates (e.g. TTL extensions) while preserving in-memory runtime fields
+            activeSandboxesRegistry.set(rec.id, { ...existing, ...redactSandboxRecord(rec) });
+          }
         }
       }
+      // Remove items previously synced from disk that were deleted by another process
+      for (const prevId of sandboxRegistryDiskIds) {
+        if (!seenDiskIds.has(prevId)) {
+          activeSandboxesRegistry.delete(prevId);
+        }
+      }
+      sandboxRegistryDiskIds = seenDiskIds;
     }
   } catch {
     // No registry file yet (or unreadable) — start from the in-memory state.
@@ -855,10 +921,14 @@ async function ensureSandboxRegistryLoaded() {
 async function persistSandboxRegistry() {
   try {
     const file = getCtfSandboxesFile();
-    await fs.mkdir(path.dirname(file), { recursive: true });
-    const tmpFile = `${file}.tmp`;
-    await fs.writeFile(tmpFile, JSON.stringify(Array.from(activeSandboxesRegistry.values()), null, 2));
+    await fs.mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
+    const redactedRecords = Array.from(activeSandboxesRegistry.values()).map(redactSandboxRecord);
+    const tmpFile = `${file}.tmp.${crypto.randomBytes(6).toString('hex')}`;
+    await fs.writeFile(tmpFile, JSON.stringify(redactedRecords, null, 2), { encoding: 'utf8', mode: 0o600 });
     await fs.rename(tmpFile, file);
+    await fs.chmod(file, 0o600);
+    sandboxRegistryLoadedFile = path.resolve(file);
+    sandboxRegistryDiskIds = new Set(redactedRecords.map(r => r.id).filter(Boolean));
   } catch (err) {
     logger.warn('KCTF:REGISTRY', `Failed to persist sandbox registry: ${err.message}`);
   }
@@ -918,6 +988,10 @@ export function generateEphemeralSandboxManifest({
   const safeChal = challengeId.toLowerCase().replace(/[^a-z0-9-]/g, '');
   const safeSandbox = String(sandboxId).toLowerCase().replace(/[^a-z0-9-]/g, '-');
   const appName = `${safeTeam}-${safeChal}`;
+  if (appName.length > 55) {
+    throw new Error(`Sandbox appName '${appName}' exceeds 55 characters (needed for '-ingress' / '-netpol' suffixes)`);
+  }
+  assertDnsLabel(appName, 'sandbox appName');
   const ingressHost = `${appName}.ctf.${domain}`;
   const expiresAt = new Date(Date.now() + ttlMinutes * 60 * 1000).toISOString();
   const createdAt = new Date().toISOString();
@@ -1087,97 +1161,104 @@ export async function spawnEphemeralSandbox({
   }
   const effectiveTtlMinutes = Math.min(MAX_SANDBOX_TTL_MINUTES, Math.max(1, Math.floor(ttlValue)));
 
-  await ensureSandboxRegistryLoaded();
+  return withSandboxRegistryLock(async () => {
+    await ensureSandboxRegistryLoaded({ forceDiskSync: true });
+    const now = Date.now();
 
-  // 1. Check team concurrency quota
-  const existingTeamSandboxes = Array.from(activeSandboxesRegistry.values()).filter(
-    s => s.teamId === teamId && s.status === 'ACTIVE'
-  );
+    // 1. Check team concurrency quota (ignore expired sandboxes)
+    const existingTeamSandboxes = Array.from(activeSandboxesRegistry.values()).filter((s) => {
+      if (s.teamId !== teamId || s.status !== 'ACTIVE') return false;
+      const exp = new Date(s.expiresAt).getTime();
+      return Number.isFinite(exp) && exp > now;
+    });
 
-  if (existingTeamSandboxes.length >= MAX_SANDBOXES_PER_TEAM) {
-    throw new Error(
-      `Team concurrency limit exceeded: Maximum ${MAX_SANDBOXES_PER_TEAM} active sandboxes allowed per team. Please terminate an active instance before creating a new one.`
-    );
-  }
-
-  // 2. Check if this team already has an active sandbox for THIS specific challenge
-  const alreadyActive = existingTeamSandboxes.find(s => s.challengeId === challengeId);
-  if (alreadyActive) {
-    return alreadyActive;
-  }
-
-  // 3. Resolve challenge template
-  const chal = CHALLENGE_TEMPLATES.find(c => c.id === challengeId);
-  if (!chal) {
-    throw new Error(`Challenge '${challengeId}' not found in catalog`);
-  }
-
-  // 4. Derive dynamic HMAC flag
-  const dynamicFlag = deriveTeamHmacFlag({ teamId, challengeId, secretKey });
-
-  // 5. Build identifiers & timestamps
-  const safeTeam = teamId.toLowerCase().replace(/[^a-z0-9]/g, '');
-  const safeChal = challengeId.toLowerCase().replace(/[^a-z0-9-]/g, '');
-  const sandboxId = `sbx-${safeTeam}-${safeChal}-${crypto.randomBytes(3).toString('hex')}`;
-  const now = Date.now();
-  const expiresAt = new Date(now + effectiveTtlMinutes * 60 * 1000).toISOString();
-  const host = `${safeTeam}-${safeChal}.ctf.${domain}`;
-  const connectionUrl = chal.serviceType === 'HTTP' ? `http://${host}` : `nc ${domain} ${chal.port}`;
-
-  // 6. Generate Kubernetes manifest
-  const manifest = generateEphemeralSandboxManifest({
-    teamId,
-    challengeId,
-    sandboxId,
-    namespace,
-    domain,
-    flag: dynamicFlag,
-    ttlMinutes: effectiveTtlMinutes,
-    targetPort: chal.port,
-    containerConfig: chal.containerConfig
-  });
-
-  // 7. Deploy to cluster if not mock
-  if (!mock) {
-    try {
-      await execa('kubectl', [
-        'apply',
-        '-f', '-',
-        '--context', `k3d-${clusterName}`
-      ], { input: manifest });
-    } catch (err) {
-      // A failed apply means nothing was provisioned — fail the spawn
-      // instead of registering an ACTIVE sandbox that does not exist.
-      throw new Error(`Kubernetes apply failed for sandbox '${sandboxId}': ${err.message}`);
+    // 2. Check if this team already has a live active sandbox for THIS specific challenge
+    const alreadyActive = existingTeamSandboxes.find(s => s.challengeId === challengeId);
+    if (alreadyActive) {
+      return alreadyActive;
     }
-  }
 
-  // 8. Register in active registry
-  const sandboxRecord = {
-    id: sandboxId,
-    teamId,
-    challengeId,
-    challengeName: chal.name,
-    category: chal.category,
-    port: chal.port,
-    protocol: chal.protocol,
-    serviceType: chal.serviceType,
-    host,
-    connectionUrl,
-    flag: dynamicFlag,
-    namespace,
-    createdAt: new Date(now).toISOString(),
-    expiresAt,
-    ttlMinutes: effectiveTtlMinutes,
-    status: 'ACTIVE',
-    manifest
-  };
+    if (existingTeamSandboxes.length >= MAX_SANDBOXES_PER_TEAM) {
+      throw new Error(
+        `Team concurrency limit exceeded: Maximum ${MAX_SANDBOXES_PER_TEAM} active sandboxes allowed per team. Please terminate an active instance before creating a new one.`
+      );
+    }
 
-  activeSandboxesRegistry.set(sandboxId, sandboxRecord);
-  await persistSandboxRegistry();
-  logger.info('KCTF:SPAWNER', `Provisioned sandbox '${sandboxId}' for Team '${teamId}' on '${challengeId}' (TTL: ${effectiveTtlMinutes}m)`);
+    // 3. Resolve challenge template
+    const chal = CHALLENGE_TEMPLATES.find(c => c.id === challengeId);
+    if (!chal) {
+      throw new Error(`Challenge '${challengeId}' not found in catalog`);
+    }
 
-  return sandboxRecord;
+    // 4. Derive dynamic HMAC flag
+    const dynamicFlag = deriveTeamHmacFlag({ teamId, challengeId, secretKey });
+
+    // 5. Build identifiers & timestamps
+    const safeTeam = teamId.toLowerCase().replace(/[^a-z0-9]/g, '');
+    const safeChal = challengeId.toLowerCase().replace(/[^a-z0-9-]/g, '');
+    const sandboxId = `sbx-${safeTeam}-${safeChal}-${crypto.randomBytes(3).toString('hex')}`;
+    const expiresAt = new Date(now + effectiveTtlMinutes * 60 * 1000).toISOString();
+    const host = `${safeTeam}-${safeChal}.ctf.${domain}`;
+    const connectionUrl = chal.serviceType === 'HTTP' ? `http://${host}` : `nc ${domain} ${chal.port}`;
+
+    // 6. Generate Kubernetes manifest
+    const manifest = generateEphemeralSandboxManifest({
+      teamId,
+      challengeId,
+      sandboxId,
+      namespace,
+      domain,
+      flag: dynamicFlag,
+      ttlMinutes: effectiveTtlMinutes,
+      targetPort: chal.port,
+      containerConfig: chal.containerConfig
+    });
+
+    // 7. Deploy to cluster if not mock
+    if (!mock) {
+      try {
+        const kubeEnv = getKubeExecutionEnv();
+        const ctxArgs = await getClusterContextArgs(clusterName);
+        await execa('kubectl', [
+          'apply',
+          '-f', '-',
+          ...ctxArgs
+        ], { input: manifest, env: kubeEnv });
+      } catch (err) {
+        // A failed apply means nothing was provisioned — fail the spawn
+        // instead of registering an ACTIVE sandbox that does not exist.
+        throw new Error(`Kubernetes apply failed for sandbox '${sandboxId}': ${err.message}`);
+      }
+    }
+
+    // 8. Register in active registry
+    const sandboxRecord = {
+      id: sandboxId,
+      teamId,
+      challengeId,
+      challengeName: chal.name,
+      category: chal.category,
+      port: chal.port,
+      protocol: chal.protocol,
+      serviceType: chal.serviceType,
+      host,
+      connectionUrl,
+      flag: dynamicFlag,
+      namespace,
+      clusterName,
+      createdAt: new Date(now).toISOString(),
+      expiresAt,
+      ttlMinutes: effectiveTtlMinutes,
+      status: 'ACTIVE',
+      manifest
+    };
+
+    activeSandboxesRegistry.set(sandboxId, sandboxRecord);
+    await persistSandboxRegistry();
+    logger.info('KCTF:SPAWNER', `Provisioned sandbox '${sandboxId}' for Team '${teamId}' on '${challengeId}' (TTL: ${effectiveTtlMinutes}m)`);
+
+    return sandboxRecord;
+  });
 }
 
 /**
@@ -1227,44 +1308,46 @@ export async function extendSandboxTtl({
   additionalMinutes = 15,
   maxTtlMinutes = MAX_SANDBOX_TTL_MINUTES
 } = {}) {
-  await ensureSandboxRegistryLoaded();
-  let record = null;
+  return withSandboxRegistryLock(async () => {
+    await ensureSandboxRegistryLoaded({ forceDiskSync: true });
+    let record = null;
 
-  if (sandboxId && activeSandboxesRegistry.has(sandboxId)) {
-    record = activeSandboxesRegistry.get(sandboxId);
-  } else if (teamId && challengeId) {
-    for (const sbx of activeSandboxesRegistry.values()) {
-      if (sbx.teamId === teamId && sbx.challengeId === challengeId && sbx.status === 'ACTIVE') {
-        record = sbx;
-        break;
+    if (sandboxId && activeSandboxesRegistry.has(sandboxId)) {
+      record = activeSandboxesRegistry.get(sandboxId);
+    } else if (teamId && challengeId) {
+      for (const sbx of activeSandboxesRegistry.values()) {
+        if (sbx.teamId === teamId && sbx.challengeId === challengeId && sbx.status === 'ACTIVE') {
+          record = sbx;
+          break;
+        }
       }
     }
-  }
 
-  if (!record) {
-    throw new Error('Active sandbox instance not found');
-  }
+    if (!record) {
+      throw new Error('Active sandbox instance not found');
+    }
 
-  const curExpiry = new Date(record.expiresAt).getTime();
-  const created = new Date(record.createdAt).getTime();
-  const maxExpiry = created + maxTtlMinutes * 60 * 1000;
+    const curExpiry = new Date(record.expiresAt).getTime();
+    const created = new Date(record.createdAt).getTime();
+    const maxExpiry = created + maxTtlMinutes * 60 * 1000;
 
-  const newExpiryTime = Math.min(maxExpiry, curExpiry + additionalMinutes * 60 * 1000);
-  const newTtlMinutes = Math.round((newExpiryTime - created) / 60000);
+    const newExpiryTime = Math.min(maxExpiry, curExpiry + additionalMinutes * 60 * 1000);
+    const newTtlMinutes = Math.round((newExpiryTime - created) / 60000);
 
-  record.expiresAt = new Date(newExpiryTime).toISOString();
-  record.ttlMinutes = newTtlMinutes;
-  await persistSandboxRegistry();
+    record.expiresAt = new Date(newExpiryTime).toISOString();
+    record.ttlMinutes = newTtlMinutes;
+    await persistSandboxRegistry();
 
-  logger.info('KCTF:SPAWNER', `Extended TTL for sandbox '${record.id}' to ${record.expiresAt} (Total: ${newTtlMinutes}m)`);
+    logger.info('KCTF:SPAWNER', `Extended TTL for sandbox '${record.id}' to ${record.expiresAt} (Total: ${newTtlMinutes}m)`);
 
-  return {
-    success: true,
-    sandboxId: record.id,
-    expiresAt: record.expiresAt,
-    remainingMinutes: Math.max(0, Math.round((newExpiryTime - Date.now()) / 60000)),
-    ttlMinutes: newTtlMinutes
-  };
+    return {
+      success: true,
+      sandboxId: record.id,
+      expiresAt: record.expiresAt,
+      remainingMinutes: Math.max(0, Math.round((newExpiryTime - Date.now()) / 60000)),
+      ttlMinutes: newTtlMinutes
+    };
+  });
 }
 
 /**
@@ -1275,55 +1358,61 @@ export async function reapExpiredSandboxes({
   clusterName = 'vigilante-dev',
   mock = false
 } = {}) {
-  await ensureSandboxRegistryLoaded();
-  const now = Date.now();
-  const reaped = [];
+  return withSandboxRegistryLock(async () => {
+    await ensureSandboxRegistryLoaded({ forceDiskSync: true });
+    const now = Date.now();
+    const reaped = [];
+    const kubeEnv = getKubeExecutionEnv();
 
-  for (const [id, sbx] of activeSandboxesRegistry.entries()) {
-    const expiry = new Date(sbx.expiresAt).getTime();
-    if (expiry <= now || sbx.status === 'EXPIRED') {
-      sbx.status = 'TERMINATED';
-      activeSandboxesRegistry.delete(id);
+    for (const [id, sbx] of activeSandboxesRegistry.entries()) {
+      const expiry = new Date(sbx.expiresAt).getTime();
+      if (expiry <= now || sbx.status === 'EXPIRED') {
+        sbx.status = 'TERMINATED';
+        activeSandboxesRegistry.delete(id);
 
-      if (!mock) {
-        const safeTeam = sbx.teamId.toLowerCase().replace(/[^a-z0-9]/g, '');
-        const safeChal = sbx.challengeId.toLowerCase().replace(/[^a-z0-9-]/g, '');
-        const appName = `${safeTeam}-${safeChal}`;
-        try {
-          // Type-qualified names: a comma type list with several names
-          // deletes every type x every name, including same-named
-          // unrelated objects of other types in the namespace.
-          await execa('kubectl', [
-            'delete',
-            `deployment/${appName}`,
-            `service/${appName}`,
-            `ingress/${appName}-ingress`,
-            `networkpolicy/${appName}-netpol`,
-            '-n', namespace,
-            '--context', `k3d-${clusterName}`,
-            '--ignore-not-found=true'
-          ]);
-        } catch (err) {
-          logger.warn('KCTF:REAPER', `Cleanup warning for ${appName}: ${err.message}`);
+        if (!mock) {
+          const safeTeam = sbx.teamId.toLowerCase().replace(/[^a-z0-9]/g, '');
+          const safeChal = sbx.challengeId.toLowerCase().replace(/[^a-z0-9-]/g, '');
+          const appName = `${safeTeam}-${safeChal}`;
+          const targetNs = sbx.namespace || namespace;
+          const targetCluster = sbx.clusterName || clusterName;
+          const ctxArgs = await getClusterContextArgs(targetCluster);
+          try {
+            // Type-qualified names: a comma type list with several names
+            // deletes every type x every name, including same-named
+            // unrelated objects of other types in the namespace.
+            await execa('kubectl', [
+              'delete',
+              `deployment/${appName}`,
+              `service/${appName}`,
+              `ingress/${appName}-ingress`,
+              `networkpolicy/${appName}-netpol`,
+              '-n', targetNs,
+              ...ctxArgs,
+              '--ignore-not-found=true'
+            ], { env: kubeEnv });
+          } catch (err) {
+            logger.warn('KCTF:REAPER', `Cleanup warning for ${appName}: ${err.message}`);
+          }
         }
+
+        reaped.push({
+          sandboxId: id,
+          teamId: sbx.teamId,
+          challengeId: sbx.challengeId,
+          expiredAt: sbx.expiresAt,
+          reapedAt: new Date(now).toISOString()
+        });
+        logger.info('KCTF:REAPER', `Reaped expired sandbox '${id}' for team '${sbx.teamId}'`);
       }
-
-      reaped.push({
-        sandboxId: id,
-        teamId: sbx.teamId,
-        challengeId: sbx.challengeId,
-        expiredAt: sbx.expiresAt,
-        reapedAt: new Date(now).toISOString()
-      });
-      logger.info('KCTF:REAPER', `Reaped expired sandbox '${id}' for team '${sbx.teamId}'`);
     }
-  }
 
-  if (reaped.length > 0) {
-    await persistSandboxRegistry();
-  }
+    if (reaped.length > 0) {
+      await persistSandboxRegistry();
+    }
 
-  return reaped;
+    return reaped;
+  });
 }
 
 /**
@@ -1337,50 +1426,56 @@ export async function terminateSandbox({
   clusterName = 'vigilante-dev',
   mock = false
 } = {}) {
-  await ensureSandboxRegistryLoaded();
-  let targetId = sandboxId;
-  let targetRecord = null;
+  return withSandboxRegistryLock(async () => {
+    await ensureSandboxRegistryLoaded({ forceDiskSync: true });
+    let targetId = sandboxId;
+    let targetRecord = null;
 
-  if (targetId && activeSandboxesRegistry.has(targetId)) {
-    targetRecord = activeSandboxesRegistry.get(targetId);
-  } else if (teamId && challengeId) {
-    for (const [id, sbx] of activeSandboxesRegistry.entries()) {
-      if (sbx.teamId === teamId && sbx.challengeId === challengeId) {
-        targetId = id;
-        targetRecord = sbx;
-        break;
+    if (targetId && activeSandboxesRegistry.has(targetId)) {
+      targetRecord = activeSandboxesRegistry.get(targetId);
+    } else if (teamId && challengeId) {
+      for (const [id, sbx] of activeSandboxesRegistry.entries()) {
+        if (sbx.teamId === teamId && sbx.challengeId === challengeId) {
+          targetId = id;
+          targetRecord = sbx;
+          break;
+        }
       }
     }
-  }
 
-  if (!targetRecord) {
-    return { success: false, message: 'Sandbox not found' };
-  }
-
-  targetRecord.status = 'TERMINATED';
-  activeSandboxesRegistry.delete(targetId);
-  await persistSandboxRegistry();
-
-  if (!mock) {
-    const safeTeam = targetRecord.teamId.toLowerCase().replace(/[^a-z0-9]/g, '');
-    const safeChal = targetRecord.challengeId.toLowerCase().replace(/[^a-z0-9-]/g, '');
-    const appName = `${safeTeam}-${safeChal}`;
-    try {
-      await execa('kubectl', [
-        'delete',
-        `deployment/${appName}`,
-        `service/${appName}`,
-        `ingress/${appName}-ingress`,
-        `networkpolicy/${appName}-netpol`,
-        '-n', namespace,
-        '--context', `k3d-${clusterName}`,
-        '--ignore-not-found=true'
-      ]);
-    } catch {
-      // Ignore not found
+    if (!targetRecord) {
+      return { success: false, message: 'Sandbox not found' };
     }
-  }
 
-  logger.info('KCTF:SPAWNER', `Terminated sandbox '${targetId}'`);
-  return { success: true, sandboxId: targetId };
+    targetRecord.status = 'TERMINATED';
+    activeSandboxesRegistry.delete(targetId);
+    await persistSandboxRegistry();
+
+    if (!mock) {
+      const safeTeam = targetRecord.teamId.toLowerCase().replace(/[^a-z0-9]/g, '');
+      const safeChal = targetRecord.challengeId.toLowerCase().replace(/[^a-z0-9-]/g, '');
+      const appName = `${safeTeam}-${safeChal}`;
+      const targetNs = targetRecord.namespace || namespace;
+      const targetCluster = targetRecord.clusterName || clusterName;
+      const kubeEnv = getKubeExecutionEnv();
+      const ctxArgs = await getClusterContextArgs(targetCluster);
+      try {
+        await execa('kubectl', [
+          'delete',
+          `deployment/${appName}`,
+          `service/${appName}`,
+          `ingress/${appName}-ingress`,
+          `networkpolicy/${appName}-netpol`,
+          '-n', targetNs,
+          ...ctxArgs,
+          '--ignore-not-found=true'
+        ], { env: kubeEnv });
+      } catch {
+        // Ignore not found
+      }
+    }
+
+    logger.info('KCTF:SPAWNER', `Terminated sandbox '${targetId}'`);
+    return { success: true, sandboxId: targetId };
+  });
 }

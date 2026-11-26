@@ -18,10 +18,14 @@ export interface LintIssue {
 export function lintRuleset(state: DesiredState): LintIssue[] {
   const issues: LintIssue[] = [];
 
-  // 1. Check for missing interface references
+  // 1. Check for missing interface references (including VPN pseudo-interfaces when used in rules)
   const validIfaces = new Set(state.interfaces.map((i) => i.name));
   validIfaces.add('any');
   validIfaces.add('floating');
+  validIfaces.add('wg0');
+  validIfaces.add('wireguard');
+  validIfaces.add('tailscale');
+  validIfaces.add('tailscale0');
 
   for (const rule of state.rules) {
     if (!validIfaces.has(rule.interface)) {
@@ -94,9 +98,11 @@ export function lintRuleset(state: DesiredState): LintIssue[] {
         });
       }
 
-      // Check if current is a shadowing catch-all (must have quick !== false)
+      // Check if current is a shadowing catch-all (must have quick !== false and non-inverted any endpoints)
       if (
         current.quick !== false &&
+        !current.invertSource &&
+        !current.invertDestination &&
         current.protocol === 'any' &&
         (current.source === 'any' || !current.source) &&
         (current.destination === 'any' || !current.destination) &&
@@ -116,6 +122,8 @@ export function lintRuleset(state: DesiredState): LintIssue[] {
           prev.protocol === current.protocol &&
           prev.source === current.source &&
           prev.destination === current.destination &&
+          Boolean(prev.invertSource) === Boolean(current.invertSource) &&
+          Boolean(prev.invertDestination) === Boolean(current.invertDestination) &&
           normPort(prev.sourcePort) === normPort(current.sourcePort) &&
           normPort(prev.destinationPort) === normPort(current.destinationPort) &&
           prev.direction === current.direction
@@ -158,7 +166,9 @@ export function lintRuleset(state: DesiredState): LintIssue[] {
     if (!wanIfaces.has(rule.interface)) continue;
     if (rule.protocol !== 'tcp' && rule.protocol !== 'tcp_udp' && rule.protocol !== 'any') continue;
 
-    const isWildcardSrc = !rule.source || rule.source === 'any' || rule.source === '0.0.0.0/0' || rule.source === '::/0';
+    const isWildcardSrc = rule.invertSource
+      ? Boolean(rule.source && rule.source !== 'any' && rule.source !== '0.0.0.0/0' && rule.source !== '::/0')
+      : !rule.source || rule.source === 'any' || rule.source === '0.0.0.0/0' || rule.source === '::/0';
     if (isWildcardSrc) {
       const dport = (rule.destinationPort || '').trim().toLowerCase();
       let touchesMgmt = false;

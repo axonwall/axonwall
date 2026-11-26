@@ -194,25 +194,25 @@ func (l *limitedBuffer) Write(p []byte) (int, error) {
 func resolveKubectlBinary() (bin string, baseArgs []string, env []string, err error) {
 	env = os.Environ()
 	if os.Getenv("KUBECONFIG") == "" {
-		if _, statErr := os.Stat("/etc/rancher/k3s/k3s.yaml"); statErr == nil {
-			env = append(env, "KUBECONFIG=/etc/rancher/k3s/k3s.yaml")
+		kubeCfg := filepath.Join(k3sEtcDir, "k3s.yaml")
+		if _, statErr := os.Stat(kubeCfg); statErr != nil {
+			kubeCfg = "/etc/rancher/k3s/k3s.yaml"
+		}
+		if _, statErr := os.Stat(kubeCfg); statErr == nil {
+			env = append(env, "KUBECONFIG="+kubeCfg)
 		}
 	}
-	if path, lookErr := exec.LookPath("kubectl"); lookErr == nil {
-		return path, nil, env, nil
-	}
-	if path, lookErr := exec.LookPath("k3s"); lookErr == nil {
-		return path, []string{"kubectl"}, env, nil
-	}
-	// Bundled core-k3s plugin paths last: the daemon's PATH never
-	// contains the plugin bin dir, so on an appliance whose only
-	// kubectl/k3s is the staged plugin tree the LookPath attempts
-	// above both miss. The plugin kubectl symlink is preferred
-	// over `k3s kubectl`, matching resolveCoreK3sKubectl in k3s.go.
+	// Match k3s.go resolution precedence: bundled core-k3s plugin binaries shadow PATH binaries.
 	if path := filepath.Join(coreK3sBinDir(), "kubectl"); isExecutableFile(path) {
 		return path, nil, env, nil
 	}
 	if path := coreK3sBinaryPath(); isExecutableFile(path) {
+		return path, []string{"kubectl"}, env, nil
+	}
+	if path, kErr := resolveCoreK3sKubectl(); kErr == nil {
+		return path, nil, env, nil
+	}
+	if path, kErr := resolveK3sBinary(); kErr == nil {
 		return path, []string{"kubectl"}, env, nil
 	}
 	return "", nil, nil, fmt.Errorf("kubectl/k3s binary not found on system")
@@ -3502,6 +3502,7 @@ func (m *K3sManager) StreamPodLogsSSE(w http.ResponseWriter, r *http.Request) {
 	for {
 		select {
 		case <-ctx.Done():
+			pipeWG.Wait()
 			_ = cmd.Wait()
 			return
 		case <-ticker.C:
@@ -3509,6 +3510,7 @@ func (m *K3sManager) StreamPodLogsSSE(w http.ResponseWriter, r *http.Request) {
 			flusher.Flush()
 		case item, open := <-lineCh:
 			if !open {
+				pipeWG.Wait()
 				waitErr := cmd.Wait()
 				if waitErr != nil && !errors.Is(ctx.Err(), context.Canceled) {
 					sendSSE("done", map[string]string{"status": "closed", "error": waitErr.Error()})
@@ -3748,6 +3750,9 @@ func (m *K3sManager) ExecuteK3sAction(ctx context.Context, req K3sActionRequest)
 
 	case "apply-yaml":
 		if err := validateYAMLDocuments(req.Yaml); err != nil {
+			return nil, err
+		}
+		if err := validateK3sManifest(req.Yaml); err != nil {
 			return nil, err
 		}
 		args := []string{"apply", "-f", "-"}

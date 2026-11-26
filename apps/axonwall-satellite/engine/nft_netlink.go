@@ -3,12 +3,14 @@ package engine
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 )
 
 // Netfilter Netlink & nf_tables kernel ABI constants (from <linux/netfilter/nfnetlink.h> and <linux/netfilter/nf_tables.h>)
@@ -2196,10 +2198,20 @@ func sendNetfilterNetlinkBatch(payload []byte) error {
 	// answers is a failure, not a success. The kernel sends exactly
 	// one NLMSG_ERROR verdict per batch — errno 0 for an acked batch,
 	// negative errno for a rejected one.
+	deadline := time.Now().Add(2 * time.Second)
 	buf := make([]byte, 8192)
 	for {
+		rem := time.Until(deadline)
+		if rem <= 0 {
+			return fmt.Errorf("timed out waiting for kernel acknowledgement of nftables batch: deadline exceeded")
+		}
+		tv := syscall.NsecToTimeval(rem.Nanoseconds())
+		_ = syscall.SetsockoptTimeval(fd, syscall.SOL_SOCKET, syscall.SO_RCVTIMEO, &tv)
 		n, _, recvErr := syscall.Recvfrom(fd, buf, 0)
 		if recvErr != nil {
+			if errors.Is(recvErr, syscall.EINTR) && time.Now().Before(deadline) {
+				continue
+			}
 			return fmt.Errorf("timed out waiting for kernel acknowledgement of nftables batch: %w", recvErr)
 		}
 		if n < syscall.NLMSG_HDRLEN {

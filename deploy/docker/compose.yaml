@@ -34,6 +34,9 @@ services:
       #   JWT_SECRET=$(openssl rand -hex 32)
       - JWT_SECRET=${JWT_SECRET:?JWT_SECRET must be set (see comment above)}
       - AXONWALL_AGENT_TOKEN=${AXONWALL_AGENT_TOKEN:?AXONWALL_AGENT_TOKEN must be set}
+      - AXONWALL_ZTP_TOKEN=${AXONWALL_ZTP_TOKEN:?AXONWALL_ZTP_TOKEN must be set}
+      - LOCAL_ADMIN_USER=${LOCAL_ADMIN_USER:-admin}
+      - LOCAL_ADMIN_PASSWORD=${LOCAL_ADMIN_PASSWORD:?LOCAL_ADMIN_PASSWORD must be set}
       - AGENT_SOCKET=/run/axonwalld/agent.sock
       - AGENT_API_SOCKET=/run/axonwalld/agent-api.sock
       - LDAP_URL=ldap://openldap:389
@@ -46,9 +49,11 @@ services:
       - CLICKHOUSE_DB=axonwall
       - VICTORIAMETRICS_URL=http://victoriametrics:8428
       - VICTORIALOGS_URL=http://victorialogs:9428
-      - CONTROLLER_URL=http://axonwall-controller:2966
+      - CONTROLLER_URL=https://axonwall-controller:2966
+      - NODE_EXTRA_CA_CERTS=/etc/axonwall/certs/ca.crt
     volumes:
       - /run/axonwalld:/run/axonwalld
+      - axonwall_certs:/etc/axonwall/certs:ro
     depends_on:
       - openldap
       - supabase-db
@@ -68,13 +73,16 @@ services:
     environment:
       - NODE_ENV=production
       - CONTROLLER_PORT=2966
+      - JWT_SECRET=${JWT_SECRET:?JWT_SECRET must be set}
+      - AXONWALL_FLEET_ENABLED=1
       - AXONWALL_AGENT_TOKEN=${AXONWALL_AGENT_TOKEN:?AXONWALL_AGENT_TOKEN must be set}
       - AXONWALL_AGENT_API_SOCK=/run/axonwalld/agent-api.sock
       - AXONWALL_VM_IMPORT_URL=http://victoriametrics:8428/api/v1/import/prometheus
       - AXONWALL_VL_INSERT_URL=http://victorialogs:9428/insert/jsonline
-      - AXONWALL_ZTP_TOKEN=${AXONWALL_ZTP_TOKEN:-}
+      - AXONWALL_ZTP_TOKEN=${AXONWALL_ZTP_TOKEN:?AXONWALL_ZTP_TOKEN must be set}
     volumes:
       - /run/axonwalld:/run/axonwalld
+      - axonwall_certs:/etc/axonwall/certs
     depends_on:
       - victoriametrics
       - victorialogs
@@ -90,6 +98,7 @@ services:
       - LDAP_DOMAIN=axonwall.internal
       - LDAP_ADMIN_PASSWORD=${LDAP_ADMIN_PASSWORD:?LDAP_ADMIN_PASSWORD must be set}
     volumes:
+      - ../ldap/bootstrap.ldif:/container/service/slapd/assets/config/bootstrap/ldif/custom/50-bootstrap.ldif:ro
       - openldap_data:/var/lib/ldap
       - openldap_config:/etc/ldap/slapd.d
 
@@ -144,6 +153,7 @@ services:
       - vl_data:/vl-data
 
 volumes:
+  axonwall_certs:
   openldap_data:
   openldap_config:
   supabase_data:

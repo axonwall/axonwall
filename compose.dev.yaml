@@ -4,7 +4,7 @@ services:
     container_name: axonwall-ldap-dev
     environment:
       LDAP_ORGANISATION: "Axonwall"
-      LDAP_DOMAIN: "axonwall.local"
+      LDAP_DOMAIN: "axonwall.internal"
       LDAP_ADMIN_PASSWORD: "axonwalladmin"
       LDAP_CONFIG_PASSWORD: "axonwallconfig"
     ports:

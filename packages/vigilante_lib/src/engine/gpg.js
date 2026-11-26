@@ -224,31 +224,49 @@ export async function verifyFileSignature(filePath, signaturePath, { gnupgHome =
   logger.info('GPG:VERIFY', `Verifying signature ${signaturePath} on ${filePath}`);
 
   try {
-    const { stdout, stderr } = await execa(gpgBin, ['--batch', '--verify', '--', signaturePath, filePath], { env });
+    const { stdout, stderr } = await execa(gpgBin, ['--batch', '--status-fd', '1', '--verify', '--', signaturePath, filePath], { env });
     const fullOutput = `${stdout}\n${stderr}`;
 
-    const isGood = fullOutput.includes('Good signature from') || fullOutput.includes('signature valid');
+    let hasGoodSig = false;
+    let hasValidSig = false;
+    let hasFailureMarker = false;
     let signerUid = null;
     let fingerprint = null;
-    let keyId = null;
     let signedAt = null;
 
-    const signerMatch = fullOutput.match(/Good signature from "([^"]+)"/);
-    if (signerMatch) signerUid = signerMatch[1];
+    for (const line of String(stdout || '').split('\n')) {
+      const m = line.match(/^\[GNUPG:\]\s+(\S+)\s*(.*)$/);
+      if (!m) continue;
+      const [, tag, rest] = m;
+      if (tag === 'BADSIG' || tag === 'ERRSIG' || tag === 'EXPSIG' || tag === 'EXPKEYSIG' || tag === 'REVKEYSIG' || tag === 'NODATA') {
+        hasFailureMarker = true;
+      } else if (tag === 'GOODSIG') {
+        hasGoodSig = true;
+        const firstSpace = rest.indexOf(' ');
+        if (firstSpace >= 0) {
+          signerUid = rest.slice(firstSpace + 1).trim() || null;
+        }
+      } else if (tag === 'VALIDSIG') {
+        hasValidSig = true;
+        const parts = rest.trim().split(/\s+/);
+        if (parts[0]) fingerprint = parts[0];
+        if (parts[1]) signedAt = parts[1];
+      }
+    }
 
-    const keyMatch = fullOutput.match(/using [A-Z0-9]+ key ([A-Fa-f0-9]+)/);
-    if (keyMatch) fingerprint = keyMatch[1];
-
-    const timeMatch = fullOutput.match(/Signature made ([^\n]+)/);
-    if (timeMatch) signedAt = timeMatch[1];
+    const isGood = hasGoodSig && hasValidSig && !hasFailureMarker;
+    if (!signedAt) {
+      const timeMatch = fullOutput.match(/Signature made ([^\n]+)/);
+      if (timeMatch) signedAt = timeMatch[1];
+    }
 
     return {
-      success: true,
+      success: isGood,
       isValid: isGood,
-      signerUid,
-      fingerprint,
-      keyId: fingerprint ? fingerprint.slice(-16) : null,
-      signedAt,
+      signerUid: isGood ? signerUid : null,
+      fingerprint: isGood ? fingerprint : null,
+      keyId: isGood && fingerprint ? fingerprint.slice(-16) : null,
+      signedAt: isGood ? signedAt : null,
       output: fullOutput.trim()
     };
   } catch (err) {

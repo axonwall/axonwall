@@ -564,7 +564,13 @@ export function compileLibvirtDomainXml(vm: VirtualMachine, opts?: VirtCompileOp
   }
   xml.push(`  </os>`);
   xml.push(`  <features><acpi/><apic/>${secBoot ? "<smm state='on'/>" : ''}</features>`);
-  xml.push(`  <cpu mode='${vm.cpuType === 'host' ? 'host-passthrough' : 'custom'}'>`);
+  if (vm.cpuType === 'host') {
+    xml.push(`  <cpu mode='host-passthrough'>`);
+  } else {
+    const safeCpuModel = escapeXmlAttr(vm.cpuType || 'x86-64-v2-AES');
+    xml.push(`  <cpu mode='custom' match='exact'>`);
+    xml.push(`    <model fallback='allow'>${safeCpuModel}</model>`);
+  }
   xml.push(`    <topology sockets='${Math.max(1, Math.trunc(vm.sockets || 1))}' dies='1' cores='${Math.max(1, Math.trunc(vm.cores || 1))}' threads='1'/>`);
   xml.push(`  </cpu>`);
   xml.push(`  <devices>`);
@@ -575,9 +581,9 @@ export function compileLibvirtDomainXml(vm: VirtualMachine, opts?: VirtCompileOp
       const pool = disk.pool || 'tank';
       const safePool = SAFE_POOL_REGEX.test(pool) && !pool.includes('..') ? pool : 'tank';
       const zvolPath = disk.zvol || `/dev/zvol/${safePool}/vms/vm-${vmidNum}-disk-${idx}`;
-      const devPrefix = disk.bus === 'scsi' ? 'sd' : disk.bus === 'nvme' ? 'nvme0n' : 'vd';
-      const targetDev = disk.bus === 'nvme' ? `${devPrefix}${idx + 1}` : `${devPrefix}${String.fromCharCode(97 + idx)}`;
       const targetBus = disk.bus === 'nvme' ? 'virtio' : disk.bus || 'virtio';
+      const devPrefix = targetBus === 'scsi' || targetBus === 'sata' ? 'sd' : targetBus === 'ide' ? 'hd' : 'vd';
+      const targetDev = `${devPrefix}${String.fromCharCode(97 + idx)}`;
       xml.push(`    <disk type='block' device='disk'>`);
       xml.push(`      <driver name='qemu' type='raw' cache='${escapeXmlAttr(disk.cache || 'none')}' discard='${disk.discard ? 'unmap' : 'ignore'}'/>`);
       xml.push(`      <source dev='${escapeXmlAttr(zvolPath)}'/>`);

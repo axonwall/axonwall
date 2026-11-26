@@ -64,9 +64,22 @@ type FlowStore struct {
 	rollups1m    map[int64]*rollupBucket
 	rollups5m    map[int64]*rollupBucket
 	rollups1h    map[int64]*rollupBucket
+	chGen        uint64
 	chConn       driver.Conn
 	chConnected  bool
 	chTableFQN   string
+}
+
+const maxFlowStorePending = 100000
+
+func capFlowQueue(q []FlowRecord, max int) []FlowRecord {
+	if max <= 0 || len(q) <= max {
+		return q
+	}
+	drop := len(q) - max
+	trimmed := make([]FlowRecord, max)
+	copy(trimmed, q[drop:])
+	return trimmed
 }
 
 func NewFlowStore(initial NetFlowStoragePayload) *FlowStore {
@@ -119,10 +132,13 @@ func (s *FlowStore) Configure(cfg NetFlowStoragePayload) {
 			s.pushHotLocked(rec)
 		}
 	}
+	s.chGen++
+	chGen := s.chGen
 	if s.chConn != nil && (!cfg.ClickHouse.Enabled || cfg.Mode == "local") {
 		_ = s.chConn.Close()
 		s.chConn = nil
 		s.chConnected = false
+		s.chTableFQN = ""
 	}
 	s.mu.Unlock()
 
@@ -130,11 +146,11 @@ func (s *FlowStore) Configure(cfg NetFlowStoragePayload) {
 		s.loadManifest()
 	}
 	if cfg.ClickHouse.Enabled && (cfg.Mode == "clickhouse" || cfg.Mode == "hybrid") {
-		go s.initClickHouse(cfg.ClickHouse)
+		go s.initClickHouse(cfg.ClickHouse, chGen)
 	}
 }
 
-func (s *FlowStore) initClickHouse(ch NetFlowClickHousePayload) {
+func (s *FlowStore) initClickHouse(ch NetFlowClickHousePayload, gen uint64) {
 	addr := strings.TrimSpace(ch.URL)
 	proto := clickhouse.Native
 	if strings.HasPrefix(addr, "http://") || strings.HasPrefix(addr, "https://") {
@@ -155,18 +171,45 @@ func (s *FlowStore) initClickHouse(ch NetFlowClickHousePayload) {
 	if tbl == "" {
 		tbl = "netflow_flows"
 	}
+	dbSafe := sanitizeClickHouseIdentWithDefault(db, "axonwall")
+	tableSafe := sanitizeClickHouseIdentWithDefault(tbl, "netflow_flows")
+	password := ch.Password
+	if password == "" {
+		password = os.Getenv("CLICKHOUSE_PASSWORD")
+	}
 	ttlDays := ch.TTLDays
 	if ttlDays <= 0 {
 		ttlDays = 30
+	}
+
+	if dbSafe != "default" {
+		if bootConn, bootErr := clickhouse.Open(&clickhouse.Options{
+			Addr:     []string{addr},
+			Protocol: proto,
+			Auth: clickhouse.Auth{
+				Database: "default",
+				Username: ch.Username,
+				Password: password,
+			},
+			DialTimeout: 3 * time.Second,
+			MaxOpenConns: 1,
+		}); bootErr == nil {
+			bCtx, bCancel := context.WithTimeout(context.Background(), 4*time.Second)
+			if bootConn.Ping(bCtx) == nil {
+				_ = bootConn.Exec(bCtx, fmt.Sprintf("CREATE DATABASE IF NOT EXISTS %s", dbSafe))
+			}
+			bCancel()
+			_ = bootConn.Close()
+		}
 	}
 
 	conn, err := clickhouse.Open(&clickhouse.Options{
 		Addr:     []string{addr},
 		Protocol: proto,
 		Auth: clickhouse.Auth{
-			Database: db,
+			Database: dbSafe,
 			Username: ch.Username,
-			Password: ch.Password,
+			Password: password,
 		},
 		DialTimeout: 3 * time.Second,
 		MaxOpenConns: 4,
@@ -183,8 +226,11 @@ func (s *FlowStore) initClickHouse(ch NetFlowClickHousePayload) {
 		log.Printf("[NetFlow] ClickHouse ping warning (%s): %v", addr, err)
 		return
 	}
-	tableSafe := sanitizeClickHouseIdent(tbl)
-	dbSafe := sanitizeClickHouseIdent(db)
+	if err := conn.Exec(ctx, fmt.Sprintf("CREATE DATABASE IF NOT EXISTS %s", dbSafe)); err != nil {
+		_ = conn.Close()
+		log.Printf("[NetFlow] ClickHouse database init warning (%s): %v", dbSafe, err)
+		return
+	}
 	ddl := fmt.Sprintf(`
 	CREATE TABLE IF NOT EXISTS %s.%s (
 		timestamp DateTime64(3),
@@ -246,6 +292,11 @@ func (s *FlowStore) initClickHouse(ch NetFlowClickHousePayload) {
 	}
 
 	s.mu.Lock()
+	if s.chGen != gen {
+		s.mu.Unlock()
+		_ = conn.Close()
+		return
+	}
 	if s.chConn != nil {
 		_ = s.chConn.Close()
 	}
@@ -255,7 +306,7 @@ func (s *FlowStore) initClickHouse(ch NetFlowClickHousePayload) {
 	s.mu.Unlock()
 }
 
-func sanitizeClickHouseIdent(s string) string {
+func sanitizeClickHouseIdentWithDefault(s, fallback string) string {
 	var b strings.Builder
 	for _, r := range s {
 		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' {
@@ -263,9 +314,13 @@ func sanitizeClickHouseIdent(s string) string {
 		}
 	}
 	if b.Len() == 0 {
-		return "netflow_flows"
+		return fallback
 	}
 	return b.String()
+}
+
+func sanitizeClickHouseIdent(s string) string {
+	return sanitizeClickHouseIdentWithDefault(s, "netflow_flows")
 }
 
 func (s *FlowStore) Ingest(flows []FlowRecord) {
@@ -282,10 +337,10 @@ func (s *FlowStore) Ingest(flows []FlowRecord) {
 		}
 		s.pushHotLocked(f)
 		if s.cfg.Mode != "clickhouse" {
-			s.pendingFlush = append(s.pendingFlush, f)
+			s.pendingFlush = capFlowQueue(append(s.pendingFlush, f), maxFlowStorePending)
 		}
 		if s.chConnected && s.chConn != nil && (s.cfg.Mode == "clickhouse" || s.cfg.Mode == "hybrid") {
-			s.pendingCH = append(s.pendingCH, f)
+			s.pendingCH = capFlowQueue(append(s.pendingCH, f), maxFlowStorePending)
 		}
 		bucketMs := (f.TimestampMs / 60000) * 60000
 		rb := s.rollups1m[bucketMs]
@@ -528,6 +583,9 @@ func (s *FlowStore) Flush() error {
 	if len(toWrite) > 0 && cfg.DataDir != "" && cfg.Mode != "clickhouse" {
 		if entry, err := s.writeChunkFile(cfg, toWrite); err != nil {
 			firstErr = err
+			s.mu.Lock()
+			s.pendingFlush = capFlowQueue(append(toWrite, s.pendingFlush...), maxFlowStorePending)
+			s.mu.Unlock()
 		} else {
 			s.mu.Lock()
 			s.chunks = append(s.chunks, entry)
@@ -547,13 +605,16 @@ func (s *FlowStore) Flush() error {
 			post_nat_src_ip, post_nat_dst_ip, post_nat_src_port, post_nat_dst_port,
 			tcp_flags, k3s_namespace, k3s_workload, rtt_ms, retransmits
 		)`, chTable))
-		if err == nil {
+		var chErr error
+		if err != nil {
+			chErr = err
+		} else {
 			for _, f := range toCH {
 				nodeID := f.HostID
 				if nodeID == "" {
 					nodeID = f.ExporterIP
 				}
-				_ = batch.Append(
+				if appErr := batch.Append(
 					time.UnixMilli(f.TimestampMs),
 					f.Version,
 					f.ExporterIP,
@@ -589,13 +650,29 @@ func (s *FlowStore) Flush() error {
 					f.K3sWorkload,
 					f.RttMs,
 					f.Retransmits,
-				)
+				); appErr != nil && chErr == nil {
+					chErr = appErr
+				}
 			}
-			if sendErr := batch.Send(); sendErr != nil && firstErr == nil {
-				firstErr = sendErr
+			if chErr == nil {
+				if sendErr := batch.Send(); sendErr != nil {
+					chErr = sendErr
+				}
+			} else {
+				_ = batch.Abort()
 			}
 		}
 		cancel()
+		if chErr != nil {
+			if firstErr == nil {
+				firstErr = chErr
+			}
+			s.mu.Lock()
+			if s.chConnected && s.chConn != nil {
+				s.pendingCH = capFlowQueue(append(toCH, s.pendingCH...), maxFlowStorePending)
+			}
+			s.mu.Unlock()
+		}
 	}
 
 	s.mu.Lock()
@@ -1738,6 +1815,9 @@ func (p fqlPred) Eval(f *FlowRecord) bool {
 
 	switch p.field {
 	case "ip":
+		if p.op == "!=" {
+			return matchIPField(f.SrcIP, p) && matchIPField(f.DstIP, p)
+		}
 		return matchIPField(f.SrcIP, p) || matchIPField(f.DstIP, p)
 	case "src", "src_ip":
 		return matchIPField(f.SrcIP, p)
@@ -1750,8 +1830,14 @@ func (p fqlPred) Eval(f *FlowRecord) bool {
 	case "exporter", "exporter_ip":
 		return matchIPField(f.ExporterIP, p)
 	case "host":
+		if p.op == "!=" {
+			return matchStrField(f.SrcHost, p) && matchStrField(f.DstHost, p) && matchStrField(f.HostName, p)
+		}
 		return matchStrField(f.SrcHost, p) || matchStrField(f.DstHost, p) || matchStrField(f.HostName, p)
 	case "host_id", "node", "node_id":
+		if p.op == "!=" {
+			return matchStrField(f.HostID, p) && matchStrField(f.HostName, p) && matchIPField(f.ExporterIP, p)
+		}
 		return matchStrField(f.HostID, p) || matchStrField(f.HostName, p) || matchIPField(f.ExporterIP, p)
 	case "src_port":
 		return matchNumField(float64(f.SrcPort), p)
@@ -1775,6 +1861,9 @@ func (p fqlPred) Eval(f *FlowRecord) bool {
 	case "out_if":
 		return matchStrField(f.OutIfName, p) || matchNumField(float64(f.OutIfIndex), p)
 	case "if":
+		if p.op == "!=" {
+			return matchStrField(f.InIfName, p) && matchStrField(f.OutIfName, p)
+		}
 		return matchStrField(f.InIfName, p) || matchStrField(f.OutIfName, p)
 	case "vlan":
 		return matchNumField(float64(f.VlanID), p)
@@ -1787,6 +1876,12 @@ func (p fqlPred) Eval(f *FlowRecord) bool {
 	case "pps":
 		return matchNumField(f.Pps, p)
 	case "asn":
+		if p.op == "!=" {
+			if p.isNum {
+				return matchNumField(float64(f.SrcAsn), p) && matchNumField(float64(f.DstAsn), p)
+			}
+			return matchStrField(f.SrcOrg, p) && matchStrField(f.DstOrg, p)
+		}
 		return matchNumField(float64(f.SrcAsn), p) || matchNumField(float64(f.DstAsn), p) || matchStrField(f.SrcOrg, p) || matchStrField(f.DstOrg, p)
 	case "peer_as":
 		return matchNumField(float64(f.PeerAs), p)
@@ -1798,8 +1893,14 @@ func (p fqlPred) Eval(f *FlowRecord) bool {
 		}
 		return false
 	case "country":
+		if p.op == "!=" {
+			return matchStrField(f.SrcCountry, p) && matchStrField(f.DstCountry, p)
+		}
 		return matchStrField(f.SrcCountry, p) || matchStrField(f.DstCountry, p)
 	case "city":
+		if p.op == "!=" {
+			return matchStrField(f.SrcCity, p) && matchStrField(f.DstCity, p)
+		}
 		return matchStrField(f.SrcCity, p) || matchStrField(f.DstCity, p)
 	case "direction", "dir":
 		return matchStrField(f.Direction, p)

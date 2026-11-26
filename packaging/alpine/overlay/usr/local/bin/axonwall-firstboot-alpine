@@ -690,7 +690,8 @@ chown root:axonwall-api /var/log/axonwall 2>/dev/null || true
 chmod 1770 /var/log/axonwall 2>/dev/null || true
 chmod 3775 /var/lib/axonwall /var/lib/axonwall/etc-axonwall 2>/dev/null || true
 chmod 0755 /var/lib/axonwall/home /var/lib/axonwall/ldap 2>/dev/null || true
-chmod 0750 /var/lib/axonwall/secrets /var/lib/axonwall/secrets/ldap /var/lib/axonwall/secrets/ha-pki 2>/dev/null || true
+chown -R root:root /var/lib/axonwall/secrets 2>/dev/null || true
+chmod 0700 /var/lib/axonwall/secrets /var/lib/axonwall/secrets/ldap /var/lib/axonwall/secrets/ha-pki 2>/dev/null || true
 chmod 0770 /run/axonwall 2>/dev/null || true
 if [ "$MINIMAL_MODE" != "1" ] || [ -x /usr/sbin/headscale ]; then
   mkdir -p /var/lib/axonwall/headscale /run/headscale
@@ -705,6 +706,7 @@ if id -u ldap >/dev/null 2>&1; then
   chown -R ldap:ldap /var/lib/axonwall/ldap /var/lib/openldap/run /run/openldap 2>/dev/null || true
   chmod 0750 /var/lib/axonwall/ldap /var/lib/axonwall/ldap/config /var/lib/axonwall/ldap/data /var/lib/axonwall/ldap/accesslog /var/lib/axonwall/ldap/backups 2>/dev/null || true
   chown -R root:ldap /var/lib/axonwall/secrets/ha-pki 2>/dev/null || true
+  chmod 0750 /var/lib/axonwall/secrets/ha-pki 2>/dev/null || true
 fi
 [ ! -e /etc/ldap ] && [ -d /etc/openldap ] && ln -sf /etc/openldap /etc/ldap 2>/dev/null || true
 [ ! -e /usr/lib/ldap ] && [ -d /usr/lib/openldap ] && ln -sf /usr/lib/openldap /usr/lib/ldap 2>/dev/null || true
@@ -740,14 +742,17 @@ if [ ! -s /etc/axonwall/axonwall.env ]; then
   if [ ! -f /etc/axonwall/install-mode ] && [ ! -f /var/lib/axonwall/install-mode ] && ! grep -qE 'slot=A|slot=B|root=LABEL=axon_root|root=ZFS=' /proc/cmdline 2>/dev/null; then
     ADMIN_PASS="axonwall"
   fi
+  ADMIN_USER="${LOCAL_ADMIN_USER:-admin}"
   if [ -f /etc/axonwall/admin.env ]; then
-    INSTALL_PASS="$(grep '^LOCAL_ADMIN_PASSWORD=' /etc/axonwall/admin.env | cut -d= -f2- || true)"
+    INSTALL_USER="$(grep '^LOCAL_ADMIN_USER=' /etc/axonwall/admin.env | cut -d= -f2- | head -n1 || true)"
+    [ -n "$INSTALL_USER" ] && ADMIN_USER="$INSTALL_USER"
+    INSTALL_PASS="$(grep '^LOCAL_ADMIN_PASSWORD=' /etc/axonwall/admin.env | cut -d= -f2- | head -n1 || true)"
     [ -n "$INSTALL_PASS" ] && ADMIN_PASS="$INSTALL_PASS"
   fi
 
   cat << ENV_EOF > /etc/axonwall/axonwall.env
 JWT_SECRET=${JWT_SECRET}
-LOCAL_ADMIN_USER=admin
+LOCAL_ADMIN_USER=${ADMIN_USER}
 LOCAL_ADMIN_PASSWORD=${ADMIN_PASS}
 AGENT_SOCKET_PATH=/run/axonwall/agent.sock
 AGENT_API_SOCKET=/run/axonwall/agent-api.sock

@@ -13,6 +13,20 @@ import { requireLedgerSigningSecret, resolveLedgerSigningSecret } from './config
 
 export const GENESIS_PREV_HASH = '0000000000000000000000000000000000000000000000000000000000000000';
 const DEFAULT_LEDGER_DIR = path.resolve(process.cwd(), '.vigilante/ledger');
+const ledgerLocks = new Map();
+
+function withLedgerLock(ledgerDir, fn) {
+  const key = path.resolve(ledgerDir);
+  const prev = ledgerLocks.get(key) || Promise.resolve();
+  const next = prev.then(fn, fn);
+  const settled = next.catch(() => {});
+  ledgerLocks.set(key, settled);
+  return next.finally(() => {
+    if (ledgerLocks.get(key) === settled) {
+      ledgerLocks.delete(key);
+    }
+  });
+}
 
 /**
  * Deterministic SHA-256 hash helper
@@ -34,13 +48,20 @@ export function hashData(data) {
  * @returns {string}
  */
 export function calculateEntryHash(entry) {
+  const signer = entry.signer && typeof entry.signer === 'object'
+    ? {
+        id: entry.signer.id || 'anonymous',
+        role: entry.signer.role || '',
+        keyId: entry.signer.keyId || ''
+      }
+    : { id: 'anonymous', role: '', keyId: '' };
   const canonicalData = {
     index: entry.index,
     timestamp: entry.timestamp,
     entryType: entry.entryType,
     payloadHash: hashData(entry.payload),
     prevHash: entry.prevHash,
-    signerId: entry.signer?.id || 'anonymous'
+    signer
   };
   return hashData(canonicalData);
 }
@@ -116,42 +137,44 @@ export async function getLedgerEntries(ledgerDir = DEFAULT_LEDGER_DIR) {
  */
 export async function appendLedgerEntry(entryType, payload, signerInfo = {}, options = {}) {
   const ledgerDir = options.ledgerDir || DEFAULT_LEDGER_DIR;
-  await fs.mkdir(ledgerDir, { recursive: true });
-  const ledgerFile = path.join(ledgerDir, 'ledger.jsonl');
+  return withLedgerLock(ledgerDir, async () => {
+    await fs.mkdir(ledgerDir, { recursive: true });
+    const ledgerFile = path.join(ledgerDir, 'ledger.jsonl');
 
-  const existingEntries = await getLedgerEntries(ledgerDir);
-  const index = existingEntries.length;
-  const prevHash = index === 0 ? GENESIS_PREV_HASH : existingEntries[index - 1].entryHash;
+    const existingEntries = await getLedgerEntries(ledgerDir);
+    const index = existingEntries.length;
+    const prevHash = index === 0 ? GENESIS_PREV_HASH : existingEntries[index - 1].entryHash;
 
-  const signer = {
-    id: signerInfo.id || 'agent:vigilante-soar',
-    role: signerInfo.role || 'IncidentCommander',
-    keyId: signerInfo.keyId || 'secp256k1-local'
-  };
+    const signer = {
+      id: signerInfo.id || 'agent:vigilante-soar',
+      role: signerInfo.role || 'IncidentCommander',
+      keyId: signerInfo.keyId || 'secp256k1-local'
+    };
 
-  const draftEntry = {
-    index,
-    timestamp: new Date().toISOString(),
-    entryType: String(entryType || 'GENERIC_AUDIT'),
-    payload,
-    signer,
-    prevHash
-  };
+    const draftEntry = {
+      index,
+      timestamp: new Date().toISOString(),
+      entryType: String(entryType || 'GENERIC_AUDIT'),
+      payload,
+      signer,
+      prevHash
+    };
 
-  const entryHash = calculateEntryHash(draftEntry);
-  // Fail closed: an entry signed with a source-shipped default secret is
-  // forgeable by anyone, so refuse to append without a provisioned key.
-  const secret = requireLedgerSigningSecret(options.signingSecret);
-  const signature = crypto.createHmac('sha256', secret).update(entryHash).digest('hex');
+    const entryHash = calculateEntryHash(draftEntry);
+    // Fail closed: an entry signed with a source-shipped default secret is
+    // forgeable by anyone, so refuse to append without a provisioned key.
+    const secret = requireLedgerSigningSecret(options.signingSecret);
+    const signature = crypto.createHmac('sha256', secret).update(entryHash).digest('hex');
 
-  const finalEntry = {
-    ...draftEntry,
-    entryHash,
-    signature
-  };
+    const finalEntry = {
+      ...draftEntry,
+      entryHash,
+      signature
+    };
 
-  await fs.appendFile(ledgerFile, JSON.stringify(finalEntry) + '\n', 'utf8');
-  return finalEntry;
+    await fs.appendFile(ledgerFile, JSON.stringify(finalEntry) + '\n', { mode: 0o600, encoding: 'utf8' });
+    return finalEntry;
+  });
 }
 
 /**
@@ -349,7 +372,7 @@ export async function exportLegalChainOfCustody(incidentId, ledgerDir = DEFAULT_
     return e.payload.incidentId === incidentId || JSON.stringify(e.payload).includes(incidentId);
   });
 
-  const targetEntries = relevant.length > 0 ? relevant : entries;
+  const targetEntries = relevant;
   const { root } = buildMerkleRoot(targetEntries);
 
   const markdown = [

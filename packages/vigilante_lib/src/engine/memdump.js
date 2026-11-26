@@ -8,7 +8,7 @@ import fs from 'node:fs/promises';
 import fsSync from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { getVigilanteEvidenceDir } from './config.js';
+import { getVigilanteEvidenceDir, sanitizePathComponent, resolvePathInside } from './config.js';
 import { logger } from '../utils/logger.js';
 
 /**
@@ -115,7 +115,7 @@ export function detectMemoryAnomalies(segments = [], options = {}) {
     }
   }
 
-  logger.info('MEMDUMP', `Memory anomaly scan evaluated ${segments.length} segments, flagged ${anomalies.length} findings.`);
+  logger.info('MEMDUMP', `Memory anomaly scan evaluated ${segList.length} segments, flagged ${anomalies.length} findings.`);
   return anomalies;
 }
 
@@ -177,27 +177,30 @@ export function extractProcessStrings(buffer, minLength = 4) {
  */
 export async function saveMemoryArtifact(podName, pid, metadata = {}, dumpBuffer = null) {
   const baseEvidenceDir = getVigilanteEvidenceDir();
-  const memDir = path.join(baseEvidenceDir, 'memdumps', podName);
+  const safePod = sanitizePathComponent(String(podName || 'unknown-pod'), 'podName');
+  const safePid = sanitizePathComponent(String(pid ?? '0'), 'pid');
+  const memRoot = path.join(baseEvidenceDir, 'memdumps');
+  const memDir = resolvePathInside(memRoot, safePod);
 
   if (!fsSync.existsSync(memDir)) {
     await fs.mkdir(memDir, { recursive: true });
   }
 
   const timestamp = Date.now();
-  const artifactId = `mem-${podName}-pid${pid}-${timestamp}`;
+  const artifactId = `mem-${safePod}-pid${safePid}-${timestamp}`;
 
   let dumpFile = null;
   let sha256 = null;
 
   if (dumpBuffer) {
-    dumpFile = path.join(memDir, `${artifactId}.raw`);
+    dumpFile = resolvePathInside(memDir, `${artifactId}.raw`);
     await fs.writeFile(dumpFile, dumpBuffer);
     sha256 = crypto.createHash('sha256').update(dumpBuffer).digest('hex');
   }
 
   const record = {
     artifactId,
-    podName,
+    podName: safePod,
     pid,
     sha256,
     dumpFile,
@@ -206,7 +209,7 @@ export async function saveMemoryArtifact(podName, pid, metadata = {}, dumpBuffer
     timestamp: new Date().toISOString()
   };
 
-  const metadataPath = path.join(memDir, `${artifactId}.json`);
+  const metadataPath = resolvePathInside(memDir, `${artifactId}.json`);
   await fs.writeFile(metadataPath, JSON.stringify(record, null, 2), 'utf8');
 
   logger.info('MEMDUMP', `Saved memory artifact record to ${metadataPath}`);

@@ -166,19 +166,22 @@ export function calculateConsensusScore(opinions = [], quorumThreshold = 75) {
 export function conductAgentDebateRound(opinions = [], proposedAction = {}) {
   return opinions.map(op => {
     const isReversible = proposedAction.action !== 'DELETE_POD' && proposedAction.action !== 'PURGE_DATA';
-    let revisedConfidence = op.confidence;
+    let revisedVerdict = op.verdict;
+    let revisedConfidence = op.confidence ?? 75;
     let rebuttal = null;
 
     if (op.role === WARROOM_ROLES.SRE_RELIABILITY && !isReversible) {
-      revisedConfidence = Math.max(20, op.confidence - 30);
+      revisedVerdict = 'MONITOR';
+      revisedConfidence = Math.min(100, revisedConfidence + 15);
       rebuttal = 'Action is non-reversible; risks production outage. Requesting shadow containment only.';
     } else if (op.role === WARROOM_ROLES.FORENSICS && isReversible) {
-      revisedConfidence = Math.min(100, op.confidence + 10);
+      revisedConfidence = Math.min(100, revisedConfidence + 10);
       rebuttal = 'Reversible NetworkPolicy isolation preserves in-memory volatile forensic state.';
     }
 
     return {
       ...op,
+      verdict: revisedVerdict,
       confidence: revisedConfidence,
       rebuttal
     };

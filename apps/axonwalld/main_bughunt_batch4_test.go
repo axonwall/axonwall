@@ -45,6 +45,19 @@ func batch4FakePath(t *testing.T, systemctlScript string) {
 	t.Cleanup(func() { _ = os.Setenv("PATH", orig) })
 }
 
+// allowTestBundlePrefix whitelists a test-specific TempDir prefix for
+// validateBundleFiles while keeping /tmp/ disallowed globally.
+func allowTestBundlePrefix(t *testing.T, dir string) {
+	t.Helper()
+	orig := append([]string(nil), testBundleAllowedPrefixes...)
+	prefix := filepath.Clean(dir)
+	if !strings.HasSuffix(prefix, "/") {
+		prefix += "/"
+	}
+	testBundleAllowedPrefixes = append(testBundleAllowedPrefixes, prefix)
+	t.Cleanup(func() { testBundleAllowedPrefixes = orig })
+}
+
 // batch4TestServer returns an AgentServer wired for ApplyBundle tests
 // with the owned-routes tracking file redirected to a temp dir.
 func batch4TestServer(t *testing.T) *AgentServer {
@@ -82,7 +95,9 @@ func TestBatch4ApplyBundleValidatesAllFilesBeforeWriting(t *testing.T) {
 	s := batch4TestServer(t)
 	batch4StopTimer(t, s)
 
-	goodPath := filepath.Join(t.TempDir(), "good.txt")
+	goodDir := t.TempDir()
+	allowTestBundlePrefix(t, goodDir)
+	goodPath := filepath.Join(goodDir, "good.txt")
 	req := &pb.ApplyBundleRequest{
 		JobId:                 "batch4-h2",
 		NftScript:             batch4NftScript,
@@ -109,7 +124,9 @@ func TestBatch4ApplyBundleSubsystemFailureFailsBundle(t *testing.T) {
 	s := batch4TestServer(t)
 	batch4StopTimer(t, s)
 
-	sdwanPath := filepath.Join(t.TempDir(), "sdwan_config.json")
+	sdwanDir := t.TempDir()
+	allowTestBundlePrefix(t, sdwanDir)
+	sdwanPath := filepath.Join(sdwanDir, "sdwan_config.json")
 	req := &pb.ApplyBundleRequest{
 		JobId:                 "batch4-m3",
 		NftScript:             batch4NftScript,

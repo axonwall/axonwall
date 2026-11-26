@@ -193,7 +193,7 @@ export function compileKeaDhcp4(
           ],
           'option-data': optionData,
           reservations: sub.staticMappings.map((m) => ({
-            'hw-address': m.mac,
+            'hw-address': m.mac.trim().replace(/-/g, ':').toLowerCase(),
             'ip-address': m.ip,
             hostname: m.hostname || undefined,
           })),

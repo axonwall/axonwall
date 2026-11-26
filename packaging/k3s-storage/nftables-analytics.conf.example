@@ -29,9 +29,14 @@ table inet k3s_host_filter {
         tcp dport { 22, 6443, 10250 } accept
         udp dport { 8472, 51820, 51821 } accept
 
-        # Opt-in Axonwall Analytics ingest (HTTPS UI/VM/VL + IPFIX TLS/TCP + NetFlow/IPFIX/sFlow UDP)
+        # Opt-in Axonwall Analytics ingest:
+        #   - TCP 80/443 (Ingress), 2966 (controller if enabled), 3000 (UI LoadBalancer),
+        #     4739 (IPFIX TCP), 30000-32767 (optional NodePort services)
+        #   - UDP 2055 (NetFlow), 4739 (IPFIX UDP), 6343 (sFlow)
+        # Note: ClickHouse (8123), VictoriaMetrics (8428), and VictoriaLogs (9428) remain
+        # ClusterIP-only by default unless explicitly exposed via Ingress (/vm, /vl) or NodePort.
         # Restrict source CIDRs as appropriate for your management/WireGuard overlay:
-        ip saddr { 10.8.0.0/24, 10.99.0.0/24, 192.168.0.0/16 } tcp dport { 443, 3000, 4739, 8123, 8428, 9428 } accept
+        ip saddr { 10.8.0.0/24, 10.99.0.0/24, 192.168.0.0/16 } tcp dport { 80, 443, 2966, 3000, 4739, 30000-32767 } accept
         ip saddr { 10.8.0.0/24, 10.99.0.0/24, 192.168.0.0/16 } udp dport { 2055, 4739, 6343 } accept
     }
 

@@ -117,19 +117,47 @@ export function importMikrotikConfig(rscContent: string): ImportReport {
 
     // 3. Firewall Filter Rules
     else if (currentSection.startsWith('/ip firewall filter')) {
-      const action = kv.action === 'accept' ? 'pass' : kv.action === 'reject' ? 'reject' : 'block';
+      const rosAction = (kv.action || 'accept').toLowerCase();
+      if (['fasttrack-connection', 'log', 'passthrough', 'jump', 'return'].includes(rosAction)) {
+        warnings.push(
+          `Skipped RouterOS filter rule with action="${rosAction}"${kv.comment ? ` ("${kv.comment}")` : ''}: non-terminal or RouterOS-specific flow control is not translated into an Axonwall block/pass rule.`,
+        );
+        continue;
+      }
+
+      if (kv['connection-state']) {
+        const states = kv['connection-state']
+          .split(',')
+          .map((s) => s.trim().toLowerCase())
+          .filter(Boolean);
+        if (states.length > 0 && !states.includes('new') && !states.includes('invalid')) {
+          warnings.push(
+            `Skipped RouterOS stateful connection-state="${kv['connection-state']}" rule${kv.comment ? ` ("${kv.comment}")` : ''}: Axonwall automatically emits ct state established,related accept.`,
+          );
+          continue;
+        }
+      }
+
+      const action = rosAction === 'accept' ? 'pass' : rosAction === 'reject' ? 'reject' : 'block';
       let proto: 'any' | 'tcp' | 'udp' | 'tcp_udp' | 'icmp' = 'any';
       if (kv.protocol === 'tcp') proto = 'tcp';
       else if (kv.protocol === 'udp') proto = 'udp';
       else if (kv.protocol === 'icmp') proto = 'icmp';
 
-      let iface = 'any';
-      if (kv['in-interface']) {
-        const inIface = kv['in-interface'].toLowerCase();
-        if (inIface.includes('wan') || inIface.includes('ether1')) iface = 'wan';
-        else if (inIface.includes('lan') || inIface.includes('ether2') || inIface.includes('bridge')) iface = 'lan';
-        else iface = inIface;
-      }
+      const isOutputChain = (kv.chain || '').toLowerCase() === 'output';
+      const direction: 'in' | 'out' = isOutputChain ? 'out' : 'in';
+
+      const mapMikrotikIface = (rawName?: string): string => {
+        if (!rawName) return 'any';
+        const lower = rawName.toLowerCase();
+        if (lower.includes('wan') || lower.includes('ether1')) return 'wan';
+        if (lower.includes('lan') || lower.includes('ether2') || lower.includes('bridge')) return 'lan';
+        return lower;
+      };
+
+      const iface = isOutputChain
+        ? mapMikrotikIface(kv['out-interface'] || kv['in-interface'])
+        : mapMikrotikIface(kv['in-interface']);
 
       let rawSrc = kv['src-address'] || (kv['src-address-list'] ? (kv['src-address-list'].startsWith('!') ? `!$${kv['src-address-list'].slice(1).replace(/[^a-zA-Z0-9_]/g, '_')}` : `$${kv['src-address-list'].replace(/[^a-zA-Z0-9_]/g, '_')}`) : 'any');
       let negatedSrc = false;
@@ -174,13 +202,15 @@ export function importMikrotikConfig(rscContent: string): ImportReport {
 
       rules.push({
         action,
-        direction: 'in',
+        direction,
         interface: iface,
         quick: true,
         protocol: proto,
         source: rawSrc,
+        ...(negatedSrc && rawSrc !== 'any' ? { invertSource: true } : {}),
         sourcePort: kv['src-port'] || '',
         destination: rawDst,
+        ...(negatedDst && rawDst !== 'any' ? { invertDestination: true } : {}),
         destinationPort: kv['dst-port'] || '',
         log: kv.log === 'yes',
         enabled: isEnabled,

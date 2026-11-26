@@ -5,7 +5,9 @@ import path from 'node:path';
 import {
   getVigilanteKubeAuditDir,
   ensureVigilanteConfig,
-  getHostEvidenceDir
+  getHostEvidenceDir,
+  assertCliTarget,
+  sanitizePathComponent
 } from './config.js';
 import { autoSignIfConfigured } from './gpg.js';
 import { saveEvidenceFile } from './evidence.js';
@@ -19,7 +21,13 @@ export const KUBEAUDIT_PROFILES = [
     tool: 'kube-bench',
     buildArgs: (opts = {}) => {
       const a = ['--json'];
-      if (opts.targets) a.push('--targets', opts.targets);
+      if (opts.targets !== undefined && opts.targets !== null && opts.targets !== '') {
+        const cleanTargets = assertCliTarget(opts.targets, 'kube-bench targets');
+        if (!/^[a-z0-9_-]+(,[a-z0-9_-]+)*$/i.test(cleanTargets)) {
+          throw new Error(`Invalid kube-bench targets '${opts.targets}': expected comma-separated component names`);
+        }
+        a.push('--targets', cleanTargets);
+      }
       return a;
     }
   },
@@ -29,7 +37,8 @@ export const KUBEAUDIT_PROFILES = [
     description: 'Actively probe Kubernetes cluster endpoints, kubelets, and etcd for exposure',
     tool: 'kube-hunter',
     buildArgs: (remoteHost, opts = {}) => {
-      const a = ['--remote', remoteHost, '--report', 'json'];
+      const cleanHost = assertCliTarget(remoteHost, 'kube-hunter remote target');
+      const a = ['--remote', cleanHost, '--report', 'json'];
       if (opts.active) a.push('--active');
       return a;
     }
@@ -165,6 +174,8 @@ export function parseKubeHunterOutput(rawJson) {
  */
 export async function runKubeAudit(target = 'cluster', profileId = 'kube-bench', opts = {}) {
   await ensureVigilanteConfig();
+  const safeTarget = assertCliTarget(target, 'target');
+  const targetComponent = sanitizePathComponent(safeTarget);
   const kubeauditDir = getVigilanteKubeAuditDir();
   const profile = KUBEAUDIT_PROFILES.find((p) => p.id === profileId) || KUBEAUDIT_PROFILES[0];
   const tools = await checkKubeAuditToolsInstalled();
@@ -214,7 +225,7 @@ export async function runKubeAudit(target = 'cluster', profileId = 'kube-bench',
     // kube-hunter
     if (tools.kubeHunter.runner === 'host') {
       try {
-        const res = await execa('kube-hunter', profile.buildArgs(target, opts));
+        const res = await execa('kube-hunter', profile.buildArgs(safeTarget, opts));
         rawOutput = res.stdout;
         auditData = parseKubeHunterOutput(rawOutput);
       } catch (err) {
@@ -224,7 +235,7 @@ export async function runKubeAudit(target = 'cluster', profileId = 'kube-bench',
     } else {
       auditData = {
         vulnerabilities: [],
-        services: [{ service: 'Kubelet API', location: `${target}:10250` }]
+        services: [{ service: 'Kubelet API', location: `${safeTarget}:10250` }]
       };
       rawOutput = JSON.stringify(auditData);
     }
@@ -240,7 +251,7 @@ export async function runKubeAudit(target = 'cluster', profileId = 'kube-bench',
 
   const record = {
     id: scanId,
-    target,
+    target: safeTarget,
     tool: profile.tool,
     profile: profile.id,
     timestamp,
@@ -258,7 +269,7 @@ export async function runKubeAudit(target = 'cluster', profileId = 'kube-bench',
 
   // Evidence file
   try {
-    await saveEvidenceFile('scans', target, `${scanId}.json`, record);
+    await saveEvidenceFile('scans', targetComponent, `${scanId}.json`, record);
   } catch (err) {
     logger.warn('KUBEAUDIT', `Could not save evidence file: ${err.message}`);
   }
@@ -287,6 +298,9 @@ export async function listSavedKubeAudits() {
             target: parsed.target || 'cluster',
             tool: parsed.tool || 'kube-bench',
             timestamp: parsed.timestamp || '',
+            synthetic: Boolean(parsed.synthetic),
+            totals: parsed.totals || parsed.summary?.totals || null,
+            summary: parsed.summary || (parsed.totals ? { totals: parsed.totals } : null),
             filePath: fullPath
           });
         } catch {

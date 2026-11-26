@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"os"
@@ -23,8 +24,13 @@ import (
 // keepalivedConfPath and conntrackdConfPath are the generated daemon
 // configs. Package variables (not constants) so tests can redirect
 // them into temp dirs; the production values are unchanged.
-var keepalivedConfPath = "/etc/keepalived/keepalived.conf"
-var conntrackdConfPath = "/etc/conntrackd/conntrackd.conf"
+var (
+	keepalivedConfPath    = "/etc/keepalived/keepalived.conf"
+	conntrackdConfPath    = "/etc/conntrackd/conntrackd.conf"
+	haEnsurePKICertsFn    = engine.EnsureHAPKICerts
+	haEnrollPKIFromPeerFn = engine.EnrollPKIFromPeer
+	haConfigureSyncreplFn = engine.ConfigureMultiProviderSyncrepl
+)
 
 type VRRPInstanceConfig struct {
 	Name         string   `json:"name"`
@@ -36,11 +42,15 @@ type VRRPInstanceConfig struct {
 }
 
 type ConntrackSyncConfig struct {
-	Enabled     bool   `json:"enabled"`
-	Interface   string `json:"interface"`
-	Protocol    string `json:"protocol"`
-	PeerAddress string `json:"peerAddress"`
-	Port        int    `json:"port"`
+	Enabled         bool     `json:"enabled"`
+	Interface       string   `json:"interface"`
+	Protocol        string   `json:"protocol"`
+	PeerAddress     string   `json:"peerAddress"`
+	Port            int      `json:"port"`
+	MulticastGroup  string   `json:"multicastGroup,omitempty"`
+	BufferSize      int      `json:"bufferSize,omitempty"`
+	FilterIgnoreIps []string `json:"filterIgnoreIps,omitempty"`
+	Mode            string   `json:"mode,omitempty"`
 }
 
 type HAConfig struct {
@@ -57,14 +67,25 @@ type HAConfig struct {
 	SqliteSync    engine.SqliteSyncConfig `json:"sqliteSync"`
 }
 
+type haNotifyItem struct {
+	state string
+	done  chan struct{}
+}
+
 type HAEngine struct {
 	mu               sync.Mutex
+	applyMu          sync.Mutex
+	transitionMu     sync.Mutex
 	config           HAConfig
 	sqliteSync       *engine.SqliteSyncManager
 	nasManager       *engine.NasManager
 	directoryManager *engine.DirectoryManager
+	pluginManager    *engine.PluginManager
 	listener         net.Listener
 	sockPath         string
+	notifyCh         chan haNotifyItem
+	workerStop       chan struct{}
+	workerDone       chan struct{}
 }
 
 func NewHAEngine(nasMgr *engine.NasManager) *HAEngine {
@@ -89,26 +110,94 @@ func (e *HAEngine) SetDirectoryManager(dm *engine.DirectoryManager) {
 	e.directoryManager = dm
 }
 
-func (e *HAEngine) StartSocketListener() error {
+func (e *HAEngine) SetPluginManager(pm *engine.PluginManager) {
 	e.mu.Lock()
-	if e.listener != nil {
-		_ = e.listener.Close()
-		e.listener = nil
-	}
-	_ = os.MkdirAll(filepath.Dir(e.sockPath), 0755)
-	_ = os.Remove(e.sockPath)
+	defer e.mu.Unlock()
+	e.pluginManager = pm
+}
 
-	l, err := net.Listen("unix", e.sockPath)
-	if err != nil {
-		e.mu.Unlock()
-		return fmt.Errorf("failed to listen on ha socket %s: %w", e.sockPath, err)
+func formatLdapsPeerURI(peerIP string) string {
+	if strings.TrimSpace(peerIP) == "" {
+		return ""
 	}
-	_ = os.Chown(e.sockPath, 0, 0)
-	_ = os.Chmod(e.sockPath, 0600)
-	e.listener = l
+	return "ldaps://" + net.JoinHostPort(strings.TrimSpace(peerIP), "636")
+}
+
+func isSlapdActive() bool {
+	if exec.Command("systemctl", "is-active", "--quiet", "slapd").Run() == nil {
+		return true
+	}
+	return exec.Command("pgrep", "-x", "slapd").Run() == nil
+}
+
+var haIsSlapdActiveFn = isSlapdActive
+
+func (e *HAEngine) isLDAPConfiguredForSync() bool {
+	e.mu.Lock()
+	dm := e.directoryManager
+	pm := e.pluginManager
 	e.mu.Unlock()
 
-	slog.Info("HA Engine state transition socket listening", "path", e.sockPath)
+	if pm != nil {
+		if !pm.IsPluginEnabled("directory-ldap") {
+			return false
+		}
+		_, replErr := os.Stat(engine.LDAPReplPassFile)
+		return haIsSlapdActiveFn() || replErr == nil
+	}
+	if dm == nil {
+		return false
+	}
+	_, replErr := os.Stat(engine.LDAPReplPassFile)
+	return haIsSlapdActiveFn() && replErr == nil
+}
+
+func (e *HAEngine) StartSocketListener() error {
+	e.mu.Lock()
+	oldListener := e.listener
+	oldStop := e.workerStop
+	oldDone := e.workerDone
+	e.listener = nil
+	e.workerStop = nil
+	e.workerDone = nil
+	e.notifyCh = nil
+	sockPath := e.sockPath
+	e.mu.Unlock()
+
+	if oldListener != nil {
+		_ = oldListener.Close()
+	}
+	if oldStop != nil {
+		close(oldStop)
+		if oldDone != nil {
+			<-oldDone
+		}
+	}
+
+	_ = os.MkdirAll(filepath.Dir(sockPath), 0755)
+	_ = os.Remove(sockPath)
+
+	l, err := net.Listen("unix", sockPath)
+	if err != nil {
+		return fmt.Errorf("failed to listen on ha socket %s: %w", sockPath, err)
+	}
+	_ = os.Chown(sockPath, 0, 0)
+	_ = os.Chmod(sockPath, 0600)
+
+	notifyCh := make(chan haNotifyItem, 64)
+	workerStop := make(chan struct{})
+	workerDone := make(chan struct{})
+
+	e.mu.Lock()
+	e.listener = l
+	e.notifyCh = notifyCh
+	e.workerStop = workerStop
+	e.workerDone = workerDone
+	e.mu.Unlock()
+
+	go e.runNotifyWorker(notifyCh, workerStop, workerDone)
+
+	slog.Info("HA Engine state transition socket listening", "path", sockPath)
 
 	go func() {
 		for {
@@ -116,34 +205,53 @@ func (e *HAEngine) StartSocketListener() error {
 			if err != nil {
 				return
 			}
-			go e.handleNotificationConn(conn)
+			go e.handleNotificationConn(conn, notifyCh, workerStop)
 		}
 	}()
 
 	return nil
 }
 
-func (e *HAEngine) handleNotificationConn(conn net.Conn) {
+func (e *HAEngine) runNotifyWorker(notifyCh <-chan haNotifyItem, stopCh <-chan struct{}, doneCh chan<- struct{}) {
+	defer close(doneCh)
+	for {
+		select {
+		case <-stopCh:
+			return
+		case item := <-notifyCh:
+			e.OnTransition(item.state)
+			close(item.done)
+		}
+	}
+}
+
+// haExpectedPeerUID restricts HA notify socket callers to UID 0 (root) in production;
+// overridden strictly in unit tests running unprivileged.
+var haExpectedPeerUID uint32
+
+func (e *HAEngine) handleNotificationConn(conn net.Conn, notifyCh chan<- haNotifyItem, stopCh <-chan struct{}) {
 	defer conn.Close()
 
-	// Verify peer credentials: only root (UID 0) is allowed to send transitions
+	// Verify peer credentials: only expected UID (root UID 0 in production) is allowed to send transitions
 	if uconn, ok := conn.(*net.UnixConn); ok {
 		raw, err := uconn.SyscallConn()
 		if err != nil {
 			slog.Warn("Rejecting HA socket connection: failed to access raw conn", "error", err)
+			_ = conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
 			_, _ = conn.Write([]byte("ERR: unauthorized\n"))
 			return
 		}
 		var credErr error
 		authorized := false
+		expectedUID := haExpectedPeerUID
 		if ctrlErr := raw.Control(func(fd uintptr) {
 			ucred, err := syscall.GetsockoptUcred(int(fd), syscall.SOL_SOCKET, syscall.SO_PEERCRED)
 			if err != nil {
 				credErr = err
 				return
 			}
-			if ucred.Uid != 0 {
-				credErr = fmt.Errorf("unauthorized caller uid %d, expected 0", ucred.Uid)
+			if ucred.Uid != expectedUID {
+				credErr = fmt.Errorf("unauthorized caller uid %d, expected %d", ucred.Uid, expectedUID)
 				return
 			}
 			authorized = true
@@ -152,28 +260,50 @@ func (e *HAEngine) handleNotificationConn(conn net.Conn) {
 		}
 		if credErr != nil || !authorized {
 			slog.Warn("Rejecting HA socket connection from unauthorized peer", "error", credErr)
+			_ = conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
 			_, _ = conn.Write([]byte("ERR: unauthorized\n"))
 			return
 		}
 	}
 
-	scanner := bufio.NewScanner(conn)
+	_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	scanner := bufio.NewScanner(io.LimitReader(conn, 4096))
 	if scanner.Scan() {
 		state := strings.ToUpper(strings.TrimSpace(scanner.Text()))
 		if state == "MASTER" || state == "BACKUP" || state == "FAULT" {
 			slog.Info("Received HA state transition from notify socket", "state", state)
-			e.OnTransition(state)
-			_, _ = conn.Write([]byte("OK\n"))
+			item := haNotifyItem{state: state, done: make(chan struct{})}
+			select {
+			case notifyCh <- item:
+			case <-stopCh:
+				_ = conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
+				_, _ = conn.Write([]byte("ERR: shutting down\n"))
+				return
+			}
+			select {
+			case <-item.done:
+				_ = conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
+				_, _ = conn.Write([]byte("OK\n"))
+			case <-stopCh:
+				_ = conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
+				_, _ = conn.Write([]byte("ERR: shutting down\n"))
+			}
 		} else {
 			slog.Warn("Ignoring unrecognized state transition", "state", state)
+			_ = conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
 			_, _ = conn.Write([]byte("ERR: invalid state\n"))
 		}
 	}
 }
 
 func (e *HAEngine) OnTransition(state string) {
+	e.transitionMu.Lock()
+	defer e.transitionMu.Unlock()
+
 	e.mu.Lock()
-	defer e.mu.Unlock()
+	cfg := e.config
+	dm := e.directoryManager
+	e.mu.Unlock()
 
 	slog.Info("HAEngine handling transition", "state", state)
 	if state == "BACKUP" || state == "FAULT" {
@@ -186,10 +316,9 @@ func (e *HAEngine) OnTransition(state string) {
 		}
 	}
 
-	if e.config.Enabled {
+	if cfg.Enabled && cfg.ConntrackSync.Enabled {
 		if _, err := exec.LookPath("conntrackd"); err == nil {
 			ctCtx, ctCancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer ctCancel()
 			if state == "MASTER" {
 				for _, arg := range []string{"-c", "-f", "-R"} {
 					if err := exec.CommandContext(ctCtx, "conntrackd", arg).Run(); err != nil {
@@ -203,20 +332,18 @@ func (e *HAEngine) OnTransition(state string) {
 					}
 				}
 			}
+			ctCancel()
 		}
 	}
 
 	e.sqliteSync.OnStateChange(state)
-	if e.directoryManager != nil {
+	if dm != nil {
 		serverID := 1
-		if strings.ToLower(e.config.Role) == "secondary" || strings.ToLower(e.config.Role) == "backup" {
+		if strings.ToLower(cfg.Role) == "secondary" || strings.ToLower(cfg.Role) == "backup" {
 			serverID = 2
 		}
-		peerURI := ""
-		if e.config.PeerIp != "" {
-			peerURI = fmt.Sprintf("ldaps://%s:636", e.config.PeerIp)
-		}
-		e.directoryManager.SetHAState(e.config.Enabled, state, serverID, peerURI)
+		peerURI := formatLdapsPeerURI(cfg.PeerIp)
+		dm.SetHAState(cfg.Enabled, state, serverID, peerURI)
 	}
 	if e.nasManager != nil {
 		if state == "MASTER" {
@@ -237,17 +364,21 @@ func (e *HAEngine) SyncTrustStatus() engine.SyncTrustStatus {
 }
 
 func (e *HAEngine) Apply(cfg HAConfig) error {
-	e.mu.Lock()
-	defer e.mu.Unlock()
+	e.applyMu.Lock()
+	defer e.applyMu.Unlock()
 
 	if !cfg.Enabled {
+		e.mu.Lock()
 		e.config = cfg
+		dm := e.directoryManager
+		e.mu.Unlock()
+
 		slog.Info("High Availability is disabled. Stopping Keepalived, Conntrackd, and SQLite sync.")
 		_, _ = stopSystemService("keepalived")
 		_, _ = stopSystemService("conntrackd")
 		e.sqliteSync.Stop()
-		if e.directoryManager != nil {
-			e.directoryManager.SetHAState(false, "MASTER", 1, "")
+		if dm != nil {
+			dm.SetHAState(false, "MASTER", 1, "")
 		}
 		return nil
 	}
@@ -323,11 +454,16 @@ func (e *HAEngine) Apply(cfg HAConfig) error {
 		return fmt.Errorf("keepalived: %w", err)
 	}
 
-	if err := e.generateConntrackd(cfg); err != nil {
-		return fmt.Errorf("conntrackd: %w", err)
+	if cfg.ConntrackSync.Enabled {
+		if err := e.generateConntrackd(cfg); err != nil {
+			return fmt.Errorf("conntrackd: %w", err)
+		}
 	}
 
+	e.mu.Lock()
 	e.config = cfg
+	dm := e.directoryManager
+	e.mu.Unlock()
 
 	// A-M3: HA component failures are returned, not merely logged.
 	// ApplyBundle fails the bundle on this error instead of entering
@@ -341,9 +477,13 @@ func (e *HAEngine) Apply(cfg HAConfig) error {
 		applyErrs = append(applyErrs, fmt.Errorf("keepalived reload: %w (output: %s)", err, strings.TrimSpace(string(out))))
 	}
 
-	if out, err := reloadOrRestartService("conntrackd"); err != nil {
-		slog.Warn("Failed to reload conntrackd", "error", err, "output", string(out))
-		applyErrs = append(applyErrs, fmt.Errorf("conntrackd reload: %w (output: %s)", err, strings.TrimSpace(string(out))))
+	if cfg.ConntrackSync.Enabled {
+		if out, err := reloadOrRestartService("conntrackd"); err != nil {
+			slog.Warn("Failed to reload conntrackd", "error", err, "output", string(out))
+			applyErrs = append(applyErrs, fmt.Errorf("conntrackd reload: %w (output: %s)", err, strings.TrimSpace(string(out))))
+		}
+	} else {
+		_, _ = stopSystemService("conntrackd")
 	}
 
 	// Configure Chrony NTP peering with HA peer to keep CSN clocks strictly synchronized
@@ -367,17 +507,17 @@ func (e *HAEngine) Apply(cfg HAConfig) error {
 		serverID = 2
 		haState = "BACKUP"
 	}
-	peerURI := ""
-	if cfg.PeerIp != "" {
-		peerURI = fmt.Sprintf("ldaps://%s:636", cfg.PeerIp)
-	}
-	if e.directoryManager != nil {
-		e.directoryManager.SetHAState(true, haState, serverID, peerURI)
+	peerURI := formatLdapsPeerURI(cfg.PeerIp)
+	if dm != nil {
+		dm.SetHAState(true, haState, serverID, peerURI)
 	}
 	if cfg.PeerIp != "" {
-		localSyncIP := resolveInterfaceIPv4(cfg.SyncInterface)
+		localSyncIP := resolveInterfaceIPForPeer(cfg.SyncInterface, cfg.PeerIp)
 		if serverID == 1 {
-			_ = engine.EnsureHAPKICerts("axonwall-ha", localSyncIP, cfg.PeerIp)
+			if err := haEnsurePKICertsFn("axonwall-ha", localSyncIP, cfg.PeerIp); err != nil {
+				slog.Warn("Failed to ensure HA PKI certificates", "error", err)
+				applyErrs = append(applyErrs, fmt.Errorf("ha pki certs: %w", err))
+			}
 		} else {
 			peerPort := cfg.SqliteSync.PeerPort
 			if peerPort <= 0 {
@@ -395,19 +535,23 @@ func (e *HAEngine) Apply(cfg HAConfig) error {
 				}
 			}
 			if _, err := os.Stat(engine.HAPKIPeerCertPath); os.IsNotExist(err) {
-				if _, enrollErr := engine.EnrollPKIFromPeer(cfg.PeerIp, peerPort, authToken); enrollErr != nil {
+				if _, enrollErr := haEnrollPKIFromPeerFn(cfg.PeerIp, peerPort, authToken); enrollErr != nil {
 					slog.Warn("Initial HA PKI enrollment from peer deferred (backup poller will retry)", "peer", cfg.PeerIp, "error", enrollErr)
 				} else {
 					slog.Info("Enrolled HA PKI from primary peer during HA apply", "peer", cfg.PeerIp)
 				}
 			}
 		}
-		baseDN, _, _ := engine.ResolveOrCreateBaseDN("axonwall.local")
-		if serverID == 1 || engine.HasHAPKI() {
-			if err := engine.ConfigureMultiProviderSyncrepl(serverID, cfg.PeerIp, baseDN); err != nil {
-				slog.Warn("Failed to configure OpenLDAP multi-provider syncrepl", "error", err)
-				applyErrs = append(applyErrs, fmt.Errorf("syncrepl: %w", err))
+		if e.isLDAPConfiguredForSync() {
+			baseDN, _, _ := engine.ResolveOrCreateBaseDN("axonwall.local")
+			if serverID == 1 || engine.HasHAPKI() {
+				if err := haConfigureSyncreplFn(serverID, cfg.PeerIp, baseDN); err != nil {
+					slog.Warn("Failed to configure OpenLDAP multi-provider syncrepl", "error", err)
+					applyErrs = append(applyErrs, fmt.Errorf("syncrepl: %w", err))
+				}
 			}
+		} else {
+			slog.Debug("Skipping OpenLDAP syncrepl configuration: OpenLDAP directory sync is not enabled/configured")
 		}
 	}
 
@@ -465,7 +609,7 @@ func (e *HAEngine) generateKeepalived(cfg HAConfig) error {
 	instances := cfg.VRRPInstances
 	if len(instances) == 0 {
 		vrid := cfg.Vrid
-		if vrid <= 0 {
+		if vrid == 0 {
 			vrid = 1
 		}
 		iface := cfg.SyncInterface
@@ -493,13 +637,21 @@ func (e *HAEngine) generateKeepalived(cfg HAConfig) error {
 
 `)
 
+	sanitizeRe := regexp.MustCompile(`[^a-zA-Z0-9_]`)
+	usedNames := make(map[string]bool, len(instances))
 	var groupInstances []string
 	for i, inst := range instances {
-		instName := inst.Name
-		if instName == "" {
+		instName := sanitizeRe.ReplaceAllString(strings.TrimSpace(inst.Name), "_")
+		if strings.Trim(instName, "_") == "" {
 			instName = fmt.Sprintf("VI_%d", i+1)
 		}
-		instName = regexp.MustCompile(`[^a-zA-Z0-9_]`).ReplaceAllString(instName, "_")
+		base := instName
+		suffix := 2
+		for usedNames[instName] {
+			instName = fmt.Sprintf("%s_%d", base, suffix)
+			suffix++
+		}
+		usedNames[instName] = true
 		groupInstances = append(groupInstances, instName)
 	}
 
@@ -515,6 +667,7 @@ func (e *HAEngine) generateKeepalived(cfg HAConfig) error {
 
 `)
 
+	validKeepalivedDevRe := regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,14}$`)
 	for i, inst := range instances {
 		instName := groupInstances[i]
 		iface := inst.Interface
@@ -525,18 +678,26 @@ func (e *HAEngine) generateKeepalived(cfg HAConfig) error {
 			iface = "eth0"
 		}
 		vrid := inst.Vrid
-		if vrid <= 0 {
+		if vrid == 0 {
 			vrid = cfg.Vrid
 		}
-		if vrid <= 0 {
+		if vrid == 0 {
 			vrid = i + 1
 		}
+		if vrid < 1 || vrid > 255 {
+			return fmt.Errorf("invalid VRRP instance %s virtual_router_id %d: must be between 1 and 255", instName, vrid)
+		}
 		prio := inst.Priority
-		if prio <= 0 {
+		if prio == 0 {
 			prio = defaultPriority
-		} else if cfg.Role == "secondary" || cfg.Role == "backup" {
-			if prio >= 100 {
-				prio = 50
+		} else {
+			if prio < 1 || prio > 255 {
+				return fmt.Errorf("invalid VRRP instance %s priority %d: must be between 1 and 255", instName, prio)
+			}
+			if cfg.Role == "secondary" || cfg.Role == "backup" {
+				if prio >= 100 {
+					prio = 50
+				}
 			}
 		}
 		pass := inst.AuthPassword
@@ -552,20 +713,24 @@ func (e *HAEngine) generateKeepalived(cfg HAConfig) error {
 			vips = []string{"10.0.99.1/24"}
 		}
 
+		authBlock := ""
+		if pass != "" {
+			authBlock = fmt.Sprintf(`
+    authentication {
+        auth_type PASS
+        auth_pass %s
+    }
+`, pass)
+		}
+
 		conf.WriteString(fmt.Sprintf(`vrrp_instance %s {
     state %s
     interface %s
     virtual_router_id %d
     priority %d
     advert_int 1
-    
-    authentication {
-        auth_type PASS
-        auth_pass %s
-    }
-`, instName, state, iface, vrid, prio, pass))
+%s`, instName, state, iface, vrid, prio, authBlock))
 
-		validKeepalivedDevRe := regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,14}$`)
 		var vipLines []string
 		for _, vip := range vips {
 			vip = strings.TrimSpace(vip)
@@ -612,7 +777,7 @@ func (e *HAEngine) generateKeepalived(cfg HAConfig) error {
 	return err
 }
 
-func resolveInterfaceIPv4(ifaceName string) string {
+func resolveInterfaceIP(ifaceName string, wantV6 bool) string {
 	iface, err := net.InterfaceByName(ifaceName)
 	if err != nil {
 		return ""
@@ -629,11 +794,32 @@ func resolveInterfaceIPv4(ifaceName string) string {
 		case *net.IPAddr:
 			ip = v.IP
 		}
-		if ip != nil && ip.To4() != nil && !ip.IsLoopback() {
-			return ip.To4().String()
+		if ip == nil || ip.IsLoopback() {
+			continue
+		}
+		if wantV6 {
+			if ip.To4() == nil && !ip.IsLinkLocalUnicast() {
+				return ip.String()
+			}
+		} else if v4 := ip.To4(); v4 != nil {
+			return v4.String()
 		}
 	}
 	return ""
+}
+
+func resolveInterfaceIPv4(ifaceName string) string {
+	return resolveInterfaceIP(ifaceName, false)
+}
+
+func resolveInterfaceIPForPeer(ifaceName, peerIP string) string {
+	parsed := net.ParseIP(strings.TrimSpace(peerIP))
+	if parsed != nil && parsed.To4() == nil {
+		if v6 := resolveInterfaceIP(ifaceName, true); v6 != "" {
+			return v6
+		}
+	}
+	return resolveInterfaceIP(ifaceName, false)
 }
 
 func (e *HAEngine) generateConntrackd(cfg HAConfig) error {
@@ -649,16 +835,121 @@ func (e *HAEngine) generateConntrackd(cfg HAConfig) error {
 		peerIp = cfg.PeerIp
 	}
 
-	for _, field := range []string{syncIface, peerIp} {
+	for _, field := range []string{syncIface, peerIp, cfg.ConntrackSync.Protocol, cfg.ConntrackSync.Mode, cfg.ConntrackSync.MulticastGroup} {
 		if strings.ContainsAny(field, "\n\r\"'{};#! \t") {
 			return fmt.Errorf("invalid characters in conntrackd configuration: %q", field)
 		}
 	}
+	if peerIp != "" && net.ParseIP(peerIp) == nil {
+		return fmt.Errorf("invalid conntrackd peer address: %q", peerIp)
+	}
+	if cfg.ConntrackSync.MulticastGroup != "" && net.ParseIP(cfg.ConntrackSync.MulticastGroup) == nil {
+		return fmt.Errorf("invalid conntrackd multicast group: %q", cfg.ConntrackSync.MulticastGroup)
+	}
 
-	localIP := resolveInterfaceIPv4(syncIface)
-	ipv4IfaceLine := ""
-	if localIP != "" {
-		ipv4IfaceLine = fmt.Sprintf("        IPv4_interface %s\n", localIP)
+	port := cfg.ConntrackSync.Port
+	if port == 0 {
+		port = 3780
+	}
+	if port < 1 || port > 65535 {
+		return fmt.Errorf("invalid conntrackd port %d: must be between 1 and 65535", port)
+	}
+	bufSize := cfg.ConntrackSync.BufferSize
+	if bufSize <= 0 {
+		bufSize = 1249280
+	}
+
+	proto := strings.ToLower(strings.TrimSpace(cfg.ConntrackSync.Protocol))
+	mode := strings.ToLower(strings.TrimSpace(cfg.ConntrackSync.Mode))
+	transportBlock := ""
+
+	switch {
+	case proto == "udp" || proto == "tcp" || (proto == "" && (mode == "unicast" || (mode != "multicast" && peerIp != ""))):
+		if peerIp == "" {
+			return fmt.Errorf("conntrackd unicast transport requires peer address")
+		}
+		blockName := "UDP"
+		if proto == "tcp" {
+			blockName = "TCP"
+		}
+		parsedPeer := net.ParseIP(peerIp)
+		isV6 := parsedPeer != nil && parsedPeer.To4() == nil
+		localIP := resolveInterfaceIP(syncIface, isV6)
+		var addrLines strings.Builder
+		if isV6 {
+			if localIP != "" {
+				addrLines.WriteString(fmt.Sprintf("        IPv6_address %s\n", localIP))
+			}
+			addrLines.WriteString(fmt.Sprintf("        IPv6_Destination_Address %s\n", peerIp))
+		} else {
+			if localIP != "" {
+				addrLines.WriteString(fmt.Sprintf("        IPv4_address %s\n", localIP))
+			}
+			addrLines.WriteString(fmt.Sprintf("        IPv4_Destination_Address %s\n", peerIp))
+		}
+		transportBlock = fmt.Sprintf(`    %s {
+%s        Port %d
+        Interface %s
+        SndSocketBuffer %d
+        RcvSocketBuffer %d
+        Checksum on
+    }`, blockName, addrLines.String(), port, syncIface, bufSize, bufSize)
+	case proto == "multicast" || proto == "":
+		mcastAddr := strings.TrimSpace(cfg.ConntrackSync.MulticastGroup)
+		if mcastAddr == "" {
+			mcastAddr = "225.0.0.50"
+		}
+		parsedMcast := net.ParseIP(mcastAddr)
+		isV6 := parsedMcast != nil && parsedMcast.To4() == nil
+		localIP := resolveInterfaceIP(syncIface, isV6)
+		var mcastLines strings.Builder
+		if isV6 {
+			mcastLines.WriteString(fmt.Sprintf("        IPv6_address %s\n", mcastAddr))
+			if localIP != "" {
+				mcastLines.WriteString(fmt.Sprintf("        IPv6_interface %s\n", localIP))
+			}
+		} else {
+			mcastLines.WriteString(fmt.Sprintf("        IPv4_address %s\n", mcastAddr))
+			if localIP != "" {
+				mcastLines.WriteString(fmt.Sprintf("        IPv4_interface %s\n", localIP))
+			}
+		}
+		transportBlock = fmt.Sprintf(`    Multicast {
+%s        Interface %s
+        SndSocketBuffer %d
+        RcvSocketBuffer %d
+        Checksum on
+    }`, mcastLines.String(), syncIface, bufSize, bufSize)
+	default:
+		return fmt.Errorf("unsupported conntrackd protocol %q", cfg.ConntrackSync.Protocol)
+	}
+
+	ignoreEntries := []string{
+		"            IPv4_address 127.0.0.1",
+		"            IPv6_address ::1",
+	}
+	for _, ipStr := range cfg.ConntrackSync.FilterIgnoreIps {
+		ipStr = strings.TrimSpace(ipStr)
+		if ipStr == "" || strings.ContainsAny(ipStr, "\n\r\"'{};#! \t") {
+			continue
+		}
+		if ipStr == "127.0.0.1" || ipStr == "::1" {
+			continue
+		}
+		var parsed net.IP
+		if ip, _, err := net.ParseCIDR(ipStr); err == nil {
+			parsed = ip
+		} else {
+			parsed = net.ParseIP(ipStr)
+		}
+		if parsed == nil {
+			continue
+		}
+		if parsed.To4() != nil {
+			ignoreEntries = append(ignoreEntries, fmt.Sprintf("            IPv4_address %s", ipStr))
+		} else {
+			ignoreEntries = append(ignoreEntries, fmt.Sprintf("            IPv6_address %s", ipStr))
+		}
 	}
 
 	conf := fmt.Sprintf(`Sync {
@@ -668,13 +959,7 @@ func (e *HAEngine) generateConntrackd(cfg HAConfig) error {
         PurgeTimeout 5
     }
     
-    Multicast {
-        IPv4_address 225.0.0.50
-%s        Interface %s
-        SndSocketBuffer 1249280
-        RcvSocketBuffer 1249280
-        Checksum on
-    }
+%s
 }
 
 General {
@@ -696,11 +981,11 @@ General {
             ICMP
         }
         Address Ignore {
-            IPv4_address 127.0.0.1
+%s
         }
     }
 }
-`, ipv4IfaceLine, syncIface)
+`, transportBlock, strings.Join(ignoreEntries, "\n"))
 
 	if err := os.MkdirAll(filepath.Dir(conntrackdConfPath), 0755); err != nil {
 		return err
@@ -716,9 +1001,26 @@ General {
 }
 
 func (e *HAEngine) Stop() {
-	if e.listener != nil {
-		_ = e.listener.Close()
-		_ = os.Remove(e.sockPath)
+	e.mu.Lock()
+	l := e.listener
+	sockPath := e.sockPath
+	stopCh := e.workerStop
+	doneCh := e.workerDone
+	e.listener = nil
+	e.notifyCh = nil
+	e.workerStop = nil
+	e.workerDone = nil
+	e.mu.Unlock()
+
+	if l != nil {
+		_ = l.Close()
+		_ = os.Remove(sockPath)
+	}
+	if stopCh != nil {
+		close(stopCh)
+		if doneCh != nil {
+			<-doneCh
+		}
 	}
 	e.sqliteSync.Stop()
 }
@@ -729,6 +1031,7 @@ func sendHANotification(state string) error {
 		return fmt.Errorf("failed to connect to axonwalld ha socket: %w", err)
 	}
 	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
 
 	if _, err := fmt.Fprintf(conn, "%s\n", state); err != nil {
 		return fmt.Errorf("failed to send notification: %w", err)

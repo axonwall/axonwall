@@ -27,13 +27,13 @@ if [[ "${1:-}" == "-c" ]]; then
   CMD="${2:-}"
   case "$CMD" in
     "axonwall-tui"|"axonwall-tui --readonly")
-      exec /usr/local/bin/axonwall-tui --readonly
+      exec sudo /usr/local/bin/axonwall-tui --readonly
       ;;
     "axonwall-tui --tab nastymap"|"axonwall-tui --readonly --tab nastymap"|"nastymap")
-      exec /usr/local/bin/axonwall-tui --readonly --tab nastymap
+      exec sudo /usr/local/bin/axonwall-tui --readonly --tab nastymap
       ;;
     "axonwallctl status"|"axonwallctl diff"|"axonwallctl validate")
-      exec /usr/local/bin/$CMD
+      exec sudo /usr/local/bin/$CMD
       ;;
     "ip addr"|"ip a"|"ip -br addr")
       exec /sbin/ip addr show

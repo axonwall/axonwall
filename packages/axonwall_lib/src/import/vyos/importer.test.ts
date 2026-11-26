@@ -139,4 +139,30 @@ describe('VyOS / EdgeOS Importer', () => {
     const { nftScript } = compileNftables(report.state);
     expect(nftScript).toContain('table inet axonwall');
   });
+
+  it('parses single-line braces and negated source/destination addresses cleanly', () => {
+    const report = importVyosConfig(`
+firewall {
+    name WAN_IN {
+        rule 10 {
+            action accept
+            protocol tcp
+            source { address !10.0.0.0/8 }
+            destination { address !192.168.0.0/16 }
+        }
+        rule 20 { action drop; protocol udp; destination { port 53 }; disable }
+    }
+}
+`);
+    expect(report.rulesCount).toBe(2);
+    expect(report.state.rules[0]!.invertSource).toBe(true);
+    expect(report.state.rules[0]!.source).toBe('10.0.0.0/8');
+    expect(report.state.rules[0]!.invertDestination).toBe(true);
+    expect(report.state.rules[0]!.destination).toBe('192.168.0.0/16');
+    expect(report.state.rules[0]!.enabled).toBe(false);
+    expect(report.reviewItems?.[0]?.reason).toBe('negated_both');
+    expect(report.state.rules[1]!.action).toBe('block');
+    expect(report.state.rules[1]!.destinationPort).toBe('53');
+    expect(report.state.rules[1]!.enabled).toBe(false);
+  });
 });

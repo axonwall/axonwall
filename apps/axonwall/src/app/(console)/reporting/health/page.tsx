@@ -116,22 +116,31 @@ export default function SystemHealthPage() {
       fetch('/api/v1/observability/status', { cache: 'no-store' })
         .then((r) => (r.ok ? r.json() : null))
         .catch(() => null),
-      runProm(`avg(axonwall_cpu_usage_percent${nodeFilter})`),
-      runProm(`avg(axonwall_mem_used_bytes${nodeFilter}) / clamp_min(avg(axonwall_mem_total_bytes${nodeFilter}), 1) * 100`),
-      runProm(`sum(rate(axonwall_net_rx_bytes_total${nodeFilter}[1m]))`),
-      runProm(`sum(rate(axonwall_net_tx_bytes_total${nodeFilter}[1m]))`),
+      runProm(`avg(axonwall_host_cpu_usage_percent${nodeFilter} or axonwall_cpu_usage_percent${nodeFilter})`),
+      runProm(
+        `avg((axonwall_host_memory_used_bytes${nodeFilter} / clamp_min(axonwall_host_memory_total_bytes${nodeFilter}, 1) * 100) or axonwall_mem_usage_percent${nodeFilter})`
+      ),
+      runProm(
+        `sum(rate(axonwall_interface_rx_bytes_total${nodeFilter}[1m]) or rate(axonwall_net_rx_bytes_total${nodeFilter}[1m]))`
+      ),
+      runProm(
+        `sum(rate(axonwall_interface_tx_bytes_total${nodeFilter}[1m]) or rate(axonwall_net_tx_bytes_total${nodeFilter}[1m]))`
+      ),
       runProm(`sum(axonwall_conntrack_entries${nodeFilter})`),
-      runProm(`avg(axonwall_sdwan_rtt_ms${nodeFilter})`),
-      runProm(`avg(axonwall_sdwan_packet_loss_percent${nodeFilter})`),
+      runProm(`avg(axonwall_sdwan_gateway_rtt_ms${nodeFilter} or axonwall_sdwan_rtt_ms${nodeFilter})`),
+      runProm(
+        `avg(axonwall_sdwan_gateway_packet_loss_percent${nodeFilter} or axonwall_sdwan_packet_loss_percent${nodeFilter})`
+      ),
     ]);
 
     const vmEndpoint = statusRes?.endpoints?.victoriaMetrics;
-    if (cpuRes) {
+    const primaryRes = cpuRes ?? memRes ?? rxRes ?? txRes ?? ctRes ?? rttRes ?? lossRes;
+    if (primaryRes) {
       setVmStatus({
-        configured: Boolean(cpuRes.configured),
-        unavailable: Boolean(cpuRes.unavailable),
+        configured: Boolean(primaryRes.configured),
+        unavailable: Boolean(primaryRes.unavailable),
         url: vmEndpoint?.url,
-        reason: cpuRes.reason,
+        reason: primaryRes.reason,
       });
       setVmSeries(
         mergeSeries([

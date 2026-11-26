@@ -3,12 +3,20 @@ import { NextResponse } from 'next/server';
 import { clearCachedAgentToken, getAgentToken } from '@/server/agent-client';
 import { getAgentApiSocketPath } from '@/server/dev-paths';
 import { getSession } from '@/server/auth';
-import { isConsoleUser, isPasswordChangeEnforced } from '@/server/auth-guard';
+import { assertActionPermitted } from '@/server/auth-guard';
+import { checkPluginApiGuard } from '@/server/plugin-guard';
 
 export const dynamic = 'force-dynamic';
 
 function fetchDaemonMetrics(canRetry401: boolean): Promise<{ status: number; body: string }> {
   return new Promise((resolve) => {
+    let settled = false;
+    const finish = (res: { status: number; body: string }) => {
+      if (settled) return;
+      settled = true;
+      resolve(res);
+    };
+
     const token = getAgentToken();
     const req = http.request(
       {
@@ -25,6 +33,7 @@ function fetchDaemonMetrics(canRetry401: boolean): Promise<{ status: number; bod
         if (res.statusCode === 401 && canRetry401) {
           res.resume();
           clearCachedAgentToken();
+          settled = true;
           resolve(fetchDaemonMetrics(false));
           return;
         }
@@ -32,33 +41,36 @@ function fetchDaemonMetrics(canRetry401: boolean): Promise<{ status: number; bod
         res.on('data', (chunk) => {
           body += chunk;
         });
+        res.on('error', () => {
+          finish({ status: 503, body: '# metrics stream error\n' });
+        });
         res.on('end', () => {
-          resolve({ status: res.statusCode || 500, body });
+          finish({ status: res.statusCode || 500, body });
         });
       },
     );
     req.on('error', () => {
-      resolve({ status: 503, body: '# axonwalld daemon unreachable\n' });
+      finish({ status: 503, body: '# axonwalld daemon unreachable\n' });
     });
     req.on('timeout', () => {
       req.destroy();
-      resolve({ status: 504, body: '# metrics timeout\n' });
+      finish({ status: 504, body: '# metrics timeout\n' });
     });
     req.end();
   });
 }
 
 export async function GET() {
-  const session = await getSession();
-  const mustChange = isPasswordChangeEnforced(session);
-  if (!session || mustChange) {
-    return new NextResponse(mustChange ? 'Forbidden: Password change required' : 'Unauthorized', {
-      status: mustChange ? 403 : 401,
-    });
+  try {
+    const session = await getSession();
+    assertActionPermitted(session);
+  } catch (err: unknown) {
+    const msg = (err as { message?: string })?.message || 'Unauthorized';
+    const status = msg.includes('Unauthorized') ? 401 : 403;
+    return new NextResponse(msg, { status });
   }
-  if (!isConsoleUser(session)) {
-    return new NextResponse('Forbidden: Console role required', { status: 403 });
-  }
+  const guard = await checkPluginApiGuard('netflow-collector');
+  if (guard) return guard;
 
   const res = await fetchDaemonMetrics(true);
   return new NextResponse(res.body, {

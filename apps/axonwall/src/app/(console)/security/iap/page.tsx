@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import { PluginDisabledGate } from '@/components/PluginDisabledGate';
-import { Shield, Plus, Trash2, CheckCircle2 } from 'lucide-react';
+import { Shield, Plus, Trash2, CheckCircle2, AlertCircle } from 'lucide-react';
 import { getCurrentDesiredState } from '@/server/agent';
 import { useDesiredStateApply } from '@/lib/use-desired-state-apply';
 import type { DesiredState, ZeroTrustApp } from '@axonwall/lib/schemas';
@@ -12,7 +12,7 @@ function IAPDashboardPageContent() {
   const [fullState, setFullState] = useState<DesiredState | null>(null);
   const [apps, setApps] = useState<ZeroTrustApp[]>([]);
   const [saving, setSaving] = useState(false);
-  const [statusMsg, setStatusMsg] = useState<string | null>(null);
+  const [statusMsg, setStatusMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
   const [newName, setNewName] = useState('');
   const [newHost, setNewHost] = useState('');
@@ -57,11 +57,17 @@ function IAPDashboardPageContent() {
       };
       setFullState(nextState);
       const res = await applyState(nextState);
-      setStatusMsg(res.message || 'Saved Zero-Trust IAP applications to /etc/axonwall/security.yaml');
+      setStatusMsg({
+        type: 'success',
+        text: res.message || 'Saved Zero-Trust IAP applications to /etc/axonwall/security.yaml',
+      });
     } catch (err: any) {
       setApps(prevApps);
       setFullState(prevFullState);
-      setStatusMsg(`Error: ${err?.message || 'Failed to save IAP apps'}`);
+      setStatusMsg({
+        type: 'error',
+        text: err?.message || 'Failed to save IAP apps',
+      });
     } finally {
       setSaving(false);
     }
@@ -107,9 +113,19 @@ function IAPDashboardPageContent() {
       </div>
 
       {statusMsg && (
-        <div className="p-3 bg-emerald-500/10 border border-emerald-500/30 rounded-lg text-xs text-emerald-300 flex items-center gap-2">
-          <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
-          <span>{statusMsg}</span>
+        <div
+          className={`p-3 rounded-lg text-xs flex items-center gap-2 border ${
+            statusMsg.type === 'error'
+              ? 'bg-red-500/10 border-red-500/30 text-red-300'
+              : 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300'
+          }`}
+        >
+          {statusMsg.type === 'error' ? (
+            <AlertCircle className="w-4 h-4 text-red-400 shrink-0" />
+          ) : (
+            <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+          )}
+          <span>{statusMsg.text}</span>
         </div>
       )}
 

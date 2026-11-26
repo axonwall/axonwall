@@ -685,16 +685,11 @@ func bughunt3WaitTask(t *testing.T, tm *TaskManager, upid string) *TaskRecord {
 }
 
 func TestBughunt3_LiveMigratePollsToCompletion(t *testing.T) {
-	oldInterval, oldTimeout, oldDial := liveMigratePollInterval, liveMigrateTimeout, liveMigrateDialTarget
+	oldInterval, oldTimeout := liveMigratePollInterval, liveMigrateTimeout
 	liveMigratePollInterval = 10 * time.Millisecond
 	liveMigrateTimeout = 30 * time.Second
-	liveMigrateDialTarget = func(network, address string, timeout time.Duration) (net.Conn, error) {
-		c1, c2 := net.Pipe()
-		_ = c2.Close()
-		return c1, nil
-	}
 	defer func() {
-		liveMigratePollInterval, liveMigrateTimeout, liveMigrateDialTarget = oldInterval, oldTimeout, oldDial
+		liveMigratePollInterval, liveMigrateTimeout = oldInterval, oldTimeout
 	}()
 
 	queries := bughunt3FakeQmp(t, 101, []string{"active", "completed"})
@@ -713,16 +708,11 @@ func TestBughunt3_LiveMigratePollsToCompletion(t *testing.T) {
 }
 
 func TestBughunt3_LiveMigrateFailedMigrationFailsTask(t *testing.T) {
-	oldInterval, oldTimeout, oldDial := liveMigratePollInterval, liveMigrateTimeout, liveMigrateDialTarget
+	oldInterval, oldTimeout := liveMigratePollInterval, liveMigrateTimeout
 	liveMigratePollInterval = 10 * time.Millisecond
 	liveMigrateTimeout = 30 * time.Second
-	liveMigrateDialTarget = func(network, address string, timeout time.Duration) (net.Conn, error) {
-		c1, c2 := net.Pipe()
-		_ = c2.Close()
-		return c1, nil
-	}
 	defer func() {
-		liveMigratePollInterval, liveMigrateTimeout, liveMigrateDialTarget = oldInterval, oldTimeout, oldDial
+		liveMigratePollInterval, liveMigrateTimeout = oldInterval, oldTimeout
 	}()
 
 	bughunt3FakeQmp(t, 101, []string{"active", "failed"})
@@ -737,33 +727,53 @@ func TestBughunt3_LiveMigrateFailedMigrationFailsTask(t *testing.T) {
 	}
 }
 
-func TestBughunt3_LiveMigrateTargetNotListening(t *testing.T) {
-	// The dial is stubbed to refuse the connection: in this sandbox
-	// a real dial to an unroutable address can be intercepted by the
-	// egress proxy and "succeed", so the refusal itself is simulated
-	// and the test asserts the code path (refusal -> fail fast, port
-	// released) rather than the sandbox's network behaviour.
-	oldDial := liveMigrateDialTarget
-	liveMigrateDialTarget = func(network, address string, timeout time.Duration) (net.Conn, error) {
-		return nil, fmt.Errorf("dial tcp %s: connect: connection refused", address)
-	}
-	defer func() { liveMigrateDialTarget = oldDial }()
-
+func TestBughunt3_LiveMigrateQmpErrorFailsAndReleasesPort(t *testing.T) {
 	oldQmpDir := virtQmpSocketDir
 	virtQmpSocketDir = t.TempDir()
 	t.Cleanup(func() { virtQmpSocketDir = oldQmpDir })
 	sockPath := filepath.Join(virtQmpSocketDir, "vm-102.sock")
-	_ = os.Remove(sockPath)
-	if err := os.WriteFile(sockPath, []byte{}, 0600); err != nil {
-		t.Fatalf("create qmp socket file: %v", err)
+	ln, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatalf("listen qmp socket: %v", err)
 	}
-	t.Cleanup(func() { _ = os.Remove(sockPath) })
+	t.Cleanup(func() {
+		_ = ln.Close()
+		_ = os.Remove(sockPath)
+	})
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				_, _ = fmt.Fprintln(c, `{"QMP": {"version": {"qemu": {"micro": 0, "minor": 0, "major": 8}, "package": "test"}}}`)
+				reader := bufio.NewReader(c)
+				if _, err := reader.ReadString('\n'); err != nil {
+					return
+				}
+				_, _ = fmt.Fprintln(c, `{"return": {}}`)
+				_, _ = reader.ReadString('\n')
+				_, _ = fmt.Fprintln(c, `{"error": {"class": "GenericError", "desc": "connection refused"}}`)
+			}(conn)
+		}
+	}()
 
-	vm, _ := bughunt3VirtManager(t)
-	if _, err := vm.LiveMigrateVM(102, "192.0.2.1", "root@axonwall"); err == nil {
-		t.Fatalf("expected LiveMigrateVM to fail fast when the target is not listening, got nil")
-	} else if !strings.Contains(err.Error(), "not listening") {
-		t.Fatalf("expected a not-listening error, got %v", err)
+	vm, tm := bughunt3VirtManager(t)
+	upid, err := vm.LiveMigrateVM(102, "192.0.2.1", "root@axonwall")
+	if err != nil {
+		t.Fatalf("expected LiveMigrateVM to launch migration task without destructive pre-probe, got error: %v", err)
+	}
+	rec := bughunt3WaitTask(t, tm, upid)
+	if rec.Status != "failed" {
+		t.Fatalf("expected QMP migrate rejection to fail task, got status=%s exit=%s", rec.Status, rec.ExitStatus)
+	}
+	vm.migMu.Lock()
+	remaining := len(vm.migPorts)
+	vm.migMu.Unlock()
+	if remaining != 0 {
+		t.Fatalf("expected migration port to be released after QMP failure, got %d remaining", remaining)
 	}
 }
 

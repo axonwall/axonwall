@@ -14,9 +14,17 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 )
 
-const wsMagicGUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+const (
+	wsMagicGUID         = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+	wsDialTimeout       = 5 * time.Second
+	wsIdleReadTimeout   = 5 * time.Minute
+	wsWriteTimeout      = 30 * time.Second
+	wsMaxControlPayload = 125
+)
 
 type ConsoleProxy struct {
 	mu sync.Mutex
@@ -31,6 +39,90 @@ func computeAcceptKey(clientKey string) string {
 	h := sha1.New()
 	h.Write([]byte(clientKey + wsMagicGUID))
 	return base64.StdEncoding.EncodeToString(h.Sum(nil))
+}
+
+func expectedConsoleOriginScheme(r *http.Request) string {
+	if r.TLS != nil {
+		return "https"
+	}
+	if r.URL != nil {
+		if strings.EqualFold(r.URL.Scheme, "https") {
+			return "https"
+		}
+		if strings.EqualFold(r.URL.Scheme, "http") {
+			return "http"
+		}
+	}
+	if xfp := strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")); xfp != "" {
+		first := strings.TrimSpace(strings.SplitN(xfp, ",", 2)[0])
+		if strings.EqualFold(first, "https") {
+			return "https"
+		}
+		if strings.EqualFold(first, "http") {
+			return "http"
+		}
+	}
+	return "http"
+}
+
+func canonicalHostPort(hostport, scheme string) (string, string, bool) {
+	if hostport == "" {
+		return "", "", false
+	}
+	if h, p, err := net.SplitHostPort(hostport); err == nil {
+		if h == "" || p == "" {
+			return "", "", false
+		}
+		return strings.ToLower(strings.Trim(h, "[]")), p, true
+	}
+	trimmed := strings.Trim(hostport, "[]")
+	if trimmed == "" || (strings.Contains(trimmed, ":") && net.ParseIP(trimmed) == nil) {
+		return "", "", false
+	}
+	defaultPort := "80"
+	if strings.EqualFold(scheme, "https") {
+		defaultPort = "443"
+	}
+	return strings.ToLower(trimmed), defaultPort, true
+}
+
+func validateConsoleOrigin(origin string, r *http.Request) bool {
+	u, err := url.Parse(origin)
+	if err != nil || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+		return false
+	}
+	if u.Path != "" && u.Path != "/" {
+		return false
+	}
+	origScheme := strings.ToLower(u.Scheme)
+	if origScheme != "http" && origScheme != "https" {
+		return false
+	}
+	reqScheme := expectedConsoleOriginScheme(r)
+	if origScheme != reqScheme {
+		return false
+	}
+	origHost, origPort, ok1 := canonicalHostPort(u.Host, origScheme)
+	reqHost, reqPort, ok2 := canonicalHostPort(r.Host, reqScheme)
+	return ok1 && ok2 && origHost == reqHost && origPort == reqPort
+}
+
+type deadlineReader struct {
+	r            io.Reader
+	conn         net.Conn
+	timeout      time.Duration
+	lastActivity *atomic.Int64
+}
+
+func (d *deadlineReader) Read(p []byte) (int, error) {
+	if d.conn != nil {
+		_ = d.conn.SetReadDeadline(time.Now().Add(d.timeout))
+	}
+	n, err := d.r.Read(p)
+	if n > 0 && d.lastActivity != nil {
+		d.lastActivity.Store(time.Now().UnixNano())
+	}
+	return n, err
 }
 
 func (p *ConsoleProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -66,20 +158,9 @@ func (p *ConsoleProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Verify WebSocket upgrade request and Origin header
+	// Verify WebSocket upgrade request and exact Origin scheme+host+port
 	if origin := strings.TrimSpace(r.Header.Get("Origin")); origin != "" {
-		u, err := url.Parse(origin)
-		if err != nil || u.Host == "" {
-			http.Error(w, "Invalid Origin header", http.StatusForbidden)
-			return
-		}
-		reqHostOnly := r.Host
-		if h, _, splitErr := net.SplitHostPort(r.Host); splitErr == nil {
-			reqHostOnly = h
-		} else {
-			reqHostOnly = strings.Trim(r.Host, "[]")
-		}
-		if r.Host != "" && !strings.EqualFold(u.Host, r.Host) && !strings.EqualFold(u.Hostname(), reqHostOnly) {
+		if !validateConsoleOrigin(origin, r) {
 			http.Error(w, "Cross-origin WebSocket connection rejected", http.StatusForbidden)
 			return
 		}
@@ -95,7 +176,7 @@ func (p *ConsoleProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Connect to the target Unix domain socket
-	backendConn, err := net.Dial("unix", socketPath)
+	backendConn, err := net.DialTimeout("unix", socketPath, wsDialTimeout)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to connect to backend socket %s: %v", socketPath, err), http.StatusBadGateway)
 		return
@@ -132,6 +213,7 @@ func (p *ConsoleProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		"%s"+
 		"Sec-WebSocket-Accept: %s\r\n\r\n", subproto, acceptKey)
 
+	_ = clientConn.SetWriteDeadline(time.Now().Add(wsWriteTimeout))
 	if _, err := clientBuf.WriteString(handshake); err != nil {
 		return
 	}
@@ -144,21 +226,36 @@ func (p *ConsoleProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	safeWriteFrame := func(payload []byte, opcode byte) error {
 		writeMu.Lock()
 		defer writeMu.Unlock()
+		_ = clientConn.SetWriteDeadline(time.Now().Add(wsWriteTimeout))
 		return writeWSFrame(clientConn, payload, opcode)
 	}
 
+	var lastActivity atomic.Int64
+	lastActivity.Store(time.Now().UnixNano())
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+
 	// Goroutine 1: Backend -> WebSocket Client (pack into binary frames)
 	go func() {
+		defer wg.Done()
 		buf := make([]byte, 16384)
 		for {
+			_ = backendConn.SetReadDeadline(time.Now().Add(wsIdleReadTimeout))
 			n, err := backendConn.Read(buf)
 			if n > 0 {
-				if err := safeWriteFrame(buf[:n], 0x2); err != nil {
-					errChan <- err
+				lastActivity.Store(time.Now().UnixNano())
+				if wErr := safeWriteFrame(buf[:n], 0x2); wErr != nil {
+					errChan <- wErr
 					return
 				}
 			}
 			if err != nil {
+				if ne, ok := err.(net.Error); ok && ne.Timeout() {
+					if time.Since(time.Unix(0, lastActivity.Load())) < wsIdleReadTimeout {
+						continue
+					}
+				}
 				errChan <- err
 				return
 			}
@@ -167,9 +264,21 @@ func (p *ConsoleProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Goroutine 2: WebSocket Client -> Backend (decode WS frames, write to unix socket)
 	allowTextFrames := targetType == "serial" || targetType == "lxc"
-	go forwardClientFramesWithOpts(clientBuf, backendConn, safeWriteFrame, errChan, allowTextFrames)
+	go func() {
+		defer wg.Done()
+		cr := &deadlineReader{
+			r:            clientBuf,
+			conn:         clientConn,
+			timeout:      wsIdleReadTimeout,
+			lastActivity: &lastActivity,
+		}
+		forwardClientFramesWithOpts(cr, backendConn, safeWriteFrame, errChan, allowTextFrames)
+	}()
 
 	<-errChan
+	_ = backendConn.Close()
+	_ = clientConn.Close()
+	wg.Wait()
 }
 
 // forwardClientFrames decodes client WebSocket frames for binary VNC/RFB sockets.
@@ -193,7 +302,14 @@ func forwardClientFramesWithOpts(clientBuf io.Reader, backendConn net.Conn, safe
 			errChan <- io.EOF
 			return
 		case 0x9: // Ping
-			_ = safeWriteFrame(payload, 0xA) // Pong
+			if len(payload) > wsMaxControlPayload {
+				errChan <- fmt.Errorf("websocket protocol violation: ping payload %d exceeds %d-byte limit", len(payload), wsMaxControlPayload)
+				return
+			}
+			if err := safeWriteFrame(payload, 0xA); err != nil { // Pong
+				errChan <- err
+				return
+			}
 			continue
 		case 0xA: // Pong: ignore, never forward to the backend.
 			continue
@@ -208,6 +324,7 @@ func forwardClientFramesWithOpts(clientBuf io.Reader, backendConn net.Conn, safe
 			}
 			if fin {
 				if len(payload) > 0 {
+					_ = backendConn.SetWriteDeadline(time.Now().Add(wsWriteTimeout))
 					if _, err := backendConn.Write(payload); err != nil {
 						errChan <- err
 						return
@@ -224,6 +341,7 @@ func forwardClientFramesWithOpts(clientBuf io.Reader, backendConn net.Conn, safe
 			}
 			if fin {
 				if len(payload) > 0 {
+					_ = backendConn.SetWriteDeadline(time.Now().Add(wsWriteTimeout))
 					if _, err := backendConn.Write(payload); err != nil {
 						errChan <- err
 						return
@@ -247,6 +365,7 @@ func forwardClientFramesWithOpts(clientBuf io.Reader, backendConn net.Conn, safe
 				continue
 			}
 			if len(fragBuf) > 0 {
+				_ = backendConn.SetWriteDeadline(time.Now().Add(wsWriteTimeout))
 				if _, err := backendConn.Write(fragBuf); err != nil {
 					errChan <- err
 					return
@@ -262,6 +381,9 @@ func forwardClientFramesWithOpts(clientBuf io.Reader, backendConn net.Conn, safe
 }
 
 func writeWSFrame(w io.Writer, payload []byte, opcode byte) error {
+	if opcode >= 0x8 && len(payload) > wsMaxControlPayload {
+		return fmt.Errorf("websocket control frame 0x%x payload %d exceeds %d-byte RFC 6455 limit", opcode, len(payload), wsMaxControlPayload)
+	}
 	length := len(payload)
 	frame := make([]byte, 10+length)
 	frame[0] = 0x80 | (opcode & 0x0F) // FIN + opcode
@@ -287,11 +409,12 @@ func writeWSFrame(w io.Writer, payload []byte, opcode byte) error {
 }
 
 func readWSFrame(r io.Reader) ([]byte, byte, bool, error) {
-	head := make([]byte, 2)
-	if _, err := io.ReadFull(r, head); err != nil {
+	var head [2]byte
+	if _, err := io.ReadFull(r, head[:]); err != nil {
 		return nil, 0, false, err
 	}
 
+	fin := (head[0] & 0x80) != 0
 	opcode := head[0] & 0x0F
 	masked := (head[1] & 0x80) != 0
 	payloadLen := int64(head[1] & 0x7F)
@@ -311,6 +434,15 @@ func readWSFrame(r io.Reader) ([]byte, byte, bool, error) {
 			return nil, 0, false, fmt.Errorf("websocket frame payload exceeds 10MB limit")
 		}
 		payloadLen = int64(extLen)
+	}
+
+	if opcode >= 0x8 {
+		if !fin {
+			return nil, 0, false, fmt.Errorf("websocket protocol violation: fragmented control frame 0x%x", opcode)
+		}
+		if payloadLen > wsMaxControlPayload {
+			return nil, 0, false, fmt.Errorf("websocket protocol violation: control frame payload %d exceeds %d-byte limit", payloadLen, wsMaxControlPayload)
+		}
 	}
 
 	var maskKey [4]byte
@@ -335,5 +467,5 @@ func readWSFrame(r io.Reader) ([]byte, byte, bool, error) {
 		}
 	}
 
-	return data, opcode, (head[0] & 0x80) != 0, nil
+	return data, opcode, fin, nil
 }

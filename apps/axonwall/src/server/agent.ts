@@ -56,7 +56,7 @@ import { promisify } from 'node:util';
 import { getSession } from './auth';
 import { assertActionPermitted, isPasswordChangeEnforced } from './auth-guard';
 import { assertPluginEnabled } from './plugin-guard';
-import { ssrfSafeFetch } from './ssrf-guard';
+import { assertSafeOutboundUrl, ssrfSafeFetch } from './ssrf-guard';
 import type { UserSession } from '@axonwall/lib/rbac';
 import { headers } from 'next/headers';
 import {
@@ -333,7 +333,7 @@ export async function getAgentStatus(): Promise<AgentStatus> {
 }
 
 function redactDesiredStateForSession(state: DesiredState, session: UserSession): DesiredState {
-  if (!isPasswordChangeEnforced(session) && (session.roles?.includes('admin') || session.privileges?.includes('*'))) {
+  if (isAdminSession(session)) {
     return state;
   }
   const redacted: any = structuredClone(state);
@@ -350,6 +350,10 @@ function redactDesiredStateForSession(state: DesiredState, session: UserSession)
         }
       }
     }
+  }
+
+  if (redacted.headscale?.wanInvite?.portKnocking?.sequence) {
+    redacted.headscale.wanInvite.portKnocking.sequence = [];
   }
 
   if (Array.isArray(redacted.vpn?.ipsec?.connections)) {
@@ -561,6 +565,7 @@ function redactDesiredStateForSession(state: DesiredState, session: UserSession)
   if (redacted.ddns && Array.isArray(redacted.ddns.entries)) {
     for (const entry of redacted.ddns.entries) {
       if (entry?.apiToken) entry.apiToken = MASK;
+      if (entry?.customUpdateUrl) entry.customUpdateUrl = MASK;
     }
   }
   if (redacted.captivePortal) {
@@ -602,6 +607,9 @@ function redactDesiredStateForSession(state: DesiredState, session: UserSession)
     }
   }
   if (redacted.threatHarvester) {
+    if (redacted.threatHarvester.anonymizationSalt) {
+      redacted.threatHarvester.anonymizationSalt = MASK;
+    }
     if (redacted.threatHarvester.teacherLlm?.apiKey) {
       redacted.threatHarvester.teacherLlm.apiKey = MASK;
     }
@@ -640,6 +648,9 @@ function redactDesiredStateForSession(state: DesiredState, session: UserSession)
     }
     if (redacted.netflow.enrichment?.geoipAsnDownloadUrl) {
       redacted.netflow.enrichment.geoipAsnDownloadUrl = MASK;
+    }
+    if (redacted.netflow.selfExport?.metadataSync?.apiToken) {
+      redacted.netflow.selfExport.metadataSync.apiToken = MASK;
     }
     if (Array.isArray(redacted.netflow.alerting?.rules)) {
       for (const rule of redacted.netflow.alerting.rules) {
@@ -1021,7 +1032,25 @@ export async function applyDesiredState(
   await enforceRateLimit(10, 60000); // Max 10 applies per minute per IP
   assertActionPermitted(session, 'admin');
 
-  const normalizedState = DesiredStateSchema.parse(state);
+  // Preserve redacted headscale port-knocking sequence before Zod .min(2) validation runs.
+  let candidateState: any = state;
+  if (
+    candidateState &&
+    typeof candidateState === 'object' &&
+    Array.isArray(candidateState?.headscale?.wanInvite?.portKnocking?.sequence) &&
+    candidateState.headscale.wanInvite.portKnocking.sequence.length === 0
+  ) {
+    const existingForKnock = await getDesiredStateInternal().catch(() => null);
+    candidateState = structuredClone(candidateState);
+    if (existingForKnock?.headscale?.wanInvite?.portKnocking?.sequence?.length) {
+      candidateState.headscale.wanInvite.portKnocking.sequence =
+        existingForKnock.headscale.wanInvite.portKnocking.sequence;
+    } else {
+      delete candidateState.headscale.wanInvite.portKnocking.sequence;
+    }
+  }
+
+  const normalizedState = DesiredStateSchema.parse(candidateState);
   const needsExistingForMask =
     (normalizedState.netbox &&
       (normalizedState.netbox.apiToken === '********' ||
@@ -1034,10 +1063,17 @@ export async function applyDesiredState(
         normalizedState.librenms.snmpDefaults?.v3AuthPass === '********' ||
         normalizedState.librenms.snmpDefaults?.v3CryptoPass === '********')) ||
     Boolean(normalizedState.topology?.peers?.some((p) => p.apiToken === '********')) ||
+    Boolean(
+      normalizedState.ddns?.entries?.some(
+        (e) => e.apiToken === '********' || e.customUpdateUrl === '********'
+      )
+    ) ||
+    normalizedState.threatHarvester?.anonymizationSalt === '********' ||
     normalizedState.netflow?.storage?.clickhouse?.password === '********' ||
     normalizedState.netflow?.reporting?.webhookUrl === '********' ||
     normalizedState.netflow?.enrichment?.geoipCityDownloadUrl === '********' ||
     normalizedState.netflow?.enrichment?.geoipAsnDownloadUrl === '********' ||
+    normalizedState.netflow?.selfExport?.metadataSync?.apiToken === '********' ||
     Boolean(normalizedState.netflow?.alerting?.rules?.some((r) => r.webhookUrl === '********')) ||
     normalizedState.observability?.clickhouse?.password === '********' ||
     normalizedState.observability?.alerting?.webhookUrl === '********' ||
@@ -1134,6 +1170,27 @@ export async function applyDesiredState(
         p.apiToken === '********' ? { ...p, apiToken: existingPeers.get(p.id)?.apiToken } : p,
       );
     }
+    if (normalizedState.ddns?.entries?.length && existing?.ddns?.entries?.length) {
+      const existingById = new Map(existing.ddns.entries.map((e) => [e.id, e]));
+      const existingByHost = new Map(existing.ddns.entries.map((e) => [e.hostname, e]));
+      normalizedState.ddns.entries = normalizedState.ddns.entries.map((e) => {
+        const prev = existingById.get(e.id) || existingByHost.get(e.hostname);
+        if (!prev) return e;
+        return {
+          ...e,
+          apiToken: e.apiToken === '********' ? prev.apiToken : e.apiToken,
+          customUpdateUrl:
+            e.customUpdateUrl === '********' ? prev.customUpdateUrl : e.customUpdateUrl,
+        };
+      });
+    }
+    if (
+      normalizedState.threatHarvester &&
+      normalizedState.threatHarvester.anonymizationSalt === '********'
+    ) {
+      normalizedState.threatHarvester.anonymizationSalt =
+        existing?.threatHarvester?.anonymizationSalt;
+    }
     if (normalizedState.netflow) {
       if (normalizedState.netflow.storage?.clickhouse?.password === '********') {
         normalizedState.netflow.storage.clickhouse.password = existing?.netflow?.storage?.clickhouse?.password;
@@ -1148,6 +1205,10 @@ export async function applyDesiredState(
       if (normalizedState.netflow.enrichment?.geoipAsnDownloadUrl === '********') {
         normalizedState.netflow.enrichment.geoipAsnDownloadUrl =
           existing?.netflow?.enrichment?.geoipAsnDownloadUrl ?? '';
+      }
+      if (normalizedState.netflow.selfExport?.metadataSync?.apiToken === '********') {
+        normalizedState.netflow.selfExport.metadataSync.apiToken =
+          existing?.netflow?.selfExport?.metadataSync?.apiToken ?? '';
       }
       if (normalizedState.netflow.alerting?.rules?.length) {
         const existingRules = new Map((existing?.netflow?.alerting?.rules ?? []).map((r) => [r.id, r]));
@@ -2727,8 +2788,8 @@ export async function saveInterfaceAssignment(data: {
   const normalizedState = outcome.preparedState;
 
   try {
-    const { recordGitOpsChange } = await import('./gitops');
-    await recordGitOpsChange(
+    const { recordGitOpsChangeInternal } = await import('./gitops-internal');
+    await recordGitOpsChangeInternal(
       normalizedState,
       session?.username || 'admin',
       `Updated interface ${cleanName.toUpperCase()} (${role.toUpperCase()}, ${
@@ -2914,8 +2975,8 @@ export async function deleteInterfaceAssignment(
   }
 
   try {
-    const { recordGitOpsChange } = await import('./gitops');
-    await recordGitOpsChange(
+    const { recordGitOpsChangeInternal } = await import('./gitops-internal');
+    await recordGitOpsChangeInternal(
       outcome.preparedState,
       session?.username || 'admin',
       `Removed interface ${cleanName.toUpperCase()}`
@@ -3144,7 +3205,7 @@ function compareSemver(v1: string, v2: string): number {
 
 export async function getReleaseInfo(forceRefresh = false): Promise<ReleaseInfo> {
   const session = await getSession();
-  if (!session) throw new Error('Unauthorized');
+  assertActionPermitted(session);
   if (isPasswordChangeEnforced(session)) throw new Error('Forbidden: Password change required');
   const currentVersion = getCurrentInstalledVersion();
   const now = Date.now();
@@ -3458,7 +3519,7 @@ function detectLocalInstallMode(): 'ab' | 'rolling' | 'zbm' | 'btrfs' {
 
 export async function getSystemPartitionsTelemetry(): Promise<SystemPartitionsTelemetry> {
   const session = await getSession();
-  if (!session) throw new Error('Unauthorized');
+  assertActionPermitted(session);
   if (isPasswordChangeEnforced(session)) throw new Error('Forbidden: Password change required');
   const currentVersion = getCurrentInstalledVersion();
   const kernel = os.release() || '6.12.0';
@@ -3740,6 +3801,9 @@ export async function getSystemPartitionsTelemetry(): Promise<SystemPartitionsTe
 function isAdminSession(session: Awaited<ReturnType<typeof getSession>>): boolean {
   if (!session) return false;
   if (isPasswordChangeEnforced(session)) return false;
+  if (session.source === 'service_token') {
+    return Array.isArray(session.scopes) && session.scopes.includes('*') && Boolean(session.roles?.includes('admin'));
+  }
   if (session.source === 'local_admin') return true;
   if (Array.isArray(session.roles) && session.roles.includes('admin')) return true;
   if (Array.isArray(session.privileges) && session.privileges.includes('*')) return true;
@@ -5438,7 +5502,16 @@ export async function runNmapScan(params: {
   const displayCmd = `nmap ${flags.join(' ')} ${cleanTarget}`;
   const startMs = Date.now();
 
-  if (!params.simulated && hasBinary('nmap')) {
+  if (!params.simulated) {
+    if (!hasBinary('nmap')) {
+      return {
+        success: false,
+        command: displayCmd,
+        mode: 'live',
+        durationMs: Date.now() - startMs,
+        error: 'nmap binary is not installed on this appliance',
+      };
+    }
     try {
       const args = [...flags, '-oX', '-', cleanTarget];
       const { stdout: xmlOut } = await execFileAsync('nmap', args, {
@@ -5455,6 +5528,13 @@ export async function runNmapScan(params: {
           durationMs: Date.now() - startMs,
         };
       }
+      return {
+        success: false,
+        command: displayCmd,
+        mode: 'live',
+        durationMs: Date.now() - startMs,
+        error: 'Live Nmap scan completed without valid XML output',
+      };
     } catch (err: any) {
       const stdoutStr = typeof err?.stdout === 'string' ? err.stdout : err?.stdout?.toString?.('utf-8') || '';
       if (stdoutStr.includes('<nmaprun')) {
@@ -5466,6 +5546,13 @@ export async function runNmapScan(params: {
           durationMs: Date.now() - startMs,
         };
       }
+      return {
+        success: false,
+        command: displayCmd,
+        mode: 'live',
+        durationMs: Date.now() - startMs,
+        error: err?.message || 'Live Nmap scan failed',
+      };
     }
   }
 
@@ -6964,6 +7051,9 @@ export async function getThreatHarvesterStatus(): Promise<ThreatHarvesterStatusS
   if (res && res.config && res.stats) {
     if (!isAdminSession(session)) {
       const cloned: ThreatHarvesterStatusSnapshot = structuredClone(res);
+      if (cloned.config?.anonymizationSalt) {
+        cloned.config.anonymizationSalt = '********';
+      }
       if (cloned.config?.teacherLlm?.apiKey) {
         cloned.config.teacherLlm.apiKey = '********';
       }
@@ -7588,6 +7678,52 @@ export async function getNetBoxStatusAction(): Promise<NetBoxStatusSnapshot> {
   };
 }
 
+async function validateServiceOverrideUrl(
+  rawOverride: string,
+  serviceLabel: string,
+  candidateUrls: Array<string | undefined>
+): Promise<string> {
+  const trimmed = rawOverride.trim();
+  const { url } = await assertSafeOutboundUrl(trimmed, {
+    allowHttp: true,
+    allowPrivate: true,
+  });
+  const allowedOrigins = new Set<string>();
+  for (const cand of candidateUrls) {
+    const clean = cand?.trim();
+    if (!clean) continue;
+    try {
+      allowedOrigins.add(new URL(clean).origin);
+    } catch {}
+  }
+  if (!allowedOrigins.has(url.origin)) {
+    throw new Error(
+      `Forbidden: ${serviceLabel} endpointOverride origin (${url.origin}) does not match configured service origin`
+    );
+  }
+  return trimmed;
+}
+
+function resolveNetBoxAllowedOrigins(state: DesiredState | null | undefined): Array<string | undefined> {
+  const cfg = resolveNetBoxConfig(state);
+  return [
+    cfg.externalUrl,
+    `https://${cfg.domain}`,
+    `http://${cfg.domain}`,
+    `http://netbox.${cfg.namespace}.svc.cluster.local:${cfg.servicePort}`,
+  ];
+}
+
+function resolveLibreNmsAllowedOrigins(state: DesiredState | null | undefined): Array<string | undefined> {
+  const cfg = resolveLibreNmsConfig(state);
+  return [
+    cfg.externalUrl,
+    `https://${cfg.domain}`,
+    `http://${cfg.domain}`,
+    `http://librenms.${cfg.namespace}.svc.cluster.local:${cfg.servicePort}`,
+  ];
+}
+
 export async function triggerNetBoxSyncAction(options?: {
   dryRun?: boolean;
   endpointOverride?: string;
@@ -7597,9 +7733,19 @@ export async function triggerNetBoxSyncAction(options?: {
   assertActionPermitted(session, 'admin');
   await assertPluginEnabled('netbox');
 
+  let validatedOverride: string | undefined;
+  if (options?.endpointOverride?.trim()) {
+    const state = await getDesiredStateInternal().catch(() => null);
+    validatedOverride = await validateServiceOverrideUrl(
+      options.endpointOverride,
+      'NetBox',
+      resolveNetBoxAllowedOrigins(state)
+    );
+  }
+
   const payload = {
     dryRun: Boolean(options?.dryRun),
-    ...(options?.endpointOverride?.trim() ? { endpointOverride: options.endpointOverride.trim() } : {}),
+    ...(validatedOverride ? { endpointOverride: validatedOverride } : {}),
   };
   const res = await callAgentApiDetailed<NetBoxSyncResultSnapshot | { error?: string; result?: NetBoxSyncResultSnapshot }>(
     '/v1/netbox/sync',
@@ -7917,9 +8063,19 @@ export async function triggerLibreNmsSyncAction(options?: {
   assertActionPermitted(session, 'admin');
   await assertPluginEnabled('librenms');
 
+  let validatedOverride: string | undefined;
+  if (options?.endpointOverride?.trim()) {
+    const state = await getDesiredStateInternal().catch(() => null);
+    validatedOverride = await validateServiceOverrideUrl(
+      options.endpointOverride,
+      'LibreNMS',
+      resolveLibreNmsAllowedOrigins(state)
+    );
+  }
+
   const payload = {
     dryRun: Boolean(options?.dryRun),
-    ...(options?.endpointOverride?.trim() ? { endpointOverride: options.endpointOverride.trim() } : {}),
+    ...(validatedOverride ? { endpointOverride: validatedOverride } : {}),
   };
   const res = await callAgentApiDetailed<
     LibreNmsSyncResultSnapshot | { error?: string; result?: LibreNmsSyncResultSnapshot }
@@ -7981,10 +8137,12 @@ export async function getLibreNmsTopologyAction(endpointOverride?: string): Prom
   const session = await getSession();
   assertActionPermitted(session);
   await assertPluginEnabled('librenms');
+  if (endpointOverride && endpointOverride.trim()) {
+    throw new Error('Forbidden: Custom endpoint overrides are not permitted on LibreNMS topology reads');
+  }
 
-  const q = endpointOverride?.trim() ? `?endpoint=${encodeURIComponent(endpointOverride.trim())}` : '';
   const res = await callAgentApiDetailed<LibreNmsTopologySnapshot>(
-    `/v1/librenms/topology${q}`,
+    '/v1/librenms/topology',
     'GET',
     undefined,
     10_000,
@@ -8029,13 +8187,33 @@ export async function triggerLibreNmsNetBoxSyncAction(options?: {
   assertActionPermitted(session, 'admin');
   await assertPluginEnabled('librenms');
 
+  let validatedLibreOverride: string | undefined;
+  let validatedNetboxOverride: string | undefined;
+  if (options?.endpointOverride?.trim() || options?.netboxOverride?.trim()) {
+    const state = await getDesiredStateInternal().catch(() => null);
+    if (options?.endpointOverride?.trim()) {
+      validatedLibreOverride = await validateServiceOverrideUrl(
+        options.endpointOverride,
+        'LibreNMS',
+        resolveLibreNmsAllowedOrigins(state)
+      );
+    }
+    if (options?.netboxOverride?.trim()) {
+      validatedNetboxOverride = await validateServiceOverrideUrl(
+        options.netboxOverride,
+        'NetBox',
+        resolveNetBoxAllowedOrigins(state)
+      );
+    }
+  }
+
   const action = options?.action || 'preview';
   const payload = {
     action,
     dryRun: options?.dryRun ?? action === 'preview',
     overwriteLabels: Boolean(options?.overwriteLabels),
-    ...(options?.endpointOverride?.trim() ? { endpointOverride: options.endpointOverride.trim() } : {}),
-    ...(options?.netboxOverride?.trim() ? { netboxOverride: options.netboxOverride.trim() } : {}),
+    ...(validatedLibreOverride ? { endpointOverride: validatedLibreOverride } : {}),
+    ...(validatedNetboxOverride ? { netboxOverride: validatedNetboxOverride } : {}),
   };
   const res = await callAgentApiDetailed<
     LibreNmsNetBoxSyncResultSnapshot | { error?: string; result?: LibreNmsNetBoxSyncResultSnapshot }

@@ -4,21 +4,13 @@ import { compileNftables } from '@axonwall/lib/compile/nft';
 import { applyDesiredState } from '../../../../server/agent';
 import { parseConfirmTimeoutSeconds } from '../../../../server/confirm-timeout';
 import { getSession } from '../../../../server/auth';
-import { isPasswordChangeEnforced } from '../../../../server/auth-guard';
+import { assertActionPermitted } from '../../../../server/auth-guard';
 import { checkPluginApiGuard } from '../../../../server/plugin-guard';
 
 export async function POST(req: Request) {
   try {
     const session = await getSession();
-    if (!session) {
-      return NextResponse.json({ error: 'Unauthorized: Valid session required' }, { status: 401 });
-    }
-    if (isPasswordChangeEnforced(session)) {
-      return NextResponse.json({ error: 'Forbidden: Password change required' }, { status: 403 });
-    }
-    if (!session.roles?.includes('admin') && !session.roles?.includes('operator')) {
-      return NextResponse.json({ error: 'Forbidden: Operator or Admin role required' }, { status: 403 });
-    }
+    assertActionPermitted(session, 'operator');
     const pluginGuard = await checkPluginApiGuard('firewall-importer');
     if (pluginGuard) return pluginGuard;
 
@@ -69,11 +61,8 @@ export async function POST(req: Request) {
       }
     }
 
-    if (shouldApply && !session.roles?.includes('admin')) {
-      return NextResponse.json(
-        { status: 'error', error: 'Forbidden: Admin role required to apply configuration' },
-        { status: 403 }
-      );
+    if (shouldApply) {
+      assertActionPermitted(session, 'admin');
     }
 
     if (!configText || configText.trim() === '') {

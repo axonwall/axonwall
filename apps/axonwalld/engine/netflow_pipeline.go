@@ -15,6 +15,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -104,6 +105,13 @@ type NetFlowManager struct {
 	selfLastTmpl     map[string]time.Time
 	targetConnsMu    sync.Mutex
 	targetConns      map[string]net.Conn
+	inboundMu        sync.Mutex
+	inboundClosed    bool
+	inboundConns     map[net.Conn]struct{}
+	metaMu           sync.Mutex
+	metaClient       *http.Client
+	metaTransport    *http.Transport
+	metaClientKey    string
 	exportQueue      *TelemetryQueue
 
 	replMu    sync.RWMutex
@@ -158,6 +166,7 @@ func NewNetFlowManager(
 		selfPrevByTarget: make(map[string]map[string]exporterCounterState),
 		selfLastTmpl:     make(map[string]time.Time),
 		targetConns:      make(map[string]net.Conn),
+		inboundConns:     make(map[net.Conn]struct{}),
 		exportQueue:      NewTelemetryQueue("netflow-export", 24, false, "/var/lib/axonwall/telemetry-spool", 256),
 		replConns:        make(map[string]*net.UDPConn),
 		replRate:      make(map[string]*replRateBucket),
@@ -313,6 +322,13 @@ func (m *NetFlowManager) Start() error {
 	m.listeners = nil
 	m.mu.Unlock()
 
+	m.inboundMu.Lock()
+	m.inboundClosed = false
+	if m.inboundConns == nil {
+		m.inboundConns = make(map[net.Conn]struct{})
+	}
+	m.inboundMu.Unlock()
+
 	if exporterOnly {
 		// Edge exporter-only mode: zero listeners, zero local ClickHouse/chunk/baseline/enrichment overhead
 		m.wg.Add(2)
@@ -373,6 +389,8 @@ func (m *NetFlowManager) Stop() {
 	}
 	m.replMu.Unlock()
 	m.closeAllTargetConns()
+	m.closeAllInboundConns()
+	m.closeMetaHTTPClient()
 
 	m.wg.Wait()
 	m.mu.RLock()
@@ -476,7 +494,7 @@ func (m *NetFlowManager) startListener(cfg NetFlowListenerPayload, stopCh chan s
 		}
 	}
 
-	addr := fmt.Sprintf("%s:%d", cfg.BindAddress, cfg.Port)
+	addr := net.JoinHostPort(cfg.BindAddress, strconv.Itoa(cfg.Port))
 	if cfg.Transport == "tcp" || cfg.Transport == "tls" {
 		ln, err := net.Listen("tcp", addr)
 		if err != nil {
@@ -599,6 +617,39 @@ func (m *NetFlowManager) serveUDP(rt *listenerRuntime, conn net.PacketConn) {
 	}
 }
 
+func (m *NetFlowManager) registerInboundConn(c net.Conn) bool {
+	m.inboundMu.Lock()
+	defer m.inboundMu.Unlock()
+	if m.inboundClosed {
+		return false
+	}
+	if m.inboundConns == nil {
+		m.inboundConns = make(map[net.Conn]struct{})
+	}
+	m.inboundConns[c] = struct{}{}
+	return true
+}
+
+func (m *NetFlowManager) unregisterInboundConn(c net.Conn) {
+	m.inboundMu.Lock()
+	delete(m.inboundConns, c)
+	m.inboundMu.Unlock()
+}
+
+func (m *NetFlowManager) closeAllInboundConns() {
+	m.inboundMu.Lock()
+	m.inboundClosed = true
+	conns := make([]net.Conn, 0, len(m.inboundConns))
+	for c := range m.inboundConns {
+		conns = append(conns, c)
+	}
+	m.inboundConns = make(map[net.Conn]struct{})
+	m.inboundMu.Unlock()
+	for _, c := range conns {
+		_ = c.Close()
+	}
+}
+
 func (m *NetFlowManager) serveTCP(rt *listenerRuntime) {
 	defer m.wg.Done()
 	for {
@@ -617,9 +668,14 @@ func (m *NetFlowManager) serveTCP(rt *listenerRuntime) {
 			_ = conn.Close()
 			continue
 		}
+		if !m.registerInboundConn(conn) {
+			_ = conn.Close()
+			return
+		}
 		m.wg.Add(1)
 		go func(c net.Conn, exp string) {
 			defer m.wg.Done()
+			defer m.unregisterInboundConn(c)
 			defer c.Close()
 			hdr := make([]byte, 4)
 			for {
@@ -743,6 +799,21 @@ func (m *NetFlowManager) recordExporterActivity(
 			name = "Local Axonwall Appliance"
 			vendor = "axonwall"
 		}
+		if len(m.exporters) >= 1024 {
+			var oldestIP string
+			var oldestSeen int64
+			first := true
+			for ip, cur := range m.exporters {
+				if first || cur.lastSeenMs < oldestSeen {
+					oldestIP = ip
+					oldestSeen = cur.lastSeenMs
+					first = false
+				}
+			}
+			if !first {
+				delete(m.exporters, oldestIP)
+			}
+		}
 		tr = &exporterTracker{
 			ip:         exporterIP,
 			versions:   make(map[string]bool),
@@ -844,7 +915,7 @@ func (m *NetFlowManager) replicateDatagram(exporterIP, ver string, raw []byte) {
 		conn := m.replConns[tgt.ID]
 		m.replMu.RUnlock()
 		if conn == nil {
-			rAddr, err := net.ResolveUDPAddr("udp", fmt.Sprintf("%s:%d", tgt.DestinationHost, tgt.DestinationPort))
+			rAddr, err := net.ResolveUDPAddr("udp", net.JoinHostPort(tgt.DestinationHost, strconv.Itoa(tgt.DestinationPort)))
 			if err != nil {
 				continue
 			}
@@ -1071,31 +1142,32 @@ func (m *NetFlowManager) selfExportLoop(stopCh chan struct{}) {
 				lastTmpl := m.selfLastTmpl[tgt.ID]
 				refreshInterval := time.Duration(maxInt(30, tgt.TemplateRefreshSec)) * time.Second
 				includeTmpl := lastTmpl.IsZero() || now.Sub(lastTmpl) >= refreshInterval
-				if includeTmpl {
-					m.selfLastTmpl[tgt.ID] = now
-				}
 
-				seq := m.selfSeq.Add(1)
 				domainID := tgt.ObservationDomainID
 				if domainID == 0 {
 					domainID = 1
 				}
 
+				tmplSentOK := true
 				if includeTmpl && tgt.Version != "netflow9" {
 					optSeq := m.selfSeq.Add(1)
 					optPkt := EncodeIPFIXOptionsPacket(domainID, optSeq, nodeID, bundle.LocalHostname, localIfaces)
 					if err := m.sendTargetDatagram(tgt, optPkt); err != nil {
 						m.enqueueExportPacket(tgt.ID, optPkt)
+						tmplSentOK = false
 					}
 				}
 
 				// Chunk flows into <= 20 per MTU-safe UDP datagram
+				dataTmplOK := false
 				for start := 0; start < len(deltaFlows); start += 20 {
 					end := start + 20
 					if end > len(deltaFlows) {
 						end = len(deltaFlows)
 					}
 					batch := deltaFlows[start:end]
+					batchCount := uint32(len(batch))
+					seq := m.selfSeq.Add(batchCount) - batchCount + 1
 					var pkt []byte
 					if tgt.Version == "netflow9" {
 						pkt = EncodeNetFlowV9Packet(domainID, seq, includeTmpl && start == 0, batch)
@@ -1105,9 +1177,18 @@ func (m *NetFlowManager) selfExportLoop(stopCh chan struct{}) {
 					if err := m.sendTargetDatagram(tgt, pkt); err == nil {
 						m.totalSelfExport.Add(uint64(len(batch)))
 						m.exportQueue.MarkSent(uint64(len(batch)))
+						if includeTmpl && start == 0 {
+							dataTmplOK = true
+						}
 					} else {
 						m.enqueueExportPacket(tgt.ID, pkt)
+						if includeTmpl && start == 0 {
+							tmplSentOK = false
+						}
 					}
+				}
+				if includeTmpl && tmplSentOK && (len(deltaFlows) == 0 || dataTmplOK) {
+					m.selfLastTmpl[tgt.ID] = now
 				}
 			}
 		}
@@ -1476,6 +1557,73 @@ func (m *NetFlowManager) metadataSyncLoop(stopCh chan struct{}) {
 	}
 }
 
+func (m *NetFlowManager) closeMetaHTTPClient() {
+	m.metaMu.Lock()
+	tr := m.metaTransport
+	m.metaClient = nil
+	m.metaTransport = nil
+	m.metaClientKey = ""
+	m.metaMu.Unlock()
+	if tr != nil {
+		tr.CloseIdleConnections()
+	}
+}
+
+func (m *NetFlowManager) getMetadataHTTPClient(bundle *NetFlowRuntimeBundle, targetURL string) (*http.Client, error) {
+	useTLS := strings.HasPrefix(targetURL, "https://")
+	key := "http"
+	if useTLS {
+		key = fmt.Sprintf("https|%v|%s|%v", bundle.UseHaMtls, bundle.TLSCACert, bundle.TLSInsecureSkipVerify)
+	}
+	m.metaMu.Lock()
+	if m.metaClient != nil && m.metaClientKey == key {
+		c := m.metaClient
+		m.metaMu.Unlock()
+		return c, nil
+	}
+	oldTr := m.metaTransport
+	m.metaMu.Unlock()
+
+	if oldTr != nil {
+		oldTr.CloseIdleConnections()
+	}
+
+	var tr *http.Transport
+	if useTLS {
+		tlsConf, terr := buildTLSConfigFromBundleParams(bundle.UseHaMtls, bundle.TLSCACert, "", "", "", bundle.TLSInsecureSkipVerify, false, false)
+		if terr != nil {
+			return nil, terr
+		}
+		tr = &http.Transport{
+			TLSClientConfig: tlsConf,
+			MaxIdleConns:    4,
+			IdleConnTimeout: 60 * time.Second,
+		}
+	} else {
+		tr = &http.Transport{
+			MaxIdleConns:    4,
+			IdleConnTimeout: 60 * time.Second,
+		}
+	}
+	c := &http.Client{
+		Timeout:   5 * time.Second,
+		Transport: tr,
+	}
+
+	m.metaMu.Lock()
+	if m.metaClient != nil && m.metaClientKey == key {
+		existing := m.metaClient
+		m.metaMu.Unlock()
+		tr.CloseIdleConnections()
+		return existing, nil
+	}
+	m.metaClient = c
+	m.metaTransport = tr
+	m.metaClientKey = key
+	m.metaMu.Unlock()
+	return c, nil
+}
+
 func (m *NetFlowManager) pushMetadataSyncOnce(bundle *NetFlowRuntimeBundle, syncCfg *NetFlowMetadataSyncPayload, targetURL string) {
 	ifaces, _ := collectLocalInterfaceSnapshot(bundle)
 	leasesList := readActiveKeaLeases("/var/lib/kea/kea-leases4.csv")
@@ -1502,6 +1650,10 @@ func (m *NetFlowManager) pushMetadataSyncOnce(bundle *NetFlowRuntimeBundle, sync
 	if err != nil {
 		return
 	}
+	client, err := m.getMetadataHTTPClient(bundle, targetURL)
+	if err != nil {
+		return
+	}
 	req, err := http.NewRequest(http.MethodPost, targetURL, bytes.NewReader(body))
 	if err != nil {
 		return
@@ -1514,14 +1666,8 @@ func (m *NetFlowManager) pushMetadataSyncOnce(bundle *NetFlowRuntimeBundle, sync
 	if tok != "" {
 		req.Header.Set("Authorization", "Bearer "+tok)
 	}
-	client := &http.Client{Timeout: 5 * time.Second}
-	if strings.HasPrefix(targetURL, "https://") {
-		if tlsConf, terr := buildTLSConfigFromBundleParams(bundle.UseHaMtls, bundle.TLSCACert, "", "", "", bundle.TLSInsecureSkipVerify, false, false); terr == nil {
-			client.Transport = &http.Transport{TLSClientConfig: tlsConf}
-		}
-	}
 	resp, err := client.Do(req)
-	if err == nil {
+	if err == nil && resp != nil {
 		_, _ = io.Copy(io.Discard, resp.Body)
 		_ = resp.Body.Close()
 	}
@@ -1870,10 +2016,30 @@ func (m *NetFlowManager) evaluateAlerts(flows []FlowRecord) {
 func (m *NetFlowManager) triggerRuleAlertLocked(rule NetFlowAlertRulePayload, culpritIP, exporterIP string, metricVal float64, summary string, nowMs int64) {
 	cdKey := rule.ID + "|" + culpritIP
 	cdMs := int64(maxInt(30, rule.CooldownSec)) * 1000
-	if last, ok := m.alertCooldown[cdKey]; ok && nowMs-last < cdMs {
+	if expMs, ok := m.alertCooldown[cdKey]; ok && nowMs < expMs {
 		return
 	}
-	m.alertCooldown[cdKey] = nowMs
+	for k, expMs := range m.alertCooldown {
+		if nowMs >= expMs {
+			delete(m.alertCooldown, k)
+		}
+	}
+	if len(m.alertCooldown) >= 4096 {
+		var oldestKey string
+		var oldestExp int64
+		first := true
+		for k, expMs := range m.alertCooldown {
+			if first || expMs < oldestExp {
+				oldestKey = k
+				oldestExp = expMs
+				first = false
+			}
+		}
+		if !first {
+			delete(m.alertCooldown, oldestKey)
+		}
+	}
+	m.alertCooldown[cdKey] = nowMs + cdMs
 
 	actionsTaken := []string{"alert_log"}
 	ttl := rule.XdpBlockTTLSec
@@ -1962,13 +2128,28 @@ func (m *NetFlowManager) dispatchRemoteEdgeMitigation(exporterIP, culpritIP stri
 	if tm == nil || culpritIP == "" || exporterIP == "" {
 		return
 	}
+	expAddr, expParseErr := netip.ParseAddr(strings.TrimSpace(exporterIP))
+	if expParseErr == nil {
+		expAddr = expAddr.Unmap()
+	}
 	peers, peerTokens := tm.ListEnabledPeersWithTokens()
 	for _, p := range peers {
 		validURL, err := validatePluginHTTPURL(p.APIURL, "peer "+p.Name)
 		if err != nil {
 			continue
 		}
-		if !strings.Contains(p.APIURL, exporterIP) && p.ID != exporterIP && p.Name != exporterIP {
+		parsedURL, perr := url.Parse(validURL)
+		if perr != nil {
+			continue
+		}
+		apiHost := strings.TrimSpace(parsedURL.Hostname())
+		hostMatch := false
+		if apiAddr, aerr := netip.ParseAddr(apiHost); aerr == nil && expParseErr == nil {
+			hostMatch = apiAddr.Unmap() == expAddr
+		} else if apiHost != "" {
+			hostMatch = strings.EqualFold(apiHost, strings.TrimSpace(exporterIP))
+		}
+		if !hostMatch && p.ID != exporterIP && p.Name != exporterIP {
 			continue
 		}
 		client, cerr := tm.BuildPeerHTTPClient(p)
@@ -2020,7 +2201,7 @@ func (m *NetFlowManager) GetStatus() NetFlowStatusSnapshot {
 			Name:            rt.cfg.Name,
 			Protocol:        rt.cfg.Protocol,
 			Transport:       rt.cfg.Transport,
-			Address:         fmt.Sprintf("%s:%d", rt.cfg.BindAddress, rt.cfg.Port),
+			Address:         net.JoinHostPort(rt.cfg.BindAddress, strconv.Itoa(rt.cfg.Port)),
 			Listening:       rt.listening.Load(),
 			PacketsReceived: rt.pktsReceived.Load(),
 			DecodeErrors:    rt.decodeErrs.Load(),

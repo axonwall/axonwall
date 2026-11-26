@@ -2,9 +2,10 @@
 
 import React, { useState, useEffect } from 'react';
 import { PluginDisabledGate } from '@/components/PluginDisabledGate';
-import { Shield, Download, AlertTriangle, Key, CheckCircle2, Plus, Trash2 } from 'lucide-react';
+import { Shield, Download, AlertTriangle, AlertCircle, Key, CheckCircle2, Plus, Trash2 } from 'lucide-react';
 import { getCurrentDesiredState } from '@/server/agent';
 import { useDesiredStateApply } from '@/lib/use-desired-state-apply';
+import { mergeTlsDecryptionConfig } from '@/lib/state-preservation';
 import type { DesiredState } from '@axonwall/lib/schemas';
 
 function TlsDecryptionPageContent() {
@@ -17,7 +18,7 @@ function TlsDecryptionPageContent() {
     '*.apple.com',
   ]);
   const [newDomain, setNewDomain] = useState('');
-  const [statusMsg, setStatusMsg] = useState<string | null>(null);
+  const [statusMsg, setStatusMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
   useEffect(() => {
     getCurrentDesiredState()
@@ -43,23 +44,64 @@ function TlsDecryptionPageContent() {
     setStatusMsg(null);
     try {
       const current = await getCurrentDesiredState();
-      const tlsObj = {
+      const existingTls = current.tlsDecryption || current.suricata?.tlsDecryption;
+      const tlsObj = mergeTlsDecryptionConfig(existingTls, {
         enabled: nextEnabled,
-        transparentProxyPort: 3129,
         bypassedDomains: nextBypass,
-      };
+      });
       const nextState: DesiredState = {
         ...current,
         tlsDecryption: tlsObj,
       };
       setFullState(nextState);
       const res = await applyState(nextState);
-      setStatusMsg(res.message || 'Saved TLS Decryption policy to /etc/axonwall/security.yaml');
+      setStatusMsg({
+        type: 'success',
+        text: res.message || 'Saved TLS Decryption policy to /etc/axonwall/security.yaml',
+      });
     } catch (err: any) {
       setEnabled(prevEnabled);
       setBypassedDomains(prevBypassedDomains);
       setFullState(prevFullState);
-      setStatusMsg(`Error: ${err?.message || 'Failed to save TLS Decryption settings'}`);
+      setStatusMsg({
+        type: 'error',
+        text: err?.message || 'Failed to save TLS Decryption settings',
+      });
+    }
+  };
+
+  const tlsCfg = fullState?.tlsDecryption || fullState?.suricata?.tlsDecryption;
+  const caId = tlsCfg?.caCertificateId;
+  const matchedCa =
+    (fullState?.acme?.internalCAs ?? []).find((ca) => (caId ? ca.id === caId : ca.isDecryptionRoot)) ??
+    (fullState?.acme?.internalCAs ?? []).find((ca) => ca.isDecryptionRoot);
+  const rawCaCert = matchedCa?.certificateBase64?.trim() || '';
+  const hasDownloadableCa = Boolean(rawCaCert && rawCaCert !== '********');
+
+  const handleDownloadCaCert = () => {
+    if (!hasDownloadableCa) {
+      setStatusMsg({
+        type: 'error',
+        text: 'No inspection Root CA certificate is currently provisioned.',
+      });
+      return;
+    }
+    try {
+      const pem = rawCaCert.includes('-----BEGIN CERTIFICATE-----') ? rawCaCert : atob(rawCaCert);
+      const blob = new Blob([pem], { type: 'application/x-x509-ca-cert' });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = `${(matchedCa?.name || 'axonwall-inspection-root-ca').replace(/[^a-zA-Z0-9._-]+/g, '-')}.crt`;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(url);
+    } catch {
+      setStatusMsg({
+        type: 'error',
+        text: 'Failed to decode configured Root CA certificate for download.',
+      });
     }
   };
 
@@ -85,9 +127,19 @@ function TlsDecryptionPageContent() {
       </div>
 
       {statusMsg && (
-        <div className="p-3 bg-emerald-500/10 border border-emerald-500/30 rounded-lg text-xs text-emerald-300 flex items-center gap-2">
-          <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
-          <span>{statusMsg}</span>
+        <div
+          className={`p-3 rounded-lg text-xs flex items-center gap-2 border ${
+            statusMsg.type === 'error'
+              ? 'bg-red-500/10 border-red-500/30 text-red-300'
+              : 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300'
+          }`}
+        >
+          {statusMsg.type === 'error' ? (
+            <AlertCircle className="w-4 h-4 text-red-400 shrink-0" />
+          ) : (
+            <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+          )}
+          <span>{statusMsg.text}</span>
         </div>
       )}
 
@@ -171,14 +223,27 @@ function TlsDecryptionPageContent() {
           In order to intercept TLS connections without browser warnings, you must deploy this internal Root CA to your client devices via MDM (Intune, Jamf, etc.).
         </p>
 
-        <div className="flex items-center justify-between p-4 bg-slate-950 border border-slate-800 rounded-lg">
+        <div className="flex items-center justify-between p-4 bg-slate-950 border border-slate-800 rounded-lg gap-4">
           <div>
-            <div className="font-mono text-sm text-emerald-400">Axonwall Inspection Root CA (Internal)</div>
-            <div className="text-xs text-slate-500 mt-1">Valid until: 2036-10-07</div>
+            <div className="font-mono text-sm text-emerald-400">
+              {matchedCa?.commonName || matchedCa?.name || 'Axonwall Inspection Root CA (Internal)'}
+            </div>
+            <div className="text-xs text-slate-500 mt-1">
+              {hasDownloadableCa
+                ? 'Ready for MDM / endpoint trust store deployment (.crt)'
+                : 'No inspection Root CA certificate generated yet — provision a Decryption Root CA under Security → ACME / PKI.'}
+            </div>
           </div>
           <button
             type="button"
-            className="flex items-center gap-2 px-4 py-2 bg-slate-800 hover:bg-slate-700 text-white text-sm font-medium rounded-lg transition"
+            disabled={!hasDownloadableCa}
+            onClick={handleDownloadCaCert}
+            title={
+              hasDownloadableCa
+                ? 'Download Root CA certificate (.crt)'
+                : 'No Root CA certificate generated yet'
+            }
+            className="flex items-center gap-2 px-4 py-2 bg-slate-800 hover:bg-slate-700 disabled:opacity-40 disabled:cursor-not-allowed text-white text-sm font-medium rounded-lg transition shrink-0 cursor-pointer"
           >
             <Download className="w-4 h-4" />
             Download .crt

@@ -52,6 +52,12 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /var/lib/clickhouse
+      {{- if not .Values.clickhouse.persistence.enabled }}
+      volumes:
+        - name: data
+          emptyDir: {}
+      {{- end }}
+  {{- if .Values.clickhouse.persistence.enabled }}
   volumeClaimTemplates:
     - metadata:
         name: data
@@ -63,4 +69,5 @@ spec:
         resources:
           requests:
             storage: {{ .Values.clickhouse.persistence.size | quote }}
+  {{- end }}
 {{- end }}

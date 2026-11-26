@@ -248,8 +248,12 @@ async function writeHostsFile(newContent, hostsPath = HOSTS_FILE_PATH, { onLog =
           // paths are single-quote escaped: a quote or $(...) in a
           // caller-supplied hostsPath must stay inert data.
           const sudo = await import('sudo-prompt');
+          const sudoExec = sudo.exec || sudo.default?.exec;
+          if (typeof sudoExec !== 'function') {
+            throw new Error('sudo-prompt exec function unavailable');
+          }
           await new Promise((resolve, reject) => {
-            sudo.exec(`cp ${shQuote(tmpFile)} ${shQuote(hostsPath)}`, { name: 'Vigilante CLI' }, (error, stdout, stderr) => {
+            sudoExec(`cp ${shQuote(tmpFile)} ${shQuote(hostsPath)}`, { name: 'Vigilante CLI' }, (error, stdout, stderr) => {
               if (error) reject(error);
               else resolve(stdout);
             });

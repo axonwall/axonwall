@@ -16,6 +16,21 @@ function assertSafeIdentifier(val: string | number, paramName: string): string {
   return str;
 }
 
+function assertSafeMachineKey(val: string): string {
+  const str = String(val).trim();
+  if (!str) {
+    throw new Error('Machine key is required');
+  }
+  if (str.startsWith('-')) {
+    throw new Error('Machine key cannot start with a hyphen');
+  }
+  // Legacy Headscale machine keys carry a `mkey:` or `nodekey:` prefix containing `:`.
+  if (!/^[a-zA-Z0-9_.:-]+$/.test(str)) {
+    throw new Error('Machine key contains invalid characters');
+  }
+  return str;
+}
+
 const HEADSCALE_SOCKET_PATH = process.env.HEADSCALE_SOCKET_PATH || '/run/headscale/headscale.sock';
 const HEADSCALE_CONFIG_PATH = process.env.HEADSCALE_CONFIG_PATH || '/etc/headscale/config.yaml';
 const HEADSCALE_BIN = process.env.HEADSCALE_BIN || '/usr/sbin/headscale';
@@ -284,7 +299,7 @@ export async function registerMachine(user: string, rawKeyOrCommand: string) {
     const token = assertSafeIdentifier(authMatch[1], 'Auth ID');
     return runHeadscale(['auth', 'register', '--user', safeUser, '--auth-id', token, '-o', 'json']);
   }
-  const keyToken = assertSafeIdentifier(legacyMatch ? legacyMatch[1] : trimmed, 'Machine key');
+  const keyToken = assertSafeMachineKey(legacyMatch ? legacyMatch[1] : trimmed);
   return runHeadscale(['nodes', 'register', '--user', safeUser, '--key', keyToken, '-o', 'json']);
 }
 

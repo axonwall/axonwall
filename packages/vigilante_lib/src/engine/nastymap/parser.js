@@ -163,21 +163,46 @@ function parseHostElement(rawHost) {
     }
   }
 
+  const hostScripts = [];
+  if (rawHost.hostscript && rawHost.hostscript.script) {
+    for (const s of ensureArray(rawHost.hostscript.script)) {
+      if (s['@_id']) {
+        hostScripts.push({
+          id: s['@_id'],
+          output: s['@_output'] || ''
+        });
+      }
+    }
+  }
+
   let osMatch = undefined;
   let osClasses = undefined;
   if (rawHost.os) {
+    const collectedClasses = [];
     if (rawHost.os.osmatch) {
       const rawMatches = ensureArray(rawHost.os.osmatch);
-      osMatch = rawMatches.map((m) => ({
-        name: m['@_name'] || 'Unknown OS',
-        accuracy: Number(m['@_accuracy']) || 0,
-        line: m['@_line'] ? Number(m['@_line']) : undefined
-      }));
+      osMatch = rawMatches.map((m) => {
+        if (m.osclass) {
+          for (const c of ensureArray(m.osclass)) {
+            collectedClasses.push(c);
+          }
+        }
+        return {
+          name: m['@_name'] || 'Unknown OS',
+          accuracy: Number(m['@_accuracy']) || 0,
+          line: m['@_line'] ? Number(m['@_line']) : undefined
+        };
+      });
     }
 
     if (rawHost.os.osclass) {
-      const rawClasses = ensureArray(rawHost.os.osclass);
-      osClasses = rawClasses.map((c) => ({
+      for (const c of ensureArray(rawHost.os.osclass)) {
+        collectedClasses.push(c);
+      }
+    }
+
+    if (collectedClasses.length > 0) {
+      osClasses = collectedClasses.map((c) => ({
         type: c['@_type'],
         vendor: c['@_vendor'],
         osfamily: c['@_osfamily'],
@@ -263,6 +288,11 @@ function parseHostElement(rawHost) {
       }
     }
   }
+  for (const s of hostScripts) {
+    if (s.id.includes('vuln') || s.id.includes('cve') || s.output.toLowerCase().includes('vulnerable')) {
+      vulnerabilitiesCount++;
+    }
+  }
 
   const latencyMs = times && times.srtt !== undefined ? Math.round(times.srtt / 1000) : undefined;
   const geolocation = geocodeIp(targetIp);
@@ -280,6 +310,7 @@ function parseHostElement(rawHost) {
     hostnames,
     primaryHostname,
     ports,
+    ...(hostScripts.length > 0 ? { hostScripts } : {}),
     osMatch,
     osClasses,
     primaryOs,

@@ -48,6 +48,13 @@ function sendAgentApiRequest<T>(
   extraHeaders?: Record<string, string>
 ): Promise<AgentApiResult<T>> {
   return new Promise((resolve) => {
+    let settled = false;
+    const finish = (result: AgentApiResult<T>) => {
+      if (settled) return;
+      settled = true;
+      resolve(result);
+    };
+
     const req = http.request(
       {
         socketPath,
@@ -70,13 +77,16 @@ function sendAgentApiRequest<T>(
         res.on('data', (chunk) => {
           data += chunk;
         });
+        res.on('error', () => {
+          finish({ kind: 'unreachable' });
+        });
         res.on('end', () => {
           const status = res.statusCode || 500;
           if (status >= 200 && status < 300) {
             try {
-              resolve({ kind: 'ok', data: JSON.parse(data) as T });
+              finish({ kind: 'ok', data: JSON.parse(data) as T });
             } catch {
-              resolve({
+              finish({
                 kind: 'http_error',
                 status,
                 message: 'Invalid JSON response from daemon API',
@@ -94,19 +104,19 @@ function sendAgentApiRequest<T>(
             if (!errorMsg) {
               errorMsg = `Daemon API error (${status})`;
             }
-            resolve({ kind: 'http_error', status, message: errorMsg, data: parsedBody });
+            finish({ kind: 'http_error', status, message: errorMsg, data: parsedBody });
           }
         });
       }
     );
 
     req.on('error', () => {
-      resolve({ kind: 'unreachable' });
+      finish({ kind: 'unreachable' });
     });
 
     req.on('timeout', () => {
       req.destroy();
-      resolve({ kind: 'timeout' });
+      finish({ kind: 'timeout' });
     });
 
     if (postData) {
@@ -177,6 +187,13 @@ function sendAgentApiBinaryRequest(
   timeoutMs: number
 ): Promise<{ ok: boolean; status: number; buffer?: Buffer; error?: string }> {
   return new Promise((resolve) => {
+    let settled = false;
+    const finish = (result: { ok: boolean; status: number; buffer?: Buffer; error?: string }) => {
+      if (settled) return;
+      settled = true;
+      resolve(result);
+    };
+
     const req = http.request(
       {
         socketPath,
@@ -192,11 +209,14 @@ function sendAgentApiBinaryRequest(
         res.on('data', (chunk: Buffer) => {
           chunks.push(chunk);
         });
+        res.on('error', (err) => {
+          finish({ ok: false, status: 503, error: err?.message || 'Daemon response stream error' });
+        });
         res.on('end', () => {
           const buf = Buffer.concat(chunks);
           const status = res.statusCode || 500;
           if (status >= 200 && status < 300) {
-            resolve({ ok: true, status, buffer: buf });
+            finish({ ok: true, status, buffer: buf });
             return;
           }
           let errorMsg = buf.toString('utf8').trim();
@@ -204,7 +224,7 @@ function sendAgentApiBinaryRequest(
             const parsed = JSON.parse(errorMsg);
             errorMsg = parsed.message || parsed.error || errorMsg;
           } catch {}
-          resolve({
+          finish({
             ok: false,
             status,
             error: errorMsg || `Daemon API error (${status})`,
@@ -214,12 +234,12 @@ function sendAgentApiBinaryRequest(
     );
 
     req.on('error', (err) => {
-      resolve({ ok: false, status: 503, error: err?.message || 'Daemon unreachable' });
+      finish({ ok: false, status: 503, error: err?.message || 'Daemon unreachable' });
     });
 
     req.on('timeout', () => {
       req.destroy();
-      resolve({ ok: false, status: 504, error: `Daemon request timed out (${Math.round(timeoutMs / 1000)}s)` });
+      finish({ ok: false, status: 504, error: `Daemon request timed out (${Math.round(timeoutMs / 1000)}s)` });
     });
 
     req.end();

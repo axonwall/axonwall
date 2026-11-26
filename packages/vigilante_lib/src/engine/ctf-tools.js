@@ -80,7 +80,7 @@ export async function checksec(binaryPathOrBuffer) {
     throw new Error('Expected file path or Buffer for checksec');
   }
 
-  // Validate ELF magic: \x7fELF
+  // Validate ELF magic: \x7fELF and minimum ELF header size (64 for ELF64, 52 for ELF32)
   if (buf.length < 52 || buf[0] !== 0x7f || buf[1] !== 0x45 || buf[2] !== 0x4c || buf[3] !== 0x46) {
     return {
       isElf: false,
@@ -89,6 +89,12 @@ export async function checksec(binaryPathOrBuffer) {
   }
 
   const is64 = buf[4] === 2;
+  if (is64 && buf.length < 64) {
+    return {
+      isElf: false,
+      summary: 'Truncated ELF64 header'
+    };
+  }
   const isLittleEndian = buf[5] === 1;
   const e_type = isLittleEndian ? buf.readUInt16LE(16) : buf.readUInt16BE(16);
 
@@ -98,28 +104,60 @@ export async function checksec(binaryPathOrBuffer) {
     : (isLittleEndian ? buf.readUInt32LE(28) : buf.readUInt32BE(28));
   const phentsize = isLittleEndian ? buf.readUInt16LE(is64 ? 54 : 42) : buf.readUInt16BE(is64 ? 54 : 42);
   const phnum = isLittleEndian ? buf.readUInt16LE(is64 ? 56 : 44) : buf.readUInt16BE(is64 ? 56 : 44);
+  const minPhentsize = is64 ? 56 : 32;
 
   let hasGnuRelro = false;
+  let hasBindNow = false;
   let hasGnuStack = false;
   let isStackExecutable = false;
 
-  for (let i = 0; i < phnum; i++) {
-    const offset = phoff + i * phentsize;
-    if (offset + phentsize > buf.length) break;
+  if (Number.isSafeInteger(phoff) && phoff >= 0 && phentsize >= minPhentsize) {
+    const maxHeaders = Math.min(phnum, Math.floor(Math.max(0, buf.length - phoff) / phentsize));
+    for (let i = 0; i < maxHeaders; i++) {
+      const offset = phoff + i * phentsize;
+      if (offset + minPhentsize > buf.length) break;
 
-    const p_type = isLittleEndian ? buf.readUInt32LE(offset) : buf.readUInt32BE(offset);
+      const p_type = isLittleEndian ? buf.readUInt32LE(offset) : buf.readUInt32BE(offset);
 
-    // PT_GNU_RELRO = 0x6474e552
-    if (p_type === 0x6474e552) {
-      hasGnuRelro = true;
-    }
-    // PT_GNU_STACK = 0x6474e551
-    if (p_type === 0x6474e551) {
-      hasGnuStack = true;
-      const flagsOffset = is64 ? offset + 4 : offset + 24;
-      const p_flags = isLittleEndian ? buf.readUInt32LE(flagsOffset) : buf.readUInt32BE(flagsOffset);
-      // PF_X = 1
-      isStackExecutable = (p_flags & 1) !== 0;
+      // PT_DYNAMIC = 2: parse Elf(32|64)_Dyn entries for DT_BIND_NOW / DF_BIND_NOW / DF_1_NOW
+      if (p_type === 2) {
+        const dynOffset = is64
+          ? (isLittleEndian ? Number(buf.readBigUInt64LE(offset + 8)) : Number(buf.readBigUInt64BE(offset + 8)))
+          : (isLittleEndian ? buf.readUInt32LE(offset + 4) : buf.readUInt32BE(offset + 4));
+        const dynSize = is64
+          ? (isLittleEndian ? Number(buf.readBigUInt64LE(offset + 32)) : Number(buf.readBigUInt64BE(offset + 32)))
+          : (isLittleEndian ? buf.readUInt32LE(offset + 16) : buf.readUInt32BE(offset + 16));
+        const dynEntrySize = is64 ? 16 : 8;
+        if (Number.isSafeInteger(dynOffset) && dynOffset >= 0 && dynSize > 0) {
+          const dynEnd = Math.min(buf.length, dynOffset + dynSize);
+          for (let d = dynOffset; d + dynEntrySize <= dynEnd; d += dynEntrySize) {
+            const dTag = is64
+              ? Number(isLittleEndian ? buf.readBigInt64LE(d) : buf.readBigInt64BE(d))
+              : (isLittleEndian ? buf.readInt32LE(d) : buf.readInt32BE(d));
+            const dVal = is64
+              ? (isLittleEndian ? buf.readBigUInt64LE(d + 8) : buf.readBigUInt64BE(d + 8))
+              : BigInt(isLittleEndian ? buf.readUInt32LE(d + 4) : buf.readUInt32BE(d + 4));
+            if (dTag === 0) break; // DT_NULL
+            // DT_BIND_NOW = 24, DT_FLAGS = 30 (DF_BIND_NOW = 0x8), DT_FLAGS_1 = 0x6ffffffb (DF_1_NOW = 0x1)
+            if (dTag === 24 || (dTag === 30 && (dVal & 0x8n) !== 0n) || (dTag === 0x6ffffffb && (dVal & 0x1n) !== 0n)) {
+              hasBindNow = true;
+            }
+          }
+        }
+      }
+
+      // PT_GNU_RELRO = 0x6474e552
+      if (p_type === 0x6474e552) {
+        hasGnuRelro = true;
+      }
+      // PT_GNU_STACK = 0x6474e551
+      if (p_type === 0x6474e551) {
+        hasGnuStack = true;
+        const flagsOffset = is64 ? offset + 4 : offset + 24;
+        const p_flags = isLittleEndian ? buf.readUInt32LE(flagsOffset) : buf.readUInt32BE(flagsOffset);
+        // PF_X = 1
+        isStackExecutable = (p_flags & 1) !== 0;
+      }
     }
   }
 
@@ -136,8 +174,7 @@ export async function checksec(binaryPathOrBuffer) {
   // RELRO classification
   let relro = 'No RELRO';
   if (hasGnuRelro) {
-    // Check if BIND_NOW tag is in dynamic section
-    relro = binaryString.includes('BIND_NOW') ? 'Full RELRO' : 'Partial RELRO';
+    relro = hasBindNow ? 'Full RELRO' : 'Partial RELRO';
   }
 
   return {
@@ -366,14 +403,18 @@ export async function findFormatStringOffset({
   const markerBuf = Buffer.from(marker, 'ascii');
   const markerHexBig = markerBuf.toString('hex').toLowerCase();
   const markerHexLittle = Buffer.from(markerBuf).reverse().toString('hex').toLowerCase();
+  const echoPrefix = `${marker.toLowerCase()}.`;
 
   for (let i = 1; i <= maxDepth; i++) {
     const payload = `${marker}.%${i}$p`;
     const response = await probeFn(payload);
     const respStr = String(response || '').toLowerCase();
+    const leakedRegion = respStr.includes(echoPrefix)
+      ? respStr.slice(respStr.indexOf(echoPrefix) + echoPrefix.length)
+      : respStr;
 
-    // Check if the hex representation of our marker is leaked
-    if (respStr.includes(markerHexLittle) || respStr.includes(markerHexBig) || respStr.includes(marker.toLowerCase())) {
+    // Check only the leaked pointer portion so echoing the literal prefix never triggers a match
+    if (leakedRegion.includes(markerHexLittle) || leakedRegion.includes(markerHexBig)) {
       return {
         matched: true,
         offset: i,

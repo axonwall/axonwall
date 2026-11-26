@@ -4,6 +4,15 @@ import path from 'node:path';
 import { logger } from '../utils/logger.js';
 import { getVigilanteConfigDir, resolveCtfFlagSecret, requireCtfFlagSecret } from './config.js';
 
+function escapeXml(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 export const TOURNAMENT_MODES = {
   JEOPARDY: 'jeopardy',
   ATTACK_DEFENSE: 'attack-defense',
@@ -359,6 +368,14 @@ export class TournamentEngine {
           secretKey: this.secretKey
         });
         if (cleanFlag === otherFlag) {
+          this.submissions.push({
+            teamId,
+            challengeId,
+            flag: cleanFlag,
+            isCorrect: false,
+            collusion: true,
+            timestamp: now
+          });
           const alert = {
             id: 'alt_' + Date.now(),
             type: 'COLLUSION_DETECTED',
@@ -428,10 +445,18 @@ export class TournamentEngine {
     }
 
     const earnedPoints = basePoints + firstBloodBonus;
+    let pendingHintPenalty = 0;
+    for (const h of team.unlockedHints || []) {
+      if (h.challengeId === challengeId && h.unappliedPenalty > 0) {
+        pendingHintPenalty += h.unappliedPenalty;
+        h.unappliedPenalty = 0;
+      }
+    }
+    const netEarnedPoints = Math.max(0, earnedPoints - pendingHintPenalty);
 
     team.solves.push(challengeId);
-    team.jeopardyScore += earnedPoints;
-    team.score += earnedPoints;
+    team.jeopardyScore += netEarnedPoints;
+    team.score += netEarnedPoints;
     team.lastSolveTimestamp = now;
 
     const solveEvent = {
@@ -440,9 +465,10 @@ export class TournamentEngine {
       challengeId,
       challengeName: challenge.name,
       category: challenge.category,
-      points: earnedPoints,
+      points: netEarnedPoints,
       basePoints,
       firstBloodBonus,
+      hintPenaltyApplied: pendingHintPenalty,
       bloodBadge,
       timestamp: now,
       isFrozen: this.state === TOURNAMENT_STATES.FROZEN
@@ -460,9 +486,10 @@ export class TournamentEngine {
 
     return {
       success: true,
-      points: earnedPoints,
+      points: netEarnedPoints,
       basePoints,
       firstBloodBonus,
+      hintPenaltyApplied: pendingHintPenalty,
       bloodBadge,
       totalScore: team.score,
       solvesCount: challenge.solvesCount
@@ -631,18 +658,41 @@ export class TournamentEngine {
    * Returns current sorted leaderboard with tie-breaking logic
    */
   getLeaderboard({ revealFrozen = false } = {}) {
-    const list = Array.from(this.teams.values()).map(t => ({
-      id: t.id,
-      name: t.name,
-      totalScore: t.score,
-      jeopardyScore: t.jeopardyScore,
-      adAttackScore: t.adAttackScore,
-      adDefenseScore: t.adDefenseScore,
-      adSlaScore: t.adSlaScore,
-      kothScore: t.kothScore,
-      solvesCount: t.solves.length,
-      lastSolveTimestamp: t.lastSolveTimestamp
-    }));
+    const list = Array.from(this.teams.values()).map(t => {
+      if (revealFrozen) {
+        return {
+          id: t.id,
+          name: t.name,
+          totalScore: t.score,
+          jeopardyScore: t.jeopardyScore,
+          adAttackScore: t.adAttackScore,
+          adDefenseScore: t.adDefenseScore,
+          adSlaScore: t.adSlaScore,
+          kothScore: t.kothScore,
+          solvesCount: t.solves.length,
+          lastSolveTimestamp: t.lastSolveTimestamp
+        };
+      }
+      const teamSolves = this.solves.filter(s => s.teamId === t.id);
+      const frozenSolves = teamSolves.filter(s => s.isFrozen);
+      const frozenPoints = frozenSolves.reduce((sum, s) => sum + (s.points || 0), 0);
+      const visibleSolves = teamSolves.filter(s => !s.isFrozen);
+      const visibleLastSolve = frozenSolves.length > 0
+        ? (visibleSolves.length > 0 ? Math.max(...visibleSolves.map(s => s.timestamp)) : 0)
+        : t.lastSolveTimestamp;
+      return {
+        id: t.id,
+        name: t.name,
+        totalScore: Math.max(0, t.score - frozenPoints),
+        jeopardyScore: Math.max(0, t.jeopardyScore - frozenPoints),
+        adAttackScore: t.adAttackScore,
+        adDefenseScore: t.adDefenseScore,
+        adSlaScore: t.adSlaScore,
+        kothScore: t.kothScore,
+        solvesCount: Math.max(0, t.solves.length - frozenSolves.length),
+        lastSolveTimestamp: visibleLastSolve
+      };
+    });
 
     // Tie-breaking: Higher score first, earlier lastSolveTimestamp wins ties
     list.sort((a, b) => {
@@ -674,10 +724,14 @@ export class TournamentEngine {
     const basePoints = challenge.currentPoints || this.initialPoints;
     const penaltyPoints = Math.floor(basePoints * penaltyRate);
 
+    const prevScore = team.score;
     team.score = Math.max(0, team.score - penaltyPoints);
+    const deductedNow = prevScore - team.score;
     if (team.jeopardyScore !== undefined) {
-      team.jeopardyScore = Math.max(0, team.jeopardyScore - penaltyPoints);
+      team.jeopardyScore = Math.max(0, team.jeopardyScore - deductedNow);
     }
+    const alreadySolved = team.solves.includes(challengeId);
+    const unappliedPenalty = alreadySolved ? 0 : Math.max(0, penaltyPoints - deductedNow);
 
     const hintRecord = {
       teamId,
@@ -686,6 +740,7 @@ export class TournamentEngine {
       challengeName: challenge.name,
       tier,
       penaltyPoints,
+      unappliedPenalty,
       unlockedAt: new Date().toISOString()
     };
 
@@ -783,7 +838,7 @@ export class TournamentEngine {
       const lastPt = s.points[s.points.length - 1];
       const lastX = margin.left + Math.round((lastPt.elapsedMinutes / maxTime) * chartW) + 6;
       const lastY = margin.top + chartH - Math.round((lastPt.score / maxScore) * chartH) + 4;
-      const label = `<text x="${lastX}" y="${lastY}" fill="${color}" font-family="monospace" font-size="10" font-weight="bold">${s.teamName} (${lastPt.score})</text>`;
+      const label = `<text x="${lastX}" y="${lastY}" fill="${color}" font-family="monospace" font-size="10" font-weight="bold">${escapeXml(s.teamName)} (${lastPt.score})</text>`;
 
       linesSvg.push(polyline);
       linesSvg.push(label);
@@ -848,6 +903,24 @@ export class TournamentEngine {
    * Export complete tournament state to JSON
    */
   exportState() {
+    const safeTeams = Array.from(this.teams.values()).map(({ token, ...rest }) => rest);
+    const safeChallenges = Array.from(this.challenges.values()).map(({ defaultFlag, ...rest }) => rest);
+    const safeAdState = {
+      ...this.adState,
+      tickHistory: (this.adState.tickHistory || []).map(tickRec => {
+        if (!tickRec || !tickRec.services) return tickRec;
+        const safeServices = {};
+        for (const [tId, svcMap] of Object.entries(tickRec.services)) {
+          safeServices[tId] = {};
+          for (const [sId, svcRec] of Object.entries(svcMap || {})) {
+            const { flag, ...restSvc } = svcRec || {};
+            safeServices[tId][sId] = restSvc;
+          }
+        }
+        return { ...tickRec, services: safeServices };
+      })
+    };
+
     return {
       id: this.id,
       title: this.title,
@@ -861,12 +934,12 @@ export class TournamentEngine {
       startTime: this.startTime,
       freezeTime: this.freezeTime,
       endTime: this.endTime,
-      teams: Array.from(this.teams.values()),
-      challenges: Array.from(this.challenges.values()),
+      teams: safeTeams,
+      challenges: safeChallenges,
       solves: this.solves,
       announcements: this.announcements,
       alerts: this.alerts,
-      adState: this.adState,
+      adState: safeAdState,
       kothState: this.kothState
     };
   }

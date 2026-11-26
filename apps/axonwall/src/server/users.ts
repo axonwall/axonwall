@@ -1,9 +1,10 @@
 'use server';
 
 import { getSession } from './auth';
-import { assertActionPermitted } from './auth-guard';
+import { assertActionPermitted, assertInteractiveSession } from './auth-guard';
 import { callAgentApi, callAgentApiResponse } from './agent-client';
 import { assertPluginEnabled } from './plugin-guard';
+import { bumpUserSessionEpoch } from './session-revocation';
 import type {
   LocalUser,
   LocalGroup,
@@ -15,6 +16,7 @@ const USERNAME_REGEX = /^[a-z_][a-z0-9_-]{0,31}$/i;
 
 export async function getLocalUsers(): Promise<LocalUser[]> {
   const session = await getSession();
+  assertInteractiveSession(session);
   assertActionPermitted(session, 'admin');
 
   const res = await callAgentApi<{ users: LocalUser[] }>('/v1/system/users', 'GET');
@@ -29,6 +31,7 @@ export async function getLocalUsers(): Promise<LocalUser[]> {
 
 export async function getLocalGroups(): Promise<LocalGroup[]> {
   const session = await getSession();
+  assertInteractiveSession(session);
   assertActionPermitted(session, 'admin');
 
   const res = await callAgentApi<{ groups: LocalGroup[] }>('/v1/system/groups', 'GET');
@@ -41,6 +44,7 @@ export async function getLocalGroups(): Promise<LocalGroup[]> {
 
 export async function createLocalUser(req: CreateLocalUserRequest): Promise<{ success: boolean; message: string }> {
   const session = await getSession();
+  assertInteractiveSession(session);
   assertActionPermitted(session, 'admin');
   if (!req?.username || !USERNAME_REGEX.test(req.username)) {
     throw new Error('Invalid username format');
@@ -62,6 +66,7 @@ export async function updateLocalUser(
   req: UpdateLocalUserRequest
 ): Promise<{ success: boolean; message: string }> {
   const session = await getSession();
+  assertInteractiveSession(session);
   assertActionPermitted(session, 'admin');
   if (!USERNAME_REGEX.test(username)) {
     throw new Error('Invalid username format');
@@ -75,6 +80,7 @@ export async function updateLocalUser(
   if (!res || !res.success) {
     throw new Error(res?.message || 'Failed to update directory user');
   }
+  bumpUserSessionEpoch(username);
   return { success: true, message: res.message || 'User updated successfully' };
 }
 
@@ -83,6 +89,7 @@ export async function deleteLocalUser(
   removeHome = false
 ): Promise<{ success: boolean; message: string }> {
   const session = await getSession();
+  assertInteractiveSession(session);
   assertActionPermitted(session, 'admin');
   if (!USERNAME_REGEX.test(username)) {
     throw new Error('Invalid username format');
@@ -95,11 +102,13 @@ export async function deleteLocalUser(
   if (!res || !res.success) {
     throw new Error(res?.message || 'Failed to delete directory user');
   }
+  bumpUserSessionEpoch(username);
   return { success: true, message: res.message || 'User deleted successfully' };
 }
 
 export async function createLocalGroup(name: string): Promise<{ success: boolean; message: string }> {
   const session = await getSession();
+  assertInteractiveSession(session);
   assertActionPermitted(session, 'admin');
   if (!name || !USERNAME_REGEX.test(name)) {
     throw new Error('Invalid group name format');
@@ -146,6 +155,7 @@ export interface DirectoryStatus {
 
 export async function getDirectoryStatus(): Promise<DirectoryStatus | null> {
   const session = await getSession();
+  assertInteractiveSession(session);
   assertActionPermitted(session, 'admin');
   await assertPluginEnabled('directory-ldap');
 
@@ -157,6 +167,7 @@ export async function updateDirectoryPasswordPolicy(
   policy: PasswordPolicyConfig
 ): Promise<{ success: boolean; message: string; policy: PasswordPolicyConfig }> {
   const session = await getSession();
+  assertInteractiveSession(session);
   assertActionPermitted(session, 'admin');
   await assertPluginEnabled('directory-ldap');
 
@@ -181,6 +192,7 @@ export async function migrateLocalUsersToLdap(): Promise<{
   message: string;
 }> {
   const session = await getSession();
+  assertInteractiveSession(session);
   assertActionPermitted(session, 'admin');
   await assertPluginEnabled('directory-ldap');
 

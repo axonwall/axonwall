@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Activity,
   AlertTriangle,
@@ -23,6 +23,11 @@ import {
 } from '@axonwall/lib/schemas';
 import { getCurrentDesiredState } from '@/server/agent';
 import { useDesiredStateApply } from '@/lib/use-desired-state-apply';
+import {
+  parseCsvTokens,
+  parseNonNegativeIntInput,
+  resolveObservabilityDraftConfig,
+} from '@/lib/state-preservation';
 
 interface ServiceTokenMeta {
   id: string;
@@ -80,6 +85,21 @@ export default function ObservabilityOffloadPage() {
   const [createdPlaintext, setCreatedPlaintext] = useState<string | null>(null);
   const [copiedTok, setCopiedTok] = useState(false);
 
+  const resolvedDraftObs = resolveObservabilityDraftConfig(draftState?.observability);
+  const [protectedCidrsText, setProtectedCidrsText] = useState(() =>
+    resolvedDraftObs.offload.activeMitigation.protectedCidrs.join(', ')
+  );
+  const protectedCidrsTextRef = useRef(protectedCidrsText);
+  protectedCidrsTextRef.current = protectedCidrsText;
+
+  useEffect(() => {
+    const externalCsv = resolvedDraftObs.offload.activeMitigation.protectedCidrs.join(',');
+    const localCsv = parseCsvTokens(protectedCidrsTextRef.current).join(',');
+    if (externalCsv !== localCsv) {
+      setProtectedCidrsText(resolvedDraftObs.offload.activeMitigation.protectedCidrs.join(', '));
+    }
+  }, [resolvedDraftObs.offload.activeMitigation.protectedCidrs]);
+
   const loadRuntime = useCallback(async () => {
     const [stRes, tokRes] = await Promise.all([
       fetch('/api/v1/observability/status', { cache: 'no-store' })
@@ -125,22 +145,21 @@ export default function ObservabilityOffloadPage() {
     );
   }
 
-  const obs = ObservabilityConfigSchema.parse(draftState.observability ?? {});
-  const offload = ObservabilityOffloadSchema.parse(obs.offload ?? {});
+  const obs = resolvedDraftObs;
+  const offload = obs.offload;
   const vmCfg = obs.victoriaMetrics ?? { enabled: false, url: 'http://127.0.0.1:8428' };
   const vlCfg = obs.victoriaLogs ?? { enabled: false, url: 'http://127.0.0.1:9428' };
-  const snmpCfg = SnmpPluginConfigSchema.parse(draftState.snmp ?? {});
+  const snmpCfg = draftState.snmp ?? SnmpPluginConfigSchema.parse({});
 
   const updateOffload = (updater: (cur: typeof offload) => typeof offload) => {
     setDraftState((prev) => {
       if (!prev) return prev;
-      const curObs = ObservabilityConfigSchema.parse(prev.observability ?? {});
-      const curOff = ObservabilityOffloadSchema.parse(curObs.offload ?? {});
+      const curObs = resolveObservabilityDraftConfig(prev.observability);
       return {
         ...prev,
         observability: {
           ...curObs,
-          offload: updater(curOff),
+          offload: updater(curObs.offload),
         },
       };
     });
@@ -149,7 +168,7 @@ export default function ObservabilityOffloadPage() {
   const updateObs = (updater: (cur: typeof obs) => typeof obs) => {
     setDraftState((prev) => {
       if (!prev) return prev;
-      const curObs = ObservabilityConfigSchema.parse(prev.observability ?? {});
+      const curObs = resolveObservabilityDraftConfig(prev.observability);
       return {
         ...prev,
         observability: updater(curObs),
@@ -158,12 +177,33 @@ export default function ObservabilityOffloadPage() {
   };
 
   const handleSave = async () => {
+    const obsCheck = ObservabilityConfigSchema.safeParse(draftState.observability ?? {});
+    if (!obsCheck.success) {
+      setBanner({
+        kind: 'err',
+        text: `Invalid observability configuration: ${obsCheck.error.issues.map((i) => `${i.path.join('.') || 'observability'}: ${i.message}`).join('; ')}`,
+      });
+      return;
+    }
+    const offloadCheck = ObservabilityOffloadSchema.safeParse(obsCheck.data.offload ?? {});
+    if (!offloadCheck.success) {
+      setBanner({
+        kind: 'err',
+        text: `Invalid offload configuration: ${offloadCheck.error.issues.map((i) => `${i.path.join('.') || 'offload'}: ${i.message}`).join('; ')}`,
+      });
+      return;
+    }
     setSaving(true);
     setBanner(null);
     try {
-      const res = await applyState(draftState);
+      const normalizedState: DesiredState = {
+        ...draftState,
+        observability: { ...obsCheck.data, offload: offloadCheck.data },
+      };
+      const res = await applyState(normalizedState);
       if (res.success) {
-        setLiveState(structuredClone(draftState));
+        setLiveState(structuredClone(normalizedState));
+        setDraftState(structuredClone(normalizedState));
         setBanner({ kind: 'ok', text: res.message || 'Observability, offload & logging configuration applied.' });
         await loadRuntime();
       } else {
@@ -179,30 +219,41 @@ export default function ObservabilityOffloadPage() {
   const handleCreateToken = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!tokName.trim()) return;
-    const res = await fetch('/api/v1/system/service-tokens', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        name: tokName.trim(),
-        role: tokRole,
-        scopes: tokScopes.length > 0 ? tokScopes : ['observability:ingest'],
-      }),
-    });
-    const json = await res.json().catch(() => null);
-    if (!res.ok) {
-      setBanner({ kind: 'err', text: json?.error || 'Failed to create service token' });
-      return;
+    try {
+      const res = await fetch('/api/v1/system/service-tokens', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: tokName.trim(),
+          role: tokRole,
+          scopes: tokScopes.length > 0 ? tokScopes : ['observability:ingest'],
+        }),
+      });
+      const json = await res.json().catch(() => null);
+      if (!res.ok) {
+        setBanner({ kind: 'err', text: json?.error || `Failed to create service token (HTTP ${res.status})` });
+        return;
+      }
+      setCreatedPlaintext(json?.plaintextToken || null);
+      setCopiedTok(false);
+      setTokName('');
+      await loadRuntime();
+    } catch (err: any) {
+      setBanner({ kind: 'err', text: err?.message || 'Failed to create service token' });
     }
-    setCreatedPlaintext(json.plaintextToken || null);
-    setCopiedTok(false);
-    setTokName('');
-    await loadRuntime();
   };
 
   const handleRevokeToken = async (id: string) => {
-    const res = await fetch(`/api/v1/system/service-tokens/${encodeURIComponent(id)}`, { method: 'DELETE' });
-    if (res.ok) {
+    try {
+      const res = await fetch(`/api/v1/system/service-tokens/${encodeURIComponent(id)}`, { method: 'DELETE' });
+      const json = await res.json().catch(() => null);
+      if (!res.ok) {
+        setBanner({ kind: 'err', text: json?.error || `Failed to revoke service token (HTTP ${res.status})` });
+        return;
+      }
       await loadRuntime();
+    } catch (err: any) {
+      setBanner({ kind: 'err', text: err?.message || 'Failed to revoke service token' });
     }
   };
 
@@ -438,10 +489,11 @@ export default function ObservabilityOffloadPage() {
                 <input
                   type="number"
                   min={5}
-                  value={offload.metrics.intervalSec}
-                  onChange={(e) =>
-                    updateOffload((c) => ({ ...c, metrics: { ...c.metrics, intervalSec: Number(e.target.value) || 15 } }))
-                  }
+                  value={offload.metrics.intervalSec || ''}
+                  onChange={(e) => {
+                    const n = parseNonNegativeIntInput(e.target.value, offload.metrics.intervalSec);
+                    updateOffload((c) => ({ ...c, metrics: { ...c.metrics, intervalSec: n } }));
+                  }}
                   className="w-full px-2 py-1.5 rounded bg-slate-900 border border-slate-700 text-white font-mono"
                 />
               </label>
@@ -470,10 +522,11 @@ export default function ObservabilityOffloadPage() {
                 />
                 <input
                   type="number"
-                  value={offload.metrics.scrapePort}
-                  onChange={(e) =>
-                    updateOffload((c) => ({ ...c, metrics: { ...c.metrics, scrapePort: Number(e.target.value) || 9100 } }))
-                  }
+                  value={offload.metrics.scrapePort || ''}
+                  onChange={(e) => {
+                    const n = parseNonNegativeIntInput(e.target.value, offload.metrics.scrapePort);
+                    updateOffload((c) => ({ ...c, metrics: { ...c.metrics, scrapePort: n } }));
+                  }}
                   className="px-2 py-1.5 rounded bg-slate-900 border border-slate-700 text-white font-mono"
                 />
                 <input
@@ -518,12 +571,13 @@ export default function ObservabilityOffloadPage() {
                   type="number"
                   min={0}
                   value={offload.logs.nflog.rateLimitPerSec}
-                  onChange={(e) =>
+                  onChange={(e) => {
+                    const n = parseNonNegativeIntInput(e.target.value, offload.logs.nflog.rateLimitPerSec);
                     updateOffload((c) => ({
                       ...c,
-                      logs: { ...c.logs, nflog: { ...c.logs.nflog, rateLimitPerSec: Number(e.target.value) || 50 } },
-                    }))
-                  }
+                      logs: { ...c.logs, nflog: { ...c.logs.nflog, rateLimitPerSec: n } },
+                    }));
+                  }}
                   className="w-full px-2 py-1.5 rounded bg-slate-900 border border-slate-700 text-white font-mono"
                 />
               </label>
@@ -562,10 +616,11 @@ export default function ObservabilityOffloadPage() {
                   type="number"
                   min={4}
                   max={256}
-                  value={offload.buffer.maxMemoryMB}
-                  onChange={(e) =>
-                    updateOffload((c) => ({ ...c, buffer: { ...c.buffer, maxMemoryMB: Number(e.target.value) || 24 } }))
-                  }
+                  value={offload.buffer.maxMemoryMB || ''}
+                  onChange={(e) => {
+                    const n = parseNonNegativeIntInput(e.target.value, offload.buffer.maxMemoryMB);
+                    updateOffload((c) => ({ ...c, buffer: { ...c.buffer, maxMemoryMB: n } }));
+                  }}
                   className="w-full px-2 py-1.5 rounded bg-slate-900 border border-slate-700 text-white font-mono"
                 />
               </label>
@@ -585,10 +640,11 @@ export default function ObservabilityOffloadPage() {
                 <input
                   type="number"
                   min={16}
-                  value={offload.buffer.diskSpoolMaxMB}
-                  onChange={(e) =>
-                    updateOffload((c) => ({ ...c, buffer: { ...c.buffer, diskSpoolMaxMB: Number(e.target.value) || 256 } }))
-                  }
+                  value={offload.buffer.diskSpoolMaxMB || ''}
+                  onChange={(e) => {
+                    const n = parseNonNegativeIntInput(e.target.value, offload.buffer.diskSpoolMaxMB);
+                    updateOffload((c) => ({ ...c, buffer: { ...c.buffer, diskSpoolMaxMB: n } }));
+                  }}
                   className="w-full px-2 py-1.5 rounded bg-slate-900 border border-slate-700 text-white font-mono"
                 />
               </label>
@@ -619,13 +675,14 @@ export default function ObservabilityOffloadPage() {
                 <input
                   type="number"
                   min={60}
-                  value={offload.activeMitigation.maxTtlSec}
-                  onChange={(e) =>
+                  value={offload.activeMitigation.maxTtlSec || ''}
+                  onChange={(e) => {
+                    const n = parseNonNegativeIntInput(e.target.value, offload.activeMitigation.maxTtlSec);
                     updateOffload((c) => ({
                       ...c,
-                      activeMitigation: { ...c.activeMitigation, maxTtlSec: Number(e.target.value) || 3600 },
-                    }))
-                  }
+                      activeMitigation: { ...c.activeMitigation, maxTtlSec: n },
+                    }));
+                  }}
                   className="w-full px-2 py-1.5 rounded bg-slate-900 border border-slate-700 text-white font-mono"
                 />
               </label>
@@ -633,19 +690,22 @@ export default function ObservabilityOffloadPage() {
                 <span className="text-slate-400 block mb-1">Protected Anti-Lockout CIDRs (CSV)</span>
                 <input
                   type="text"
-                  value={offload.activeMitigation.protectedCidrs.join(', ')}
-                  onChange={(e) =>
+                  value={protectedCidrsText}
+                  onChange={(e) => {
+                    const nextText = e.target.value;
+                    setProtectedCidrsText(nextText);
+                    protectedCidrsTextRef.current = nextText;
                     updateOffload((c) => ({
                       ...c,
                       activeMitigation: {
                         ...c.activeMitigation,
-                        protectedCidrs: e.target.value
-                          .split(',')
-                          .map((x) => x.trim())
-                          .filter(Boolean),
+                        protectedCidrs: parseCsvTokens(nextText),
                       },
-                    }))
-                  }
+                    }));
+                  }}
+                  onBlur={() => {
+                    setProtectedCidrsText(parseCsvTokens(protectedCidrsTextRef.current).join(', '));
+                  }}
                   className="w-full px-2 py-1.5 rounded bg-slate-900 border border-slate-700 text-white font-mono"
                 />
               </label>

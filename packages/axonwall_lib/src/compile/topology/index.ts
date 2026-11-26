@@ -1,6 +1,8 @@
 import {
   TopologyConfigSchema,
+  inferInterfaceRole,
   type DesiredState,
+  type InterfaceRole,
   type TopologyCableEdge,
   type TopologyCanvasNode,
   type TopologyConfig,
@@ -275,10 +277,10 @@ export function resolveTopologyConfig(state?: Partial<DesiredState> | null): Top
   };
 }
 
+const SAFE_LLDP_IFACE_PATTERN = /^[a-zA-Z0-9_.:*-]+$/;
+
 function isWanInterface(name: string, role?: string): boolean {
-  if (role === 'wan') return true;
-  const lower = name.trim().toLowerCase();
-  return lower === 'wan' || /^wan\d+$/.test(lower) || lower.startsWith('wan-');
+  return inferInterfaceRole({ name, role: role as InterfaceRole | undefined }) === 'wan';
 }
 
 /**
@@ -291,8 +293,8 @@ export function compileLldpdConfig(state?: Partial<DesiredState> | null): Compil
 
   for (const iface of state?.interfaces ?? []) {
     const dev = (iface.device || iface.name || '').trim();
-    if (!dev) continue;
-    if (isWanInterface(iface.name, iface.role) || isWanInterface(dev, iface.role)) {
+    if (!dev || !SAFE_LLDP_IFACE_PATTERN.test(dev)) continue;
+    if (inferInterfaceRole(iface) === 'wan' || isWanInterface(dev, iface.role)) {
       excludedWan.add(dev);
     } else if (iface.enabled) {
       nonWanDevs.add(dev);
@@ -305,8 +307,9 @@ export function compileLldpdConfig(state?: Partial<DesiredState> | null): Compil
   if (requested.length > 0) {
     for (const dev of requested) {
       const clean = dev.trim();
-      if (!clean || excludedWan.has(clean) || (cfg.lldp.excludeWan !== false && isWanInterface(clean))) {
-        if (clean) excludedWan.add(clean);
+      if (!clean || !SAFE_LLDP_IFACE_PATTERN.test(clean)) continue;
+      if (excludedWan.has(clean) || (cfg.lldp.excludeWan !== false && isWanInterface(clean))) {
+        excludedWan.add(clean);
         continue;
       }
       allowSet.add(clean);

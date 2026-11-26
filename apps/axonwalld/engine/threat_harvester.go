@@ -54,6 +54,7 @@ const (
 	maxPendingHarvesterFlows   = 8192
 	maxInMemoryEpisodes        = 2000
 	defaultHarvesterSpoolDir   = "/var/lib/axonwall/threat-corpus"
+	threatHarvesterMaskedPlaceholder = "********"
 	harvesterDefaultSftSystem  = "You are Axonwall Blackbox, an autonomous NGFW and Ring-0 eBPF threat reasoning model. Analyze the chronological telemetry episode, identify the MITRE ATT&CK technique and malicious/benign verdict, and emit the exact Axonwall MCP containment tool call when warranted."
 )
 
@@ -577,7 +578,10 @@ func isMountZfs(dir string) (bool, string) {
 	if err != nil {
 		return false, ""
 	}
-	abs, _ := filepath.Abs(dir)
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		abs = filepath.Clean(dir)
+	}
 	bestLen := -1
 	bestFs := ""
 	bestSrc := ""
@@ -591,8 +595,9 @@ func isMountZfs(dir string) (bool, string) {
 		if len(left) < 5 || len(right) < 2 {
 			continue
 		}
-		mnt := left[4]
-		if strings.HasPrefix(abs, mnt) && len(mnt) > bestLen {
+		mnt := filepath.Clean(left[4])
+		matches := abs == mnt || (mnt == "/" && strings.HasPrefix(abs, "/")) || (mnt != "/" && strings.HasPrefix(abs, mnt+"/"))
+		if matches && len(mnt) > bestLen {
 			bestLen = len(mnt)
 			bestFs = right[0]
 			bestSrc = right[1]
@@ -670,6 +675,19 @@ func (m *ThreatHarvesterManager) ApplyConfig(rawJSON []byte) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	if nextCfg.TeacherLlm.ApiKey == threatHarvesterMaskedPlaceholder {
+		nextCfg.TeacherLlm.ApiKey = m.cfg.TeacherLlm.ApiKey
+	}
+	if nextCfg.FleetShipper.AccessKey == threatHarvesterMaskedPlaceholder {
+		nextCfg.FleetShipper.AccessKey = m.cfg.FleetShipper.AccessKey
+	}
+	if nextCfg.FleetShipper.SecretKey == threatHarvesterMaskedPlaceholder {
+		nextCfg.FleetShipper.SecretKey = m.cfg.FleetShipper.SecretKey
+	}
+	if nextCfg.AnonymizationSalt == threatHarvesterMaskedPlaceholder {
+		nextCfg.AnonymizationSalt = m.cfg.AnonymizationSalt
+	}
+
 	oldSpool := m.cfg.SpoolDir
 	m.cfg = nextCfg
 	if nextCfg.SpoolDir != oldSpool {
@@ -717,6 +735,7 @@ func (m *ThreatHarvesterManager) SetEnabled(enabled bool) error {
 	}
 	m.ensureSpoolStorageLocked()
 	if err := m.syncOrAttachBpfLocked(); err != nil {
+		m.detachBpfLocked()
 		m.cfg.Enabled = false
 		m.bpfLoadErr = err.Error()
 		return err
@@ -985,12 +1004,50 @@ func (m *ThreatHarvesterManager) reconcileBpfAttachmentsLocked() error {
 	return errors.Join(errs...)
 }
 
+func (m *ThreatHarvesterManager) buildRuntimeCfgLocked() axebpf.ThreatHarvesterHarvesterRuntimeCfg {
+	firehoseFlag := uint8(0)
+	if m.cfg.CaptureMode == "firehose" || len(m.cfg.FirehoseInterfaces) > 0 {
+		firehoseFlag = 1
+	}
+	dropTier1 := uint8(0)
+	if m.backpressureActive.Load() {
+		dropTier1 = 1
+	}
+	sampleMod := uint32(200)
+	if m.cfg.BenignSampleRate > 0 {
+		inv := int(math.Round(1.0 / m.cfg.BenignSampleRate))
+		if inv < 1 {
+			inv = 1
+		}
+		sampleMod = uint32(inv)
+	}
+	return axebpf.ThreatHarvesterHarvesterRuntimeCfg{
+		Enabled:               1,
+		FirehoseMode:          firehoseFlag,
+		DropTier1Backpressure: dropTier1,
+		MaxFlowPayloadBytes:   uint32(m.cfg.MaxPayloadBytes),
+		BenignSampleMod:       sampleMod,
+	}
+}
+
+func (m *ThreatHarvesterManager) syncRuntimeCfgMap() {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if !m.bpfLoaded || !m.cfg.Enabled || m.objs.HarvesterCfgMap == nil {
+		return
+	}
+	zero := uint32(0)
+	rtCfg := m.buildRuntimeCfgLocked()
+	_ = m.objs.HarvesterCfgMap.Put(&zero, &rtCfg)
+}
+
 func (m *ThreatHarvesterManager) syncOrAttachBpfLocked() error {
 	if os.Geteuid() != 0 || (strings.TrimSpace(os.Getenv("AXONWALL_RUNTIME_MODE")) == "dev" && strings.TrimSpace(os.Getenv("AXONWALL_DEV_EBPF")) != "1") {
 		return errHarvesterBpfUnavailable
 	}
 
-	if !m.bpfLoaded {
+	initialAttach := !m.bpfLoaded
+	if initialAttach {
 		var objs axebpf.ThreatHarvesterObjects
 		if err := axebpf.LoadThreatHarvesterObjects(&objs, nil); err != nil {
 			return fmt.Errorf("LoadThreatHarvesterObjects: %w", err)
@@ -1044,30 +1101,11 @@ func (m *ThreatHarvesterManager) syncOrAttachBpfLocked() error {
 
 	// Update runtime config map
 	zero := uint32(0)
-	firehoseFlag := uint8(0)
-	if m.cfg.CaptureMode == "firehose" || len(m.cfg.FirehoseInterfaces) > 0 {
-		firehoseFlag = 1
-	}
-	dropTier1 := uint8(0)
-	if m.backpressureActive.Load() {
-		dropTier1 = 1
-	}
-	sampleMod := uint32(200)
-	if m.cfg.BenignSampleRate > 0 {
-		inv := int(math.Round(1.0 / m.cfg.BenignSampleRate))
-		if inv < 1 {
-			inv = 1
-		}
-		sampleMod = uint32(inv)
-	}
-	rtCfg := axebpf.ThreatHarvesterHarvesterRuntimeCfg{
-		Enabled:               1,
-		FirehoseMode:          firehoseFlag,
-		DropTier1Backpressure: dropTier1,
-		MaxFlowPayloadBytes:   uint32(m.cfg.MaxPayloadBytes),
-		BenignSampleMod:       sampleMod,
-	}
+	rtCfg := m.buildRuntimeCfgLocked()
 	if err := m.objs.HarvesterCfgMap.Put(&zero, &rtCfg); err != nil {
+		if initialAttach {
+			m.detachBpfLocked()
+		}
 		return err
 	}
 
@@ -1076,6 +1114,9 @@ func (m *ThreatHarvesterManager) syncOrAttachBpfLocked() error {
 	// was invisible; it is now returned, and ports removed from the
 	// config are deleted from the map instead of lingering.
 	if m.objs.HarvesterDarkPorts == nil {
+		if initialAttach {
+			m.detachBpfLocked()
+		}
 		return fmt.Errorf("harvester dark-port map is not loaded")
 	}
 	desiredPorts := make(map[uint16]bool, len(m.cfg.CanaryPorts))
@@ -1085,6 +1126,9 @@ func (m *ThreatHarvesterManager) syncOrAttachBpfLocked() error {
 			desiredPorts[p] = true
 			v := uint8(1)
 			if err := m.objs.HarvesterDarkPorts.Put(&p, &v); err != nil {
+				if initialAttach {
+					m.detachBpfLocked()
+				}
 				return fmt.Errorf("harvester dark-port map insert for port %d: %w", port, err)
 			}
 		}
@@ -1099,10 +1143,16 @@ func (m *ThreatHarvesterManager) syncOrAttachBpfLocked() error {
 		}
 	}
 	if err := it.Err(); err != nil {
+		if initialAttach {
+			m.detachBpfLocked()
+		}
 		return fmt.Errorf("harvester dark-port map iterate: %w", err)
 	}
 	for _, p := range stalePorts {
 		if err := m.objs.HarvesterDarkPorts.Delete(&p); err != nil {
+			if initialAttach {
+				m.detachBpfLocked()
+			}
 			return fmt.Errorf("harvester dark-port map delete for port %d: %w", p, err)
 		}
 	}
@@ -1141,11 +1191,20 @@ func (m *ThreatHarvesterManager) ingestRingEvent(ev *axebpf.ThreatHarvesterHarve
 	comm := cBytesToString(ev.Comm[:])
 	sni := cBytesToString(ev.Sni[:])
 
+	syncCfgNeeded := false
+	defer func() {
+		if syncCfgNeeded {
+			m.syncRuntimeCfgMap()
+		}
+	}()
+
 	m.pendingMu.Lock()
 	defer m.pendingMu.Unlock()
 
 	if len(m.pendingFlows) > maxPendingHarvesterFlows*9/10 {
-		m.backpressureActive.Store(true)
+		if !m.backpressureActive.Swap(true) {
+			syncCfgNeeded = true
+		}
 		m.backpressureCooloff = now.Add(10 * time.Second)
 	}
 
@@ -1277,9 +1336,11 @@ func (m *ThreatHarvesterManager) FlushReadyFlows(forceAll bool) (created, failed
 	now := time.Now().UTC()
 	var ready []*pendingFlowRecord
 
+	bpCleared := false
 	m.pendingMu.Lock()
 	if m.backpressureActive.Load() && now.After(m.backpressureCooloff) {
 		m.backpressureActive.Store(false)
+		bpCleared = true
 	}
 	for k, rec := range m.pendingFlows {
 		if forceAll || now.Sub(rec.firstSeen) >= window || now.Sub(rec.lastSeen) >= 15*time.Second {
@@ -1288,6 +1349,9 @@ func (m *ThreatHarvesterManager) FlushReadyFlows(forceAll bool) (created, failed
 		}
 	}
 	m.pendingMu.Unlock()
+	if bpCleared {
+		m.syncRuntimeCfgMap()
+	}
 
 	if len(ready) == 0 {
 		return 0, 0
@@ -1714,7 +1778,9 @@ func extractSubnetPrefix(ipStr string) string {
 		return fmt.Sprintf("%d.%d.%d.0/24", v4[0], v4[1], v4[2])
 	}
 	v6 := ip.To16()
-	return net.IP(v6[:8]).String() + "::/64"
+	var prefix [16]byte
+	copy(prefix[:8], v6[:8])
+	return net.IP(prefix[:]).String() + "/64"
 }
 
 func (m *ThreatHarvesterManager) writeEpisodeShardLocked(ep *ThreatEpisode) error {
@@ -2554,8 +2620,27 @@ func (m *ThreatHarvesterManager) SnapshotStatus() ThreatHarvesterStatusSnapshot 
 	attachedIfs := append([]string{}, m.attachedIfs...)
 	activeHooks := append([]string{}, m.activeHooks...)
 
+	cfgCopy := m.cfg
+	cfgCopy.WatchedInterfaces = append([]string{}, m.cfg.WatchedInterfaces...)
+	cfgCopy.FirehoseInterfaces = append([]string{}, m.cfg.FirehoseInterfaces...)
+	cfgCopy.FirehoseNamespaces = append([]string{}, m.cfg.FirehoseNamespaces...)
+	cfgCopy.CanaryPorts = append([]int{}, m.cfg.CanaryPorts...)
+	cfgCopy.TlsUprobeAllowlist = append([]string{}, m.cfg.TlsUprobeAllowlist...)
+	if cfgCopy.TeacherLlm.ApiKey != "" {
+		cfgCopy.TeacherLlm.ApiKey = threatHarvesterMaskedPlaceholder
+	}
+	if cfgCopy.FleetShipper.AccessKey != "" {
+		cfgCopy.FleetShipper.AccessKey = threatHarvesterMaskedPlaceholder
+	}
+	if cfgCopy.FleetShipper.SecretKey != "" {
+		cfgCopy.FleetShipper.SecretKey = threatHarvesterMaskedPlaceholder
+	}
+	if cfgCopy.AnonymizationSalt != "" {
+		cfgCopy.AnonymizationSalt = threatHarvesterMaskedPlaceholder
+	}
+
 	return ThreatHarvesterStatusSnapshot{
-		Config:                m.cfg,
+		Config:                cfgCopy,
 		BpfAttached:           m.bpfLoaded && len(activeHooks) > 0,
 		AttachedInterfaces:    attachedIfs,
 		ActiveHooks:           activeHooks,

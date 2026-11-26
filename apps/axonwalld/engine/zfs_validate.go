@@ -118,6 +118,10 @@ func validInstallZfsDevice(dev string) bool {
 	return zfsInstallDevRe.MatchString(dev) || zfsByIDRe.MatchString(dev) || zfsByPartlabelZfsRe.MatchString(dev)
 }
 
+func validZfsSpecialSmallBlocks(v string) bool {
+	return v == "" || v == "0" || zfsRecordSizes[v]
+}
+
 func ValidateInstallZfsPoolSpec(pool ZfsPoolSpec) error {
 	if !validZfsPoolName(pool.Name) {
 		return fmt.Errorf("invalid pool name %q", pool.Name)
@@ -127,6 +131,9 @@ func ValidateInstallZfsPoolSpec(pool ZfsPoolSpec) error {
 	}
 	if !zfsCompressions[pool.Compression] {
 		return fmt.Errorf("pool %q: compression %q is not permitted", pool.Name, pool.Compression)
+	}
+	if !validZfsSpecialSmallBlocks(pool.SpecialSmallBlocks) {
+		return fmt.Errorf("pool %q: special_small_blocks %q is not permitted", pool.Name, pool.SpecialSmallBlocks)
 	}
 	if len(pool.DataDisks) == 0 {
 		return fmt.Errorf("pool %q: at least one data disk is required", pool.Name)
@@ -150,6 +157,9 @@ func ValidateZfsPoolSpec(pool ZfsPoolSpec) error {
 	}
 	if !zfsCompressions[pool.Compression] {
 		return fmt.Errorf("pool %q: compression %q is not permitted", pool.Name, pool.Compression)
+	}
+	if !validZfsSpecialSmallBlocks(pool.SpecialSmallBlocks) {
+		return fmt.Errorf("pool %q: special_small_blocks %q is not permitted", pool.Name, pool.SpecialSmallBlocks)
 	}
 	for _, group := range [][]string{pool.DataDisks, pool.LogDisks, pool.CacheDisks, pool.SpareDisks, pool.SpecialDisks, pool.DedupDisks} {
 		for _, dev := range group {

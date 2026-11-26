@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -59,13 +60,15 @@ type storedHeadscaleInvite struct {
 // (headscale_wan_window_ports) against active pending invites and admin arming.
 type HeadscaleWanGateManager struct {
 	mu          sync.Mutex
+	stateDir    string
 	invitesPath string
 	dryRun      bool
 	cfg         HeadscaleWanConfig
 
-	manualUntil   time.Time
-	windowOpen    bool
-	lastSyncError string
+	manualUntil     time.Time
+	windowOpen      bool
+	disabledFlushed bool
+	lastSyncError   string
 
 	nowFn        func() time.Time
 	nftApplyFn   func(stdin string) error
@@ -75,12 +78,17 @@ type HeadscaleWanGateManager struct {
 	stopCh   chan struct{}
 }
 
+type persistedManualArm struct {
+	ManualUntil string `json:"manualUntil"`
+}
+
 // NewHeadscaleWanGateManager constructs a gate manager watching stateDir/headscale-invites.json.
 func NewHeadscaleWanGateManager(stateDir string, dryRun bool) *HeadscaleWanGateManager {
 	if strings.TrimSpace(stateDir) == "" {
 		stateDir = "/var/lib/axonwall"
 	}
 	m := &HeadscaleWanGateManager{
+		stateDir:    stateDir,
 		invitesPath: filepath.Join(stateDir, "headscale-invites.json"),
 		dryRun:      dryRun,
 		nowFn:       time.Now,
@@ -88,7 +96,70 @@ func NewHeadscaleWanGateManager(stateDir string, dryRun bool) *HeadscaleWanGateM
 	}
 	m.nftApplyFn = defaultNftBatchApply
 	m.nftListSetFn = defaultNftListSetIPs
+	m.loadManualStateLocked()
 	return m
+}
+
+func (m *HeadscaleWanGateManager) manualStatePath() string {
+	return filepath.Join(m.stateDir, "headscale-wan-manual.json")
+}
+
+func (m *HeadscaleWanGateManager) loadManualStateLocked() {
+	path := m.manualStatePath()
+	fi, err := os.Lstat(path)
+	if err != nil || (fi.Mode()&os.ModeSymlink) != 0 || fi.IsDir() {
+		return
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil || len(bytes.TrimSpace(raw)) == 0 {
+		return
+	}
+	var saved persistedManualArm
+	if err := json.Unmarshal(raw, &saved); err != nil {
+		return
+	}
+	t, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(saved.ManualUntil))
+	if err != nil {
+		t, err = time.Parse(time.RFC3339, strings.TrimSpace(saved.ManualUntil))
+	}
+	if err == nil {
+		m.manualUntil = t.UTC()
+	}
+}
+
+func (m *HeadscaleWanGateManager) persistManualStateLocked() {
+	if m.manualUntil.IsZero() {
+		m.clearManualStateLocked()
+		return
+	}
+	if err := os.MkdirAll(m.stateDir, 0750); err != nil {
+		return
+	}
+	path := m.manualStatePath()
+	if fi, err := os.Lstat(path); err == nil && (fi.Mode()&os.ModeSymlink) != 0 {
+		return
+	}
+	payload, err := json.Marshal(persistedManualArm{
+		ManualUntil: m.manualUntil.UTC().Format(time.RFC3339Nano),
+	})
+	if err != nil {
+		return
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, 0600)
+	if err != nil {
+		return
+	}
+	_, _ = f.Write(payload)
+	_ = f.Chmod(0600)
+	_ = f.Close()
+}
+
+func (m *HeadscaleWanGateManager) clearManualStateLocked() {
+	path := m.manualStatePath()
+	if fi, err := os.Lstat(path); err == nil && (fi.Mode()&os.ModeSymlink) != 0 {
+		return
+	}
+	_ = os.Remove(path)
 }
 
 func (m *HeadscaleWanGateManager) effectiveInvitesPath() string {
@@ -198,6 +269,13 @@ func (m *HeadscaleWanGateManager) ApplyConfig(raw []byte) error {
 	}
 	m.mu.Lock()
 	m.cfg = cfg
+	if !cfg.Enabled || !cfg.AutoWindow {
+		m.manualUntil = time.Time{}
+		m.clearManualStateLocked()
+	}
+	if cfg.Enabled {
+		m.disabledFlushed = false
+	}
 	m.mu.Unlock()
 	return nil
 }
@@ -251,24 +329,29 @@ func (m *HeadscaleWanGateManager) reconcileLocked() error {
 	now := m.nowFn().UTC()
 	cfg := m.cfg
 
-	if m.manualUntil.IsZero() || !m.manualUntil.After(now) {
+	if !m.manualUntil.IsZero() && !m.manualUntil.After(now) {
 		m.manualUntil = time.Time{}
+		m.clearManualStateLocked()
 	}
 
 	_, pendingUntil := m.readPendingInviteSummary(now)
 
 	if !cfg.Enabled || cfg.BindPort < 1 || cfg.BindPort > 65535 {
-		wasOpen := m.windowOpen
-		m.windowOpen = false
-		m.lastSyncError = ""
-		if !m.dryRun && wasOpen {
+		if !m.dryRun && (m.windowOpen || !m.disabledFlushed) {
 			if err := m.nftApplyFn("flush set inet axonwall headscale_wan_window_ports\n"); err != nil && !isNftMissingSetError(err) {
 				m.lastSyncError = err.Error()
 				return err
 			}
 		}
+		m.windowOpen = false
+		m.disabledFlushed = true
+		m.manualUntil = time.Time{}
+		m.clearManualStateLocked()
+		m.lastSyncError = ""
 		return nil
 	}
+
+	m.disabledFlushed = false
 
 	if !cfg.AutoWindow {
 		m.windowOpen = true
@@ -318,16 +401,25 @@ func (m *HeadscaleWanGateManager) reconcileLocked() error {
 	return nil
 }
 
-// SyncFromInvites immediately reconciles and returns the updated gate status.
-func (m *HeadscaleWanGateManager) SyncFromInvites() HeadscaleWanStatus {
-	_ = m.Reconcile()
-	return m.Status()
+// SyncFromInvites immediately reconciles and returns the updated gate status and any reconcile error.
+func (m *HeadscaleWanGateManager) SyncFromInvites() (HeadscaleWanStatus, error) {
+	err := m.Reconcile()
+	return m.Status(), err
 }
 
 // ArmManual temporarily opens the WAN invite window (durationSec <= 0 closes manual arm).
 func (m *HeadscaleWanGateManager) ArmManual(durationSec int) (HeadscaleWanStatus, error) {
 	m.mu.Lock()
+	if !m.cfg.Enabled {
+		m.mu.Unlock()
+		return m.Status(), fmt.Errorf("headscale WAN invite gate is disabled")
+	}
+	if !m.cfg.AutoWindow {
+		m.mu.Unlock()
+		return m.Status(), fmt.Errorf("manual arming is disabled when autoWindow is false")
+	}
 	now := m.nowFn().UTC()
+	prevManualUntil := m.manualUntil
 	if durationSec <= 0 {
 		m.manualUntil = time.Time{}
 	} else {
@@ -340,8 +432,14 @@ func (m *HeadscaleWanGateManager) ArmManual(durationSec int) (HeadscaleWanStatus
 		m.manualUntil = now.Add(time.Duration(durationSec) * time.Second)
 	}
 	err := m.reconcileLocked()
+	if err != nil {
+		m.manualUntil = prevManualUntil
+		m.mu.Unlock()
+		return m.Status(), err
+	}
+	m.persistManualStateLocked()
 	m.mu.Unlock()
-	return m.Status(), err
+	return m.Status(), nil
 }
 
 // Status returns the current WAN invite window status and any active knocked-in IPs.
@@ -353,6 +451,7 @@ func (m *HeadscaleWanGateManager) Status() HeadscaleWanStatus {
 	if !manualUntil.IsZero() && !manualUntil.After(now) {
 		manualUntil = time.Time{}
 		m.manualUntil = time.Time{}
+		m.clearManualStateLocked()
 	}
 	pendingCount, pendingUntil := m.readPendingInviteSummary(now)
 	windowOpen := m.windowOpen
@@ -379,6 +478,12 @@ func (m *HeadscaleWanGateManager) Status() HeadscaleWanStatus {
 		} else {
 			reason = "pending_invites"
 		}
+		if dryRun {
+			windowOpen = true
+		}
+	} else {
+		reason = "closed"
+		windowOpen = false
 	}
 
 	seqCopy := make([]int, len(cfg.KnockSequence))
@@ -432,7 +537,9 @@ func (m *HeadscaleWanGateManager) Start() {
 	go func() {
 		ticker := time.NewTicker(15 * time.Second)
 		defer ticker.Stop()
-		_ = m.Reconcile()
+		if err := m.Reconcile(); err != nil {
+			log.Printf("[HeadscaleWanGate] Initial reconcile error: %v", err)
+		}
 		for {
 			select {
 			case <-ticker.C:

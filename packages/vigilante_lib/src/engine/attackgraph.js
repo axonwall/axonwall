@@ -222,6 +222,60 @@ export function buildCompositeAttackGraph(nmapHosts = [], k8sWorkloads = [], blo
         });
       }
     }
+    // 4. Synthesize cross-layer edges when real Nmap hosts / K8s workloads / BloodHound paths are supplied
+    const addSynthesizedEdge = (from, to, type, label, cost = 2) => {
+      if (!from || !to || from === to) return;
+      if (edges.some(e => e.from === from && e.to === to && e.type === type)) return;
+      edges.push({ from, to, type, label, cost });
+    };
+
+    const hostNodes = Array.from(nodesMap.values()).filter(n => n.type === 'Host');
+    const workloadNodes = Array.from(nodesMap.values()).filter(n => n.type === 'Workload');
+
+    for (const wk of k8sWorkloads) {
+      const podId = `pod-${wk.name || wk.pod}`;
+      const wkHostIp = wk.hostIp || wk.nodeIp;
+      if (wkHostIp && nodesMap.has(`host-${wkHostIp}`)) {
+        addSynthesizedEdge(`host-${wkHostIp}`, podId, 'HOSTS_WORKLOAD', 'Host schedules Kubernetes pod', 2);
+      }
+      if (wk.serviceAccount && nodesMap.has(wk.serviceAccount)) {
+        addSynthesizedEdge(podId, wk.serviceAccount, 'ASSUMES_IDENTITY', `Pod mounts SA '${wk.serviceAccount}'`, 2);
+      }
+      for (const targetId of wk.connectsTo || wk.targets || []) {
+        const resolvedTarget = nodesMap.has(targetId) ? targetId : (nodesMap.has(`pod-${targetId}`) ? `pod-${targetId}` : null);
+        if (resolvedTarget) {
+          addSynthesizedEdge(podId, resolvedTarget, 'NETWORK_FLOW', 'Service reachability', 2);
+        }
+      }
+    }
+
+    // Link Edge workloads -> Restricted/CrownJewel workloads in same namespace, and exposed Hosts -> Workloads/CrownJewels
+    for (const src of workloadNodes) {
+      for (const dst of workloadNodes) {
+        if (src.id === dst.id) continue;
+        if (src.namespace === dst.namespace && TIER_WEIGHTS[src.tier] <= TIER_WEIGHTS[dst.tier] && dst.tier !== 'Untrusted') {
+          if (src.tier === 'Edge' || dst.tier === 'CrownJewel') {
+            addSynthesizedEdge(src.id, dst.id, 'SAME_NAMESPACE_PIVOT', `Namespace '${src.namespace}' lateral reachability`, 2);
+          }
+        }
+      }
+    }
+    for (const host of hostNodes) {
+      const matchingNmap = nmapHosts.find(h => `host-${h.ip || h.hostname}` === host.id);
+      const hasMgmtOrWeb = (matchingNmap?.openPorts || []).some(p => [22, 80, 443, 3389, 8080, 8443].includes(Number(p)));
+      if (hasMgmtOrWeb) {
+        for (const dst of hostNodes) {
+          if (host.id !== dst.id && dst.tier === 'CrownJewel') {
+            addSynthesizedEdge(host.id, dst.id, 'LATERAL_MOVEMENT', 'Network lateral pivot via exposed service', 3);
+          }
+        }
+        if (workloadNodes.length > 0 && edges.filter(e => e.from === host.id).length === 0) {
+          for (const wkNode of workloadNodes.filter(w => w.tier === 'Edge')) {
+            addSynthesizedEdge(host.id, wkNode.id, 'INGRESS_TARGET', 'Host forwards external traffic to ingress/edge workload', 2);
+          }
+        }
+      }
+    }
   }
 
   // Construct adjacency list
@@ -264,6 +318,14 @@ export function buildCompositeAttackGraph(nmapHosts = [], k8sWorkloads = [], blo
  * @returns {Object} { pathFound, hops, nodePath, edgePath, totalCost }
  */
 export function findShortestAttackPath(fromNodeId, toNodeId, graph) {
+  if (!graph || (!graph.adjacency && !Array.isArray(graph.nodes))) {
+    return { pathFound: false, hops: -1, nodePath: [], edgePath: [], totalCost: null };
+  }
+  const hasStart = Boolean(graph.adjacency?.has(fromNodeId) || graph.nodes?.some(n => n.id === fromNodeId));
+  const hasEnd = Boolean(graph.adjacency?.has(toNodeId) || graph.nodes?.some(n => n.id === toNodeId));
+  if (!hasStart || !hasEnd) {
+    return { pathFound: false, hops: -1, nodePath: [], edgePath: [], totalCost: null };
+  }
   if (fromNodeId === toNodeId) {
     return { pathFound: true, hops: 0, nodePath: [fromNodeId], edgePath: [], totalCost: 0 };
   }
@@ -358,7 +420,7 @@ export function calculateBlastRadius(startNodeId, graph, options = {}) {
   // Calculate composite impact score based on reachable asset tiers
   let totalScore = 0;
   for (const node of reachableNodes) {
-    const weight = TIER_WEIGHTS[node.tier] || 10;
+    const weight = TIER_WEIGHTS[node.tier] ?? 10;
     // Closer nodes carry slightly more immediate blast risk
     const depthDiscount = Math.max(0.5, 1 - (node.depth * 0.1));
     totalScore += weight * depthDiscount;

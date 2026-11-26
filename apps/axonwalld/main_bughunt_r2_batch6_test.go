@@ -146,6 +146,7 @@ func TestR2Batch6ConfirmFailsFastDuringApply(t *testing.T) {
 // the first job confirms.
 func TestR2Batch6ConcurrentAppliesSerialise(t *testing.T) {
 	dir := t.TempDir()
+	allowTestBundlePrefix(t, dir)
 	started := filepath.Join(dir, "systemctl-started")
 	release := filepath.Join(dir, "systemctl-release")
 	batch4FakePath(t, r2BlockingSystemctl(t, started, release))
@@ -523,25 +524,25 @@ func TestR2Batch6StartupDoesNotAdoptLiveRulesetWhenPending(t *testing.T) {
 	s.mu.Lock()
 	lastGood := s.lastGoodScript
 	s.mu.Unlock()
-	// The file-based fallbacks (/etc/nftables.conf) may still supply a
-	// rollback target — that is pre-existing behaviour. What must NOT
-	// happen is adopting the LIVE kernel ruleset (the fake nft's
-	// `list ruleset` output) as last-known-good.
+	// Distro /etc/nftables.conf containing `flush ruleset` or omitting
+	// `table inet axonwall` must not be adopted as last-known-good, and
+	// live kernel ruleset capture (`nft list table inet axonwall` / `nft list ruleset`)
+	// must NOT run while a confirm is pending.
 	if lastGood == "table inet axonwall { chain input { type filter hook input priority 0; } }" {
 		t.Fatal("startup adopted the live ruleset as last-known-good while a confirm was pending")
 	}
-	if etcData, err := os.ReadFile("/etc/nftables.conf"); err == nil && len(etcData) > 0 {
+	if etcData, err := os.ReadFile("/etc/nftables.conf"); err == nil && isSafeLkgNftScript("/etc/nftables.conf", etcData) {
 		if lastGood != string(etcData) {
-			t.Fatalf("startup loaded last-known-good from somewhere other than the file fallback while a confirm was pending")
+			t.Fatalf("startup did not load safe /etc/nftables.conf fallback while a confirm was pending")
 		}
 	} else if lastGood != "" {
-		t.Fatal("startup adopted a last-known-good script from somewhere other than the file fallback while a confirm was pending")
+		t.Fatalf("startup adopted unsafe or unexpected last-known-good script while a confirm was pending: %q", lastGood)
 	}
 	if _, err := os.Stat(filepath.Join(bundleDir, "last-known-good.nft")); !os.IsNotExist(err) {
 		t.Fatal("startup wrote the live ruleset to last-known-good.nft while a confirm was pending")
 	}
-	if argsLog, err := os.ReadFile(nftLog); err == nil && strings.Contains(string(argsLog), "list ruleset") {
-		t.Fatal("startup ran `nft list ruleset` to adopt the live ruleset while a confirm was pending")
+	if argsLog, err := os.ReadFile(nftLog); err == nil && (strings.Contains(string(argsLog), "list ruleset") || strings.Contains(string(argsLog), "list table inet axonwall")) {
+		t.Fatalf("startup ran live nft list to adopt the live ruleset while a confirm was pending: %s", string(argsLog))
 	}
 }
 
@@ -827,7 +828,9 @@ func r2Batch6K3sFootprint(t *testing.T) {
 
 func r2Batch6K3sApplyRequest(t *testing.T) *pb.ApplyBundleRequest {
 	t.Helper()
-	k3sPath := filepath.Join(t.TempDir(), "k3s_config.json")
+	dir := t.TempDir()
+	allowTestBundlePrefix(t, dir)
+	k3sPath := filepath.Join(dir, "k3s_config.json")
 	return &pb.ApplyBundleRequest{
 		JobId:                 "r2-m14-subsystem",
 		NftScript:             batch4NftScript,

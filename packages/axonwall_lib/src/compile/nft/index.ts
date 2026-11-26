@@ -40,6 +40,7 @@ import { compileTrafficShaper } from '../tc/index.js';
 import { compileIpsec } from '../ipsec/index.js';
 import { compileOpenVpn } from '../openvpn/index.js';
 import { compileVirtBundle } from '../virt/index.js';
+import { compileCaptivePortal } from '../../captive/index.js';
 
 function buildNetFlowInputRules(state: DesiredState, lanExpr?: string): string[] {
   const resolved = resolveNetFlowConfig(state);
@@ -284,33 +285,40 @@ function buildHeadscaleWanInviteNft(
       cfg.knockProtocol === 'tcp'
         ? `tcp flags & (fin|syn|rst|ack) == syn tcp dport ${port}`
         : `udp dport ${port}`;
+    const dropKnockPort = (port: number): string =>
+      cfg.knockProtocol === 'tcp' ? `tcp dport ${port}` : `udp dport ${port}`;
 
     // Evaluate knock stages in reverse order so one packet cannot advance multiple stages.
+    // Separate rate-limited dynamic set updates from unconditional port drops so floods above 10/s still drop.
     for (let idx = seqLen - 1; idx >= 0; idx -= 1) {
       const port = cfg.knockSequence[idx]!;
       const pMatch = matchPort(port);
+      const pDrop = dropKnockPort(port);
       if (idx === seqLen - 1) {
         chainLines.push(
-          `    ip saddr @headscale_knock_s${idx}_v4 ${pMatch} limit rate 10/second update @headscale_knock_allow_v4 { ip saddr timeout ${cfg.knockOpenDurationSec}s } drop comment "headscale-knock-unlock-v4"`,
+          `    ip saddr @headscale_knock_s${idx}_v4 ${pMatch} meter headscale_knock_rl_unlock_v4 size 1024 { ip saddr limit rate 10/second } update @headscale_knock_allow_v4 { ip saddr timeout ${cfg.knockOpenDurationSec}s } comment "headscale-knock-unlock-v4"`,
         );
         chainLines.push(
-          `    ip6 saddr @headscale_knock_s${idx}_v6 ${pMatch} limit rate 10/second update @headscale_knock_allow_v6 { ip6 saddr timeout ${cfg.knockOpenDurationSec}s } drop comment "headscale-knock-unlock-v6"`,
+          `    ip6 saddr @headscale_knock_s${idx}_v6 ${pMatch} meter headscale_knock_rl_unlock_v6 size 1024 { ip6 saddr limit rate 10/second } update @headscale_knock_allow_v6 { ip6 saddr timeout ${cfg.knockOpenDurationSec}s } comment "headscale-knock-unlock-v6"`,
         );
+        chainLines.push(`    ${pDrop} drop comment "headscale-knock-unlock-drop"`);
       } else if (idx > 0) {
         const nextStage = idx + 1;
         chainLines.push(
-          `    ip saddr @headscale_knock_s${idx}_v4 ${pMatch} limit rate 10/second update @headscale_knock_s${nextStage}_v4 { ip saddr timeout ${cfg.knockStepTimeoutSec}s } drop comment "headscale-knock-s${nextStage}-v4"`,
+          `    ip saddr @headscale_knock_s${idx}_v4 ${pMatch} meter headscale_knock_rl_s${nextStage}_v4 size 1024 { ip saddr limit rate 10/second } update @headscale_knock_s${nextStage}_v4 { ip saddr timeout ${cfg.knockStepTimeoutSec}s } comment "headscale-knock-s${nextStage}-v4"`,
         );
         chainLines.push(
-          `    ip6 saddr @headscale_knock_s${idx}_v6 ${pMatch} limit rate 10/second update @headscale_knock_s${nextStage}_v6 { ip6 saddr timeout ${cfg.knockStepTimeoutSec}s } drop comment "headscale-knock-s${nextStage}-v6"`,
+          `    ip6 saddr @headscale_knock_s${idx}_v6 ${pMatch} meter headscale_knock_rl_s${nextStage}_v6 size 1024 { ip6 saddr limit rate 10/second } update @headscale_knock_s${nextStage}_v6 { ip6 saddr timeout ${cfg.knockStepTimeoutSec}s } comment "headscale-knock-s${nextStage}-v6"`,
         );
+        chainLines.push(`    ${pDrop} drop comment "headscale-knock-s${nextStage}-drop"`);
       } else {
         chainLines.push(
-          `    meta nfproto ipv4 ${pMatch} limit rate 10/second update @headscale_knock_s1_v4 { ip saddr timeout ${cfg.knockStepTimeoutSec}s } drop comment "headscale-knock-s1-v4"`,
+          `    meta nfproto ipv4 ${pMatch} meter headscale_knock_rl_s1_v4 size 1024 { ip saddr limit rate 10/second } update @headscale_knock_s1_v4 { ip saddr timeout ${cfg.knockStepTimeoutSec}s } comment "headscale-knock-s1-v4"`,
         );
         chainLines.push(
-          `    meta nfproto ipv6 ${pMatch} limit rate 10/second update @headscale_knock_s1_v6 { ip6 saddr timeout ${cfg.knockStepTimeoutSec}s } drop comment "headscale-knock-s1-v6"`,
+          `    meta nfproto ipv6 ${pMatch} meter headscale_knock_rl_s1_v6 size 1024 { ip6 saddr limit rate 10/second } update @headscale_knock_s1_v6 { ip6 saddr timeout ${cfg.knockStepTimeoutSec}s } comment "headscale-knock-s1-v6"`,
         );
+        chainLines.push(`    ${pDrop} drop comment "headscale-knock-s1-drop"`);
       }
     }
   }
@@ -1100,7 +1108,7 @@ export function compileNftables(state: DesiredState): CompileResult {
     reloadServices.push('strongswan');
   }
 
-  // Emit OpenVPN 2.6 DCO server configurations when enabled
+  // Emit OpenVPN 2.6 DCO server configurations & Client-Specific Overrides when enabled
   if (isPluginEnabled('openvpn', state) && state.openvpn?.enabled) {
     const ovpnCompiled = compileOpenVpn(state.openvpn);
     for (const srv of ovpnCompiled.servers) {
@@ -1110,6 +1118,15 @@ export function compileNftables(state: DesiredState): CompileResult {
         content: srv.serverConf,
         fileMode: 0o600,
       });
+      for (const [cn, ccdContent] of Object.entries(srv.ccdFiles)) {
+        const safeCn = cn.replace(/[^a-zA-Z0-9_.-]/g, '_');
+        if (!safeCn || safeCn.includes('..') || safeCn.startsWith('.')) continue;
+        files.push({
+          path: `/etc/openvpn/ccd/${safeSrv}/${safeCn}`,
+          content: ccdContent,
+          fileMode: 0o600,
+        });
+      }
       reloadServices.push(`openvpn-server@${safeSrv}`);
     }
   }
@@ -1161,30 +1178,9 @@ export function compileNftables(state: DesiredState): CompileResult {
     reloadServices.push('rosenpass');
   }
 
-  // Always emit Headscale WAN Invite Access configuration so axonwalld tracks live state on enable, disable, and rollback
+  // Resolve Headscale WAN Invite settings and verify HAProxy injectability BEFORE emitting
+  // headscale_wan_config.json or nftables WAN invite rules so collisions never open an unproxied port.
   const wanInviteCfg = resolveHeadscaleWanInviteSettings(state, warnings);
-  files.push({
-    path: '/etc/axonwall/managed/headscale_wan_config.json',
-    content: JSON.stringify(
-      {
-        enabled: wanInviteCfg.enabled,
-        bindPort: wanInviteCfg.bindPort,
-        hostname: wanInviteCfg.hostname,
-        autoWindow: wanInviteCfg.autoWindow,
-        requirePin: wanInviteCfg.requirePin,
-        portKnockingEnabled: wanInviteCfg.knockEnabled,
-        knockProtocol: wanInviteCfg.knockProtocol,
-        knockSequence: wanInviteCfg.knockSequence,
-        knockStepTimeoutSec: wanInviteCfg.knockStepTimeoutSec,
-        knockOpenDurationSec: wanInviteCfg.knockOpenDurationSec,
-      },
-      null,
-      2,
-    ),
-    fileMode: 0o600,
-  });
-
-  // Emit HAProxy configuration (merging converged K3s workloads & Headscale WAN Invite frontend if present)
   const k3sHaproxyWorkloads = (state.k3s?.workloads ?? []).filter(
     (w) => w.enabled && (w.exposeViaHaproxy || Boolean(w.ingressHostname)) && w.port > 0,
   );
@@ -1254,12 +1250,16 @@ export function compileNftables(state: DesiredState): CompileResult {
         warnings.push(
           `HAProxy global mode is '${baseHaproxy.mode}'; Headscale WAN invite path allowlisting requires 'http' mode. Skipped fe_headscale_wan_invite injection.`,
         );
+        wanInviteCfg.enabled = false;
+        wanInviteCfg.knockEnabled = false;
       } else {
         const collidingFe = mergedFrontends.find((f) => f.bindPort === wanInviteCfg.bindPort);
         if (collidingFe) {
           warnings.push(
             `Port ${wanInviteCfg.bindPort} is already in use by HAProxy frontend '${collidingFe.name}'; choose a different WAN invite bindPort such as 8444 or 9443.`,
           );
+          wanInviteCfg.enabled = false;
+          wanInviteCfg.knockEnabled = false;
         } else {
           if (!mergedBackends.some((b) => b.name === 'be_axonwall_invite_ui')) {
             mergedBackends.push({
@@ -1294,6 +1294,7 @@ export function compileNftables(state: DesiredState): CompileResult {
                 name: 'be_headscale_control',
                 mode: 'http',
                 balance: 'roundrobin',
+                healthCheckPath: '/health',
                 servers: [{ name: 'local_headscale', address: '127.0.0.1', port: 8080, check: true }],
               });
             }
@@ -1322,13 +1323,37 @@ export function compileNftables(state: DesiredState): CompileResult {
       }
     }
 
-    files.push({
-      path: '/etc/haproxy/haproxy.cfg',
-      content: compileHaProxy({ ...baseHaproxy, enabled: true, frontends: mergedFrontends, backends: mergedBackends }),
-      fileMode: 0o644,
-    });
-    reloadServices.push('haproxy');
+    if (state.haproxy?.enabled || k3sHaproxyWorkloads.length > 0 || wanInviteCfg.enabled) {
+      files.push({
+        path: '/etc/haproxy/haproxy.cfg',
+        content: compileHaProxy({ ...baseHaproxy, enabled: true, frontends: mergedFrontends, backends: mergedBackends }),
+        fileMode: 0o644,
+      });
+      reloadServices.push('haproxy');
+    }
   }
+
+  // Always emit Headscale WAN Invite Access configuration so axonwalld tracks effective state on enable, disable, collision, and rollback
+  files.push({
+    path: '/etc/axonwall/managed/headscale_wan_config.json',
+    content: JSON.stringify(
+      {
+        enabled: wanInviteCfg.enabled,
+        bindPort: wanInviteCfg.bindPort,
+        hostname: wanInviteCfg.hostname,
+        autoWindow: wanInviteCfg.autoWindow,
+        requirePin: wanInviteCfg.requirePin,
+        portKnockingEnabled: wanInviteCfg.knockEnabled,
+        knockProtocol: wanInviteCfg.knockProtocol,
+        knockSequence: wanInviteCfg.knockSequence,
+        knockStepTimeoutSec: wanInviteCfg.knockStepTimeoutSec,
+        knockOpenDurationSec: wanInviteCfg.knockOpenDurationSec,
+      },
+      null,
+      2,
+    ),
+    fileMode: 0o600,
+  });
 
   // Emit FreeRADIUS clients configuration when enabled
   if (state.freeradius?.enabled) {
@@ -1370,11 +1395,11 @@ export function compileNftables(state: DesiredState): CompileResult {
   const wanInterfaces = state.interfaces.filter(
     (i) => i.enabled && inferInterfaceRole(i) === 'wan' && isValidDevice(i.device),
   );
-  const wanDevicesSet = wanInterfaces.map((i) => `"${i.device}"`);
+  const wanDevicesSet = Array.from(new Set(wanInterfaces.map((i) => `"${i.device}"`)));
   const lanInterfacesForWanGate = state.interfaces.filter(
     (i) => i.enabled && inferInterfaceRole(i) !== 'wan' && isValidDevice(i.device),
   );
-  const lanDevicesSetForWanGate = lanInterfacesForWanGate.map((i) => `"${i.device}"`);
+  const lanDevicesSetForWanGate = Array.from(new Set(lanInterfacesForWanGate.map((i) => `"${i.device}"`)));
   const wanInviteNft = buildHeadscaleWanInviteNft(wanInviteCfg, wanDevicesSet, lanDevicesSetForWanGate);
 
   // When core-firewall plugin is disabled, emit a clean Host-Mode Appliance Ruleset
@@ -1403,7 +1428,9 @@ export function compileNftables(state: DesiredState): CompileResult {
 
     if (state.system.antiLockout?.enabled && (state.system.antiLockout.ports?.length ?? 0) > 0) {
       const ifaceList = normalizeAntiLockoutInterfaces(state.system.antiLockout);
-      const validPorts = state.system.antiLockout.ports.filter((p) => Number.isInteger(p) && p >= 1 && p <= 65535);
+      const validPorts = Array.from(
+        new Set(state.system.antiLockout.ports.filter((p) => Number.isInteger(p) && p >= 1 && p <= 65535)),
+      );
       if (validPorts.length > 0) {
         const ports = validPorts.join(', ');
         const seenDevs = new Set<string>();
@@ -1514,10 +1541,33 @@ export function compileNftables(state: DesiredState): CompileResult {
         }
       : undefined;
   const suricataCompiled = compileSuricata(suricataConfig);
+  const crowdsecEnabled = isPluginEnabled('crowdsec-bouncer', state) && Boolean(state.crowdsec?.enabled);
   const crowdsecCompiled = compileCrowdSec(
-    isPluginEnabled('crowdsec-bouncer', state) ? state.crowdsec : undefined,
+    crowdsecEnabled ? state.crowdsec : undefined,
   );
   const geoipCompiled = compileGeoIp(state.geoip);
+
+  // Compile Captive Portal redirection rules when enabled (mapping zone interface names -> OS device names)
+  let captiveNftRules: string[] = [];
+  const captiveAllowPorts: Array<{ dev: string; port: number; safeZoneName: string }> = [];
+  if (isPluginEnabled('captive-portal', state) && state.captivePortal?.enabled && (state.captivePortal.zones?.length ?? 0) > 0) {
+    const resolvedZones = [];
+    for (const z of state.captivePortal.zones) {
+      if (!z.enabled) continue;
+      const dev = ifDeviceMap.get(z.interface) || z.interface;
+      if (!isValidDevice(dev)) {
+        warnings.push(`Skipped captive portal zone "${z.name}" with invalid interface "${z.interface}".`);
+        continue;
+      }
+      const port = Math.max(1, Math.min(65535, Math.trunc(Number(z.listenPort) || 8999)));
+      const safeZoneName = sanitizeIdentifier(z.name || 'portal');
+      resolvedZones.push({ ...z, interface: dev });
+      captiveAllowPorts.push({ dev, port, safeZoneName });
+    }
+    if (resolvedZones.length > 0) {
+      captiveNftRules = compileCaptivePortal({ ...state.captivePortal, zones: resolvedZones }).nftRules;
+    }
+  }
 
   if (isPluginEnabled('suricata-ids', state) && state.suricata?.enabled) {
     files.push({
@@ -1566,7 +1616,7 @@ export function compileNftables(state: DesiredState): CompileResult {
     lines.push(...wanInviteNft.setLines);
   }
 
-  if (state.crowdsec?.enabled) {
+  if (crowdsecEnabled) {
     lines.push('  # CrowdSec integration');
     lines.push(crowdsecCompiled.nftSetDefinition.split('\n').map(l => '  ' + l).join('\n'));
     lines.push('');
@@ -1579,6 +1629,7 @@ export function compileNftables(state: DesiredState): CompileResult {
   }
 
   const emittedSets = new Map<string, { setType: string; isV6: boolean; hasDualV6?: boolean }>();
+  const emittedServiceSetElements = new Map<string, string[]>();
 
   if (state.aliases.length > 0) {
     lines.push('  # Aliases & Dynamic Sets');
@@ -1599,7 +1650,8 @@ export function compileNftables(state: DesiredState): CompileResult {
       }
 
       const emitSetBlock = (targetSetName: string, setType: string, entries: string[]) => {
-        const elements = entries.join(', ');
+        const deduped = Array.from(new Set(entries));
+        const elements = deduped.join(', ');
         lines.push(`  set ${targetSetName} {`);
         lines.push(`    type ${setType};`);
         if (
@@ -1618,18 +1670,25 @@ export function compileNftables(state: DesiredState): CompileResult {
       };
 
       if (alias.type === 'port') {
-        const validPorts = rawExpanded.filter((e) => isValidPortRange(e));
+        const validPorts = Array.from(new Set(rawExpanded.filter((e) => isValidPortRange(e))));
         if (validPorts.length === 0) continue;
         emitSetBlock(setName, 'inet_service', validPorts);
         emittedSets.set(setName, { setType: 'inet_service', isV6: false });
+        emittedServiceSetElements.set(setName, validPorts);
       } else if (alias.type === 'mac') {
-        const validMacs = rawExpanded.filter((e) => isValidMAC(e));
+        const validMacs = Array.from(
+          new Set(rawExpanded.filter((e) => isValidMAC(e)).map((e) => e.replace(/-/g, ':').toLowerCase())),
+        );
         if (validMacs.length === 0) continue;
         emitSetBlock(setName, 'ether_addr', validMacs);
         emittedSets.set(setName, { setType: 'ether_addr', isV6: false });
       } else {
-        const v4Entries = rawExpanded.filter((e) => !e.includes(':') && (isValidIPv4(e) || isValidCIDR(e)));
-        const v6Entries = rawExpanded.filter((e) => e.includes(':') && (isValidIPv6(e) || isValidCIDR(e)));
+        const v4Entries = Array.from(
+          new Set(rawExpanded.filter((e) => !e.includes(':') && (isValidIPv4(e) || isValidCIDR(e)))),
+        );
+        const v6Entries = Array.from(
+          new Set(rawExpanded.filter((e) => e.includes(':') && (isValidIPv6(e) || isValidCIDR(e)))),
+        );
         if (v4Entries.length > 0 && v6Entries.length > 0) {
           emitSetBlock(setName, 'ipv4_addr', v4Entries);
           emitSetBlock(`${setName}_v6`, 'ipv6_addr', v6Entries);
@@ -1648,9 +1707,13 @@ export function compileNftables(state: DesiredState): CompileResult {
   }
 
   // 3. Flowtable for hardware/software fastpath offloading
-  const enabledDevices = state.interfaces
-    .filter((i) => i.enabled && isValidDevice(i.device))
-    .map((i) => `"${i.device}"`);
+  const enabledDevices = Array.from(
+    new Set(
+      state.interfaces
+        .filter((i) => i.enabled && isValidDevice(i.device))
+        .map((i) => `"${i.device}"`),
+    ),
+  );
 
   if (state.system.flowtableOffload && enabledDevices.length > 0) {
     lines.push('  # Flowtable Fastpath');
@@ -1683,7 +1746,13 @@ export function compileNftables(state: DesiredState): CompileResult {
   const lanInterfaces = state.interfaces.filter(
     (i) => i.enabled && inferInterfaceRole(i) !== 'wan' && isValidDevice(i.device),
   );
-  const lanDevicesSet = lanInterfaces.map((i) => `"${i.device}"`);
+  const lanDevicesSet = Array.from(new Set(lanInterfaces.map((i) => `"${i.device}"`)));
+
+  const isDualStackAlias = (endpoint?: string): boolean => {
+    if (!endpoint || !endpoint.startsWith('$')) return false;
+    const setName = `set_${sanitizeIdentifier(endpoint.slice(1))}`;
+    return Boolean(emittedSets.get(setName)?.hasDualV6);
+  };
 
   // 4. Chains definition
   const sortedNat = [...state.nat].sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0));
@@ -1702,6 +1771,13 @@ export function compileNftables(state: DesiredState): CompileResult {
         const dev = iface.device;
         lines.push(`    iifname "${dev}" tcp dport 443 redirect to :${tlsConfig.transparentProxyPort} comment "tls-decryption-intercept"`);
       }
+    }
+  }
+
+  if (captiveNftRules.length > 0) {
+    lines.push('    # Captive Portal HTTP/HTTPS Interception');
+    for (const cRule of captiveNftRules) {
+      lines.push(`    ${cRule}`);
     }
   }
 
@@ -1747,21 +1823,47 @@ export function compileNftables(state: DesiredState): CompileResult {
     if (!isValidIPv4(nat.targetIp) && !isValidIPv6(nat.targetIp)) continue;
     if (nat.sourcePort && nat.sourcePort !== 'any' && !isValidPortSpec(nat.sourcePort)) continue;
     if (nat.destinationPort && nat.destinationPort !== 'any' && !isValidPortSpec(nat.destinationPort)) continue;
-    if (nat.targetPort && nat.targetPort !== 'any' && !isValidPortRange(nat.targetPort)) continue;
+    if (
+      nat.targetPort &&
+      nat.targetPort !== 'any' &&
+      (nat.targetPort.includes(',') || nat.targetPort.startsWith('$') || !isValidPortRange(nat.targetPort))
+    ) {
+      continue;
+    }
     if (nat.sourcePort?.startsWith('$') && emittedSets.get(`set_${sanitizeIdentifier(nat.sourcePort.slice(1))}`)?.setType !== 'inet_service') continue;
     if (nat.destinationPort?.startsWith('$') && emittedSets.get(`set_${sanitizeIdentifier(nat.destinationPort.slice(1))}`)?.setType !== 'inet_service') continue;
 
+    const isV6 = nat.targetIp.includes(':');
     const addrClauses: string[] = [];
     if (nat.source && nat.source !== 'any') {
-      const srcClause = resolveEndpointClause(nat.source, 'saddr', state.interfaces, state.aliases, emittedSets);
+      const srcClause = resolveEndpointClause(
+        nat.source,
+        'saddr',
+        state.interfaces,
+        state.aliases,
+        emittedSets,
+        false,
+        isV6 && isDualStackAlias(nat.source),
+      );
       if (srcClause === null) continue;
       if (srcClause) addrClauses.push(srcClause);
     }
     if (nat.destination && nat.destination !== 'any' && nat.destination !== 'wan_ip') {
-      const dstClause = resolveEndpointClause(nat.destination, 'daddr', state.interfaces, state.aliases, emittedSets);
+      const dstClause = resolveEndpointClause(
+        nat.destination,
+        'daddr',
+        state.interfaces,
+        state.aliases,
+        emittedSets,
+        false,
+        isV6 && isDualStackAlias(nat.destination),
+      );
       if (dstClause === null) continue;
       if (dstClause) addrClauses.push(dstClause);
     }
+    const hasIp4Clause = addrClauses.some((c) => c.startsWith('ip '));
+    const hasIp6Clause = addrClauses.some((c) => c.startsWith('ip6 '));
+    if ((isV6 && hasIp4Clause) || (!isV6 && hasIp6Clause)) continue;
 
     const hasDport = Boolean(nat.destinationPort && nat.destinationPort !== 'any');
     const hasSport = Boolean(nat.sourcePort && nat.sourcePort !== 'any');
@@ -1784,7 +1886,6 @@ export function compileNftables(state: DesiredState): CompileResult {
       protoMatch = `meta l4proto ${nat.protocol}`;
     }
     const hasTargetPort = Boolean(nat.targetPort && nat.targetPort !== 'any');
-    const isV6 = nat.targetIp.includes(':');
     const family = isV6 ? 'ip6' : 'ip';
     const formattedIp = isV6 && hasTargetPort ? `[${nat.targetIp}]` : nat.targetIp;
     const dnatTarget = hasTargetPort ? `${formattedIp}:${nat.targetPort}` : formattedIp;
@@ -1836,13 +1937,17 @@ export function compileNftables(state: DesiredState): CompileResult {
   // Anti-Lockout Rule (Evaluated BEFORE dynamic AI/SOAR blocklists so management access can never be locked out)
   if (state.system.antiLockout?.enabled && (state.system.antiLockout.ports?.length ?? 0) > 0) {
     const ifaceList = normalizeAntiLockoutInterfaces(state.system.antiLockout);
-    const validPorts = state.system.antiLockout.ports.filter((p) => Number.isInteger(p) && p >= 1 && p <= 65535);
+    const validPorts = Array.from(
+      new Set(state.system.antiLockout.ports.filter((p) => Number.isInteger(p) && p >= 1 && p <= 65535)),
+    );
     if (validPorts.length > 0) {
       const ports = validPorts.join(', ');
+      const seenDevs = new Set<string>();
       for (const ifaceName of ifaceList) {
         if (!isWanInterfaceName(ifaceName)) {
           const dev = ifDeviceMap.get(ifaceName) || ifaceName;
-          if (isValidDevice(dev)) {
+          if (isValidDevice(dev) && !seenDevs.has(dev)) {
+            seenDevs.add(dev);
             lines.push(`    # Anti-Lockout: Allow management access from ${ifaceName}`);
             const comment = ifaceName === 'lan' ? 'anti-lockout' : `anti-lockout-${ifaceName}`;
             lines.push(`    iifname "${dev}" tcp dport { ${ports} } accept comment "${comment}"`);
@@ -1854,7 +1959,7 @@ export function compileNftables(state: DesiredState): CompileResult {
     }
   }
 
-  if (state.crowdsec?.enabled && crowdsecCompiled.nftRule) {
+  if (crowdsecEnabled && crowdsecCompiled.nftRule) {
     for (const csLine of crowdsecCompiled.nftRule.split('\n').map((l) => l.trim()).filter(Boolean)) {
       lines.push(`    ${csLine} comment "crowdsec-drop"`);
     }
@@ -1871,6 +1976,15 @@ export function compileNftables(state: DesiredState): CompileResult {
   // NAS & K3s Core Role Listeners (when enabled alongside Firewall)
   lines.push(...buildNasAndK3sInputRules(state, ifDeviceMap, capabilities.nasEnabled, capabilities.k3sEnabled));
 
+  // Captive Portal local web listener allow rules (for redirected HTTP/HTTPS guest traffic)
+  const seenCaptiveAllows = new Set<string>();
+  for (const cp of captiveAllowPorts) {
+    const key = `${cp.dev}:${cp.port}`;
+    if (seenCaptiveAllows.has(key)) continue;
+    seenCaptiveAllows.add(key);
+    lines.push(`    iifname "${cp.dev}" tcp dport ${cp.port} accept comment "captive-${cp.safeZoneName}-portal"`);
+  }
+
   // DHCPv6 server, mDNS reflector, UPnP IGD, IPsec IKEv2, and OpenVPN DCO listeners
   if ((state.dhcp?.dhcp6Enabled || (state.dhcp?.subnets6?.length ?? 0) > 0) && lanDevicesSet.length > 0) {
     const lanExpr = lanDevicesSet.length === 1 ? lanDevicesSet[0]! : `{ ${lanDevicesSet.join(', ')} }`;
@@ -1884,30 +1998,52 @@ export function compileNftables(state: DesiredState): CompileResult {
     const lanExpr = lanDevicesSet.length === 1 ? lanDevicesSet[0]! : `{ ${lanDevicesSet.join(', ')} }`;
     lines.push(`    iifname ${lanExpr} udp dport { 1900, 5351 } accept comment "upnp-natpmp-discovery"`);
   }
-  if (state.ipsec?.enabled) {
+  const ipsecEnabled = isPluginEnabled('ipsec-strongswan', state) && Boolean(state.ipsec?.enabled);
+  const openvpnEnabled = isPluginEnabled('openvpn', state) && Boolean(state.openvpn?.enabled);
+  if (ipsecEnabled) {
     lines.push('    udp dport { 500, 4500 } accept comment "ipsec-ikev2"');
     lines.push('    meta l4proto esp accept comment "ipsec-esp"');
   }
-  if (state.openvpn?.enabled) {
+  if (openvpnEnabled && state.openvpn) {
     for (const srv of state.openvpn.servers ?? []) {
       if (!srv.enabled) continue;
       lines.push(`    ${srv.protocol} dport ${srv.port} accept comment "openvpn-${sanitizeIdentifier(srv.name)}"`);
     }
   }
 
+  const isFloating = (ifaceName: string) => ifaceName === 'any' || ifaceName === 'floating';
   const hasExplicitWg0Interface = state.interfaces.some((i) => i.enabled && i.device === 'wg0');
-  const hasExplicitWgRules = state.rules.some(
+  const wgExplicitRules = state.rules.filter(
     (r) => r.enabled && (r.interface === 'wg0' || r.interface === 'wireguard'),
   );
+  const hasExplicitWgInboundRules = wgExplicitRules.some((r) => r.direction !== 'out');
+  const hasExplicitWgOutboundRules =
+    wgExplicitRules.some((r) => r.direction === 'out') ||
+    (hasExplicitWgInboundRules && state.rules.some((r) => r.enabled && r.direction === 'out' && isFloating(r.interface)));
+
+  const hasExplicitTs0Interface = state.interfaces.some((i) => i.enabled && i.device === 'tailscale0');
+  const tsExplicitRules = state.rules.filter(
+    (r) => r.enabled && (r.interface === 'tailscale0' || r.interface === 'tailscale'),
+  );
+  const hasExplicitTsInboundRules = tsExplicitRules.some((r) => r.direction !== 'out');
+  const hasExplicitTsOutboundRules =
+    tsExplicitRules.some((r) => r.direction === 'out') ||
+    (hasExplicitTsInboundRules && state.rules.some((r) => r.enabled && r.direction === 'out' && isFloating(r.interface)));
+
   const nflogOptions: RuleFormatOptions = {
+    nflogEnabled: Boolean(
+      state.observability?.offload?.enabled &&
+      state.observability?.offload?.logs?.enabled !== false &&
+      state.observability?.offload?.logs?.nflog?.enabled !== false,
+    ),
     nflogGroup: state.observability?.offload?.logs?.nflog?.group ?? 0,
     nflogRateLimitPerSec: state.observability?.offload?.logs?.nflog?.rateLimitPerSec ?? 50,
   };
 
-  // WireGuard listener (& tunnel input when wg0 is not explicitly managed as an interface)
+  // WireGuard listener (& tunnel input when wg0 has no explicit interface or inbound rules)
   if (state.wireguard?.enabled) {
     lines.push(`    udp dport ${state.wireguard.listenPort} accept comment "wireguard-service"`);
-    if (!hasExplicitWg0Interface && !hasExplicitWgRules) {
+    if (!hasExplicitWg0Interface && !hasExplicitWgInboundRules) {
       lines.push('    iifname "wg0" accept comment "wireguard-tunnel-input"');
     }
   }
@@ -1924,19 +2060,24 @@ export function compileNftables(state: DesiredState): CompileResult {
     lines.push(`    udp dport ${rpPort} accept comment "rosenpass-pq-kem"`);
   }
 
-  // Headscale listener (WireGuard hole punching) & WAN Invite Gate
+  // Headscale listener (WireGuard hole punching) & WAN Invite Gate & Tailscale default input fallback
   if (state.headscale?.enabled) {
     lines.push(`    udp dport 41641 accept comment "headscale-mesh"`);
     if (wanInviteNft.inputJumpLines.length > 0) {
       lines.push(...wanInviteNft.inputJumpLines);
     }
+    if (!hasExplicitTs0Interface && !hasExplicitTsInboundRules) {
+      lines.push('    iifname "tailscale0" accept comment "tailscale-mesh-input"');
+    }
   }
 
   // NetFlow / IPFIX / sFlow collector listeners & Prometheus scrape on trusted LAN/WireGuard interfaces
-  const trustedTelemetryDevices = [
-    ...lanDevicesSet,
-    ...(state.wireguard?.enabled ? ['"wg0"'] : []),
-  ];
+  const trustedTelemetryDevices = Array.from(
+    new Set([
+      ...lanDevicesSet,
+      ...(state.wireguard?.enabled ? ['"wg0"'] : []),
+    ]),
+  );
   const nfLanExpr =
     trustedTelemetryDevices.length === 0
       ? undefined
@@ -1955,10 +2096,10 @@ export function compileNftables(state: DesiredState): CompileResult {
     const safeChainName = sanitizeIdentifier(iface.name);
     lines.push(`    iifname "${dev}" jump input_${safeChainName}`);
   }
-  if (state.wireguard?.enabled && !hasExplicitWg0Interface && hasExplicitWgRules) {
+  if (state.wireguard?.enabled && !hasExplicitWg0Interface && hasExplicitWgInboundRules) {
     lines.push(`    iifname "wg0" jump input_wireguard`);
   }
-  if (state.headscale?.enabled) {
+  if (state.headscale?.enabled && !hasExplicitTs0Interface && hasExplicitTsInboundRules) {
     lines.push(`    iifname "tailscale0" jump input_tailscale`);
   }
   lines.push('  }');
@@ -1966,18 +2107,29 @@ export function compileNftables(state: DesiredState): CompileResult {
 
   // Collect per-VNIC Hypervisor Security Group bindings
   const virtSecGroups = state.virt?.securityGroups ?? [];
-  const virtSgNames = new Set(virtSecGroups.map((sg) => sg.name));
-  const vnicSgJumps: Array<{ devName: string; sgChain: string }> = [];
+  const virtSgMap = new Map<string, (typeof virtSecGroups)[number]>();
+  for (const sg of virtSecGroups) {
+    const sgChain = sanitizeIdentifier(sg.name);
+    if (!virtSgMap.has(sg.name)) {
+      virtSgMap.set(sg.name, sg);
+    }
+    void sgChain;
+  }
+  const hostDevSet = new Set(Array.from(ifDeviceMap.values()));
+  const vnicSgJumps: Array<{ devName: string; sgChain: string; sgName: string }> = [];
+  const seenVnicBindings = new Set<string>();
   if (virtSecGroups.length > 0 && state.virt) {
     for (const vm of state.virt.vms ?? []) {
       if (!vm.enabled) continue;
       (vm.nics ?? []).forEach((nic, idx) => {
+        const devName = nic.vnet && isValidDevice(nic.vnet) ? nic.vnet : `tap${vm.vmid}i${idx}`;
         for (const sgName of nic.securityGroups ?? []) {
-          if (virtSgNames.has(sgName)) {
-            vnicSgJumps.push({
-              devName: `tap${vm.vmid}i${idx}`,
-              sgChain: sanitizeIdentifier(sgName),
-            });
+          if (virtSgMap.has(sgName)) {
+            const sgChain = sanitizeIdentifier(sgName);
+            const bindKey = `${devName}::${sgChain}`;
+            if (seenVnicBindings.has(bindKey)) continue;
+            seenVnicBindings.add(bindKey);
+            vnicSgJumps.push({ devName, sgChain, sgName });
           }
         }
       });
@@ -1985,12 +2137,18 @@ export function compileNftables(state: DesiredState): CompileResult {
     for (const ct of state.virt.containers ?? []) {
       if (!ct.enabled) continue;
       (ct.nics ?? []).forEach((nic, idx) => {
+        const customVnet =
+          nic.vnet && isValidDevice(nic.vnet) && !hostDevSet.has(nic.vnet) && !/^eth\d+$/.test(nic.vnet)
+            ? nic.vnet
+            : '';
+        const devName = customVnet || `veth${ct.ctid}i${idx}`;
         for (const sgName of nic.securityGroups ?? []) {
-          if (virtSgNames.has(sgName)) {
-            vnicSgJumps.push({
-              devName: `veth${ct.ctid}i${idx}`,
-              sgChain: sanitizeIdentifier(sgName),
-            });
+          if (virtSgMap.has(sgName)) {
+            const sgChain = sanitizeIdentifier(sgName);
+            const bindKey = `${devName}::${sgChain}`;
+            if (seenVnicBindings.has(bindKey)) continue;
+            seenVnicBindings.add(bindKey);
+            vnicSgJumps.push({ devName, sgChain, sgName });
           }
         }
       });
@@ -2000,16 +2158,9 @@ export function compileNftables(state: DesiredState): CompileResult {
   // Forward chain (routed traffic between interfaces)
   lines.push('  chain forward {');
   lines.push('    type filter hook forward priority filter; policy drop;');
-  // Suricata IPS rules
-  lines.push(...suricataCompiled.nftRules.map(r => '    ' + r));
-  if (state.crowdsec?.enabled && crowdsecCompiled.nftRule) {
+  if (crowdsecEnabled && crowdsecCompiled.nftRule) {
     for (const csLine of crowdsecCompiled.nftRule.split('\n').map((l) => l.trim()).filter(Boolean)) {
       lines.push(`    ${csLine} comment "crowdsec-drop"`);
-    }
-  }
-  if (state.geoip?.enabled && geoipCompiled.forwardRules.length > 0) {
-    for (const rule of geoipCompiled.forwardRules) {
-      lines.push(`    ${rule}`);
     }
   }
   lines.push('    ip saddr @blocked_ips drop comment "ai-micro-segmentation"');
@@ -2029,6 +2180,14 @@ export function compileNftables(state: DesiredState): CompileResult {
   }
   lines.push('    ct state established,related accept');
   lines.push('    ct state invalid drop');
+
+  // GeoIP forward rules run AFTER established/related accept so allow-mode replies to approved outbound flows are not dropped
+  if (state.geoip?.enabled && geoipCompiled.forwardRules.length > 0) {
+    for (const rule of geoipCompiled.forwardRules) {
+      lines.push(`    ${rule}`);
+    }
+  }
+
   if (state.upnp?.enabled) {
     lines.push('    jump upnp_forward');
   }
@@ -2048,31 +2207,30 @@ export function compileNftables(state: DesiredState): CompileResult {
     lines.push('    iifname "vmbr*" accept comment "virt-bridge-forward"');
     lines.push('    oifname "vmbr*" accept comment "virt-bridge-forward"');
   }
-  if (state.ipsec?.enabled) {
+  if (ipsecEnabled) {
     lines.push('    iifname "xfrm*" accept comment "ipsec-xfrm-forward"');
     lines.push('    oifname "xfrm*" accept comment "ipsec-xfrm-forward"');
   }
-  if (state.openvpn?.enabled) {
+  if (openvpnEnabled) {
     lines.push('    iifname "ovpn*" accept comment "openvpn-dco-forward"');
     lines.push('    oifname "ovpn*" accept comment "openvpn-dco-forward"');
   }
-  if (state.wireguard?.enabled && !hasExplicitWg0Interface && !hasExplicitWgRules) {
+  if (state.wireguard?.enabled && !hasExplicitWg0Interface && !hasExplicitWgInboundRules) {
     lines.push('    iifname "wg0" accept comment "wireguard-forward"');
     lines.push('    oifname "wg0" accept comment "wireguard-forward"');
   }
-
-  const isFloating = (ifaceName: string) => ifaceName === 'any' || ifaceName === 'floating';
-  const hasOutboundRulesFor = (ifaceName: string) =>
-    state.rules.some((r) => r.enabled && r.direction === 'out' && (r.interface === ifaceName || isFloating(r.interface)));
-
-  // Outbound interface dispatcher for transit traffic (evaluated before inbound accept jumps)
-  for (const iface of state.interfaces) {
-    if (!iface.enabled || !isValidDevice(iface.device)) continue;
-    if (hasOutboundRulesFor(iface.name)) {
-      const safeChainName = sanitizeIdentifier(iface.name);
-      lines.push(`    oifname "${iface.device}" jump forward_out_${safeChainName}`);
-    }
+  if (state.headscale?.enabled && !hasExplicitTs0Interface && !hasExplicitTsInboundRules) {
+    lines.push('    iifname "tailscale0" accept comment "tailscale-forward"');
+    lines.push('    oifname "tailscale0" accept comment "tailscale-forward"');
   }
+
+  const matchesInterfaceRule = (r: FirewallRule, iface: Interface) =>
+    r.interface === iface.name ||
+    (iface.device === 'wg0' && (r.interface === 'wg0' || r.interface === 'wireguard')) ||
+    (iface.device === 'tailscale0' && (r.interface === 'tailscale0' || r.interface === 'tailscale'));
+
+  const hasOutboundRulesFor = (iface: Interface) =>
+    state.rules.some((r) => r.enabled && r.direction === 'out' && (matchesInterfaceRule(r, iface) || isFloating(r.interface)));
 
   // Inbound interface dispatcher for forward
   for (const iface of state.interfaces) {
@@ -2081,24 +2239,63 @@ export function compileNftables(state: DesiredState): CompileResult {
     const safeChainName = sanitizeIdentifier(iface.name);
     lines.push(`    iifname "${dev}" jump forward_${safeChainName}`);
   }
-  if (state.wireguard?.enabled && !hasExplicitWg0Interface && hasExplicitWgRules) {
+  if (state.wireguard?.enabled && !hasExplicitWg0Interface && hasExplicitWgInboundRules) {
     lines.push(`    iifname "wg0" jump forward_wireguard`);
   }
-  if (state.headscale?.enabled) {
+  if (state.headscale?.enabled && !hasExplicitTs0Interface && hasExplicitTsInboundRules) {
     lines.push(`    iifname "tailscale0" jump forward_tailscale`);
   }
   lines.push('  }');
   lines.push('');
+
+  // Post-ingress Forward Egress base chain (ensures both ingress forward_* AND egress forward_out_* policies enforce on transit traffic)
+  const forwardEgressIfaceLines: string[] = [];
+  for (const iface of state.interfaces) {
+    if (!iface.enabled || !isValidDevice(iface.device)) continue;
+    if (hasOutboundRulesFor(iface)) {
+      const safeChainName = sanitizeIdentifier(iface.name);
+      forwardEgressIfaceLines.push(`    oifname "${iface.device}" jump forward_out_${safeChainName}`);
+    }
+  }
+  if (state.wireguard?.enabled && !hasExplicitWg0Interface && hasExplicitWgOutboundRules) {
+    forwardEgressIfaceLines.push(`    oifname "wg0" jump forward_out_wireguard`);
+  }
+  if (state.headscale?.enabled && !hasExplicitTs0Interface && hasExplicitTsOutboundRules) {
+    forwardEgressIfaceLines.push(`    oifname "tailscale0" jump forward_out_tailscale`);
+  }
+  if (forwardEgressIfaceLines.length > 0) {
+    lines.push('  chain forward_egress {');
+    lines.push('    type filter hook forward priority filter + 5; policy accept;');
+    lines.push('    ct state established,related accept');
+    lines.push(...forwardEgressIfaceLines);
+    lines.push('  }');
+    lines.push('');
+  }
+
+  // Dedicated post-filter Suricata IPS base chain (evaluates AFTER forward & forward_egress so NF_ACCEPT / queue bypass never skips firewall policy)
+  if (suricataCompiled.nftRules.length > 0) {
+    lines.push('  chain forward_suricata {');
+    lines.push('    type filter hook forward priority filter + 10; policy accept;');
+    lines.push(...suricataCompiled.nftRules.map((r) => `    ${r}`));
+    lines.push('  }');
+    lines.push('');
+  }
 
   // Output chain
   lines.push('  chain output {');
   lines.push('    type filter hook output priority filter; policy accept;');
   for (const iface of state.interfaces) {
     if (!iface.enabled || !isValidDevice(iface.device)) continue;
-    if (hasOutboundRulesFor(iface.name)) {
+    if (hasOutboundRulesFor(iface)) {
       const safeChainName = sanitizeIdentifier(iface.name);
       lines.push(`    oifname "${iface.device}" jump output_${safeChainName}`);
     }
+  }
+  if (state.wireguard?.enabled && !hasExplicitWg0Interface && hasExplicitWgOutboundRules) {
+    lines.push(`    oifname "wg0" jump output_wireguard`);
+  }
+  if (state.headscale?.enabled && !hasExplicitTs0Interface && hasExplicitTsOutboundRules) {
+    lines.push(`    oifname "tailscale0" jump output_tailscale`);
   }
   lines.push('  }');
   lines.push('');
@@ -2148,30 +2345,57 @@ export function compileNftables(state: DesiredState): CompileResult {
 
     if (nat.type !== 'masquerade' && !(nat.type === 'snat' && nat.targetIp)) continue;
 
+    let resolvedSnatTarget = '';
+    let snatIsV6 = false;
+    if (nat.type === 'snat' && nat.targetIp) {
+      resolvedSnatTarget = nat.targetIp.trim();
+      if (resolvedSnatTarget === 'wan_ip') {
+        resolvedSnatTarget = resolveWanIpv4(nat.interface);
+      }
+      if (!resolvedSnatTarget || !(isValidIPv4(resolvedSnatTarget) || isValidIPv6(resolvedSnatTarget) || isValidCIDR(resolvedSnatTarget))) {
+        continue;
+      }
+      snatIsV6 = resolvedSnatTarget.includes(':');
+    }
+
     const matchClauses: string[] = [`oifname "${ifaceDev}"`];
     if (nat.source && nat.source !== 'any') {
-      const srcClause = resolveEndpointClause(nat.source, 'saddr', state.interfaces, state.aliases, emittedSets);
+      const srcClause = resolveEndpointClause(
+        nat.source,
+        'saddr',
+        state.interfaces,
+        state.aliases,
+        emittedSets,
+        false,
+        nat.type === 'snat' && snatIsV6 && isDualStackAlias(nat.source),
+      );
       if (srcClause === null) continue;
       if (srcClause) matchClauses.push(srcClause);
     }
     if (nat.destination && nat.destination !== 'any' && nat.destination !== 'wan_ip') {
-      const dstClause = resolveEndpointClause(nat.destination, 'daddr', state.interfaces, state.aliases, emittedSets);
+      const dstClause = resolveEndpointClause(
+        nat.destination,
+        'daddr',
+        state.interfaces,
+        state.aliases,
+        emittedSets,
+        false,
+        nat.type === 'snat' && snatIsV6 && isDualStackAlias(nat.destination),
+      );
       if (dstClause === null) continue;
       if (dstClause) matchClauses.push(dstClause);
     }
 
+    const hasIp4Clause = matchClauses.some((c) => c.startsWith('ip '));
+    const hasIp6Clause = matchClauses.some((c) => c.startsWith('ip6 '));
+    if (hasIp4Clause && hasIp6Clause) continue;
+
     if (nat.type === 'masquerade') {
       lines.push(`    ${matchClauses.join(' ')} masquerade comment "outbound-nat"`);
-    } else if (nat.type === 'snat' && nat.targetIp) {
-      let resolvedTarget = nat.targetIp.trim();
-      if (resolvedTarget === 'wan_ip') {
-        resolvedTarget = resolveWanIpv4(nat.interface);
-      }
-      if (!resolvedTarget || !(isValidIPv4(resolvedTarget) || isValidIPv6(resolvedTarget) || isValidCIDR(resolvedTarget))) {
-        continue;
-      }
-      const family = resolvedTarget.includes(':') ? 'ip6' : 'ip';
-      lines.push(`    ${matchClauses.join(' ')} snat ${family} to ${resolvedTarget} comment "outbound-snat"`);
+    } else if (nat.type === 'snat' && resolvedSnatTarget) {
+      if ((snatIsV6 && hasIp4Clause) || (!snatIsV6 && hasIp6Clause)) continue;
+      const family = snatIsV6 ? 'ip6' : 'ip';
+      lines.push(`    ${matchClauses.join(' ')} snat ${family} to ${resolvedSnatTarget} comment "outbound-snat"`);
     }
   }
   if (state.upnp?.enabled) {
@@ -2207,12 +2431,12 @@ export function compileNftables(state: DesiredState): CompileResult {
     // For WAN interfaces, local input rules MUST be explicitly assigned to the WAN interface.
     // Floating ('any' / 'floating') rules apply to forwarded transit traffic, but do not open local host input on WAN.
     const inputRules = state.rules
-      .filter((r) => r.enabled && (r.interface === iface.name || (!isWan && isFloating(r.interface))))
+      .filter((r) => r.enabled && (matchesInterfaceRule(r, iface) || (!isWan && isFloating(r.interface))))
       .sort((a, b) => a.sortOrder - b.sortOrder);
 
     // Forward chain evaluates interface-specific and floating transit rules
     const forwardRules = state.rules
-      .filter((r) => r.enabled && (r.interface === iface.name || isFloating(r.interface)))
+      .filter((r) => r.enabled && (matchesInterfaceRule(r, iface) || isFloating(r.interface)))
       .sort((a, b) => a.sortOrder - b.sortOrder);
 
     const outboundRules = forwardRules.filter((r) => r.direction === 'out');
@@ -2319,89 +2543,186 @@ export function compileNftables(state: DesiredState): CompileResult {
     return parts.join(' ');
   };
 
+  const emittedSgChains = new Set<string>();
+  const virtSgChainBlocks: string[] = [];
+  const referencedSgServiceSets = new Set<string>();
   for (const sg of virtSecGroups) {
     const sgChain = sanitizeIdentifier(sg.name);
-    lines.push(`  chain virt_sg_${sgChain}_in {`);
-    lines.push('    ct state established,related accept');
-    lines.push('    ct state invalid drop');
+    if (emittedSgChains.has(sgChain)) continue;
+    emittedSgChains.add(sgChain);
+
+    const block: string[] = [];
+    block.push(`  chain virt_sg_${sgChain}_in {`);
+    block.push('    ct state established,related accept');
+    block.push('    ct state invalid drop');
     for (const rule of (sg.rules ?? []).filter((r) => r.direction === 'in')) {
       const stmt = formatSgRule(rule, 'saddr');
-      if (stmt) lines.push(`    ${stmt}`);
+      if (stmt) {
+        block.push(`    ${stmt}`);
+        if (rule.port?.startsWith('$')) {
+          referencedSgServiceSets.add(`set_${sanitizeIdentifier(rule.port.slice(1))}`);
+        }
+      }
     }
-    lines.push('  }');
-    lines.push('');
+    block.push('    drop comment "virt-sg-default-drop"');
+    block.push('  }');
+    block.push('');
 
-    lines.push(`  chain virt_sg_${sgChain}_out {`);
-    lines.push('    ct state established,related accept');
-    lines.push('    ct state invalid drop');
+    block.push(`  chain virt_sg_${sgChain}_out {`);
+    block.push('    ct state established,related accept');
+    block.push('    ct state invalid drop');
     for (const rule of (sg.rules ?? []).filter((r) => r.direction === 'out')) {
       const stmt = formatSgRule(rule, 'daddr');
-      if (stmt) lines.push(`    ${stmt}`);
+      if (stmt) {
+        block.push(`    ${stmt}`);
+        if (rule.port?.startsWith('$')) {
+          referencedSgServiceSets.add(`set_${sanitizeIdentifier(rule.port.slice(1))}`);
+        }
+      }
     }
-    lines.push('  }');
-    lines.push('');
-  }
+    block.push('    drop comment "virt-sg-default-drop"');
+    block.push('  }');
+    block.push('');
 
-  // Tailscale pseudo-interface chains
-  if (state.headscale?.enabled) {
+    virtSgChainBlocks.push(...block);
+  }
+  lines.push(...virtSgChainBlocks);
+
+  // Tailscale pseudo-interface chains (when custom rules exist for tailscale0/tailscale)
+  if (state.headscale?.enabled && !hasExplicitTs0Interface && (hasExplicitTsInboundRules || hasExplicitTsOutboundRules)) {
     const tsRules = state.rules
-      .filter((r) => r.enabled && (r.interface === 'tailscale' || isFloating(r.interface)))
+      .filter((r) => r.enabled && (r.interface === 'tailscale0' || r.interface === 'tailscale' || isFloating(r.interface)))
       .sort((a, b) => a.sortOrder - b.sortOrder);
 
-    lines.push(`  chain input_tailscale {`);
-    for (const rule of tsRules) {
-      if (rule.direction === 'in') {
-        for (const stmt of formatRuleStatements(rule, state.aliases, state.interfaces, emittedSets, nflogOptions)) {
-          lines.push(`    ${stmt}`);
+    if (hasExplicitTsInboundRules) {
+      lines.push(`  chain input_tailscale {`);
+      for (const rule of tsRules) {
+        if (rule.direction === 'in') {
+          for (const stmt of formatRuleStatements(rule, state.aliases, state.interfaces, emittedSets, nflogOptions)) {
+            lines.push(`    ${stmt}`);
+          }
         }
       }
-    }
-    lines.push('  }');
-    lines.push('');
+      lines.push('  }');
+      lines.push('');
 
-    lines.push(`  chain forward_tailscale {`);
-    for (const rule of tsRules) {
-      if (rule.direction !== 'out') {
+      lines.push(`  chain forward_tailscale {`);
+      for (const rule of tsRules) {
+        if (rule.direction !== 'out') {
+          for (const stmt of formatRuleStatements(rule, state.aliases, state.interfaces, emittedSets, nflogOptions)) {
+            lines.push(`    ${stmt}`);
+          }
+        }
+      }
+      lines.push('  }');
+      lines.push('');
+    }
+
+    if (hasExplicitTsOutboundRules) {
+      const tsOutRules = tsRules.filter((r) => r.direction === 'out');
+      lines.push(`  chain forward_out_tailscale {`);
+      for (const rule of tsOutRules) {
         for (const stmt of formatRuleStatements(rule, state.aliases, state.interfaces, emittedSets, nflogOptions)) {
           lines.push(`    ${stmt}`);
         }
       }
+      lines.push('  }');
+      lines.push('');
+
+      lines.push(`  chain output_tailscale {`);
+      for (const rule of tsOutRules) {
+        for (const stmt of formatRuleStatements(rule, state.aliases, state.interfaces, emittedSets, nflogOptions)) {
+          lines.push(`    ${stmt}`);
+        }
+      }
+      lines.push('  }');
+      lines.push('');
     }
-    lines.push('  }');
-    lines.push('');
   }
 
   // WireGuard pseudo-interface chains (when custom rules exist for wg0/wireguard)
-  if (state.wireguard?.enabled && !hasExplicitWg0Interface && hasExplicitWgRules) {
+  if (state.wireguard?.enabled && !hasExplicitWg0Interface && (hasExplicitWgInboundRules || hasExplicitWgOutboundRules)) {
     const wgRules = state.rules
       .filter((r) => r.enabled && (r.interface === 'wg0' || r.interface === 'wireguard' || isFloating(r.interface)))
       .sort((a, b) => a.sortOrder - b.sortOrder);
 
-    lines.push(`  chain input_wireguard {`);
-    for (const rule of wgRules) {
-      if (rule.direction === 'in') {
-        for (const stmt of formatRuleStatements(rule, state.aliases, state.interfaces, emittedSets, nflogOptions)) {
-          lines.push(`    ${stmt}`);
+    if (hasExplicitWgInboundRules) {
+      lines.push(`  chain input_wireguard {`);
+      for (const rule of wgRules) {
+        if (rule.direction === 'in') {
+          for (const stmt of formatRuleStatements(rule, state.aliases, state.interfaces, emittedSets, nflogOptions)) {
+            lines.push(`    ${stmt}`);
+          }
         }
       }
-    }
-    lines.push('  }');
-    lines.push('');
+      lines.push('  }');
+      lines.push('');
 
-    lines.push(`  chain forward_wireguard {`);
-    for (const rule of wgRules) {
-      if (rule.direction !== 'out') {
+      lines.push(`  chain forward_wireguard {`);
+      for (const rule of wgRules) {
+        if (rule.direction !== 'out') {
+          for (const stmt of formatRuleStatements(rule, state.aliases, state.interfaces, emittedSets, nflogOptions)) {
+            lines.push(`    ${stmt}`);
+          }
+        }
+      }
+      lines.push('  }');
+      lines.push('');
+    }
+
+    if (hasExplicitWgOutboundRules) {
+      const wgOutRules = wgRules.filter((r) => r.direction === 'out');
+      lines.push(`  chain forward_out_wireguard {`);
+      for (const rule of wgOutRules) {
         for (const stmt of formatRuleStatements(rule, state.aliases, state.interfaces, emittedSets, nflogOptions)) {
           lines.push(`    ${stmt}`);
         }
       }
+      lines.push('  }');
+      lines.push('');
+
+      lines.push(`  chain output_wireguard {`);
+      for (const rule of wgOutRules) {
+        for (const stmt of formatRuleStatements(rule, state.aliases, state.interfaces, emittedSets, nflogOptions)) {
+          lines.push(`    ${stmt}`);
+        }
+      }
+      lines.push('  }');
+      lines.push('');
     }
-    lines.push('  }');
-    lines.push('');
   }
 
   lines.push('}');
   lines.push('');
+
+  // Dedicated L2 Bridge Security Group table for bridged VM/LXC tap & veth ports
+  if (vnicSgJumps.length > 0 && virtSgChainBlocks.length > 0) {
+    lines.push('table bridge axonwall_virt {}');
+    lines.push('flush table bridge axonwall_virt');
+    lines.push('table bridge axonwall_virt {');
+    for (const setName of referencedSgServiceSets) {
+      const els = emittedServiceSetElements.get(setName);
+      if (!els || els.length === 0) continue;
+      lines.push(`  set ${setName} {`);
+      lines.push('    type inet_service;');
+      lines.push('    flags interval;');
+      lines.push('    auto-merge;');
+      lines.push(`    elements = { ${els.join(', ')} };`);
+      lines.push('  }');
+    }
+    lines.push('  chain forward {');
+    lines.push('    type filter hook forward priority filter; policy accept;');
+    lines.push('    ether type arp accept');
+    for (const binding of vnicSgJumps) {
+      lines.push(`    iifname "${binding.devName}" jump virt_sg_${binding.sgChain}_out`);
+      lines.push(`    oifname "${binding.devName}" jump virt_sg_${binding.sgChain}_in`);
+    }
+    lines.push('  }');
+    lines.push('');
+    lines.push(...virtSgChainBlocks);
+    lines.push('}');
+    lines.push('');
+  }
 
   return {
     nftScript: lines.join('\n'),
@@ -2561,7 +2882,8 @@ export function compileSatelliteNftables(node: any): CompileResult {
   if (isEdgeNgfw) {
     // Must be the LAST input rule: a terminal drop placed earlier would shadow the
     // WireGuard / Headscale accepts above and cut the edge off from the Hub.
-    lines.push(`    iifname "${wanDev}" limit rate 10/second log prefix "axonwall-rule:wan-drop: " drop comment "log-and-drop-wan-input"`);
+    lines.push(`    iifname "${wanDev}" limit rate 10/second log prefix "axonwall-rule:wan-drop: "`);
+    lines.push(`    iifname "${wanDev}" drop comment "log-and-drop-wan-input"`);
   }
 
   lines.push('  }');
@@ -2764,6 +3086,7 @@ function formatPort(val: string): string {
 const SAFE_DSCP_REGEX = /^(?:[0-9]|[1-5][0-9]|6[0-3]|cs[0-7]|ef|af[1-4][1-3]|va|le)$/i;
 
 interface RuleFormatOptions {
+  nflogEnabled?: boolean;
   nflogGroup?: number;
   nflogRateLimitPerSec?: number;
 }
@@ -2783,24 +3106,23 @@ function formatRuleStatements(
     Boolean(emittedSets?.get(`set_${sanitizeIdentifier(rule.destination!.slice(1))}`)?.hasDualV6);
 
   if (srcDual || dstDual) {
-    const v4Stmt = formatSingleRuleStatement(rule, aliases, interfaces, emittedSets, false, options);
-    const v6Stmt = formatSingleRuleStatement(rule, aliases, interfaces, emittedSets, true, options);
-    return [v4Stmt, v6Stmt].filter(Boolean);
+    const v4Stmts = formatSingleRuleStatements(rule, aliases, interfaces, emittedSets, false, options);
+    const v6Stmts = formatSingleRuleStatements(rule, aliases, interfaces, emittedSets, true, options);
+    return [...v4Stmts, ...v6Stmts].filter(Boolean);
   }
 
-  const single = formatSingleRuleStatement(rule, aliases, interfaces, emittedSets, false, options);
-  return single ? [single] : [];
+  return formatSingleRuleStatements(rule, aliases, interfaces, emittedSets, false, options).filter(Boolean);
 }
 
-function formatSingleRuleStatement(
+function formatSingleRuleStatements(
   rule: FirewallRule,
   aliases: Alias[],
   interfaces: Interface[] = [],
   emittedSets?: Map<string, { setType: string; isV6: boolean; hasDualV6?: boolean }>,
   forceDualV6 = false,
   options?: RuleFormatOptions,
-): string {
-  const parts: string[] = [];
+): string[] {
+  const matchParts: string[] = [];
 
   if (
     (rule.source && (!isValidFirewallEndpoint(rule.source) || /[;\r\n#{}'"]/.test(rule.source))) ||
@@ -2808,17 +3130,17 @@ function formatSingleRuleStatement(
     (rule.sourcePort && rule.sourcePort !== 'any' && !isValidPortSpec(rule.sourcePort)) ||
     (rule.destinationPort && rule.destinationPort !== 'any' && !isValidPortSpec(rule.destinationPort))
   ) {
-    return '';
+    return [];
   }
 
   // Verify port aliases exist as inet_service sets before emitting rule
   if (rule.sourcePort?.startsWith('$')) {
     const setName = `set_${sanitizeIdentifier(rule.sourcePort.slice(1))}`;
-    if (emittedSets && emittedSets.get(setName)?.setType !== 'inet_service') return '';
+    if (emittedSets && emittedSets.get(setName)?.setType !== 'inet_service') return [];
   }
   if (rule.destinationPort?.startsWith('$')) {
     const setName = `set_${sanitizeIdentifier(rule.destinationPort.slice(1))}`;
-    if (emittedSets && emittedSets.get(setName)?.setType !== 'inet_service') return '';
+    if (emittedSets && emittedSets.get(setName)?.setType !== 'inet_service') return [];
   }
 
   // Source Address
@@ -2836,8 +3158,8 @@ function formatSingleRuleStatement(
       Boolean(rule.invertSource),
       srcUseV6,
     );
-    if (srcClause === null) return '';
-    if (srcClause) parts.push(srcClause);
+    if (srcClause === null) return [];
+    if (srcClause) matchParts.push(srcClause);
   }
 
   // Destination Address
@@ -2855,22 +3177,22 @@ function formatSingleRuleStatement(
       Boolean(rule.invertDestination),
       dstUseV6,
     );
-    if (dstClause === null) return '';
-    if (dstClause) parts.push(dstClause);
+    if (dstClause === null) return [];
+    if (dstClause) matchParts.push(dstClause);
   }
 
   // Reject mixed IPv4 + IPv6 in a single nftables rule statement
-  const hasIp4Clause = parts.some((p) => p.startsWith('ip '));
-  const hasIp6Clause = parts.some((p) => p.startsWith('ip6 '));
+  const hasIp4Clause = matchParts.some((p) => p.startsWith('ip '));
+  const hasIp6Clause = matchParts.some((p) => p.startsWith('ip6 '));
   if (hasIp4Clause && hasIp6Clause) {
-    return '';
+    return [];
   }
 
   // DSCP / DiffServ matching
   if (rule.dscp !== undefined && SAFE_DSCP_REGEX.test(String(rule.dscp).trim())) {
     const dscpToken = String(rule.dscp).trim().toLowerCase();
     const dscpFamily = hasIp6Clause || rule.protocol === 'ipv6-icmp' ? 'ip6' : 'ip';
-    parts.push(`${dscpFamily} dscp ${dscpToken}`);
+    matchParts.push(`${dscpFamily} dscp ${dscpToken}`);
   }
 
   // Protocol & Ports
@@ -2879,55 +3201,39 @@ function formatSingleRuleStatement(
 
   if (rule.protocol === 'tcp' || rule.protocol === 'udp') {
     if (hasSport || hasDport) {
-      if (hasSport) parts.push(`${rule.protocol} sport ${formatPort(rule.sourcePort!)}`);
-      if (hasDport) parts.push(`${rule.protocol} dport ${formatPort(rule.destinationPort!)}`);
+      if (hasSport) matchParts.push(`${rule.protocol} sport ${formatPort(rule.sourcePort!)}`);
+      if (hasDport) matchParts.push(`${rule.protocol} dport ${formatPort(rule.destinationPort!)}`);
     } else {
-      parts.push(`meta l4proto ${rule.protocol}`);
+      matchParts.push(`meta l4proto ${rule.protocol}`);
     }
   } else if (rule.protocol === 'tcp_udp') {
-    parts.push('meta l4proto { tcp, udp }');
-    if (hasSport) parts.push(`th sport ${formatPort(rule.sourcePort!)}`);
-    if (hasDport) parts.push(`th dport ${formatPort(rule.destinationPort!)}`);
+    matchParts.push('meta l4proto { tcp, udp }');
+    if (hasSport) matchParts.push(`th sport ${formatPort(rule.sourcePort!)}`);
+    if (hasDport) matchParts.push(`th dport ${formatPort(rule.destinationPort!)}`);
   } else if (rule.protocol === 'ipv6-icmp') {
-    parts.push('meta l4proto ipv6-icmp');
+    matchParts.push('meta l4proto ipv6-icmp');
   } else if (rule.protocol !== 'any') {
-    parts.push(`meta l4proto ${rule.protocol}`);
+    matchParts.push(`meta l4proto ${rule.protocol}`);
   }
 
-  // Per-rule PPS Rate Limiting
+  // Per-rule PPS Rate Limiting (applied strictly to the verdict statement)
+  let rateLimitPpsClause = '';
   if (rule.rateLimitPps && Number.isInteger(rule.rateLimitPps) && rule.rateLimitPps > 0) {
-    if (rule.action === 'pass') {
-      parts.push(`limit rate ${rule.rateLimitPps}/second`);
-    } else {
-      parts.push(`limit rate over ${rule.rateLimitPps}/second`);
-    }
+    rateLimitPpsClause =
+      rule.action === 'pass'
+        ? `limit rate ${rule.rateLimitPps}/second`
+        : `limit rate over ${rule.rateLimitPps}/second`;
   }
 
-  // Logging (rate-limited by default to prevent NFLOG floods on WAN scans; 0 disables limit)
-  if (rule.log) {
-    const safeRuleId = (rule.id || '').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 8) || 'log';
-    const nflogGroup =
-      typeof options?.nflogGroup === 'number' && Number.isInteger(options.nflogGroup) && options.nflogGroup >= 0
-        ? options.nflogGroup
-        : 0;
-    const rateLimit =
-      typeof options?.nflogRateLimitPerSec === 'number' && Number.isInteger(options.nflogRateLimitPerSec)
-        ? options.nflogRateLimitPerSec
-        : 50;
-    if (rateLimit > 0) {
-      parts.push(`limit rate ${rateLimit}/second`);
-    }
-    parts.push(`log prefix "axonwall-rule:${safeRuleId}: " group ${nflogGroup}`);
-  }
-
-  // Policy Routing: Mark packets for Linux ip rule / multi-WAN routing tables
+  // Policy Routing: Mark packets for Linux ip rule / multi-WAN routing tables (bit 0 cleared to avoid Suricata 0x1 loop-guard collision)
+  let markClause = '';
   if (rule.action === 'pass') {
     if (rule.gatewayGroup) {
-      const markHex = `0x${hashStringToInt(rule.gatewayGroup, 0x1000, 0x7fff).toString(16)}`;
-      parts.push(`meta mark set ${markHex}`);
+      const markVal = hashStringToInt(rule.gatewayGroup, 0x1000, 0x7fff) & ~1;
+      markClause = `meta mark set 0x${markVal.toString(16)}`;
     } else if (rule.gateway) {
-      const markHex = `0x${hashStringToInt(rule.gateway, 0x100, 0xfff).toString(16)}`;
-      parts.push(`meta mark set ${markHex}`);
+      const markVal = hashStringToInt(rule.gateway, 0x100, 0xfff) & ~1;
+      markClause = `meta mark set 0x${markVal.toString(16)}`;
     }
   }
 
@@ -2937,15 +3243,50 @@ function formatSingleRuleStatement(
     block: 'drop',
     reject: 'reject',
   };
-  parts.push(actionMap[rule.action] || 'drop');
+  const actionStr = actionMap[rule.action] || 'drop';
 
   // Comment
+  let commentClause = '';
   if (rule.description) {
     const safeDesc = rule.description.replace(/[\r\n]+/g, ' ').replace(/[\\"]/g, "'").trim();
-    parts.push(`comment "${safeDesc}"`);
+    commentClause = `comment "${safeDesc}"`;
   }
 
-  return parts.join(' ');
+  // Logging: when rate-limited, emit a non-terminating log statement BEFORE the verdict rule so packets above rateLimit still execute the verdict
+  if (rule.log) {
+    const safeRuleId = (rule.id || '').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 8) || 'log';
+    const nflogGroup =
+      typeof options?.nflogGroup === 'number' && Number.isInteger(options.nflogGroup) && options.nflogGroup >= 0
+        ? options.nflogGroup
+        : 0;
+    const logStmt = options?.nflogEnabled
+      ? `log prefix "axonwall-rule:${safeRuleId}: " group ${nflogGroup}`
+      : `log prefix "axonwall-rule:${safeRuleId}: "`;
+    const rateLimit =
+      typeof options?.nflogRateLimitPerSec === 'number' &&
+      Number.isInteger(options.nflogRateLimitPerSec) &&
+      options.nflogRateLimitPerSec >= 0
+        ? options.nflogRateLimitPerSec
+        : 50;
+
+    if (rateLimit > 0) {
+      const logLine = [...matchParts, `limit rate ${rateLimit}/second`, logStmt].filter(Boolean).join(' ');
+      const verdictLine = [...matchParts, rateLimitPpsClause, markClause, actionStr, commentClause]
+        .filter(Boolean)
+        .join(' ');
+      return [logLine, verdictLine];
+    }
+
+    const singleLine = [...matchParts, rateLimitPpsClause, logStmt, markClause, actionStr, commentClause]
+      .filter(Boolean)
+      .join(' ');
+    return [singleLine];
+  }
+
+  const verdictLine = [...matchParts, rateLimitPpsClause, markClause, actionStr, commentClause]
+    .filter(Boolean)
+    .join(' ');
+  return [verdictLine];
 }
 
 function hashStringToInt(str: string, min: number, max: number): number {

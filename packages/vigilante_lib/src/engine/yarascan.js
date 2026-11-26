@@ -48,6 +48,61 @@ export const CS_SETTINGS_MAP = {
  * @param {Object|string} ruleDef
  * @returns {Object} Compiled rule
  */
+function assertSafeRegexPattern(pattern) {
+  if (typeof pattern !== 'string' || pattern.length === 0) {
+    throw new Error('YARA regex pattern must be a non-empty string');
+  }
+  if (pattern.length > 512) {
+    throw new Error(`YARA regex pattern exceeds maximum length (${pattern.length} > 512)`);
+  }
+  let inClass = false;
+  const groupHasQuantifier = [];
+  for (let i = 0; i < pattern.length; i++) {
+    const ch = pattern[i];
+    if (ch === '\\') {
+      i++;
+      continue;
+    }
+    if (ch === '[' && !inClass) {
+      inClass = true;
+      continue;
+    }
+    if (ch === ']' && inClass) {
+      inClass = false;
+      continue;
+    }
+    if (inClass) continue;
+    if (ch === '(') {
+      groupHasQuantifier.push(false);
+    } else if (ch === ')') {
+      const innerQuantified = groupHasQuantifier.pop() || false;
+      const next = pattern[i + 1];
+      const nextIsQuant = next === '+' || next === '*' || next === '?' || next === '{';
+      if (innerQuantified && nextIsQuant) {
+        throw new Error('Unsafe YARA regex pattern: nested quantifiers are disallowed to prevent ReDoS');
+      }
+      if (groupHasQuantifier.length > 0 && (innerQuantified || nextIsQuant)) {
+        groupHasQuantifier[groupHasQuantifier.length - 1] = true;
+      }
+    } else if (ch === '+' || ch === '*' || ch === '{') {
+      if (ch === '{') {
+        const closeBrace = pattern.indexOf('}', i + 1);
+        if (closeBrace !== -1) {
+          const inner = pattern.slice(i + 1, closeBrace);
+          const nums = inner.split(',').map(s => Number(s.trim())).filter(n => !Number.isNaN(n));
+          if (nums.some(n => n > 1000)) {
+            throw new Error('Unsafe YARA regex pattern: repetition count exceeds limit (1000)');
+          }
+          i = closeBrace;
+        }
+      }
+      if (groupHasQuantifier.length > 0) {
+        groupHasQuantifier[groupHasQuantifier.length - 1] = true;
+      }
+    }
+  }
+}
+
 export function compileYaraRule(ruleDef) {
   if (typeof ruleDef === 'string') {
     return parseYaraTextRule(ruleDef);
@@ -65,6 +120,7 @@ export function compileYaraRule(ruleDef) {
       });
       matcher = new RegExp(regexParts.join(''), 'g');
     } else if (s.type === 'regex') {
+      assertSafeRegexPattern(s.value);
       const flags = s.nocase ? 'gi' : 'g';
       matcher = new RegExp(s.value, flags);
     } else {
@@ -138,8 +194,8 @@ function parseYaraTextRule(text) {
     }
   }
 
-  const condMatch = text.match(/condition:\s*([\s\S]+?)$/i);
-  const condition = condMatch ? condMatch[1].trim() : 'any of them';
+  const condMatch = text.match(/condition:\s*([\s\S]*?)\s*\}\s*$/i) || text.match(/condition:\s*([\s\S]+?)$/i);
+  const condition = condMatch ? condMatch[1].replace(/\}\s*$/, '').trim() : 'any of them';
 
   return compileYaraRule({ name, meta: {}, strings, condition });
 }
@@ -199,37 +255,90 @@ export function scanBufferWithRules(inputBuffer, compiledRules = []) {
 }
 
 /**
- * Evaluate boolean condition expression against string match counts
+ * Evaluate boolean condition expression against string match counts without dynamic eval
  */
 function evaluateRuleCondition(condition, stringMatches, strings) {
-  const cond = condition.trim().toLowerCase();
+  const cond = String(condition || '').trim();
+  const lowerCond = cond.toLowerCase();
 
-  if (cond === 'any of them') {
+  if (!cond || lowerCond === 'any of them') {
     return Object.values(stringMatches).some(c => c > 0);
   }
-  if (cond === 'all of them') {
-    return strings.every(s => (stringMatches[s.id] || 0) > 0);
+  if (lowerCond === 'all of them') {
+    return strings.length > 0 && strings.every(s => (stringMatches[s.id] || 0) > 0);
   }
 
-  // Expression evaluation: replace string identifiers with boolean values
-  let expr = condition;
-  for (const [id, count] of Object.entries(stringMatches)) {
-    // Escape dollar sign for regex replace
-    const safeId = id.replace('$', '\\$');
-    expr = expr.replace(new RegExp(`${safeId}\\b`, 'g'), count > 0 ? 'true' : 'false');
+  const tokens = [];
+  const tokenRe = /\s+|(\(|\)|&&|\|\||!|\$[A-Za-z0-9_]+|\b(?:and|or|not|true|false|any\s+of\s+them|all\s+of\s+them)\b)/gi;
+  let lastIdx = 0;
+  let m;
+  while ((m = tokenRe.exec(cond)) !== null) {
+    if (m.index !== lastIdx) {
+      throw new Error(`Invalid YARA condition syntax near '${cond.slice(lastIdx, m.index)}'`);
+    }
+    lastIdx = tokenRe.lastIndex;
+    if (m[1]) tokens.push(m[1]);
+  }
+  if (lastIdx !== cond.length || tokens.length === 0) {
+    throw new Error(`Invalid YARA condition expression '${cond}'`);
   }
 
-  // Handle any remaining un-matched string tokens
-  expr = expr.replace(/\$[A-Za-z0-9_]+\b/g, 'false');
-  expr = expr.replace(/\band\b/gi, '&&').replace(/\bor\b/gi, '||').replace(/\bnot\b/gi, '!');
+  let pos = 0;
+  const peek = () => tokens[pos];
+  const consume = () => tokens[pos++];
 
-  try {
-    // Safe evaluation of boolean logic
-    const sanitized = expr.replace(/[^()!&|truefals\s]/g, '');
-    return Boolean(Function(`"use strict"; return (${sanitized});`)());
-  } catch {
-    return Object.values(stringMatches).some(c => c > 0);
+  const parseOr = () => {
+    let left = parseAnd();
+    while (peek() && (peek().toLowerCase() === 'or' || peek() === '||')) {
+      consume();
+      const right = parseAnd();
+      left = left || right;
+    }
+    return left;
+  };
+
+  const parseAnd = () => {
+    let left = parseNot();
+    while (peek() && (peek().toLowerCase() === 'and' || peek() === '&&')) {
+      consume();
+      const right = parseNot();
+      left = left && right;
+    }
+    return left;
+  };
+
+  const parseNot = () => {
+    if (peek() && (peek().toLowerCase() === 'not' || peek() === '!')) {
+      consume();
+      return !parseNot();
+    }
+    return parsePrimary();
+  };
+
+  const parsePrimary = () => {
+    const tok = consume();
+    if (!tok) throw new Error('Unexpected end of YARA condition expression');
+    if (tok === '(') {
+      const val = parseOr();
+      if (consume() !== ')') throw new Error('Unclosed parenthesis in YARA condition');
+      return val;
+    }
+    const low = tok.toLowerCase();
+    if (low === 'true') return true;
+    if (low === 'false') return false;
+    if (/^any\s+of\s+them$/i.test(tok)) return Object.values(stringMatches).some(c => c > 0);
+    if (/^all\s+of\s+them$/i.test(tok)) return strings.length > 0 && strings.every(s => (stringMatches[s.id] || 0) > 0);
+    if (tok.startsWith('$')) {
+      return (stringMatches[tok] || 0) > 0;
+    }
+    throw new Error(`Unsupported YARA condition token '${tok}'`);
+  };
+
+  const value = parseOr();
+  if (pos !== tokens.length) {
+    throw new Error(`Unexpected token '${tokens[pos]}' in YARA condition`);
   }
+  return Boolean(value);
 }
 
 /**
@@ -343,8 +452,13 @@ function scanForCsConfigWithKey(buf, key) {
  * @returns {Promise<Object>} Process memory scan result
  */
 export async function scanProcessMemory(pid, rules = [], options = {}) {
+  const numPid = Number(pid);
+  if (!Number.isInteger(numPid) || numPid <= 0) {
+    throw new Error(`Invalid process ID '${pid}': expected a positive integer`);
+  }
+
   const result = {
-    pid: Number(pid),
+    pid: numPid,
     timestamp: new Date().toISOString(),
     yaraMatches: [],
     c2Config: null,
@@ -353,24 +467,67 @@ export async function scanProcessMemory(pid, rules = [], options = {}) {
   };
 
   let bufferToScan = options.memoryBuffer || null;
+  const maxTotalBytes = Number.isFinite(options.maxBytes) ? options.maxBytes : 64 * 1024 * 1024;
+  const maxRegionBytes = 4 * 1024 * 1024;
 
-  // Attempt to read from /proc/$PID/mem if accessible and no explicit buffer provided
+  // Attempt to read readable /proc/<pid>/maps regions from /proc/<pid>/mem
   if (!bufferToScan) {
-    const memPath = `/proc/${pid}/mem`;
-    const mapsPath = `/proc/${pid}/maps`;
+    const procBase = options.procRoot || '/proc';
+    const memPath = path.join(procBase, String(numPid), 'mem');
+    const mapsPath = path.join(procBase, String(numPid), 'maps');
     if (fsSync.existsSync(mapsPath)) {
-      try {
-        const mapsContent = await fs.readFile(mapsPath, 'utf8');
-        // Filter readable segments
-        result.segmentsScanned = mapsContent.split('\n').filter(Boolean).length;
-      } catch (err) {
-        // Fallback
+      const mapsContent = await fs.readFile(mapsPath, 'utf8');
+      const regions = [];
+      for (const line of mapsContent.split(/\r?\n/)) {
+        const match = /^([0-9a-f]+)-([0-9a-f]+)\s+([rwxps-]{4})\s+[0-9a-f]+\s+[0-9a-f:]+\s+\d+\s*(.*)$/i.exec(line.trim());
+        if (!match) continue;
+        const start = BigInt(`0x${match[1]}`);
+        const end = BigInt(`0x${match[2]}`);
+        const perms = match[3];
+        const pathname = (match[4] || '').trim();
+        if (!perms.startsWith('r')) continue;
+        if (pathname === '[vvar]' || pathname === '[vsyscall]') continue;
+        if (end <= start || start > BigInt(Number.MAX_SAFE_INTEGER)) continue;
+        const size = Number(end - start > BigInt(maxRegionBytes) ? BigInt(maxRegionBytes) : end - start);
+        if (size > 0) {
+          regions.push({ start: Number(start), size });
+        }
+      }
+
+      if (regions.length > 0 && fsSync.existsSync(memPath)) {
+        const chunks = [];
+        let totalRead = 0;
+        const fh = await fs.open(memPath, 'r');
+        try {
+          for (const reg of regions) {
+            if (totalRead >= maxTotalBytes) break;
+            const toRead = Math.min(reg.size, maxTotalBytes - totalRead);
+            const buf = Buffer.allocUnsafe(toRead);
+            try {
+              const { bytesRead } = await fh.read(buf, 0, toRead, reg.start);
+              if (bytesRead > 0) {
+                chunks.push(bytesRead === toRead ? buf : buf.subarray(0, bytesRead));
+                totalRead += bytesRead;
+                result.segmentsScanned++;
+              }
+            } catch {
+              // Individual unmapped/guarded pages can fail EIO while others remain readable
+            }
+          }
+        } finally {
+          await fh.close();
+        }
+        if (chunks.length > 0) {
+          bufferToScan = Buffer.concat(chunks);
+        }
       }
     }
+  } else {
+    result.segmentsScanned = 1;
   }
 
   if (bufferToScan) {
-    result.segmentsScanned = 1;
+    if (result.segmentsScanned === 0) result.segmentsScanned = 1;
     // 1. Evaluate YARA rules
     result.yaraMatches = scanBufferWithRules(bufferToScan, rules);
 

@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSession } from '@/server/auth';
-import { isPasswordChangeEnforced } from '@/server/auth-guard';
+import { assertActionPermitted } from '@/server/auth-guard';
 import { callAgentApiResponse } from '@/server/agent-client';
 import { resolveHeadscaleNetworkInfo } from '@/server/headscale-network';
 
@@ -9,20 +9,16 @@ export const dynamic = 'force-dynamic';
 export async function GET(req: NextRequest) {
   try {
     const session = await getSession();
-    const pwdEnforced = isPasswordChangeEnforced(session);
-    if (!session || pwdEnforced || !session.roles.includes('admin')) {
-      return NextResponse.json(
-        { status: 'error', error: pwdEnforced ? 'Password change required' : 'Unauthorized' },
-        { status: pwdEnforced ? 403 : 401 }
-      );
-    }
+    assertActionPermitted(session, 'admin');
 
     const network = await resolveHeadscaleNetworkInfo(req);
     return NextResponse.json({ status: 'ok', data: network });
   } catch (err: any) {
+    const msg = err?.message || 'Failed to read Headscale config';
+    const status = msg === 'Unauthorized' ? 401 : msg.startsWith('Forbidden') ? 403 : 500;
     return NextResponse.json(
-      { status: 'error', error: err?.message || 'Failed to read Headscale config' },
-      { status: 500 }
+      { status: 'error', error: msg },
+      { status }
     );
   }
 }
@@ -30,13 +26,7 @@ export async function GET(req: NextRequest) {
 export async function POST(req: NextRequest) {
   try {
     const session = await getSession();
-    const pwdEnforced = isPasswordChangeEnforced(session);
-    if (!session || pwdEnforced || !session.roles.includes('admin')) {
-      return NextResponse.json(
-        { status: 'error', error: pwdEnforced ? 'Password change required' : 'Unauthorized' },
-        { status: pwdEnforced ? 403 : 401 }
-      );
-    }
+    assertActionPermitted(session, 'admin');
 
     const body = await req.json().catch(() => ({}));
     const serverUrl = typeof body?.serverUrl === 'string' ? body.serverUrl.trim() : '';
@@ -68,9 +58,11 @@ export async function POST(req: NextRequest) {
 
     return NextResponse.json({ status: 'ok', data: res });
   } catch (err: any) {
+    const msg = err?.message || 'Failed to sync Headscale config';
+    const status = msg === 'Unauthorized' ? 401 : msg.startsWith('Forbidden') ? 403 : 500;
     return NextResponse.json(
-      { status: 'error', error: err?.message || 'Failed to sync Headscale config' },
-      { status: 500 }
+      { status: 'error', error: msg },
+      { status }
     );
   }
 }

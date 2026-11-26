@@ -67,7 +67,7 @@ export default function GeoIpPage() {
 
   const [search, setSearch] = useState('');
   const [showScript, setShowScript] = useState(false);
-  const [savedMessage, setSavedMessage] = useState<string | null>(null);
+  const [savedMessage, setSavedMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
   useEffect(() => {
     getCurrentDesiredState()
@@ -118,10 +118,16 @@ export default function GeoIpPage() {
       };
       setFullState(nextState);
       const res = await applyState(nextState);
-      setSavedMessage(res.message || 'GeoIP configuration saved to /etc/axonwall/security.yaml.');
+      setSavedMessage({
+        type: 'success',
+        text: res.message || 'GeoIP configuration saved to /etc/axonwall/security.yaml.',
+      });
     } catch (err: any) {
       setFullState(prevFullState);
-      setSavedMessage(`Error: ${err?.message || 'Failed to save GeoIP policy'}`);
+      setSavedMessage({
+        type: 'error',
+        text: err?.message || 'Failed to save GeoIP policy',
+      });
     }
     setTimeout(() => setSavedMessage(null), 4000);
   }
@@ -163,9 +169,19 @@ export default function GeoIpPage() {
       </div>
 
       {savedMessage && (
-        <div className="bg-emerald-500/10 border border-emerald-500/30 rounded-xl p-4 flex items-center gap-3 text-emerald-300 text-sm">
-          <CheckCircle2 className="w-5 h-5 shrink-0 text-emerald-400" />
-          <span>{savedMessage}</span>
+        <div
+          className={`border rounded-xl p-4 flex items-center gap-3 text-sm ${
+            savedMessage.type === 'error'
+              ? 'bg-red-500/10 border-red-500/30 text-red-300'
+              : 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300'
+          }`}
+        >
+          {savedMessage.type === 'error' ? (
+            <AlertCircle className="w-5 h-5 shrink-0 text-red-400" />
+          ) : (
+            <CheckCircle2 className="w-5 h-5 shrink-0 text-emerald-400" />
+          )}
+          <span>{savedMessage.text}</span>
         </div>
       )}
 

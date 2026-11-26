@@ -1891,102 +1891,103 @@ async function cmdCloudInit(userArgs: string[]) {
 const CORE_ROLE_PLUGIN_IDS = new Set(['core-firewall', 'core-nas', 'core-k3s', 'core-virt', 'core-vigilante']);
 
 async function setCoreRolePlugin(pluginId: string, enable: boolean) {
-  const state = cmdValidate(true);
-  const currentCaps = resolveCapabilities(state);
-  const nextCaps = {
-    firewallEnabled: pluginId === 'core-firewall' ? enable : currentCaps.firewallEnabled,
-    nasEnabled: pluginId === 'core-nas' ? enable : currentCaps.nasEnabled,
-    k3sEnabled: pluginId === 'core-k3s' ? enable : currentCaps.k3sEnabled,
-    virtEnabled: pluginId === 'core-virt' ? enable : currentCaps.virtEnabled,
-    vigilanteEnabled: pluginId === 'core-vigilante' ? enable : currentCaps.vigilanteEnabled,
-  };
-  state.capabilities = nextCaps;
+  let releaseLock: (() => void) | null = null;
+  let nextCaps: ReturnType<typeof resolveCapabilities>;
+  try {
+    releaseLock = acquireMcpLockFile(desiredStateLockPath());
+    const state = cmdValidate(true);
+    const currentCaps = resolveCapabilities(state);
+    nextCaps = {
+      firewallEnabled: pluginId === 'core-firewall' ? enable : currentCaps.firewallEnabled,
+      nasEnabled: pluginId === 'core-nas' ? enable : currentCaps.nasEnabled,
+      k3sEnabled: pluginId === 'core-k3s' ? enable : currentCaps.k3sEnabled,
+      virtEnabled: pluginId === 'core-virt' ? enable : currentCaps.virtEnabled,
+      vigilanteEnabled: pluginId === 'core-vigilante' ? enable : currentCaps.vigilanteEnabled,
+    };
+    state.capabilities = nextCaps;
 
-  if (pluginId === 'core-nas') {
-    state.nas = state.nas || {
-      enabled: enable,
-      workgroup: 'WORKGROUP',
-      serverString: 'Axonwall Enterprise ZFS NAS',
-      pools: [],
-      datasets: [],
-      snapshotPolicies: [],
-      smbShares: [],
-      nfsExports: [],
-      iscsiTargets: [],
-    };
-    state.nas.enabled = enable;
-  } else if (pluginId === 'core-k3s') {
-    state.k3s = state.k3s || {
-      enabled: enable,
-      clusterCidr: '10.42.0.0/16',
-      serviceCidr: '10.43.0.0/16',
-      nodeIpInterface: 'lan',
-      flannelBackend: 'wireguard-native',
-      disableTraefik: false,
-      autoJoinHaPeer: true,
-      enableUserNamespaces: false,
-      bpfTokenProfiles: [],
-      openEbs: {
-        enabled: true,
-        zfsLocalPvEnabled: true,
-        zfsLocalPvPool: 'tank',
-        replicatedStorageEnabled: true,
-        defaultReplicaCount: 2,
-        replicatedBackingPool: 'tank/openebs-replicated',
-      },
-      workloads: [],
-    };
-    state.k3s.enabled = enable;
-    if (!enable) {
-      const depRes = disablePluginWithDependents('core-k3s', state);
-      Object.assign(state, depRes.state);
-      if (depRes.autoDisabledDependents.length > 0) {
-        console.log(
-          `${cYellow}[!] Auto-disabled dependent plugins requiring core-k3s: ${depRes.autoDisabledDependents.join(', ')}${cReset}`
-        );
+    if (Array.isArray(state.plugins)) {
+      const idx = state.plugins.findIndex((p) => p.id === pluginId);
+      if (idx >= 0) {
+        state.plugins[idx] = { ...state.plugins[idx]!, enabled: enable };
       }
     }
-  } else if (pluginId === 'core-virt') {
-    state.virt = state.virt || {
-      enabled: enable,
-      defaultPool: 'tank',
-      isoPool: 'tank',
-      vms: [],
-      containers: [],
-      isos: [],
-      pciDevices: [],
-      backupJobs: [],
-      vxlanZones: [],
-    };
-    state.virt.enabled = enable;
-  } else if (pluginId === 'core-vigilante') {
-    if (enable) {
-      const depRes = enablePluginWithDependencies('core-vigilante', state);
-      Object.assign(state, depRes.state);
-      if (depRes.autoEnabledDependencies.length > 0) {
-        console.log(
-          `${cCyan}[+] Auto-enabled required dependency plugins for core-vigilante: ${depRes.autoEnabledDependencies.join(', ')}${cReset}`
-        );
-      }
-    } else {
-      const depRes = disablePluginWithDependents('core-vigilante', state);
-      Object.assign(state, depRes.state);
-    }
-  }
 
-  const yamlFiles = serializeDesiredStateToYamlFiles(state);
-  for (const dir of [ETC_DIR, PERSIST_YAML_DIR]) {
-    try {
-      fs.mkdirSync(path.join(dir, 'conf.d'), { recursive: true });
-      for (const [filename, content] of Object.entries(yamlFiles)) {
-        fs.writeFileSync(path.join(dir, filename), content, { mode: 0o660 });
+    if (pluginId === 'core-nas') {
+      state.nas = state.nas || {
+        enabled: enable,
+        workgroup: 'WORKGROUP',
+        serverString: 'Axonwall Enterprise ZFS NAS',
+        pools: [],
+        datasets: [],
+        snapshotPolicies: [],
+        smbShares: [],
+        nfsExports: [],
+        iscsiTargets: [],
+      };
+      state.nas.enabled = enable;
+    } else if (pluginId === 'core-k3s') {
+      state.k3s = state.k3s || {
+        enabled: enable,
+        clusterCidr: '10.42.0.0/16',
+        serviceCidr: '10.43.0.0/16',
+        nodeIpInterface: 'lan',
+        flannelBackend: 'wireguard-native',
+        disableTraefik: false,
+        autoJoinHaPeer: true,
+        enableUserNamespaces: false,
+        bpfTokenProfiles: [],
+        openEbs: {
+          enabled: true,
+          zfsLocalPvEnabled: true,
+          zfsLocalPvPool: 'tank',
+          replicatedStorageEnabled: true,
+          defaultReplicaCount: 2,
+          replicatedBackingPool: 'tank/openebs-replicated',
+        },
+        workloads: [],
+      };
+      state.k3s.enabled = enable;
+      if (!enable) {
+        const depRes = disablePluginWithDependents('core-k3s', state);
+        Object.assign(state, depRes.state);
+        if (depRes.autoDisabledDependents.length > 0) {
+          console.log(
+            `${cYellow}[!] Auto-disabled dependent plugins requiring core-k3s: ${depRes.autoDisabledDependents.join(', ')}${cReset}`
+          );
+        }
       }
-      // Remove stale conf.d/99-cloudinit.yaml override now that state is persisted to canonical domain files
-      const ciOverride = path.join(dir, 'conf.d', '99-cloudinit.yaml');
-      if (fs.existsSync(ciOverride)) {
-        fs.rmSync(ciOverride, { force: true });
+    } else if (pluginId === 'core-virt') {
+      state.virt = state.virt || {
+        enabled: enable,
+        defaultPool: 'tank',
+        isoPool: 'tank',
+        vms: [],
+        containers: [],
+        isos: [],
+        pciDevices: [],
+        backupJobs: [],
+        vxlanZones: [],
+      };
+      state.virt.enabled = enable;
+    } else if (pluginId === 'core-vigilante') {
+      if (enable) {
+        const depRes = enablePluginWithDependencies('core-vigilante', state);
+        Object.assign(state, depRes.state);
+        if (depRes.autoEnabledDependencies.length > 0) {
+          console.log(
+            `${cCyan}[+] Auto-enabled required dependency plugins for core-vigilante: ${depRes.autoEnabledDependencies.join(', ')}${cReset}`
+          );
+        }
+      } else {
+        const depRes = disablePluginWithDependents('core-vigilante', state);
+        Object.assign(state, depRes.state);
       }
-    } catch {}
+    }
+
+    persistDesiredStateAtomic(state);
+  } finally {
+    try { releaseLock?.(); } catch {}
   }
 
   console.log(
@@ -3143,7 +3144,7 @@ function parseCliArgs(args: string[], valueFlags: string[] = []): { positionals:
 }
 
 async function cmdNetFlow(args: string[]) {
-  const { positionals, flags } = parseCliArgs(args);
+  const { positionals, flags } = parseCliArgs(args, ['range', 'group', 'format', 'fql', 'scope', 'limit', 'minutes']);
   const sub = (positionals[0] || 'status').toLowerCase();
   const asJson = Boolean(flags.json);
 
@@ -3574,6 +3575,60 @@ async function cmdNas(args: string[]) {
   }
 }
 
+async function enforceVirtAntiLockout(
+  targetId: number,
+  actionLabel: string,
+  safetyAction: 'stop' | 'pause' | 'reboot' | 'rollback' | 'restore' | 'live_migrate',
+  force: boolean,
+  workloadType: 'vm' | 'lxc' = 'vm',
+): Promise<void> {
+  let workloadName: string | undefined;
+  try {
+    if (workloadType === 'vm') {
+      const vmsRes = await sendAgentSocketRequest<any>('/v1/virt/vms', 'GET');
+      workloadName = Array.isArray(vmsRes?.vms)
+        ? vmsRes.vms.find((v: any) => Number(v.vmid) === targetId)?.name
+        : undefined;
+    } else {
+      const ctsRes = await sendAgentSocketRequest<any>('/v1/virt/containers', 'GET');
+      workloadName = Array.isArray(ctsRes?.containers)
+        ? ctsRes.containers.find((c: any) => Number(c.ctid) === targetId)?.hostname ||
+          ctsRes.containers.find((c: any) => Number(c.ctid) === targetId)?.name
+        : undefined;
+    }
+  } catch {
+    // Name unresolvable: validateVirtWorkloadSafety fails closed on unresolvable names.
+  }
+  let hostedEdgeEnabled: boolean | undefined;
+  try {
+    for (const candidate of [STATE_JSON_PATH, path.join(ETC_DIR, 'state.json')]) {
+      if (fs.existsSync(candidate)) {
+        const parsed = DesiredStateSchema.safeParse(JSON.parse(fs.readFileSync(candidate, 'utf8')));
+        if (parsed.success) {
+          hostedEdgeEnabled = parsed.data.hostedEdge?.enabled;
+          break;
+        }
+      }
+    }
+  } catch {
+    // Best effort: name-pattern guard still applies.
+  }
+  const safetyCheck = validateVirtWorkloadSafety(
+    workloadName,
+    safetyAction,
+    hostedEdgeEnabled,
+    workloadType === 'vm' ? targetId : undefined,
+  );
+  if (!safetyCheck.valid && !force) {
+    console.error(`${cRed}[✗] ${safetyCheck.reason || 'Virtualization action blocked by anti-lockout guard'}${cReset}`);
+    console.error(`${cYellow}Re-run with --force if you really mean to ${actionLabel} ${workloadType.toUpperCase()} #${targetId}.${cReset}`);
+    process.exit(1);
+  }
+  if (!safetyCheck.valid && force) {
+    console.error(`${cYellow}[!] Overriding anti-lockout guard with --force: ${safetyCheck.reason || ''}${cReset}`);
+  }
+}
+
 async function cmdVirt(args: string[]) {
   const { positionals, flags } = parseCliArgs(args);
   const sub = (positionals[0] || 'list').toLowerCase();
@@ -3596,11 +3651,6 @@ async function cmdVirt(args: string[]) {
         console.error(`${cRed}Usage: axonwallctl virt ${sub} <vmid> [--force]${cReset}`);
         process.exit(1);
       }
-      // B-M5: the CLI used to post stop/pause straight to the daemon
-      // with no anti-lockout guard (the MCP tool is the only caller
-      // that had one). Resolve the VM name from the daemon list and
-      // the hosted-edge flag from local DesiredState, and refuse a
-      // guarded stop/pause unless --force is given explicitly.
       const guardedVirtMap: Record<string, 'stop' | 'pause' | 'reboot' | 'rollback' | 'restore' | 'live_migrate'> = {
         stop: 'stop',
         pause: 'pause',
@@ -3612,38 +3662,7 @@ async function cmdVirt(args: string[]) {
       const safetyAction = guardedVirtMap[sub];
       const force = parseBoolFlag(flags.force);
       if (safetyAction) {
-        let workloadName: string | undefined;
-        try {
-          const vmsRes = await sendAgentSocketRequest<any>('/v1/virt/vms', 'GET');
-          workloadName = Array.isArray(vmsRes?.vms)
-            ? vmsRes.vms.find((v: any) => Number(v.vmid) === vmid)?.name
-            : undefined;
-        } catch {
-          // Name unresolvable: the guard below fails closed on it.
-        }
-        let hostedEdgeEnabled: boolean | undefined;
-        try {
-          for (const candidate of [STATE_JSON_PATH, path.join(ETC_DIR, 'state.json')]) {
-            if (fs.existsSync(candidate)) {
-              const parsed = DesiredStateSchema.safeParse(JSON.parse(fs.readFileSync(candidate, 'utf8')));
-              if (parsed.success) {
-                hostedEdgeEnabled = parsed.data.hostedEdge?.enabled;
-                break;
-              }
-            }
-          }
-        } catch {
-          // Best effort: the name-pattern half of the guard still applies.
-        }
-        const safetyCheck = validateVirtWorkloadSafety(workloadName, safetyAction, hostedEdgeEnabled, vmid);
-        if (!safetyCheck.valid && !force) {
-          console.error(`${cRed}[✗] ${safetyCheck.reason || 'Virtualization action blocked by anti-lockout guard'}${cReset}`);
-          console.error(`${cYellow}Re-run with --force if you really mean to ${sub} VM #${vmid}.${cReset}`);
-          process.exit(1);
-        }
-        if (!safetyCheck.valid && force) {
-          console.error(`${cYellow}[!] Overriding anti-lockout guard with --force: ${safetyCheck.reason || ''}${cReset}`);
-        }
+        await enforceVirtAntiLockout(vmid, sub, safetyAction, force, 'vm');
       }
       console.log(
         JSON.stringify(
@@ -3684,15 +3703,19 @@ async function cmdVirt(args: string[]) {
     case 'rollback': {
       const rawType = (positionals[1] || '').toLowerCase();
       if (rawType !== 'vm' && rawType !== 'lxc') {
-        console.error(`${cRed}Usage: axonwallctl virt ${sub} <vm|lxc> <id> <label>${cReset}`);
+        console.error(`${cRed}Usage: axonwallctl virt ${sub} <vm|lxc> <id> <label> [--force]${cReset}`);
         process.exit(1);
       }
       const targetType = rawType;
       const targetId = Number(positionals[2]);
       const label = positionals[3] || '';
       if (!targetId || (sub === 'rollback' && !label)) {
-        console.error(`${cRed}Usage: axonwallctl virt ${sub} <vm|lxc> <id> <label>${cReset}`);
+        console.error(`${cRed}Usage: axonwallctl virt ${sub} <vm|lxc> <id> <label> [--force]${cReset}`);
         process.exit(1);
+      }
+      const force = parseBoolFlag(flags.force);
+      if (sub === 'rollback') {
+        await enforceVirtAntiLockout(targetId, 'rollback', 'rollback', force, targetType);
       }
       console.log(
         JSON.stringify(
@@ -3701,6 +3724,7 @@ async function cmdVirt(args: string[]) {
             targetType,
             targetId,
             label,
+            force,
           }),
           null,
           2,
@@ -3712,11 +3736,13 @@ async function cmdVirt(args: string[]) {
       const vmid = Number(positionals[1]);
       const targetPeerIp = positionals[2] || '';
       if (!vmid || !targetPeerIp) {
-        console.error(`${cRed}Usage: axonwallctl virt migrate <vmid> <targetPeerIp>${cReset}`);
+        console.error(`${cRed}Usage: axonwallctl virt migrate <vmid> <targetPeerIp> [--force]${cReset}`);
         process.exit(1);
       }
+      const force = parseBoolFlag(flags.force);
+      await enforceVirtAntiLockout(vmid, 'migrate', 'live_migrate', force, 'vm');
       console.log(
-        JSON.stringify(await sendAgentSocketRequest<any>('/v1/virt/migrate', 'POST', { vmid, targetPeerIp }, 120_000), null, 2),
+        JSON.stringify(await sendAgentSocketRequest<any>('/v1/virt/migrate', 'POST', { vmid, targetPeerIp, force }, 120_000), null, 2),
       );
       return;
     }
@@ -3748,10 +3774,12 @@ async function cmdVirt(args: string[]) {
       const rawType = (positionals[2] || '').toLowerCase();
       const targetId = Number(positionals[3]);
       if (!archiveName || (rawType !== 'vm' && rawType !== 'lxc') || !targetId) {
-        console.error(`${cRed}Usage: axonwallctl virt restore <archive.vma.zst> <vm|lxc> <id>${cReset}`);
+        console.error(`${cRed}Usage: axonwallctl virt restore <archive.vma.zst> <vm|lxc> <id> [--force]${cReset}`);
         process.exit(1);
       }
       const targetType = rawType;
+      const force = parseBoolFlag(flags.force);
+      await enforceVirtAntiLockout(targetId, 'restore', 'restore', force, targetType);
       console.log(
         JSON.stringify(
           await sendAgentSocketRequest<any>('/v1/virt/backups', 'POST', {
@@ -3759,6 +3787,7 @@ async function cmdVirt(args: string[]) {
             archiveName,
             targetType,
             targetId,
+            force,
           }, 120_000),
           null,
           2,

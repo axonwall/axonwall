@@ -129,13 +129,26 @@ fi
 sysctl --system >/dev/null 2>&1 || true
 
 if command -v nft >/dev/null 2>&1 && [ -f /etc/nftables.conf ]; then
+    if [ "$ANALYTICS_INGEST_ENABLED" = "1" ] || [ "$ANALYTICS_INGEST_ENABLED" = "true" ]; then
+        log "analytics ingest enabled (allowed CIDRs: ${ANALYTICS_ALLOWED_CIDRS}); persisting rules into /etc/nftables.conf"
+        if ! grep -q "Axonwall Analytics ingest" /etc/nftables.conf 2>/dev/null; then
+            _nft_tmp="$(mktemp /etc/nftables.conf.XXXXXX)"
+            awk -v cidrs="${ANALYTICS_ALLOWED_CIDRS}" '
+                /udp dport \{ 8472, 51820, 51821 \} accept/ && !done {
+                    print $0
+                    print ""
+                    print "        # Axonwall Analytics ingest (HTTPS UI/Ingress, NodePort, IPFIX TCP/UDP, NetFlow/sFlow)"
+                    print "        ip saddr { " cidrs " } tcp dport { 80, 443, 2966, 3000, 4739, 8123, 8428, 9428, 30000-32767 } accept"
+                    print "        ip saddr { " cidrs " } udp dport { 2055, 4739, 6343 } accept"
+                    done=1
+                    next
+                }
+                { print }
+            ' /etc/nftables.conf > "$_nft_tmp" && chmod 0644 "$_nft_tmp" && mv -f "$_nft_tmp" /etc/nftables.conf || rm -f "$_nft_tmp"
+        fi
+    fi
     log "applying isolated k3s_host_filter nftables ruleset"
     nft -f /etc/nftables.conf || log "WARNING: nft -f /etc/nftables.conf returned non-zero"
-    if [ "$ANALYTICS_INGEST_ENABLED" = "1" ] || [ "$ANALYTICS_INGEST_ENABLED" = "true" ]; then
-        log "analytics ingest enabled (allowed CIDRs: ${ANALYTICS_ALLOWED_CIDRS}); extending k3s_host_filter input chain"
-        nft add rule inet k3s_host_filter input ip saddr "{ ${ANALYTICS_ALLOWED_CIDRS} }" tcp dport "{ 443, 3000, 4739, 8123, 8428, 9428 }" accept 2>/dev/null || true
-        nft add rule inet k3s_host_filter input ip saddr "{ ${ANALYTICS_ALLOWED_CIDRS} }" udp dport "{ 2055, 4739, 6343 }" accept 2>/dev/null || true
-    fi
 fi
 
 # --- 3. Host Mode DHCP networking (no router NAT, no static 192.168.1.1) ---
@@ -415,12 +428,12 @@ if command -v zpool >/dev/null 2>&1 && command -v zfs >/dev/null 2>&1; then
             # failure swallowed, and the partial stash restored over the
             # fresh dataset. Measure first and fail closed (the marker
             # stays, so the next boot retries) instead of corrupting state.
-            _stash_bytes="$(du -sb "$K3S_DATA_DIR" 2>/dev/null | cut -f1 || echo "")"
+            _stash_kb="$(du -sk "$K3S_DATA_DIR" 2>/dev/null | awk '{print $1}' || echo "")"
             _run_avail_kb="$(df -k /run 2>/dev/null | awk 'NR==2 {print $4}' || echo "")"
-            case "$_stash_bytes" in ''|*[!0-9]*) die "cannot measure size of ${K3S_DATA_DIR} for the runtime stash; refusing to proceed" ;; esac
+            case "$_stash_kb" in ''|*[!0-9]*) die "cannot measure size of ${K3S_DATA_DIR} for the runtime stash; refusing to proceed" ;; esac
             case "$_run_avail_kb" in ''|*[!0-9]*) die "cannot measure free space on /run for the runtime stash; refusing to proceed" ;; esac
-            if [ "$_stash_bytes" -gt $(( _run_avail_kb * 1024 )) ]; then
-                die "K3s runtime dir (${_stash_bytes} bytes) exceeds free tmpfs space on /run (${_run_avail_kb} KiB); refusing to stash (free space on /run or move the runtime data first)"
+            if [ "$_stash_kb" -gt "$_run_avail_kb" ]; then
+                die "K3s runtime dir (${_stash_kb} KiB) exceeds free tmpfs space on /run (${_run_avail_kb} KiB); refusing to stash (free space on /run or move the runtime data first)"
             fi
             _k3s_stash="$(mktemp -d /run/k3s-runtime-stash.XXXXXX)"
             if ! cp -a "${K3S_DATA_DIR}/." "${_k3s_stash}/" 2>/dev/null; then

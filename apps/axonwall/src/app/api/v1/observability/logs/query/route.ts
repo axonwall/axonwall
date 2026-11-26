@@ -14,6 +14,43 @@ function escapeLogsQLValue(val: string): string {
   return val.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
 }
 
+function splitLogsQLTopLevelPipe(rawQ: string): { head: string; pipeSuffix: string } {
+  let inQuotes = false;
+  let escaped = false;
+  let parenDepth = 0;
+
+  for (let i = 0; i < rawQ.length; i += 1) {
+    const ch = rawQ[i];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (ch === '\\' && inQuotes) {
+      escaped = true;
+      continue;
+    }
+    if (ch === '"') {
+      inQuotes = !inQuotes;
+      continue;
+    }
+    if (inQuotes) {
+      continue;
+    }
+    if (ch === '(') {
+      parenDepth += 1;
+    } else if (ch === ')' && parenDepth > 0) {
+      parenDepth -= 1;
+    } else if (ch === '|' && parenDepth === 0) {
+      return {
+        head: rawQ.slice(0, i).trim(),
+        pipeSuffix: rawQ.slice(i).trim(),
+      };
+    }
+  }
+
+  return { head: rawQ.trim(), pipeSuffix: '' };
+}
+
 function buildLogsQLQuery(params: {
   q?: string;
   nodeId?: string;
@@ -21,10 +58,6 @@ function buildLogsQLQuery(params: {
   level?: string;
 }): string {
   const clauses: string[] = [];
-  const rawQ = String(params.q || '').trim();
-  if (rawQ) {
-    clauses.push(rawQ);
-  }
   const nodeId = String(params.nodeId || '').trim();
   if (nodeId && nodeId !== 'all') {
     clauses.push(`node_id:"${escapeLogsQLValue(nodeId)}"`);
@@ -36,6 +69,18 @@ function buildLogsQLQuery(params: {
   const level = String(params.level || '').trim();
   if (level && level !== 'all') {
     clauses.push(`level:"${escapeLogsQLValue(level)}"`);
+  }
+  const rawQ = String(params.q || '').trim();
+  if (rawQ) {
+    const { head, pipeSuffix } = splitLogsQLTopLevelPipe(rawQ);
+    if (head) {
+      clauses.push(head === '*' ? '*' : `(${head})`);
+    } else if (clauses.length === 0) {
+      clauses.push('*');
+    }
+    if (pipeSuffix) {
+      clauses.push(pipeSuffix);
+    }
   }
   return clauses.length > 0 ? clauses.join(' ') : '*';
 }

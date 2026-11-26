@@ -3,7 +3,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { logger } from '../utils/logger.js';
 import { signFile } from './gpg.js';
-import { loadConfig, getVigilanteConfigDir } from './config.js';
+import { loadConfig, getVigilanteConfigDir, sanitizePathComponent, resolvePathInside } from './config.js';
 
 /**
  * Initializes and scaffolds a structured local CTF participant workspace
@@ -45,17 +45,28 @@ export async function initCtfWorkspace({
 
   // Scaffold challenge directories
   const scaffolded = [];
+  const allowedCategories = new Set(categories);
   for (const chal of challenges) {
-    const cat = (chal.category || 'misc').toLowerCase();
-    const chalDir = path.join(absTargetDir, cat, chal.id || chal.name);
+    const rawCat = String(chal.category || 'misc').toLowerCase();
+    const cat = allowedCategories.has(rawCat) ? rawCat : 'misc';
+    const rawChalName = String(chal.id || chal.name || 'challenge');
+    const safeChalDirName = sanitizePathComponent(rawChalName, 'challenge identifier');
+    const chalDir = resolvePathInside(absTargetDir, cat, safeChalDirName);
     await fs.mkdir(chalDir, { recursive: true });
+
+    const safePortNum = Number.isInteger(Number(chal.port)) && Number(chal.port) >= 1 && Number(chal.port) <= 65535
+      ? Number(chal.port)
+      : (cat === 'web' ? 8080 : cat === 'crypto' ? 20001 : 31337);
+    const strippedHost = String(tournamentUrl || 'ctf.vigilante.local').replace(/^https?:\/\//i, '').replace(/\/+$/, '');
+    const safeTargetUrl = String(tournamentUrl || 'https://ctf.vigilante.local').replace(/\/+$/, '');
+    const safeElfName = `./${safeChalDirName}.elf`;
 
     // Generate challenge README.md
     const readmeContent = `# ${chal.name || chal.id}
-**Category**: ${(chal.category || 'misc').toUpperCase()}
+**Category**: ${cat.toUpperCase()}
 **Difficulty**: ${chal.difficulty || 'Normal'}
 **Points**: ${chal.currentPoints || 500} pts
-**Connection**: \`${chal.connectionString || (chal.category === 'web' ? `http://ctf.vigilante.local:${chal.port || 8080}` : `nc ctf.vigilante.local ${chal.port || 31337}`)}\`
+**Connection**: \`${chal.connectionString || (cat === 'web' ? `http://ctf.vigilante.local:${safePortNum}` : `nc ctf.vigilante.local ${safePortNum}`)}\`
 
 ---
 
@@ -70,7 +81,7 @@ ${(chal.hints && chal.hints.length > 0) ? chal.hints.map(h => `- ${h}`).join('\n
 ## 🚩 Flag Submission
 To submit your flag using Vigilante CLI:
 \`\`\`bash
-$ vigilante ctf submit ${chal.id} VIGILANTE{...}
+$ vigilante ctf submit ${safeChalDirName} VIGILANTE{...}
 \`\`\`
 `;
     await fs.writeFile(path.join(chalDir, 'README.md'), readmeContent, 'utf8');
@@ -78,20 +89,20 @@ $ vigilante ctf submit ${chal.id} VIGILANTE{...}
     // Generate boilerplate starter solve scripts
     if (cat === 'pwn') {
       const pwnTemplate = `#!/usr/bin/env python3
-# Pwntools Exploit Template for ${chal.name}
+# Pwntools Exploit Template for ${String(chal.name || safeChalDirName).replace(/[\r\n]/g, ' ')}
 from pwn import *
 
 context.arch = 'amd64'
 context.terminal = ['tmux', 'splitw', '-h']
 
-HOST = "${tournamentUrl.replace(/https?:\/\//, '')}"
-PORT = ${chal.port || 31337}
+HOST = ${JSON.stringify(strippedHost)}
+PORT = ${safePortNum}
 
 def start():
     if args.REMOTE:
         return remote(HOST, PORT)
     else:
-        return process("./${chal.id}.elf")
+        return process(${JSON.stringify(safeElfName)})
 
 io = start()
 # TODO: Inject buffer overflow or format string payload
@@ -103,10 +114,10 @@ io.interactive()
       await fs.writeFile(path.join(chalDir, 'solve.py'), pwnTemplate, 'utf8');
     } else if (cat === 'web') {
       const webTemplate = `#!/usr/bin/env python3
-# Web Exploitation Script for ${chal.name}
+# Web Exploitation Script for ${String(chal.name || safeChalDirName).replace(/[\r\n]/g, ' ')}
 import requests
 
-TARGET = "${tournamentUrl}:${chal.port || 8080}"
+TARGET = ${JSON.stringify(`${safeTargetUrl}:${safePortNum}`)}
 session = requests.Session()
 
 # Step 1: Probe target endpoint
@@ -119,11 +130,11 @@ print(f"[*] Headers: {res.headers}")
       await fs.writeFile(path.join(chalDir, 'exploit.py'), webTemplate, 'utf8');
     } else if (cat === 'crypto') {
       const cryptoTemplate = `#!/usr/bin/env python3
-# Cryptographic Solver for ${chal.name}
+# Cryptographic Solver for ${String(chal.name || safeChalDirName).replace(/[\r\n]/g, ' ')}
 import socket
 
-HOST = "${tournamentUrl.replace(/https?:\/\//, '')}"
-PORT = ${chal.port || 20001}
+HOST = ${JSON.stringify(strippedHost)}
+PORT = ${safePortNum}
 
 # Connect to oracle service
 s = socket.socket()
@@ -136,7 +147,7 @@ print(banner.decode())
       await fs.writeFile(path.join(chalDir, 'solve.py'), cryptoTemplate, 'utf8');
     }
 
-    scaffolded.push(chal.id);
+    scaffolded.push(chal.id || safeChalDirName);
   }
 
   logger.info('CTF_CLIENT:INIT', `Initialized workspace at ${absTargetDir} with ${scaffolded.length} challenges.`);
@@ -201,9 +212,9 @@ export async function generateSignedWriteup({
   const absOutputDir = path.resolve(outputDir);
   await fs.mkdir(absOutputDir, { recursive: true });
 
-  const safeChal = challengeId.toLowerCase().replace(/[^a-z0-9_-]/g, '-');
+  const safeChal = sanitizePathComponent(String(challengeId).toLowerCase(), 'challengeId');
   const filename = `writeup-${safeChal}.md`;
-  const filePath = path.join(absOutputDir, filename);
+  const filePath = resolvePathInside(absOutputDir, filename);
 
   const writeupMarkdown = `# 🚩 CTF Solution Writeup: ${challengeName}
 **Challenge ID**: \`${challengeId}\`
@@ -239,8 +250,10 @@ ${exploitScript || '# Working exploit script'}
   if (cfg.gpg?.enabled) {
     try {
       const sigRes = await signFile(filePath, { keyId: cfg.gpg.keyId });
-      signaturePath = sigRes.signaturePath;
-      isSigned = true;
+      if (sigRes?.success) {
+        signaturePath = sigRes.signaturePath;
+        isSigned = true;
+      }
     } catch (err) {
       logger.warn('CTF_CLIENT:WRITEUP:GPG', `Could not sign writeup: ${err.message}`);
     }
@@ -276,9 +289,9 @@ export async function recordSolveSession({
   const absDir = path.resolve(outputDir);
   await fs.mkdir(absDir, { recursive: true });
 
-  const safeChal = challengeId.toLowerCase().replace(/[^a-z0-9_-]/g, '-');
+  const safeChal = sanitizePathComponent(String(challengeId).toLowerCase(), 'challengeId');
   const filename = `session-${safeChal}-${Date.now()}.cast`;
-  const filePath = path.join(absDir, filename);
+  const filePath = resolvePathInside(absDir, filename);
 
   const header = JSON.stringify({
     version: 2,
@@ -398,8 +411,10 @@ export async function sealSolveEvidence({
   if (cfg.gpg?.enabled) {
     try {
       const sigRes = await signFile(manifestFile, { keyId: cfg.gpg.keyId });
-      signaturePath = sigRes.signaturePath;
-      isSigned = true;
+      if (sigRes?.success) {
+        signaturePath = sigRes.signaturePath;
+        isSigned = true;
+      }
     } catch {
       // Ignore if gpg not configured
     }

@@ -168,6 +168,71 @@ func readBootDeviceRoles() map[string]string {
 	return roles
 }
 
+func readLiveDefaultRoutes() ([]LiveDefaultRoute, map[string]bool, bool) {
+	var defaultRoutes []LiveDefaultRoute
+	defaultRouteDevs := make(map[string]bool)
+	routeOut, rErr := exec.Command("ip", "-j", "-4", "route", "show", "default").Output()
+	if rErr != nil {
+		return nil, defaultRouteDevs, false
+	}
+	routeTrimmed := bytes.TrimSpace(routeOut)
+	if len(routeTrimmed) == 0 {
+		return defaultRoutes, defaultRouteDevs, true
+	}
+	if routeTrimmed[0] != '[' {
+		return nil, defaultRouteDevs, false
+	}
+	var rawRoutes []ipRouteShowEntry
+	if err := json.Unmarshal(routeTrimmed, &rawRoutes); err != nil {
+		return nil, defaultRouteDevs, false
+	}
+	for _, r := range rawRoutes {
+		if len(r.Nexthops) > 0 {
+			var hops []LiveRouteNexthop
+			for _, nh := range r.Nexthops {
+				nhDev := strings.TrimSpace(nh.Dev)
+				nhGw := strings.TrimSpace(nh.Gateway)
+				if nhDev == "" || !isValidNetdev(nhDev) {
+					continue
+				}
+				if nhGw != "" && net.ParseIP(nhGw) == nil {
+					continue
+				}
+				hops = append(hops, LiveRouteNexthop{
+					Gateway: nhGw,
+					Device:  nhDev,
+					Weight:  nh.Weight,
+				})
+				defaultRouteDevs[nhDev] = true
+			}
+			if len(hops) > 0 {
+				defaultRoutes = append(defaultRoutes, LiveDefaultRoute{
+					Metric:   r.Metric,
+					Protocol: strings.TrimSpace(r.Protocol),
+					Nexthops: hops,
+				})
+			}
+			continue
+		}
+		dev := strings.TrimSpace(r.Dev)
+		gw := strings.TrimSpace(r.Gateway)
+		if dev == "" || !isValidNetdev(dev) {
+			continue
+		}
+		if gw != "" && net.ParseIP(gw) == nil {
+			continue
+		}
+		defaultRoutes = append(defaultRoutes, LiveDefaultRoute{
+			Gateway:  gw,
+			Device:   dev,
+			Metric:   r.Metric,
+			Protocol: strings.TrimSpace(r.Protocol),
+		})
+		defaultRouteDevs[dev] = true
+	}
+	return defaultRoutes, defaultRouteDevs, true
+}
+
 // readLiveNetState queries `ip -j -4` for live interfaces and default routes.
 // Returns (nil, false) cleanly when `ip -j` prints empty/non-JSON output (such
 // as under minimal test fakes).
@@ -185,60 +250,7 @@ func readLiveNetState() (*LiveNetSnapshot, bool) {
 		return nil, false
 	}
 
-	var defaultRoutes []LiveDefaultRoute
-	defaultRouteDevs := make(map[string]bool)
-	if routeOut, rErr := exec.Command("ip", "-j", "-4", "route", "show", "default").Output(); rErr == nil {
-		routeTrimmed := bytes.TrimSpace(routeOut)
-		if len(routeTrimmed) > 0 && routeTrimmed[0] == '[' {
-			var rawRoutes []ipRouteShowEntry
-			if json.Unmarshal(routeTrimmed, &rawRoutes) == nil {
-				for _, r := range rawRoutes {
-					if len(r.Nexthops) > 0 {
-						var hops []LiveRouteNexthop
-						for _, nh := range r.Nexthops {
-							nhDev := strings.TrimSpace(nh.Dev)
-							nhGw := strings.TrimSpace(nh.Gateway)
-							if nhDev == "" || !isValidNetdev(nhDev) {
-								continue
-							}
-							if nhGw != "" && net.ParseIP(nhGw) == nil {
-								continue
-							}
-							hops = append(hops, LiveRouteNexthop{
-								Gateway: nhGw,
-								Device:  nhDev,
-								Weight:  nh.Weight,
-							})
-							defaultRouteDevs[nhDev] = true
-						}
-						if len(hops) > 0 {
-							defaultRoutes = append(defaultRoutes, LiveDefaultRoute{
-								Metric:   r.Metric,
-								Protocol: strings.TrimSpace(r.Protocol),
-								Nexthops: hops,
-							})
-						}
-						continue
-					}
-					dev := strings.TrimSpace(r.Dev)
-					gw := strings.TrimSpace(r.Gateway)
-					if dev == "" || !isValidNetdev(dev) {
-						continue
-					}
-					if gw != "" && net.ParseIP(gw) == nil {
-						continue
-					}
-					defaultRoutes = append(defaultRoutes, LiveDefaultRoute{
-						Gateway:  gw,
-						Device:   dev,
-						Metric:   r.Metric,
-						Protocol: strings.TrimSpace(r.Protocol),
-					})
-					defaultRouteDevs[dev] = true
-				}
-			}
-		}
-	}
+	defaultRoutes, defaultRouteDevs, _ := readLiveDefaultRoutes()
 
 	devRoles := readBootDeviceRoles()
 	snap := &LiveNetSnapshot{
@@ -337,6 +349,50 @@ func buildDefaultRouteArgs(verb string, r LiveDefaultRoute) []string {
 	return args
 }
 
+var procSysNetIPv4ConfRoot = "/proc/sys/net/ipv4/conf"
+
+func enablePromoteSecondaries(dev string) {
+	if dev == "" || dev == "lo" || !isValidNetdev(dev) || isDynamicVirtualIface(dev) || isExternallyManagedHostIface(dev) {
+		return
+	}
+	sysPath := filepath.Join(procSysNetIPv4ConfRoot, dev, "promote_secondaries")
+	_ = os.WriteFile(sysPath, []byte("1\n"), 0644)
+}
+
+func snapshotOwnsDefaultRoute(routes []LiveDefaultRoute, dev string) bool {
+	if dev == "" {
+		return false
+	}
+	for _, r := range routes {
+		if r.Device == dev {
+			return true
+		}
+		for _, nh := range r.Nexthops {
+			if nh.Device == dev {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func inferRollbackDhcpPolicy(snap LiveNetIfaceSnapshot, restoredRoles map[string]string, hasWan bool, snapDefaultRoutes []LiveDefaultRoute) (string, bool) {
+	role := restoredRoles[snap.Device]
+	if role == "" {
+		role = snap.Role
+	}
+	ownsDefault := snapshotOwnsDefaultRoute(snapDefaultRoutes, snap.Device)
+	if role == "" {
+		if ownsDefault {
+			role = "wan"
+		} else {
+			role = "lan"
+		}
+	}
+	allowDefaultRoute := role == "wan" || role == "wan-delegated" || ownsDefault || (!hasWan && len(snapDefaultRoutes) == 0)
+	return role, allowDefaultRoute
+}
+
 func restoreLiveNetSnapshot(bundleDir string) bool {
 	if currentRuntimeMode == engine.ModeDev {
 		return false
@@ -355,16 +411,72 @@ func restoreLiveNetSnapshot(bundleDir string) bool {
 	}
 
 	restoredRoles := readBootDeviceRoles()
+	hasWan := false
+	for _, role := range restoredRoles {
+		if role == "wan" || role == "wan-delegated" {
+			hasWan = true
+			break
+		}
+	}
+	if !hasWan {
+		for _, ifc := range snapshot.Interfaces {
+			if ifc.Role == "wan" || ifc.Role == "wan-delegated" {
+				hasWan = true
+				break
+			}
+		}
+	}
+
 	snapByDev := make(map[string]LiveNetIfaceSnapshot, len(snapshot.Interfaces))
 	for _, ifc := range snapshot.Interfaces {
 		snapByDev[ifc.Device] = ifc
+		enablePromoteSecondaries(ifc.Device)
 	}
 	curByDev := make(map[string]LiveNetIfaceSnapshot, len(current.Interfaces))
 	for _, ifc := range current.Interfaces {
 		curByDev[ifc.Device] = ifc
+		enablePromoteSecondaries(ifc.Device)
 	}
 
-	// Phase A: remove any non-secondary IPv4 addresses added after the snapshot
+	// Phase B FIRST: restore pre-apply link UP state, missing static LKG IPs,
+	// and DHCP clients before removing candidate IPs. Together with
+	// promote_secondaries=1 this avoids transiently losing connectivity or
+	// dropping interface routes while removing candidate addresses.
+	for _, snap := range snapshot.Interfaces {
+		if snap.IsUp {
+			_ = exec.Command("ip", "link", "set", snap.Device, "up").Run()
+		}
+		cur := curByDev[snap.Device]
+		curAddrs := make(map[string]bool, len(cur.Addresses))
+		for _, a := range cur.Addresses {
+			curAddrs[a.CIDR] = true
+		}
+		missingDynamic := false
+		for _, addr := range snap.Addresses {
+			if addr.Secondary {
+				continue
+			}
+			if addr.Dynamic {
+				if !curAddrs[addr.CIDR] {
+					missingDynamic = true
+				}
+				continue
+			}
+			if !curAddrs[addr.CIDR] {
+				if out, err := exec.Command("ip", "addr", "replace", addr.CIDR, "dev", snap.Device).CombinedOutput(); err != nil {
+					log.Printf("[Agent] Rollback: failed to restore static address %s on %s: %v (%s)", addr.CIDR, snap.Device, err, strings.TrimSpace(string(out)))
+				}
+			}
+		}
+		if snap.DhcpRunning {
+			role, allowDefaultRoute := inferRollbackDhcpPolicy(snap, restoredRoles, hasWan, snapshot.DefaultRoutes)
+			if !dhcpClientRunning(snap.Device) || missingDynamic || dhcpClientNeedsRebind(snap.Device, role, allowDefaultRoute) {
+				rebindOrStartDhcpClient(snap.Device, role, allowDefaultRoute)
+			}
+		}
+	}
+
+	// Phase A SECOND: remove any non-secondary IPv4 addresses added after the snapshot
 	// and bring down any device that was down/unassigned before the apply.
 	// Never touch dynamic virtual/overlay/container interfaces (Tailscale, WG, K3s veth/CNI, VM taps).
 	for _, cur := range current.Interfaces {
@@ -401,56 +513,23 @@ func restoreLiveNetSnapshot(bundleDir string) bool {
 		}
 	}
 
-	// Phase B: restore pre-apply link UP state, static IPs, and DHCP clients.
-	for _, snap := range snapshot.Interfaces {
-		if snap.IsUp {
-			_ = exec.Command("ip", "link", "set", snap.Device, "up").Run()
-		}
-		cur := curByDev[snap.Device]
-		curAddrs := make(map[string]bool, len(cur.Addresses))
-		for _, a := range cur.Addresses {
-			curAddrs[a.CIDR] = true
-		}
-		missingDynamic := false
-		for _, addr := range snap.Addresses {
-			if addr.Secondary {
-				continue
-			}
-			if addr.Dynamic {
-				if !curAddrs[addr.CIDR] {
-					missingDynamic = true
-				}
-				continue
-			}
-			if !curAddrs[addr.CIDR] {
-				if out, err := exec.Command("ip", "addr", "replace", addr.CIDR, "dev", snap.Device).CombinedOutput(); err != nil {
-					log.Printf("[Agent] Rollback: failed to restore static address %s on %s: %v (%s)", addr.CIDR, snap.Device, err, strings.TrimSpace(string(out)))
-				}
-			}
-		}
-		if snap.DhcpRunning && (!dhcpClientRunning(snap.Device) || missingDynamic) {
-			role := restoredRoles[snap.Device]
-			if role == "" {
-				role = snap.Role
-			}
-			if role == "" {
-				role = "lan"
-			}
-			rebindOrStartDhcpClient(snap.Device, role)
-		}
+	// Phase C: re-read live default routes after Phase B/A address and DHCP
+	// transitions, then reconcile toward pre-apply default routes.
+	liveDefaultRoutes, _, routeReadOK := readLiveDefaultRoutes()
+	if !routeReadOK {
+		liveDefaultRoutes = current.DefaultRoutes
 	}
 
-	// Phase C: delete newly added default routes and restore pre-apply default routes.
 	snapRoutes := make(map[string]bool, len(snapshot.DefaultRoutes))
 	for _, r := range snapshot.DefaultRoutes {
 		snapRoutes[defaultRouteKey(r)] = true
 	}
-	curRoutes := make(map[string]bool, len(current.DefaultRoutes))
-	for _, r := range current.DefaultRoutes {
+	curRoutes := make(map[string]bool, len(liveDefaultRoutes))
+	for _, r := range liveDefaultRoutes {
 		curRoutes[defaultRouteKey(r)] = true
 	}
 
-	for _, curRoute := range current.DefaultRoutes {
+	for _, curRoute := range liveDefaultRoutes {
 		if snapRoutes[defaultRouteKey(curRoute)] {
 			continue
 		}
@@ -587,6 +666,120 @@ func recordPendingReloadServices(bundleDir string, services []string) {
 	_ = saveExternalBundleMeta(bundleDir, meta)
 }
 
+func unitForAddedConfigPath(cleanPath string) string {
+	cleanPath = filepath.Clean(cleanPath)
+	switch {
+	case strings.HasPrefix(cleanPath, "/etc/wireguard/") && strings.HasSuffix(cleanPath, ".conf"):
+		iface := strings.TrimSuffix(filepath.Base(cleanPath), ".conf")
+		if isValidNetdev(iface) {
+			return "wg-quick@" + iface
+		}
+	case strings.HasPrefix(cleanPath, "/etc/openvpn/server/") && strings.HasSuffix(cleanPath, ".conf"):
+		name := strings.TrimSuffix(filepath.Base(cleanPath), ".conf")
+		if name != "" && !strings.ContainsAny(name, "/ \t\r\n") && !strings.Contains(name, "..") {
+			return "openvpn-server@" + name
+		}
+	case cleanPath == "/etc/rosenpass/config.toml":
+		return "rosenpass"
+	case cleanPath == "/etc/radvd.conf":
+		return "radvd"
+	}
+	return ""
+}
+
+func openFileNoSymlinkParents(cleanPath string, flags int, fileMode, dirMode os.FileMode) (*os.File, error) {
+	if !filepath.IsAbs(cleanPath) {
+		return nil, fmt.Errorf("path must be absolute: %s", cleanPath)
+	}
+	cleanPath = filepath.Clean(cleanPath)
+	parent := filepath.Dir(cleanPath)
+	base := filepath.Base(cleanPath)
+	if base == "." || base == "/" || base == ".." {
+		return nil, fmt.Errorf("invalid target file path: %s", cleanPath)
+	}
+
+	dirFD, err := syscall.Open("/", syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if dirFD >= 0 {
+			_ = syscall.Close(dirFD)
+		}
+	}()
+
+	relParent := strings.TrimPrefix(parent, "/")
+	if relParent != "" {
+		for _, comp := range strings.Split(relParent, "/") {
+			if comp == "" || comp == "." {
+				continue
+			}
+			if comp == ".." {
+				return nil, fmt.Errorf("path traversal component in %s", cleanPath)
+			}
+			nextFD, err := syscall.Openat(dirFD, comp, syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
+			if err != nil {
+				if os.IsNotExist(err) && dirMode != 0 {
+					if mkErr := syscall.Mkdirat(dirFD, comp, uint32(dirMode.Perm())); mkErr != nil && !os.IsExist(mkErr) {
+						return nil, mkErr
+					}
+					nextFD, err = syscall.Openat(dirFD, comp, syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
+				}
+				if err != nil {
+					return nil, fmt.Errorf("unsafe or missing directory component %q in %s: %w", comp, cleanPath, err)
+				}
+			}
+			_ = syscall.Close(dirFD)
+			dirFD = nextFD
+		}
+	}
+
+	fd, err := syscall.Openat(dirFD, base, flags|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, uint32(fileMode.Perm()))
+	if err != nil {
+		return nil, err
+	}
+	return os.NewFile(uintptr(fd), cleanPath), nil
+}
+
+func verifyParentDirsNoSymlinks(cleanPath string) error {
+	if !filepath.IsAbs(cleanPath) {
+		return fmt.Errorf("path must be absolute: %s", cleanPath)
+	}
+	cleanPath = filepath.Clean(cleanPath)
+	parent := filepath.Dir(cleanPath)
+	dirFD, err := syscall.Open("/", syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_CLOEXEC, 0)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if dirFD >= 0 {
+			_ = syscall.Close(dirFD)
+		}
+	}()
+
+	relParent := strings.TrimPrefix(parent, "/")
+	if relParent != "" {
+		for _, comp := range strings.Split(relParent, "/") {
+			if comp == "" || comp == "." {
+				continue
+			}
+			if comp == ".." {
+				return fmt.Errorf("path traversal component in %s", cleanPath)
+			}
+			nextFD, err := syscall.Openat(dirFD, comp, syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
+			if err != nil {
+				if os.IsNotExist(err) {
+					return nil
+				}
+				return fmt.Errorf("unsafe directory component %q in %s: %w", comp, cleanPath, err)
+			}
+			_ = syscall.Close(dirFD)
+			dirFD = nextFD
+		}
+	}
+	return nil
+}
+
 func restoreExternalBundleFiles(bundleDir string) ([]string, bool) {
 	metaPath := externalBundleMetaPath(bundleDir)
 	data, err := os.ReadFile(metaPath)
@@ -599,11 +792,20 @@ func restoreExternalBundleFiles(bundleDir string) ([]string, bool) {
 	}
 
 	extDir := externalBundleDir(bundleDir)
+	stoppedUnits := make(map[string]bool)
 	for _, entry := range meta.Files {
 		if fi, lerr := os.Lstat(entry.Path); lerr == nil && (fi.Mode()&os.ModeSymlink) != 0 {
 			continue
 		}
 		if !entry.Existed {
+			if unit := unitForAddedConfigPath(entry.Path); unit != "" {
+				if currentRuntimeMode != engine.ModeCollector {
+					if out, sErr := stopSystemService(unit); sErr != nil {
+						log.Printf("[Agent] Rollback: failed stopping added unit %s before removing %s: %v (%s)", unit, entry.Path, sErr, strings.TrimSpace(string(out)))
+					}
+				}
+				stoppedUnits[unit] = true
+			}
 			if err := os.Remove(entry.Path); err != nil && !os.IsNotExist(err) {
 				log.Printf("[Agent] Rollback: failed to remove added file %s: %v", entry.Path, err)
 			}
@@ -617,14 +819,13 @@ func restoreExternalBundleFiles(bundleDir string) ([]string, bool) {
 			log.Printf("[Agent] Rollback: failed to read backup for %s: %v", entry.Path, rErr)
 			continue
 		}
-		mode := os.FileMode(entry.Mode).Perm()
+		mode := os.FileMode(entry.Mode).Perm() &^ 0o133
 		if mode == 0 {
 			mode = 0644
 		}
-		_ = os.MkdirAll(filepath.Dir(entry.Path), 0755)
-		f, oErr := os.OpenFile(entry.Path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, mode)
+		f, oErr := openFileNoSymlinkParents(entry.Path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, mode, 0755)
 		if oErr != nil {
-			log.Printf("[Agent] Rollback: failed to restore %s: %v", entry.Path, oErr)
+			log.Printf("[Agent] Rollback: failed to restore %s safely: %v", entry.Path, oErr)
 			continue
 		}
 		if _, wErr := f.Write(backupData); wErr != nil {
@@ -636,7 +837,14 @@ func restoreExternalBundleFiles(bundleDir string) ([]string, bool) {
 		_ = f.Close()
 	}
 
-	return meta.ReloadServices, true
+	var remainingReloads []string
+	for _, svc := range meta.ReloadServices {
+		if stoppedUnits[svc] {
+			continue
+		}
+		remainingReloads = append(remainingReloads, svc)
+	}
+	return remainingReloads, true
 }
 
 func clearPendingRollbackSnapshots(bundleDir string) {

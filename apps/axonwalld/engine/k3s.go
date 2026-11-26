@@ -2,7 +2,9 @@ package engine
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -259,24 +261,79 @@ func (m *K3sManager) GetClusterNodeToken() (string, error) {
 	return "", fmt.Errorf("k3s node-token not yet generated")
 }
 
+var (
+	k3sPeerHTTPMu    sync.Mutex
+	k3sPeerHTTPTr    *http.Transport
+	k3sPeerHTTPSCli  *http.Client
+	k3sPeerHTTPKey   string
+	k3sPeerPlainCli  = &http.Client{Timeout: 8 * time.Second}
+)
+
+func anyHAPKIFileExists() bool {
+	for _, p := range []string{HAPKICACertPath, HAPKINodeCertPath, HAPKINodeKeyPath} {
+		if _, err := os.Stat(p); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+func haPKIStatKey() string {
+	var b strings.Builder
+	for _, p := range []string{HAPKICACertPath, HAPKINodeCertPath, HAPKINodeKeyPath} {
+		if st, err := os.Stat(p); err == nil {
+			b.WriteString(p)
+			b.WriteByte(':')
+			b.WriteString(strconv.FormatInt(st.ModTime().UnixNano(), 10))
+			b.WriteByte(';')
+		}
+	}
+	return b.String()
+}
+
+func getCachedK3sPeerHTTPSClient(tlsCfg *tls.Config) *http.Client {
+	key := haPKIStatKey()
+	k3sPeerHTTPMu.Lock()
+	if k3sPeerHTTPSCli != nil && k3sPeerHTTPKey == key && key != "" {
+		cli := k3sPeerHTTPSCli
+		k3sPeerHTTPMu.Unlock()
+		return cli
+	}
+	oldTr := k3sPeerHTTPTr
+	tr := &http.Transport{
+		TLSClientConfig: tlsCfg,
+		MaxIdleConns:    4,
+		IdleConnTimeout: 60 * time.Second,
+	}
+	cli := &http.Client{
+		Timeout:   8 * time.Second,
+		Transport: tr,
+	}
+	k3sPeerHTTPTr = tr
+	k3sPeerHTTPSCli = cli
+	k3sPeerHTTPKey = key
+	k3sPeerHTTPMu.Unlock()
+	if oldTr != nil {
+		oldTr.CloseIdleConnections()
+	}
+	return cli
+}
+
 // FetchPeerClusterToken contacts the primary HA node's sync endpoint to retrieve the K3s join token.
 func FetchPeerClusterToken(peerIp string, syncPort int, authToken string) (string, error) {
 	cleanPeer := strings.TrimSpace(peerIp)
 	if parsed := net.ParseIP(cleanPeer); parsed == nil || parsed.IsLoopback() || parsed.IsLinkLocalUnicast() || parsed.IsLinkLocalMulticast() || parsed.IsUnspecified() {
 		return "", fmt.Errorf("invalid or disallowed HA peer IP: %s", peerIp)
 	}
-	if HasHAPKI() {
-		tlsCfg, err := LoadHAPKITLSConfig()
-		if err != nil {
-			return "", fmt.Errorf("failed to load HA PKI TLS config for K3s token fetch: %w", err)
-		}
-		client := &http.Client{
-			Timeout:   8 * time.Second,
-			Transport: &http.Transport{TLSClientConfig: tlsCfg},
-		}
+	tlsCfg, tlsErr := LoadHAPKITLSConfig()
+	if tlsErr == nil {
+		client := getCachedK3sPeerHTTPSClient(tlsCfg)
 		return FetchPeerClusterTokenWithClient(cleanPeer, syncPort, authToken, client, "https")
 	}
-	return FetchPeerClusterTokenWithClient(cleanPeer, syncPort, authToken, &http.Client{Timeout: 8 * time.Second}, "http")
+	if anyHAPKIFileExists() || !errors.Is(tlsErr, os.ErrNotExist) {
+		return "", fmt.Errorf("failed to load HA PKI TLS config for K3s token fetch (refusing plaintext fallback): %w", tlsErr)
+	}
+	return FetchPeerClusterTokenWithClient(cleanPeer, syncPort, authToken, k3sPeerPlainCli, "http")
 }
 
 // FetchPeerClusterTokenWithClient is FetchPeerClusterToken over a
@@ -335,7 +392,7 @@ func (m *K3sManager) ApplyConfig(rawJSON []byte) error {
 		bundle.AuthToken = bundle.HaSharedSecret
 	}
 	if bundle.SyncPort <= 0 {
-		bundle.SyncPort = 8443
+		bundle.SyncPort = 9876
 	}
 
 	// Validate free-text config before it can reach privileged paths
@@ -366,10 +423,6 @@ func (m *K3sManager) ApplyConfig(rawJSON []byte) error {
 		}
 	}
 
-	m.mu.Lock()
-	m.cfg = bundle
-	m.mu.Unlock()
-
 	if !bundle.Enabled {
 		slog.Info("K3s plugin is disabled; stopping k3s service")
 		_ = removeFileIfExists(filepath.Join(k3sEtcDir, "config.yaml"))
@@ -381,6 +434,7 @@ func (m *K3sManager) ApplyConfig(rawJSON []byte) error {
 		// reporting ClusterJoined. The latch used to survive the
 		// disable path untouched.
 		m.mu.Lock()
+		m.cfg = bundle
 		m.clearHaJoinedLocked()
 		m.lastMessage = "K3s plugin is disabled"
 		m.mu.Unlock()
@@ -505,16 +559,11 @@ func (m *K3sManager) ApplyConfig(rawJSON []byte) error {
 		return fmt.Errorf("failed to reload-or-restart %s: %v (%s)", k3sServiceUnit, err, strings.TrimSpace(string(out)))
 	}
 
-	// A-H2 (round 3): only NOW — after the restart with the join
-	// token in place succeeded — is the node joined. A fresh fetch
-	// this apply (tokenFetched) or a cached token that survived a
-	// successful restart both qualify; a restart that never ran (or
-	// failed above) never latches.
+	m.mu.Lock()
+	m.cfg = bundle
 	if (bundle.Role == "backup" || bundle.Role == "secondary") && bundle.AutoJoinHaPeer {
 		if tok, rErr := os.ReadFile(filepath.Join(k3sStateDir, "k3s-join.token")); rErr == nil && strings.TrimSpace(string(tok)) != "" {
-			m.mu.Lock()
 			m.recordHaJoinedLocked(bundle.PeerIp)
-			m.mu.Unlock()
 		} else if tokenFetched {
 			// Defensive: the token was fetched but its file vanished
 			// between fetch and restart; do not latch on a token
@@ -522,6 +571,7 @@ func (m *K3sManager) ApplyConfig(rawJSON []byte) error {
 			slog.Warn("K3s join token fetched this apply is no longer on disk after restart; not latching as joined", "peerIp", bundle.PeerIp)
 		}
 	}
+	m.mu.Unlock()
 
 	// Ensure /etc/rancher/k3s/k3s.yaml is accessible by admin operators in group axonwall-api
 	ensureKubeconfigPermissions()

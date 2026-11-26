@@ -7,12 +7,32 @@ import { mintSupabaseToken } from '@axonwall/lib/ldap';
 
 export async function POST(req: Request) {
   try {
-    const body = await req.json();
-    const { username, password, totpCode } = body;
-
-    if (!username || !password) {
+    let body: unknown;
+    try {
+      body = await req.json();
+    } catch {
       return NextResponse.json(
-        { success: false, error: 'Username and password are required' },
+        { success: false, error: 'Invalid JSON request body' },
+        { status: 400 }
+      );
+    }
+    if (!body || typeof body !== 'object' || Array.isArray(body)) {
+      return NextResponse.json(
+        { success: false, error: 'Invalid JSON request body' },
+        { status: 400 }
+      );
+    }
+    const { username, password, totpCode } = body as Record<string, unknown>;
+
+    if (
+      typeof username !== 'string' ||
+      !username ||
+      typeof password !== 'string' ||
+      !password ||
+      (totpCode !== undefined && typeof totpCode !== 'string')
+    ) {
+      return NextResponse.json(
+        { success: false, error: 'Username and password must be non-empty strings' },
         { status: 400 }
       );
     }

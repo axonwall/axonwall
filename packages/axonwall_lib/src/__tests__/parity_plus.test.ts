@@ -359,8 +359,9 @@ describe('Axonwall Parity-Plus Architecture Suite (@axonwall/lib)', () => {
     const haproxyFile = bundle.files.find((f) => f.path === '/etc/haproxy/haproxy.cfg');
     expect(haproxyFile?.content).toContain('backend k3s_grafana');
     expect(haproxyFile?.content).toContain('frontend fe_converged_tls');
-    expect(haproxyFile?.content).toContain('acl host_grafana_corp_internal hdr_dom(host) -i grafana.corp.internal');
-    expect(haproxyFile?.content).toContain('use_backend k3s_grafana if host_grafana_corp_internal');
+    expect(haproxyFile?.content).toContain('acl host_rule_0 req.hdr(host),field(1,:) -i grafana.corp.internal');
+    expect(haproxyFile?.content).toContain('use_backend k3s_grafana if host_rule_0');
+    expect(haproxyFile?.content).toContain('timeout tunnel 3600s');
     const frrFile = bundle.files.find((f) => f.path === '/etc/frr/frr.conf');
     expect(frrFile?.content).toContain('network 10.10.0.240/29');
     expect(frrFile?.content).toContain('neighbor 127.0.0.1 remote-as 65010');

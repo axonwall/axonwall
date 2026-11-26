@@ -64,6 +64,9 @@ san_profile() {
     _hn="$(hostname 2>/dev/null || echo axonwall)"
     _san="DNS:${_hn},DNS:axonwall.local,DNS:localhost,IP:127.0.0.1"
     _ips="$(hostname -I 2>/dev/null || true)"
+    if [ -z "$_ips" ] && command -v ip >/dev/null 2>&1; then
+        _ips="$(ip -4 -o addr show scope global 2>/dev/null | awk '{split($4,a,"/"); print a[1]}' | tr '\n' ' ')"
+    fi
     if [ -n "$_ips" ]; then
         for _ip in $_ips; do _san="${_san},IP:${_ip}"; done
     else

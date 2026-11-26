@@ -300,6 +300,11 @@ function EtckeeperPageContent() {
           : res.message,
       });
       await loadData();
+    } catch (err: any) {
+      setActionMessage({
+        type: 'error',
+        text: err?.message || `Failed to ignore "${filePath}" in etckeeper.`,
+      });
     } finally {
       setIsSavingConfig(false);
     }

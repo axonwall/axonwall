@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSession } from '@/server/auth';
-import { isPasswordChangeEnforced } from '@/server/auth-guard';
+import { assertActionPermitted } from '@/server/auth-guard';
 import { callAgentApiDetailed } from '@/server/agent-client';
 import { getActivePendingInviteWindow } from '@/server/headscale-invites';
 import { resolveHeadscaleNetworkInfo } from '@/server/headscale-network';
@@ -65,12 +65,11 @@ function buildFallbackStatus(
 
 export async function GET(req: NextRequest) {
   const session = await getSession();
-  const pwdEnforced = isPasswordChangeEnforced(session);
-  if (!session || pwdEnforced || !session.roles.includes('admin')) {
-    return NextResponse.json(
-      { status: 'error', error: pwdEnforced ? 'Password change required' : 'Unauthorized' },
-      { status: pwdEnforced ? 403 : 401 }
-    );
+  try {
+    assertActionPermitted(session, 'admin');
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : 'Unauthorized';
+    return NextResponse.json({ status: 'error', error: msg }, { status: msg === 'Unauthorized' ? 401 : 403 });
   }
 
   const network = await resolveHeadscaleNetworkInfo(req);
@@ -98,12 +97,11 @@ export async function GET(req: NextRequest) {
 
 export async function POST(req: NextRequest) {
   const session = await getSession();
-  const pwdEnforced = isPasswordChangeEnforced(session);
-  if (!session || pwdEnforced || !session.roles.includes('admin')) {
-    return NextResponse.json(
-      { status: 'error', error: pwdEnforced ? 'Password change required' : 'Unauthorized' },
-      { status: pwdEnforced ? 403 : 401 }
-    );
+  try {
+    assertActionPermitted(session, 'admin');
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : 'Unauthorized';
+    return NextResponse.json({ status: 'error', error: msg }, { status: msg === 'Unauthorized' ? 401 : 403 });
   }
 
   const body = await req.json().catch(() => ({}));

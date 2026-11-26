@@ -130,6 +130,7 @@ type LibreNMSDevice struct {
 type LibreNMSPort struct {
 	PortID        int     `json:"portId"`
 	DeviceID      int     `json:"deviceId"`
+	IfIndex       int     `json:"ifIndex,omitempty"`
 	DeviceHost    string  `json:"deviceHost,omitempty"`
 	IfName        string  `json:"ifName"`
 	IfDescr       string  `json:"ifDescr,omitempty"`
@@ -430,6 +431,20 @@ func (m *LibreNMSManager) ApplyConfig(rawJSON []byte) error {
 	if bundle.Mode == "" {
 		bundle.Mode = "k3s"
 	}
+	if strings.TrimSpace(bundle.EndpointURL) != "" {
+		validURL, err := validatePluginHTTPURL(bundle.EndpointURL, "librenms")
+		if err != nil {
+			return fmt.Errorf("librenms bundle rejected: %w", err)
+		}
+		bundle.EndpointURL = validURL
+	}
+	if strings.TrimSpace(bundle.InternalServiceURL) != "" {
+		validInternal, err := validatePluginHTTPURL(bundle.InternalServiceURL, "librenms internal")
+		if err != nil {
+			return fmt.Errorf("librenms bundle rejected: %w", err)
+		}
+		bundle.InternalServiceURL = validInternal
+	}
 
 	sanitizedBundle := bundle
 	sanitizedBundle.APIToken = ""
@@ -559,7 +574,11 @@ func (c *libreNmsAPIClient) doJSON(ctx context.Context, method, path string, pay
 		_ = json.Unmarshal(respBytes, &decoded)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return resp.StatusCode, decoded, fmt.Errorf("%s %s returned HTTP %d: %s", method, path, resp.StatusCode, strings.TrimSpace(string(respBytes)))
+		errSnippet := sanitizeHTTPErrorBody(respBytes, 256)
+		if errSnippet == "" {
+			return resp.StatusCode, decoded, fmt.Errorf("%s %s returned HTTP %d", method, path, resp.StatusCode)
+		}
+		return resp.StatusCode, decoded, fmt.Errorf("%s %s returned HTTP %d: %s", method, path, resp.StatusCode, errSnippet)
 	}
 	return resp.StatusCode, decoded, nil
 }
@@ -622,21 +641,24 @@ func (m *LibreNMSManager) resolveClient(ctx context.Context, endpointOverride st
 		return nil, bundle, nil, secErr
 	}
 
+	clusterIP := ""
+	if bundle.Mode != "external" && bundle.Enabled {
+		_, clusterIP = inspectK3sAppPodsAndService(ctx, m.kubectlRunner, bundle.Namespace, "librenms")
+	}
+	autoEndpoint := m.resolveReachableBaseURL(bundle, clusterIP)
 	endpoint := strings.TrimSpace(endpointOverride)
 	if endpoint == "" {
-		clusterIP := ""
-		if bundle.Mode != "external" && bundle.Enabled {
-			_, clusterIP = inspectK3sAppPodsAndService(ctx, m.kubectlRunner, bundle.Namespace, "librenms")
-		}
-		endpoint = m.resolveReachableBaseURL(bundle, clusterIP)
+		endpoint = autoEndpoint
 	}
 	validEndpoint, urlErr := validatePluginHTTPURL(endpoint, "librenms")
 	if urlErr != nil {
 		return nil, bundle, sec, urlErr
 	}
+	configuredBases := []string{bundle.EndpointURL, bundle.InternalServiceURL, autoEndpoint}
+	tok := tokenIfSameOrigin(endpointOverride, configuredBases, sec.APIToken)
 	return &libreNmsAPIClient{
 		baseURL:    validEndpoint,
-		token:      sec.APIToken,
+		token:      tok,
 		httpClient: m.httpClient,
 	}, bundle, sec, nil
 }
@@ -993,7 +1015,7 @@ func (m *LibreNMSManager) GetTopologySnapshot(ctx context.Context, endpointOverr
 
 	// 2. Ports with rate, error counters, VLAN, MTU, MAC
 	portByID := map[int]LibreNMSPort{}
-	portCols := "port_id,device_id,ifName,ifDescr,ifAlias,ifOperStatus,ifAdminStatus,ifSpeed,ifInOctets_rate,ifOutOctets_rate,ifInErrors_delta,ifOutErrors_delta,ifVlan,ifMtu,ifPhysAddress,ifType"
+	portCols := "port_id,device_id,ifIndex,ifName,ifDescr,ifAlias,ifOperStatus,ifAdminStatus,ifSpeed,ifInOctets_rate,ifOutOctets_rate,ifInErrors_delta,ifOutErrors_delta,ifVlan,ifMtu,ifPhysAddress,ifType"
 	if _, pDoc, pErr := client.doJSON(reqCtx, http.MethodGet, "/api/v0/ports?columns="+portCols, nil); pErr == nil {
 		if pList, ok := pDoc["ports"].([]any); ok {
 			for _, item := range pList {
@@ -1003,6 +1025,7 @@ func (m *LibreNMSManager) GetTopologySnapshot(ctx context.Context, endpointOverr
 				}
 				pid := asInt(p["port_id"])
 				did := asInt(p["device_id"])
+				ifIdx := asInt(p["ifIndex"])
 				ifName := strings.TrimSpace(asStr(p["ifName"]))
 				if ifName == "" {
 					ifName = strings.TrimSpace(asStr(p["ifDescr"]))
@@ -1010,6 +1033,7 @@ func (m *LibreNMSManager) GetTopologySnapshot(ctx context.Context, endpointOverr
 				port := LibreNMSPort{
 					PortID:        pid,
 					DeviceID:      did,
+					IfIndex:       ifIdx,
 					DeviceHost:    devHostByID[did],
 					IfName:        ifName,
 					IfDescr:       strings.TrimSpace(asStr(p["ifDescr"])),

@@ -1,19 +1,17 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSession } from '@/server/auth';
-import { isPasswordChangeEnforced } from '@/server/auth-guard';
+import { assertActionPermitted, assertInteractiveSession } from '@/server/auth-guard';
 import { exportCloudInitConfigAction } from '@/server/agent';
 import { buildNoCloudIso, type CloudInitExportOptions } from '@axonwall/lib/cloudinit';
 
 export async function POST(request: NextRequest) {
   const session = await getSession();
-  const pwdEnforced = isPasswordChangeEnforced(session);
-  if (!session || pwdEnforced || !session.roles.includes('admin')) {
-    return new NextResponse(
-      pwdEnforced
-        ? 'Forbidden: Password change required'
-        : 'Unauthorized: Admin access required',
-      { status: pwdEnforced ? 403 : 401 }
-    );
+  try {
+    assertInteractiveSession(session);
+    assertActionPermitted(session, 'admin');
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : 'Unauthorized';
+    return new NextResponse(msg, { status: msg === 'Unauthorized' ? 401 : 403 });
   }
 
   let body: any = {};

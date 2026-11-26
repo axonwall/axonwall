@@ -612,7 +612,6 @@ for f in /var/lib/axonwall/state.json /var/lib/axonwall/slot_versions.json /var/
     chmod 0660 "$f" 2>/dev/null || true
   fi
 done
-chmod 1775 /var/lib/axonwall 2>/dev/null || true
 chmod 0755 /var/lib/axonwall/home 2>/dev/null || true
 chown root:root /var/lib/axonwall/home 2>/dev/null || true
 chown -R root:root /var/lib/axonwall/secrets 2>/dev/null || true
@@ -736,9 +735,11 @@ if [[ ! -s /etc/axonwall/axonwall.env ]]; then
   echo "[Axonwall Firstboot] Generating unique appliance security tokens and credentials..."
   JWT_SECRET=$(openssl rand -hex 32)
   
+  INSTALL_USER=""
   INSTALL_PASS=""
   if [[ -f /etc/axonwall/admin.env ]]; then
-    INSTALL_PASS=$(grep '^LOCAL_ADMIN_PASSWORD=' /etc/axonwall/admin.env | cut -d= -f2- || true)
+    INSTALL_USER=$(grep '^LOCAL_ADMIN_USER=' /etc/axonwall/admin.env | cut -d= -f2- | head -n1 || true)
+    INSTALL_PASS=$(grep '^LOCAL_ADMIN_PASSWORD=' /etc/axonwall/admin.env | cut -d= -f2- | head -n1 || true)
   fi
   if [[ -z "$INSTALL_PASS" && -f /etc/axonwall/initial-admin-password ]]; then
     INSTALL_PASS=$(head -n1 /etc/axonwall/initial-admin-password 2>/dev/null | tr -d '\r\n' || true)
@@ -746,11 +747,12 @@ if [[ ! -s /etc/axonwall/axonwall.env ]]; then
   if [[ -z "$INSTALL_PASS" ]]; then
     INSTALL_PASS="axonwall"
   fi
+  ADMIN_USER="${INSTALL_USER:-${LOCAL_ADMIN_USER:-admin}}"
   ADMIN_PASS="${INSTALL_PASS:-${LOCAL_ADMIN_PASSWORD:-axonwall}}"
 
   cat << ENV_EOF > /etc/axonwall/axonwall.env
 JWT_SECRET=${JWT_SECRET}
-LOCAL_ADMIN_USER=admin
+LOCAL_ADMIN_USER=${ADMIN_USER}
 LOCAL_ADMIN_PASSWORD=${ADMIN_PASS}
 AGENT_SOCKET_PATH=/run/axonwall/agent.sock
 AGENT_API_SOCKET=/run/axonwall/agent-api.sock

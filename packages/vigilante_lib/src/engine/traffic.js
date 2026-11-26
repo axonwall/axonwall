@@ -5,20 +5,34 @@ import path from 'node:path';
 import {
   getVigilantePcapDir,
   ensureVigilanteConfig,
-  getHostEvidenceDir
+  getHostEvidenceDir,
+  assertDnsLabel
 } from './config.js';
+import { getClusterContextArgs, getKubeExecutionEnv } from './k8s.js';
 import { autoSignIfConfigured } from './gpg.js';
 import { saveEvidenceFile } from './evidence.js';
 import { logger } from '../utils/logger.js';
 
+const SUSPICIOUS_ZEEK_STATES = new Set(['S0', 'REJ', 'RSTO', 'RSTR']);
+const SUSPICIOUS_ZEEK_PORTS = new Set([21, 23, 445, 3389, 4444, 5555, 6667, 1337, 31337]);
+
+function isSuspiciousZeekConnection(connState, destPort) {
+  const port = Number(destPort);
+  return SUSPICIOUS_ZEEK_STATES.has(connState) || (Number.isInteger(port) && SUSPICIOUS_ZEEK_PORTS.has(port));
+}
+
 /**
- * Parse Suricata eve.json output (NDJSON string or file path)
- * @param {string} contentOrPath - Path to eve.json or raw string content
+ * Parse Suricata eve.json output (NDJSON string, or file path when options.fromFile === true)
+ * @param {string} contentOrPath - Raw eve.json NDJSON string (or file path if options.fromFile === true)
+ * @param {Object} [options={}]
  * @returns {Object} Parsed Suricata events and statistics
  */
-export function parseSuricataEve(contentOrPath) {
+export function parseSuricataEve(contentOrPath, options = {}) {
   let content = contentOrPath;
-  if (typeof contentOrPath === 'string' && fsSync.existsSync(contentOrPath)) {
+  if (options.fromFile === true && typeof contentOrPath === 'string') {
+    if (!fsSync.existsSync(contentOrPath)) {
+      return { totalEvents: 0, alerts: [], statistics: {} };
+    }
     try {
       content = fsSync.readFileSync(contentOrPath, 'utf8');
     } catch (err) {
@@ -171,13 +185,17 @@ export function parseSuricataEve(contentOrPath) {
 }
 
 /**
- * Parse Zeek conn.log (TSV or JSON format)
- * @param {string} contentOrPath - Path to conn.log or raw string content
+ * Parse Zeek conn.log (TSV or JSON string, or file path when options.fromFile === true)
+ * @param {string} contentOrPath - Raw conn.log string (or file path if options.fromFile === true)
+ * @param {Object} [options={}]
  * @returns {Object} Parsed Zeek connection records and network statistics
  */
-export function parseZeekConnLogs(contentOrPath) {
+export function parseZeekConnLogs(contentOrPath, options = {}) {
   let content = contentOrPath;
-  if (typeof contentOrPath === 'string' && fsSync.existsSync(contentOrPath)) {
+  if (options.fromFile === true && typeof contentOrPath === 'string') {
+    if (!fsSync.existsSync(contentOrPath)) {
+      return { totalConnections: 0, connections: [], statistics: {} };
+    }
     try {
       content = fsSync.readFileSync(contentOrPath, 'utf8');
     } catch (err) {
@@ -236,8 +254,8 @@ export function parseZeekConnLogs(contentOrPath) {
         };
         connections.push(connObj);
 
-        // Flag suspicious states (e.g. S0: syn with no reply, REJ: rejected, scanning)
-        if (['S0', 'REJ', 'RSTO', 'RSTR'].includes(connState) || (destPort < 1024 && !['80', '443', '53', '22'].includes(String(destPort)))) {
+        // Flag suspicious states/ports consistently across JSON and TSV parsers
+        if (isSuspiciousZeekConnection(connState, destPort)) {
           suspiciousConns.push(connObj);
         }
       } catch {
@@ -305,7 +323,7 @@ export function parseZeekConnLogs(contentOrPath) {
         };
         connections.push(connObj);
 
-        if (['S0', 'REJ', 'RSTO'].includes(connState) || (destPort && destPort === 4444)) {
+        if (isSuspiciousZeekConnection(connState, destPort)) {
           suspiciousConns.push(connObj);
         }
       }
@@ -444,14 +462,17 @@ export function replayPcap(pcapFilePath, options = {}) {
     };
 
     // If kubectl is accessible and cluster is active, attempt to copy to running suricata/zeek pod
-    const namespace = options.namespace || 'vigilante';
+    const namespace = assertDnsLabel(options.namespace || 'vigilante', 'namespace');
     if (options.copyToPod !== false) {
       try {
+        const kubeEnv = getKubeExecutionEnv();
+        const ctxArgs = await getClusterContextArgs(options.clusterName || 'axonwall-k3s');
         const { stdout } = await execa('kubectl', [
+          ...ctxArgs,
           'get', 'pods', '-n', namespace,
           '-l', 'app.kubernetes.io/name in (suricata,zeek)',
           '-o', 'jsonpath={.items[*].metadata.name}'
-        ], { timeout: 4000 });
+        ], { timeout: 4000, env: kubeEnv });
 
         const pods = stdout.trim().split(/\s+/).filter(Boolean);
         if (pods.length > 0) {
@@ -463,9 +484,10 @@ export function replayPcap(pcapFilePath, options = {}) {
           for (const pod of pods) {
             try {
               await execa('kubectl', [
+                ...ctxArgs,
                 'cp', destPcap,
                 `${namespace}/${pod}:/var/log/vigilante/pcap-spool/${fileName}`
-              ], { timeout: 6000 });
+              ], { timeout: 6000, env: kubeEnv });
               logger.info('TRAFFIC', `Dispatched ${fileName} to ${pod}:/var/log/vigilante/pcap-spool/`);
               result.copyResults.push({ pod, success: true });
               successCount++;

@@ -736,8 +736,6 @@ export default function SystemUpdatesPage() {
       }
 
       if (!res.success) {
-        clearTimeout(timer1);
-        clearTimeout(timer2);
         setIsUpgrading(false);
         alert(`Firmware update error: ${res.message}`);
         return;
@@ -776,10 +774,11 @@ export default function SystemUpdatesPage() {
         }, 600);
       }, 1200);
     } catch (err: any) {
-      clearTimeout(timer1);
-      clearTimeout(timer2);
       setIsUpgrading(false);
       alert(`Firmware update error: ${err?.message || String(err)}`);
+    } finally {
+      clearTimeout(timer1);
+      clearTimeout(timer2);
     }
   };
 

@@ -21,6 +21,14 @@ spec:
       containers:
         - name: axonwalld
           image: ghcr.io/axonwall/axonwalld:v0.16.2
+          env:
+            - name: AXONWALL_SOCKET_GROUP
+              value: "1001"
+            - name: AXONWALL_AGENT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: axonwall-auth-secret
+                  key: agent-token
           securityContext:
             privileged: true
             capabilities:

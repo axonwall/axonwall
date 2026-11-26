@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import { PluginDisabledGate } from '@/components/PluginDisabledGate';
-import { Shield, ShieldAlert, CheckCircle2, Terminal, RefreshCw, Trash2, Save } from 'lucide-react';
+import { Shield, ShieldAlert, CheckCircle2, AlertCircle, Terminal, RefreshCw, Trash2, Save } from 'lucide-react';
 import { compileCrowdSec } from '@axonwall/lib/compile/crowdsec';
 import { getCurrentDesiredState } from '@/server/agent';
 import { useDesiredStateApply } from '@/lib/use-desired-state-apply';
@@ -23,7 +23,7 @@ function CrowdSecPageContent() {
   const [lapiUrl, setLapiUrl] = useState('http://127.0.0.1:8080/');
   const [decisions, setDecisions] = useState<RemediationDecision[]>([]);
   const [saving, setSaving] = useState(false);
-  const [statusMsg, setStatusMsg] = useState<string | null>(null);
+  const [statusMsg, setStatusMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
   useEffect(() => {
     getCurrentDesiredState()
@@ -40,7 +40,7 @@ function CrowdSecPageContent() {
   const crowdSecConfig: CrowdSecConfig = {
     enabled,
     lapiUrl,
-    apiKey: fullState?.crowdsec?.apiKey || '9a8b7c6d5e4f3a2b1c0d',
+    ...(fullState?.crowdsec?.apiKey ? { apiKey: fullState.crowdsec.apiKey } : {}),
     remediationSetName: fullState?.crowdsec?.remediationSetName || 'set_crowdsec_blacklists',
     action: fullState?.crowdsec?.action || 'drop',
     logBanned: fullState?.crowdsec?.logBanned ?? true,
@@ -57,17 +57,31 @@ function CrowdSecPageContent() {
       const nextState: DesiredState = {
         ...current,
         crowdsec: {
-          ...crowdSecConfig,
+          ...(current.crowdsec ?? {}),
           enabled: nextEnabled,
+          lapiUrl,
+          remediationSetName:
+            current.crowdsec?.remediationSetName ||
+            fullState?.crowdsec?.remediationSetName ||
+            'set_crowdsec_blacklists',
+          action: current.crowdsec?.action || fullState?.crowdsec?.action || 'drop',
+          logBanned: current.crowdsec?.logBanned ?? fullState?.crowdsec?.logBanned ?? true,
+          ...(current.crowdsec?.apiKey ? { apiKey: current.crowdsec.apiKey } : {}),
         },
       };
       setFullState(nextState);
       const res = await applyState(nextState);
-      setStatusMsg(res.message || 'Saved CrowdSec configuration to /etc/axonwall/security.yaml');
+      setStatusMsg({
+        type: 'success',
+        text: res.message || 'Saved CrowdSec configuration to /etc/axonwall/security.yaml',
+      });
     } catch (err: any) {
       setEnabled(prevEnabled);
       setFullState(prevFullState);
-      setStatusMsg(`Error: ${err?.message || 'Failed to save CrowdSec settings'}`);
+      setStatusMsg({
+        type: 'error',
+        text: err?.message || 'Failed to save CrowdSec settings',
+      });
     } finally {
       setSaving(false);
     }
@@ -112,9 +126,19 @@ function CrowdSecPageContent() {
       </div>
 
       {statusMsg && (
-        <div className="p-3 bg-emerald-500/10 border border-emerald-500/30 rounded-lg text-xs text-emerald-300 flex items-center gap-2">
-          <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
-          <span>{statusMsg}</span>
+        <div
+          className={`p-3 rounded-lg text-xs flex items-center gap-2 border ${
+            statusMsg.type === 'error'
+              ? 'bg-red-500/10 border-red-500/30 text-red-300'
+              : 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300'
+          }`}
+        >
+          {statusMsg.type === 'error' ? (
+            <AlertCircle className="w-4 h-4 text-red-400 shrink-0" />
+          ) : (
+            <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+          )}
+          <span>{statusMsg.text}</span>
         </div>
       )}
 

@@ -54,7 +54,7 @@ export async function runAuthzCli(args = []) {
     return 0;
   }
 
-  // Parse simple flags
+  // Parse simple flags (accumulate repeatable flags like --grant into arrays)
   const flags = {};
   const positional = [];
   for (let i = 0; i < rest.length; i++) {
@@ -62,11 +62,12 @@ export async function runAuthzCli(args = []) {
     if (arg.startsWith('--')) {
       const key = arg.slice(2);
       const next = rest[i + 1];
-      if (next && !next.startsWith('--')) {
-        flags[key] = next;
-        i++;
+      const val = (next && !next.startsWith('--')) ? (i++, next) : true;
+      if (key === 'grant') {
+        if (!Array.isArray(flags.grant)) flags.grant = [];
+        flags.grant.push(val);
       } else {
-        flags[key] = true;
+        flags[key] = val;
       }
     } else {
       positional.push(arg);

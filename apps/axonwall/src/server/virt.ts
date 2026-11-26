@@ -17,6 +17,7 @@ import { getDesiredStateInternal } from './desired-state-internal';
 import { callAgentApi, callAgentApiResponse } from './agent-client';
 import { getSession } from './auth';
 import { assertActionPermitted } from './auth-guard';
+import { assertSafeOutboundUrl } from './ssrf-guard';
 
 // C-M8: these server actions used to apply with no expectedFingerprint, so
 // two concurrent VM/container creates both read S0, both appended, and the
@@ -757,27 +758,11 @@ function validateIsoFilename(filename: string): void {
   }
 }
 
-function validateIsoDownloadUrl(rawUrl: string): void {
-  let parsed: URL;
-  try {
-    parsed = new URL((rawUrl || '').trim());
-  } catch {
-    throw new Error('Invalid ISO download URL');
-  }
-  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-    throw new Error('ISO download URL must use http: or https:');
-  }
-  const host = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, '');
-  if (
-    host === 'localhost' ||
-    host === '::1' ||
-    host === '0.0.0.0' ||
-    host.startsWith('127.') ||
-    host.startsWith('169.254.') ||
-    host === 'metadata.google.internal'
-  ) {
-    throw new Error('ISO download from loopback or link-local/metadata addresses is prohibited');
-  }
+async function validateIsoDownloadUrl(rawUrl: string): Promise<void> {
+  await assertSafeOutboundUrl((rawUrl || '').trim(), {
+    allowHttp: true,
+    allowPrivate: false,
+  });
 }
 
 function validatePciBdf(bdf: string): void {
@@ -905,7 +890,7 @@ export async function downloadIsoAction(
   assertActionPermitted(session, 'admin');
   validatePoolName(pool);
   validateIsoFilename(filename);
-  validateIsoDownloadUrl(url);
+  await validateIsoDownloadUrl(url);
 
   const daemonResp = await callAgentApiResponse<{ success: boolean; upid?: string; message?: string }>(
     '/v1/virt/isos',

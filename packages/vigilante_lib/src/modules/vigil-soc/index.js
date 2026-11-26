@@ -5,8 +5,8 @@ import fs from 'node:fs/promises';
 import { BaseModule } from '../base.js';
 import { execStream } from '../../utils/exec.js';
 import { applyK8sTlsSecret } from '../../engine/certs.js';
-import { ensureNamespace } from '../../engine/k8s.js';
-import { resolveChartValuesArgs } from '../../engine/helm.js';
+import { ensureNamespace, ensureGeneratedK8sSecret, generateStrongSecret, getClusterContextArgs, getHelmContextArgs, getKubeExecutionEnv } from '../../engine/k8s.js';
+import { resolveChartValuesArgs, cleanupHelmTempValues } from '../../engine/helm.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -64,6 +64,8 @@ export class VigilSOCModule extends BaseModule {
     if (onLog) onLog(`[vigil-soc] Deploying Vigil AI SOC '${releaseName}' (Ingress: https://${ingressHost})...`);
     const vigilChartPath = path.join(__dirname, 'charts', 'vigil');
     const vigilDefaultValues = path.join(__dirname, 'values', 'vigil.yaml');
+    const kubeEnv = getKubeExecutionEnv();
+    const helmCtxArgs = await getHelmContextArgs(clusterName);
     const vigilValuesArgs = await resolveChartValuesArgs({
       moduleId: this.id,
       chartName: 'vigil',
@@ -77,13 +79,31 @@ export class VigilSOCModule extends BaseModule {
       onLog
     });
 
-    const vigilArgs = [
-      'upgrade', '--install', releaseName, vigilChartPath,
-      '--namespace', targetNamespace,
-      '--timeout', options?.timeout || '10m',
-      ...vigilValuesArgs
-    ];
-    await execStream('helm', vigilArgs, { onLog });
+    try {
+      const secretName = `${releaseName}-secrets`;
+      await ensureGeneratedK8sSecret({
+        namespace: targetNamespace,
+        secretName,
+        clusterName,
+        keys: {
+          POSTGRES_PASSWORD: () => generateStrongSecret(),
+          JWT_SECRET_KEY: () => generateStrongSecret(),
+          AGENT_INTERNAL_TOKEN: () => generateStrongSecret()
+        }
+      });
+
+      const vigilArgs = [
+        'upgrade', '--install', releaseName, vigilChartPath,
+        ...helmCtxArgs,
+        '--namespace', targetNamespace,
+        '--timeout', options?.timeout || '10m',
+        '--set', `secrets.existingSecret=${secretName}`,
+        ...vigilValuesArgs
+      ];
+      await execStream('helm', vigilArgs, { onLog, env: kubeEnv });
+    } finally {
+      await cleanupHelmTempValues(vigilValuesArgs);
+    }
 
     if (onLog) onLog(`[vigil-soc] Successfully deployed Vigil AI SOC in namespace '${targetNamespace}'! Ingress: https://${ingressHost}`);
   }
@@ -95,10 +115,13 @@ export class VigilSOCModule extends BaseModule {
     const targetNamespace = namespace || this.namespace;
     const isStandardNs = targetNamespace === 'default' || targetNamespace === 'vigil-soc';
     const releaseName = isStandardNs ? 'vigil' : `${targetNamespace}-vigil`;
+    const kubeEnv = getKubeExecutionEnv();
+    const helmCtxArgs = await getHelmContextArgs(clusterName);
+    const ctxArgs = await getClusterContextArgs(clusterName);
 
     if (onLog) onLog(`[vigil-soc] Uninstalling Vigil AI SOC from namespace '${targetNamespace}'...`);
     try {
-      await execa('helm', ['uninstall', releaseName, '-n', targetNamespace]);
+      await execa('helm', ['uninstall', releaseName, '-n', targetNamespace, ...helmCtxArgs], { env: kubeEnv });
     } catch {
       // Ignore if not present
     }
@@ -106,7 +129,7 @@ export class VigilSOCModule extends BaseModule {
     if (deleteNamespace && targetNamespace !== 'default' && targetNamespace !== 'kube-system') {
       if (onLog) onLog(`[vigil-soc] Deleting namespace '${targetNamespace}'...`);
       try {
-        await execa('kubectl', ['delete', 'namespace', targetNamespace, '--timeout=60s']);
+        await execa('kubectl', ['delete', 'namespace', targetNamespace, '--timeout=60s', ...ctxArgs], { env: kubeEnv });
       } catch {
         // Ignore if already deleted
       }
@@ -120,13 +143,15 @@ export class VigilSOCModule extends BaseModule {
     const targetNamespace = namespace || this.namespace;
 
     try {
+      const kubeEnv = getKubeExecutionEnv();
+      const ctxArgs = await getClusterContextArgs(clusterName);
       const { stdout: podsJson } = await execa('kubectl', [
         'get', 'pods',
         '-n', targetNamespace,
-        '--context', `k3d-${clusterName}`,
+        ...ctxArgs,
         '--request-timeout=3s',
         '-o', 'json'
-      ]);
+      ], { env: kubeEnv });
       const parsed = JSON.parse(podsJson);
       const pods = (parsed.items || []).map(p => ({
         name: p.metadata.name,

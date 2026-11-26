@@ -1,6 +1,7 @@
 import { execa } from 'execa';
 import fs from 'node:fs/promises';
 import fsSync from 'node:fs';
+import crypto from 'node:crypto';
 import net from 'node:net';
 import path from 'node:path';
 import { dump as yamlDump } from 'js-yaml';
@@ -11,9 +12,18 @@ import {
   resolvePathInside,
   assertDnsLabel
 } from './config.js';
+import { getClusterContextArgs, getKubeExecutionEnv } from './k8s.js';
 import { autoSignIfConfigured } from './gpg.js';
 import { saveEvidenceFile } from './evidence.js';
 import { logger } from '../utils/logger.js';
+
+function buildQuarantinePolicyName(podName) {
+  const base = `quarantine-${podName}`;
+  if (base.length <= 63) return base;
+  const suffix = crypto.createHash('sha256').update(podName).digest('hex').slice(0, 8);
+  const head = podName.slice(0, 63 - 'quarantine-'.length - 1 - suffix.length).replace(/-+$/, '');
+  return `quarantine-${head || 'pod'}-${suffix}`;
+}
 
 function resolveSoarPodTarget(arg1, arg2 = 'default', arg3 = {}) {
   let rawPod;
@@ -42,7 +52,7 @@ function resolveSoarPodTarget(arg1, arg2 = 'default', arg3 = {}) {
  */
 export function generateQuarantineNetworkPolicy(arg1, arg2 = 'default', arg3 = {}) {
   const { podName, namespace, options } = resolveSoarPodTarget(arg1, arg2, arg3);
-  const policyName = `quarantine-${podName}`;
+  const policyName = buildQuarantinePolicyName(podName);
   const matchLabels = options.labels || options.podLabels || { 'app.kubernetes.io/name': podName, app: podName };
 
   const manifest = {
@@ -53,7 +63,7 @@ export function generateQuarantineNetworkPolicy(arg1, arg2 = 'default', arg3 = {
       namespace,
       labels: {
         'vigilante.containment/quarantine': 'true',
-        'vigilante.containment/target-pod': String(podName),
+        'vigilante.containment/target-pod': String(podName).slice(0, 63).replace(/-+$/, ''),
         'app.kubernetes.io/managed-by': 'vigilante-soar'
       },
       annotations: {
@@ -85,8 +95,31 @@ export async function isolatePod(arg1, arg2 = 'default', arg3 = {}) {
   const containmentsDir = getVigilanteContainmentsDir();
 
   const { podName, namespace, options } = resolveSoarPodTarget(arg1, arg2, arg3);
+  const policyName = buildQuarantinePolicyName(podName);
+  const resolvedOptions = { ...options };
+  const kubeEnv = getKubeExecutionEnv();
+  const ctxArgs = options.apply !== false
+    ? await getClusterContextArgs(options.clusterName || 'vigilante-dev', options.clusterProvider || null)
+    : [];
 
-  const manifestYaml = generateQuarantineNetworkPolicy(podName, namespace, options);
+  if (options.apply !== false && !resolvedOptions.labels && !resolvedOptions.podLabels) {
+    try {
+      const { stdout } = await execa(
+        'kubectl',
+        [...ctxArgs, 'get', 'pod', podName, '-n', namespace, '-o', 'json'],
+        { timeout: 5000, env: kubeEnv }
+      );
+      const podObj = JSON.parse(stdout || '{}');
+      const actualLabels = podObj?.metadata?.labels;
+      if (actualLabels && typeof actualLabels === 'object' && Object.keys(actualLabels).length > 0) {
+        resolvedOptions.labels = actualLabels;
+      }
+    } catch (err) {
+      logger.debug('SOAR', `Could not fetch labels for pod ${namespace}/${podName} prior to isolation: ${err.message}`);
+    }
+  }
+
+  const manifestYaml = generateQuarantineNetworkPolicy(podName, namespace, resolvedOptions);
   const containmentId = `cont-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
 
   const record = {
@@ -95,26 +128,36 @@ export async function isolatePod(arg1, arg2 = 'default', arg3 = {}) {
     type: 'NETWORK_ISOLATION',
     target: podName,
     namespace,
-    policyName: `quarantine-${podName}`,
+    clusterName: options.clusterName || 'vigilante-dev',
+    policyName,
     policyYaml: manifestYaml,
-    active: true,
-    status: 'ACTIVE',
+    active: options.apply === false,
+    status: options.apply === false ? 'STAGED' : 'PENDING',
     isolatedAt: new Date().toISOString(),
     reason: options.reason || 'Active Threat Containment',
     appliedToCluster: false
   };
 
-  // Attempt kubectl apply if cluster reachable
+  // Apply NetworkPolicy and fail closed when live cluster application fails
   if (options.apply !== false) {
     try {
-      await execa('kubectl', ['apply', '-f', '-'], {
+      await execa('kubectl', [...ctxArgs, 'apply', '-f', '-'], {
         input: manifestYaml,
-        timeout: 5000
+        timeout: 5000,
+        env: kubeEnv
       });
       record.appliedToCluster = true;
+      record.active = true;
+      record.status = 'ACTIVE';
       logger.info('SOAR', `Applied isolation NetworkPolicy ${record.policyName} in ${namespace}`);
     } catch (err) {
-      logger.warn('SOAR', `Could not apply NetworkPolicy via kubectl (staged locally): ${err.message}`);
+      record.appliedToCluster = false;
+      record.active = false;
+      record.status = 'FAILED';
+      record.error = err.message;
+      const failedFile = path.join(containmentsDir, `${containmentId}.json`);
+      await fs.writeFile(failedFile, JSON.stringify(record, null, 2), 'utf8').catch(() => {});
+      throw new Error(`SOAR pod isolation failed closed for ${namespace}/${podName}: ${err.message}`);
     }
   }
 
@@ -256,6 +299,7 @@ export async function blockIp(arg1, arg2 = {}) {
             });
           }
         );
+        req.on('timeout', () => req.destroy(new Error('Axonwalld socket request timed out')));
         req.on('error', reject);
         req.write(payload);
         req.end();
@@ -371,7 +415,12 @@ export async function releaseContainment(containmentId) {
 
   if (record.policyName && record.namespace) {
     try {
-      await execa('kubectl', ['delete', 'networkpolicy', record.policyName, '-n', record.namespace], { timeout: 5000 });
+      const kubeEnv = getKubeExecutionEnv();
+      const ctxArgs = await getClusterContextArgs(record.clusterName || 'vigilante-dev');
+      await execa('kubectl', [...ctxArgs, 'delete', 'networkpolicy', record.policyName, '-n', record.namespace], {
+        timeout: 5000,
+        env: kubeEnv
+      });
       logger.info('SOAR', `Removed isolation NetworkPolicy ${record.policyName}`);
     } catch (err) {
       logger.warn('SOAR', `Could not delete NetworkPolicy: ${err.message}`);
@@ -380,46 +429,56 @@ export async function releaseContainment(containmentId) {
 
   if (record.mcpLeaseId) {
     const sockPath = process.env.AXONWALL_AGENT_API_SOCK || '/run/axonwall/agent-api.sock';
-    if (fsSync.existsSync(sockPath)) {
-      try {
-        const httpMod = await import('node:http');
-        let agentToken = process.env.AXONWALL_AGENT_TOKEN || '';
-        if (!agentToken) {
-          for (const p of ['/etc/axonwall/agent.token', '/var/lib/axonwall/etc-axonwall/agent.token']) {
-            if (fsSync.existsSync(p)) {
-              agentToken = fsSync.readFileSync(p, 'utf8').trim();
-              if (agentToken) break;
-            }
-          }
+    if (!fsSync.existsSync(sockPath)) {
+      throw new Error(`Cannot revert MCP blackhole lease '${record.mcpLeaseId}': axonwalld socket not found at ${sockPath}`);
+    }
+    const httpMod = await import('node:http');
+    let agentToken = process.env.AXONWALL_AGENT_TOKEN || '';
+    if (!agentToken) {
+      for (const p of ['/etc/axonwall/agent.token', '/var/lib/axonwall/etc-axonwall/agent.token']) {
+        if (fsSync.existsSync(p)) {
+          agentToken = fsSync.readFileSync(p, 'utf8').trim();
+          if (agentToken) break;
         }
-        const payload = JSON.stringify({ leaseId: record.mcpLeaseId });
-        await new Promise((resolve, reject) => {
-          const req = httpMod.request(
-            {
-              socketPath: sockPath,
-              path: '/v1/mcp/leases/revoke',
-              method: 'POST',
-              headers: {
-                'Content-Type': 'application/json',
-                'Content-Length': Buffer.byteLength(payload),
-                ...(agentToken ? { 'X-Axonwall-Agent-Token': agentToken } : {})
-              },
-              timeout: 5000
-            },
-            (res) => {
-              res.resume();
-              res.on('end', () => resolve({ status: res.statusCode }));
-            }
-          );
-          req.on('error', reject);
-          req.write(payload);
-          req.end();
-        });
-        record.enforcedInKernel = false;
-      } catch (err) {
-        logger.warn('SOAR', `Could not revoke MCP lease ${record.mcpLeaseId} via axonwalld socket: ${err.message}`);
       }
     }
+    const payload = JSON.stringify({ leaseId: record.mcpLeaseId });
+    const revertResp = await new Promise((resolve, reject) => {
+      const req = httpMod.request(
+        {
+          socketPath: sockPath,
+          path: '/v1/mcp/revert',
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Content-Length': Buffer.byteLength(payload),
+            ...(agentToken ? { 'X-Axonwall-Agent-Token': agentToken } : {})
+          },
+          timeout: 5000
+        },
+        (res) => {
+          let body = '';
+          res.on('data', (c) => { body += c.toString(); });
+          res.on('end', () => {
+            try {
+              resolve({ status: res.statusCode, data: JSON.parse(body || '{}') });
+            } catch {
+              resolve({ status: res.statusCode, data: {} });
+            }
+          });
+        }
+      );
+      req.on('timeout', () => req.destroy(new Error('Axonwalld socket revert request timed out')));
+      req.on('error', reject);
+      req.write(payload);
+      req.end();
+    });
+    if (revertResp.status !== 200 || revertResp.data?.success !== true) {
+      throw new Error(
+        `Failed to revert MCP lease '${record.mcpLeaseId}' via axonwalld: HTTP ${revertResp.status}${revertResp.data?.error ? ` (${revertResp.data.error})` : ''}`
+      );
+    }
+    record.enforcedInKernel = false;
   }
 
   record.status = 'RELEASED';

@@ -47,13 +47,14 @@ type AgentServer struct {
 	// only take s.mu, so they stay live during an apply (Confirm and
 	// Rollback fail fast while one is in progress — see
 	// applyInProgress — instead of acting on state mid-apply).
-	applyMu sync.Mutex
+	applyMu            sync.Mutex
 	// applyInProgress is set under s.mu for the whole of ApplyBundle
 	// (including the windows where s.mu itself is released) so
 	// Confirm, Rollback, and the auto-rollback timer can tell an
 	// apply is running without taking applyMu.
-	applyInProgress bool
-	bundleDir       string
+	applyInProgress    bool
+	rollbackInProgress bool
+	bundleDir          string
 	activeHash      string
 	lastGoodHash    string
 	lastGoodScript  string
@@ -473,6 +474,39 @@ func restoreLkgConfig(bundleDir string) bool {
 	return restored
 }
 
+func isSafeLkgNftScript(checkPath string, data []byte) bool {
+	text := string(data)
+	if strings.TrimSpace(text) == "" {
+		return false
+	}
+	if checkPath == "/etc/nftables.conf" {
+		if strings.Contains(text, "flush ruleset") || !strings.Contains(text, "table inet axonwall") {
+			return false
+		}
+	}
+	return true
+}
+
+func captureLiveAxonwallLkgNft(lkgPath string) (string, string, bool) {
+	out, err := exec.Command("nft", "list", "table", "inet", "axonwall").Output()
+	if err != nil {
+		return "", "", false
+	}
+	trimmed := strings.TrimSpace(string(out))
+	if trimmed == "" || !strings.Contains(trimmed, "table inet axonwall") {
+		return "", "", false
+	}
+	scriptStr := "table inet axonwall {}\nflush table inet axonwall\n" + string(out)
+	scriptBytes := []byte(scriptStr)
+	h := sha256.Sum256(scriptBytes)
+	if lkgPath != "" {
+		if err := os.MkdirAll(filepath.Dir(lkgPath), 0700); err == nil {
+			_ = os.WriteFile(lkgPath, scriptBytes, 0600)
+		}
+	}
+	return scriptStr, hex.EncodeToString(h[:]), true
+}
+
 func NewAgentServer(bundleDir string, iapManager *engine.IAPManager, haEngine *HAEngine, sdwanProber *SDWanProber, pcapManager *engine.PacketCaptureManager, watchdog *engine.WatchdogEngine, nasManager *engine.NasManager, k3sManager *engine.K3sManager, vigilanteManager *engine.VigilanteManager, etckeeperManager *engine.EtckeeperManager, directoryManager *engine.DirectoryManager) *AgentServer {
 	hostname, _ := os.Hostname()
 
@@ -488,7 +522,7 @@ func NewAgentServer(bundleDir string, iapManager *engine.IAPManager, haEngine *H
 	initHash := ""
 	lastGoodScript := ""
 	for _, checkPath := range []string{filepath.Join(bundleDir, "last-known-good.nft"), "/etc/axonwall/last-known-good.nft", "/etc/nftables.conf"} {
-		if data, err := os.ReadFile(checkPath); err == nil && len(data) > 0 {
+		if data, err := os.ReadFile(checkPath); err == nil && isSafeLkgNftScript(checkPath, data) {
 			h := sha256.Sum256(data)
 			initHash = hex.EncodeToString(h[:])
 			lastGoodScript = string(data)
@@ -496,18 +530,9 @@ func NewAgentServer(bundleDir string, iapManager *engine.IAPManager, haEngine *H
 		}
 	}
 	if lastGoodScript == "" && !pendingExists && currentRuntimeMode != engine.ModeCollector {
-		if out, err := exec.Command("nft", "list", "ruleset").Output(); err == nil && len(out) > 0 {
-			scriptStr := string(out)
-			if !strings.HasPrefix(strings.TrimSpace(scriptStr), "flush ruleset") {
-				scriptStr = "flush ruleset\n" + scriptStr
-			}
-			scriptBytes := []byte(scriptStr)
-			h := sha256.Sum256(scriptBytes)
-			initHash = hex.EncodeToString(h[:])
+		if scriptStr, scriptHash, ok := captureLiveAxonwallLkgNft(filepath.Join(bundleDir, "last-known-good.nft")); ok {
+			initHash = scriptHash
 			lastGoodScript = scriptStr
-			if err := os.MkdirAll(bundleDir, 0700); err == nil {
-				_ = os.WriteFile(filepath.Join(bundleDir, "last-known-good.nft"), scriptBytes, 0600)
-			}
 		}
 	}
 
@@ -590,6 +615,11 @@ func (s *AgentServer) handlePendingConfirmAtStartup(bundleDir string) {
 func (s *AgentServer) rollbackPendingAtStartup(bundleDir string) {
 	restored := restoreLkgConfig(bundleDir)
 	restoredServices, extRestored := restoreExternalBundleFiles(bundleDir)
+	if currentRuntimeMode != engine.ModeCollector && (restored || extRestored) {
+		if err := reapplyRestoredNetdev(); err != nil {
+			log.Printf("[Agent] Startup rollback: netdev re-apply warning: %v", err)
+		}
+	}
 	netRestored := restoreLiveNetSnapshot(bundleDir)
 	if s.lastGoodScript != "" {
 		if err := applyNftScriptString(s.lastGoodScript); err != nil {
@@ -602,9 +632,6 @@ func (s *AgentServer) rollbackPendingAtStartup(bundleDir string) {
 		}
 	}
 	if restored || extRestored || netRestored {
-		if err := reapplyRestoredNetdev(); err != nil {
-			log.Printf("[Agent] Startup rollback: netdev re-apply warning: %v", err)
-		}
 		if err := applyBootInterfaces(); err != nil {
 			log.Printf("[Agent] Startup rollback: boot interfaces re-apply failed: %v", err)
 		}
@@ -615,6 +642,19 @@ func (s *AgentServer) rollbackPendingAtStartup(bundleDir string) {
 			for _, rErr := range reloadBundleServices(restoredServices) {
 				log.Printf("[Agent] Startup rollback service reload warning: %v", rErr)
 			}
+		}
+		if err := runWithTimeout(func() error {
+			return s.reapplyRestoredSubsystemsImpl(false)
+		}, subsystemApplyTimeout); err != nil {
+			log.Printf("[Agent] Startup rollback: subsystem re-apply warning: %v", err)
+		}
+		if s.headscaleWanGateManager != nil {
+			if err := s.headscaleWanGateManager.Reconcile(); err != nil {
+				log.Printf("[Agent] Startup rollback: headscale WAN gate reconcile warning: %v", err)
+			}
+		}
+		if err := s.restartNgfwDaemonsIfEnabled(); err != nil {
+			log.Printf("[Agent] Startup rollback: NGFW daemon restart warning: %v", err)
 		}
 	}
 	if restored {
@@ -667,6 +707,10 @@ type validatedBundleFile struct {
 	isSharedAxonwallCfg bool
 }
 
+// testBundleAllowedPrefixes is empty in production and may only be set
+// inside unit tests to redirect bundle writes into an isolated TempDir.
+var testBundleAllowedPrefixes []string
+
 // validateBundleFiles checks every file in a bundle — allowed prefix,
 // protected credential/PKI paths, leaf and intermediate symlinks, and
 // the sanitized mode — without writing anything. ApplyBundle runs
@@ -677,7 +721,7 @@ type validatedBundleFile struct {
 func validateBundleFiles(files []*pb.BundleFile) ([]validatedBundleFile, error) {
 	allowedPrefixes := []string{
 		"/etc/axonwall/",
-		"/tmp/",
+		"/run/axonwall/tmp/",
 		"/etc/network/",
 		"/etc/suricata/",
 		"/etc/crowdsec/",
@@ -701,6 +745,7 @@ func validateBundleFiles(files []*pb.BundleFile) ([]validatedBundleFile, error) 
 		"/etc/minio/",
 		"/etc/systemd/network/",
 	}
+	allowedPrefixes = append(allowedPrefixes, testBundleAllowedPrefixes...)
 	allowedExactFiles := map[string]bool{
 		"/etc/radvd.conf":    true,
 		"/etc/default/minio": true,
@@ -733,37 +778,22 @@ func validateBundleFiles(files []*pb.BundleFile) ([]validatedBundleFile, error) 
 		if fi, lerr := os.Lstat(cleanPath); lerr == nil && (fi.Mode()&os.ModeSymlink) != 0 {
 			return nil, status.Errorf(codes.PermissionDenied, "destination path is a symlink: %s", cleanPath)
 		}
-		// Reject symlinked intermediate directories (audit D-S02): the
-		// prefix check and O_NOFOLLOW leaf open do not stop a planted
-		// symlink one level up from redirecting the write outside the
-		// allowed tree.
-		for _, prefix := range allowedPrefixes {
-			if strings.HasPrefix(cleanPath, prefix) {
-				rel, _ := filepath.Rel(strings.TrimSuffix(prefix, "/"), filepath.Dir(cleanPath))
-				cur := strings.TrimSuffix(prefix, "/")
-				unsafe := false
-				if rel != "." {
-					for _, part := range strings.Split(rel, string(filepath.Separator)) {
-						cur = filepath.Join(cur, part)
-						if fi, err := os.Lstat(cur); err == nil && fi.Mode()&os.ModeSymlink != 0 {
-							unsafe = true
-							break
-						}
-					}
-				}
-				if unsafe {
-					return nil, status.Errorf(codes.PermissionDenied, "destination path traverses a symlink: %s", cleanPath)
-				}
-			}
+		// Verify all parent directory components from "/" via O_DIRECTORY|O_NOFOLLOW
+		// so symlinked parents anywhere in the hierarchy are rejected cleanly.
+		if err := verifyParentDirsNoSymlinks(cleanPath); err != nil {
+			return nil, status.Errorf(codes.PermissionDenied, "destination path traverses an unsafe or symlinked directory (%v): %s", err, cleanPath)
 		}
-		if allowedExactFiles[cleanPath] {
-			dir := filepath.Dir(cleanPath)
-			if fi, err := os.Lstat(dir); err == nil && fi.Mode()&os.ModeSymlink != 0 {
-				return nil, status.Errorf(codes.PermissionDenied, "destination path traverses a symlink: %s", cleanPath)
+		if strings.HasPrefix(cleanPath, "/run/axonwall/tmp/") {
+			if fi, err := os.Lstat("/run/axonwall/tmp"); err == nil {
+				st, ok := fi.Sys().(*syscall.Stat_t)
+				if !fi.IsDir() || (fi.Mode()&os.ModeSymlink) != 0 || fi.Mode().Perm() != 0700 || (ok && st.Uid != 0) {
+					return nil, status.Errorf(codes.PermissionDenied, "unsafe /run/axonwall/tmp directory permissions or ownership for %s", cleanPath)
+				}
 			}
 		}
 		// Sanitize the caller-chosen mode (audit D-S02): plain permission
-		// bits only (drops setuid/setgid/sticky), and never world-writable.
+		// bits only (drops setuid/setgid/sticky), strip execute bits on
+		// config files, and never world-writable.
 		// Shared config files under /etc/axonwall (*.yaml, *.yml, state.json, interfaces.conf)
 		// must remain group-readable and group-writable (0660 / 0664) for group axonwall-api
 		// so axonwall-ui and axonwall-controller can read and update them across reboots.
@@ -776,7 +806,7 @@ func validateBundleFiles(files []*pb.BundleFile) ([]validatedBundleFile, error) 
 			} else {
 				mode = 0660
 			}
-			mode &^= 0o002
+			mode &^= 0o113
 		} else {
 			if mode == 0 {
 				if (strings.HasPrefix(cleanPath, "/etc/axonwall/") && strings.HasSuffix(cleanPath, ".json")) || cleanPath == "/etc/default/minio" {
@@ -785,7 +815,10 @@ func validateBundleFiles(files []*pb.BundleFile) ([]validatedBundleFile, error) 
 					mode = 0644
 				}
 			}
-			mode &^= 0o022
+			mode &^= 0o133
+			if mode == 0 {
+				mode = 0600
+			}
 		}
 		out = append(out, validatedBundleFile{file: f, cleanPath: cleanPath, mode: mode, isSharedAxonwallCfg: isSharedAxonwallCfg})
 	}
@@ -984,17 +1017,31 @@ func (s *AgentServer) ApplyBundle(ctx context.Context, req *pb.ApplyBundleReques
 		return nil, status.FromContextError(err).Err()
 	}
 
-	s.mu.Lock()
+	muHeld := false
+	lockMu := func() {
+		if !muHeld {
+			s.mu.Lock()
+			muHeld = true
+		}
+	}
+	unlockMu := func() {
+		if muHeld {
+			s.mu.Unlock()
+			muHeld = false
+		}
+	}
+
+	lockMu()
 	s.applyInProgress = true
-	// Registered before the deferred s.mu.Unlock below, so it runs
-	// after the lock is released at return: clear the flag under the
-	// lock, then let the deferred applyMu unlock run.
 	defer func() {
-		s.mu.Lock()
+		if !muHeld {
+			s.mu.Lock()
+			muHeld = true
+		}
 		s.applyInProgress = false
 		s.mu.Unlock()
+		muHeld = false
 	}()
-	defer s.mu.Unlock()
 
 	log.Printf("[Agent] Received ApplyBundle request (hash: %s, timeout: %ds)", req.BundleHash, req.ConfirmTimeoutSeconds)
 
@@ -1002,25 +1049,21 @@ func (s *AgentServer) ApplyBundle(ctx context.Context, req *pb.ApplyBundleReques
 		return nil, status.Error(codes.InvalidArgument, "nft_script cannot be empty")
 	}
 
-	// B-M1 (round 3): refuse an overlapping apply. applyMu above
-	// serialises the ApplyBundle RPC itself, but the pending-confirm
-	// window lives AFTER ApplyBundle returns — so a second apply
-	// used to silently stop the first bundle's rollback timer,
-	// overwrite pendingJobID, and arm its own timer. The first
-	// caller's confirm was then refused with a job mismatch, and if
-	// neither confirmed in time the stale timer rolled the kernel
-	// back to last-known-good while disk held both rules. The second
-	// caller must confirm or roll back the pending job first (or
-	// wait for its deadline, after which the auto-rollback clears
-	// the slot); the rejection names the pending job so the caller
-	// knows exactly what to confirm. A re-apply of the SAME job id
-	// is rejected too — that job is already pending and confirmable
-	// under its own id, so there is nothing to re-apply.
+	if s.rollbackInProgress {
+		return nil, status.Errorf(codes.FailedPrecondition, "a configuration rollback is currently in progress; retry after rollback completes")
+	}
+
+	// B-M1 (round 3): refuse an overlapping apply.
 	if s.pendingConfirm {
 		return nil, status.Errorf(codes.FailedPrecondition, "another configuration apply (job %s) is still pending confirmation; confirm that job or roll it back (or wait for its deadline at %s) before applying a new bundle", s.pendingJobID, s.confirmDeadline.Format(time.RFC3339))
 	}
 
-	// 1. Dry run syntax check using `nft -c -f` (skipped in collector-only container mode)
+	wasPending := s.pendingConfirm
+	bundleDir := s.bundleDir
+	lastGoodScript := s.lastGoodScript
+	unlockMu()
+
+	// 1. Dry run syntax check using `nft -c -f` outside s.mu.
 	var tmpFilePath string
 	if currentRuntimeMode != engine.ModeCollector {
 		tmpFile, err := os.CreateTemp("", "axonwall-candidate-*.nft")
@@ -1036,8 +1079,6 @@ func (s *AgentServer) ApplyBundle(ctx context.Context, req *pb.ApplyBundleReques
 		}
 		_ = tmpFile.Close()
 
-		// A-M2: bound the validation exec; an nft binary that hangs must
-		// not wedge the agent API behind s.mu forever.
 		validateCtx, validateCancel := context.WithTimeout(context.Background(), nftValidateTimeout)
 		defer validateCancel()
 		validateCmd := exec.CommandContext(validateCtx, "nft", "-c", "-f", tmpFilePath)
@@ -1057,78 +1098,55 @@ func (s *AgentServer) ApplyBundle(ctx context.Context, req *pb.ApplyBundleReques
 	}
 
 	// Snapshot verified configuration, external bundle files, and live kernel
-	// network state BEFORE writing candidate changes.
-	if !s.pendingConfirm {
+	// network state BEFORE writing candidate changes (outside s.mu).
+	if !wasPending {
 		if currentRuntimeMode != engine.ModeCollector {
-			if s.lastGoodScript == "" {
-				lkgPath := filepath.Join(s.bundleDir, "last-known-good.nft")
-				if data, rErr := os.ReadFile(lkgPath); rErr == nil && len(data) > 0 {
+			if lastGoodScript == "" {
+				lkgPath := filepath.Join(bundleDir, "last-known-good.nft")
+				if data, rErr := os.ReadFile(lkgPath); rErr == nil && isSafeLkgNftScript(lkgPath, data) {
 					h := sha256.Sum256(data)
+					lockMu()
 					s.lastGoodScript = string(data)
 					s.lastGoodHash = hex.EncodeToString(h[:])
-				} else if out, nErr := exec.Command("nft", "list", "ruleset").Output(); nErr == nil && strings.TrimSpace(string(out)) != "" {
-					scriptStr := string(out)
-					if !strings.HasPrefix(strings.TrimSpace(scriptStr), "flush ruleset") {
-						scriptStr = "flush ruleset\n" + scriptStr
-					}
-					scriptBytes := []byte(scriptStr)
-					h := sha256.Sum256(scriptBytes)
+					unlockMu()
+				} else if scriptStr, scriptHash, ok := captureLiveAxonwallLkgNft(lkgPath); ok {
+					lockMu()
 					s.lastGoodScript = scriptStr
-					s.lastGoodHash = hex.EncodeToString(h[:])
-					if mkErr := os.MkdirAll(s.bundleDir, 0700); mkErr == nil {
-						_ = os.WriteFile(lkgPath, scriptBytes, 0600)
-					}
+					s.lastGoodHash = scriptHash
+					unlockMu()
 				}
 			}
-			captureLiveNetSnapshot(s.bundleDir)
+			captureLiveNetSnapshot(bundleDir)
 		}
-		snapshotLkgConfig(s.bundleDir)
+		snapshotLkgConfig(bundleDir)
 	}
-	snapshotExternalBundleFiles(s.bundleDir, validatedFiles, s.pendingConfirm)
+	snapshotExternalBundleFiles(bundleDir, validatedFiles, wasPending)
 
-	// 2. Write the already-validated bundle configuration files (e.g.
-	// kea, unbound, suricata, crowdsec). Paths, symlinks, and modes
-	// were checked for every file up front by validateBundleFiles, so
-	// a failure here can only come from the writes themselves — and
-	// any such failure rolls back instead of leaving a half-applied
-	// bundle behind (A-H2).
-	//
-	// A-M14: the subsystem applies for each config file are only
-	// QUEUED here; they run after the write loop, without holding
-	// s.mu (see runSubsystemApplies). Running them inline used to
-	// hold the agent lock across unbounded subsystem work — HA
-	// Apply runs keepalived/conntrackd reloads plus LDAP syncrepl
-	// setup, NAS/K3s/Vigilante applies shell out to ZFS/kubectl-class
-	// tooling — so a hung subsystem wedged GetStatus, Confirm,
-	// Rollback, and the auto-rollback timer behind s.mu.
 	var subsystemErr error
 	var pendingApplies []pendingSubsystemApply
-	// applyWarnings collects non-fatal apply problems (L5 mirror
-	// failures, L6 service-reload failures) to surface in the
-	// ApplyBundle response instead of silently discarding them.
 	var applyWarnings []string
+	hostModeStopNgfw := false
+
 	for _, vf := range validatedFiles {
 		f := vf.file
 		cleanPath := vf.cleanPath
 		mode := vf.mode
 		isSharedAxonwallCfg := vf.isSharedAxonwallCfg
-		if err := os.MkdirAll(filepath.Dir(cleanPath), 0755); err != nil {
-			log.Printf("[Agent] Failed to create directories for %s: %v; rolling back", cleanPath, err)
-			_ = s.executeRollback("bundle file write failed")
-			return nil, status.Errorf(codes.Internal, "failed to create directories for %s: %v", cleanPath, err)
-		}
 
-		// Use syscall.O_NOFOLLOW to prevent symlink TOCTOU attacks
-		file, err := os.OpenFile(cleanPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, mode)
+		dirPerm := os.FileMode(0755)
+		if strings.HasPrefix(cleanPath, "/run/axonwall/tmp/") {
+			dirPerm = 0700
+		}
+		file, err := openFileNoSymlinkParents(cleanPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, mode, dirPerm)
 		if err != nil {
-			log.Printf("[Agent] Failed to open file %s: %v; rolling back", cleanPath, err)
-			_ = s.executeRollback("bundle file write failed")
+			log.Printf("[Agent] Failed to open file %s safely: %v; rolling back", cleanPath, err)
+			_ = s.rollbackUnlocked("bundle file write failed", &muHeld)
 			return nil, status.Errorf(codes.Internal, "failed to open file %s: %v", cleanPath, err)
 		}
 		if _, err := file.Write([]byte(f.Content)); err != nil {
 			file.Close()
 			log.Printf("[Agent] Failed to write file %s: %v; rolling back", cleanPath, err)
-			_ = s.executeRollback("bundle file write failed")
+			_ = s.rollbackUnlocked("bundle file write failed", &muHeld)
 			return nil, status.Errorf(codes.Internal, "failed to write file %s: %v", cleanPath, err)
 		}
 		_ = file.Chmod(mode)
@@ -1138,11 +1156,6 @@ func (s *AgentServer) ApplyBundle(ctx context.Context, req *pb.ApplyBundleReques
 		}
 
 		// Mirror /etc/axonwall/*.yaml, *.json, and interfaces.conf to /var/lib/axonwall/etc-axonwall/ for A/B rootfs persistence.
-		// L5: the mirror write used to discard every error, so a
-		// bundle could be live in /etc and reported successful
-		// while its mirror was stale or missing. Failures are
-		// logged loudly and carried into the ApplyBundle response
-		// as warnings instead.
 		if strings.HasPrefix(cleanPath, "/etc/axonwall/") &&
 			(strings.HasSuffix(cleanPath, ".yaml") || strings.HasSuffix(cleanPath, ".yml") || strings.HasSuffix(cleanPath, ".json") || filepath.Base(cleanPath) == "interfaces.conf") {
 			relPath := strings.TrimPrefix(cleanPath, "/etc/axonwall/")
@@ -1164,24 +1177,11 @@ func (s *AgentServer) ApplyBundle(ctx context.Context, req *pb.ApplyBundleReques
 				Enabled bool `json:"enabled"`
 			}
 			if err := json.Unmarshal([]byte(f.Content), &fwCfg); err == nil && !fwCfg.Enabled {
-				log.Printf("[Agent] Core-Firewall plugin is disabled (Host Mode); stopping NGFW-only daemons")
-				// L9: the stop error used to be discarded, so the
-				// bundle proceeded as host mode while kea/suricata/
-				// FRR/conntrackd kept enforcing. Fail the bundle
-				// (with rollback, like other subsystem failures)
-				// instead of reporting host mode with NGFW live.
-				if err := stopNgfwDaemons(); err != nil {
-					subsystemErr = fmt.Errorf("failed to stop NGFW daemons for host mode: %w", err)
-					break
-				}
+				log.Printf("[Agent] Core-Firewall plugin is disabled (Host Mode); scheduling NGFW-only daemon stop")
+				hostModeStopNgfw = true
 			}
 		}
 
-		// A-M3: a subsystem apply failure fails the bundle instead of
-		// being logged and then confirmed into last-known-good. The
-		// applies are queued in file order and run after the write
-		// loop (A-M14); the first failure stops the run and the
-		// bundle is rolled back below.
 		if filepath.Base(cleanPath) == "zero_trust_apps.json" {
 			content := []byte(f.Content)
 			pendingApplies = append(pendingApplies, pendingSubsystemApply{
@@ -1326,25 +1326,19 @@ func (s *AgentServer) ApplyBundle(ctx context.Context, req *pb.ApplyBundleReques
 		}
 	}
 
-	// A-M14: run the queued subsystem applies without holding s.mu —
-	// the same pattern as reloadBundleServices below. The applyMu
-	// serialisation and the applyInProgress flag still protect
-	// Confirm/Rollback (they fail fast while an apply is in flight,
-	// M1), and the auto-rollback timer defers while an apply is in
-	// progress (M2) instead of rolling back underneath it. The
-	// deferred s.mu.Unlock at the top of ApplyBundle releases the
-	// lock re-acquired here.
-	if subsystemErr == nil && len(pendingApplies) > 0 {
-		s.mu.Unlock()
-		subsystemErr = runSubsystemApplies(pendingApplies)
-		s.mu.Lock()
+	if hostModeStopNgfw {
+		if err := stopNgfwDaemons(); err != nil {
+			subsystemErr = fmt.Errorf("failed to stop NGFW daemons for host mode: %w", err)
+		}
 	}
 
-	// A-M3: report the subsystem failure and roll back instead of
-	// entering pending-confirm with a half-applied bundle.
+	if subsystemErr == nil && len(pendingApplies) > 0 {
+		subsystemErr = runSubsystemApplies(pendingApplies)
+	}
+
 	if subsystemErr != nil {
 		log.Printf("[Agent] Subsystem apply failed (%v); rolling back", subsystemErr)
-		if rbErr := s.executeRollback("subsystem apply failed"); rbErr != nil {
+		if rbErr := s.rollbackUnlocked("subsystem apply failed", &muHeld); rbErr != nil {
 			log.Printf("[Agent] Rollback after subsystem failure also failed: %v", rbErr)
 		}
 		return &pb.ApplyBundleResponse{
@@ -1354,13 +1348,9 @@ func (s *AgentServer) ApplyBundle(ctx context.Context, req *pb.ApplyBundleReques
 	}
 
 	if currentRuntimeMode != engine.ModeCollector {
-		// Reconcile physical/logical interfaces and static routes whenever a bundle is applied
-		// A-M16: a failed static address assignment fails the apply (with
-		// rollback, like the nft failure below) instead of being logged
-		// while the WAN is left address-less.
 		if err := applyBootInterfaces(); err != nil {
 			log.Printf("[Agent] Failed to apply boot interfaces: %v; rolling back", err)
-			_ = s.executeRollback("interface apply failed")
+			_ = s.rollbackUnlocked("interface apply failed", &muHeld)
 			return &pb.ApplyBundleResponse{
 				Success: false,
 				Message: fmt.Sprintf("failed to apply interfaces: %v", err),
@@ -1376,17 +1366,13 @@ func (s *AgentServer) ApplyBundle(ctx context.Context, req *pb.ApplyBundleReques
 		s.etckeeperManager.ScheduleCommit(commitMsg, "axonwall")
 	}
 
-	// 3. Backup current script for rollback
-	s.candidateScript = req.NftScript
-
 	if currentRuntimeMode != engine.ModeCollector {
-		// 4. Apply ruleset atomically (bounded by A-M2's timeout).
 		applyCtx, applyCancel := context.WithTimeout(context.Background(), nftApplyTimeout)
 		defer applyCancel()
 		applyCmd := exec.CommandContext(applyCtx, "nft", "-f", tmpFilePath)
 		if out, err := applyCmd.CombinedOutput(); err != nil {
 			log.Printf("[Agent] Failed to apply nftables ruleset: %s; rolling back config files and services", string(out))
-			if rbErr := s.executeRollback("nftables apply failed"); rbErr != nil {
+			if rbErr := s.rollbackUnlocked("nftables apply failed", &muHeld); rbErr != nil {
 				log.Printf("[Agent] Rollback after nftables apply failure also failed: %v", rbErr)
 			}
 			return &pb.ApplyBundleResponse{
@@ -1397,13 +1383,27 @@ func (s *AgentServer) ApplyBundle(ctx context.Context, req *pb.ApplyBundleReques
 	}
 
 	// Re-populate dynamic Headscale WAN invite window elements after nft -f flush/recreate.
-	if s.headscaleWanGateManager != nil {
-		hwm := s.headscaleWanGateManager
-		s.mu.Unlock()
-		_ = hwm.Reconcile()
-		s.mu.Lock()
+	lockMu()
+	hwm := s.headscaleWanGateManager
+	unlockMu()
+	if hwm != nil {
+		if err := hwm.Reconcile(); err != nil {
+			log.Printf("[Agent] WARNING: Headscale WAN gate reconcile failed after nftables apply: %v", err)
+			applyWarnings = append(applyWarnings, fmt.Sprintf("headscale WAN gate reconcile failed: %v", err))
+		}
 	}
 
+	if currentRuntimeMode != engine.ModeCollector {
+		if len(req.ReloadServices) > 0 {
+			recordPendingReloadServices(bundleDir, req.ReloadServices)
+		}
+		for _, err := range reloadBundleServices(req.ReloadServices) {
+			applyWarnings = append(applyWarnings, err.Error())
+		}
+	}
+
+	lockMu()
+	s.candidateScript = req.NftScript
 	if req.BundleHash != "" {
 		s.activeHash = req.BundleHash
 	} else {
@@ -1411,27 +1411,7 @@ func (s *AgentServer) ApplyBundle(ctx context.Context, req *pb.ApplyBundleReques
 		s.activeHash = hex.EncodeToString(h[:])
 	}
 
-	if currentRuntimeMode != engine.ModeCollector {
-		// 5. Reload any changed systemd units requested. A-M2: this runs
-		// without holding s.mu (see reloadBundleServices); the deferred
-		// unlock at the top of ApplyBundle releases the re-acquired lock.
-		if len(req.ReloadServices) > 0 {
-			recordPendingReloadServices(s.bundleDir, req.ReloadServices)
-		}
-		s.mu.Unlock()
-		for _, err := range reloadBundleServices(req.ReloadServices) {
-			applyWarnings = append(applyWarnings, err.Error())
-		}
-		s.mu.Lock()
-	}
-
-	// 6. Setup Commit-Confirm deadline
-	// C26 (daemon side): the UI now validates/clamps this value, but
-	// the daemon must not trust it. Out-of-range values previously
-	// passed through verbatim: a negative timeout armed a deadline
-	// in the past (immediate auto-rollback racing the confirm), and
-	// a huge timeout left a ruleset effectively unconfirmed forever.
-	// Clamp to 10-3600s, defaulting an absent value to 120s.
+	// 6. Setup Commit-Confirm deadline (clamped to 10-3600s, default 120s).
 	timeoutSec := req.ConfirmTimeoutSeconds
 	if timeoutSec == 0 {
 		timeoutSec = 120
@@ -1453,20 +1433,12 @@ func (s *AgentServer) ApplyBundle(ctx context.Context, req *pb.ApplyBundleReques
 	_ = os.MkdirAll("/run/axonwall", 0755)
 	_ = os.WriteFile("/run/axonwall/commit-confirm.pending", []byte(fmt.Sprintf("COMMIT-CONFIRM (%ds)", timeoutSec)), 0644)
 
-	// M2: the callback captures the generation it was armed with.
-	// A stale callback (already running when a newer bundle armed
-	// its own timer) must not roll back the newer bundle.
 	s.rollbackGen++
 	rollbackGen := s.rollbackGen
 	s.rollbackTimer = time.AfterFunc(time.Duration(timeoutSec)*time.Second, func() {
 		s.triggerAutoRollback(req.JobId, rollbackGen)
 	})
 
-	// M3: persist the pending-confirm state (job, deadline, candidate
-	// script) so a daemon restart neither promotes the unconfirmed
-	// bundle to last-known-good nor loses the chance to confirm or
-	// roll it back. A persist failure is loud but does not fail the
-	// apply: the in-memory state is still correct for this run.
 	if err := writePendingConfirmState(s.bundleDir, pendingConfirmState{
 		JobID:        req.JobId,
 		DeadlineUnix: s.confirmDeadline.Unix(),
@@ -1638,53 +1610,57 @@ func applyNftScriptString(script string) error {
 	return nil
 }
 
-func (s *AgentServer) executeRollback(reason string) error {
+func (s *AgentServer) runRollbackIO(reason, bundleDir, lastGoodScript, lastGoodHash string) (updatedLastGood, updatedActiveHash string, err error) {
 	cancelPostBootVerification()
 	var rollbackErrs []string
 
-	if s.lastGoodScript == "" {
-		lkgPath := filepath.Join(s.bundleDir, "last-known-good.nft")
-		if data, err := os.ReadFile(lkgPath); err == nil && len(data) > 0 {
-			s.lastGoodScript = string(data)
+	updatedLastGood = lastGoodScript
+	if updatedLastGood == "" {
+		lkgPath := filepath.Join(bundleDir, "last-known-good.nft")
+		if data, rErr := os.ReadFile(lkgPath); rErr == nil && isSafeLkgNftScript(lkgPath, data) {
+			updatedLastGood = string(data)
 		}
 	}
 
-	// Always restore LKG configuration files, external bundle files, and live kernel
-	// network state BEFORE giving up on a missing/failing nft script, so partial/broken
-	// candidate files, IPs, and routes are never stranded live on the appliance.
-	restored := restoreLkgConfig(s.bundleDir)
-	restoredServices, extRestored := restoreExternalBundleFiles(s.bundleDir)
-	netRestored := restoreLiveNetSnapshot(s.bundleDir)
+	// Always restore LKG configuration files, external bundle files, netdev
+	// topology, and live kernel network state BEFORE giving up on a
+	// missing/failing nft script, so partial/broken candidate files, IPs, and
+	// routes are never stranded live on the appliance.
+	restored := restoreLkgConfig(bundleDir)
+	restoredServices, extRestored := restoreExternalBundleFiles(bundleDir)
+	if currentRuntimeMode != engine.ModeCollector && (restored || extRestored) {
+		// Re-create restored VLANs/bonds/bridges BEFORE re-applying IPs/routes.
+		if nErr := reapplyRestoredNetdev(); nErr != nil {
+			log.Printf("[Agent] Rollback: netdev re-apply failed: %v", nErr)
+			rollbackErrs = append(rollbackErrs, fmt.Sprintf("netdev_config.json: %v", nErr))
+		}
+	}
+	netRestored := restoreLiveNetSnapshot(bundleDir)
 
-	if s.lastGoodScript == "" {
+	if updatedLastGood == "" {
 		rollbackErrs = append(rollbackErrs, "no previous last-known-good configuration available for rollback")
 	} else {
-		if err := applyNftScriptString(s.lastGoodScript); err != nil {
-			log.Printf("[Agent] ERROR applying rollback ruleset: %v", err)
-			rollbackErrs = append(rollbackErrs, fmt.Sprintf("failed to execute rollback nftables application: %v", err))
+		if nErr := applyNftScriptString(updatedLastGood); nErr != nil {
+			log.Printf("[Agent] ERROR applying rollback ruleset: %v", nErr)
+			rollbackErrs = append(rollbackErrs, fmt.Sprintf("failed to execute rollback nftables application: %v", nErr))
 		} else {
-			if s.lastGoodHash != "" {
-				s.activeHash = s.lastGoodHash
+			if lastGoodHash != "" {
+				updatedActiveHash = lastGoodHash
 			} else {
-				h := sha256.Sum256([]byte(s.lastGoodScript))
-				s.activeHash = hex.EncodeToString(h[:])
+				h := sha256.Sum256([]byte(updatedLastGood))
+				updatedActiveHash = hex.EncodeToString(h[:])
 			}
 		}
 	}
 
-	if restored || extRestored || netRestored || s.lastGoodScript != "" {
-		// Re-create restored VLANs/bonds/bridges BEFORE re-applying IPs/routes.
-		if err := reapplyRestoredNetdev(); err != nil {
-			log.Printf("[Agent] Rollback: netdev re-apply failed: %v", err)
-			rollbackErrs = append(rollbackErrs, fmt.Sprintf("netdev_config.json: %v", err))
-		}
+	if restored || extRestored || netRestored || updatedLastGood != "" {
 		// A-M16: a rollback must not itself abort because one interface
 		// re-apply failed; log and continue restoring the rest.
-		if err := applyBootInterfaces(); err != nil {
-			log.Printf("[Agent] Rollback: boot interfaces re-apply failed: %v", err)
+		if bErr := applyBootInterfaces(); bErr != nil {
+			log.Printf("[Agent] Rollback: boot interfaces re-apply failed: %v", bErr)
 		}
-		if err := ReconcileStaticRoutes(); err != nil {
-			log.Printf("[Agent] Rollback: static routes reconciliation: %v", err)
+		if rErr := ReconcileStaticRoutes(); rErr != nil {
+			log.Printf("[Agent] Rollback: static routes reconciliation: %v", rErr)
 		}
 		if len(restoredServices) > 0 {
 			for _, rErr := range reloadBundleServices(restoredServices) {
@@ -1692,27 +1668,71 @@ func (s *AgentServer) executeRollback(reason string) error {
 			}
 		}
 
-		// A-H1 (round 2): restoring the files is not a rollback — re-apply
-		// the restored subsystem configs so live state matches the files,
-		// and restart the NGFW daemons the failed bundle stopped.
-		if err := s.reapplyRestoredSubsystemsImpl(false); err != nil {
-			rollbackErrs = append(rollbackErrs, err.Error())
+		// A-H1 (round 2): bound subsystem re-apply during rollback as well
+		// so a slow/wedged subsystem cannot hang manual or auto-rollback.
+		if subErr := runWithTimeout(func() error {
+			return s.reapplyRestoredSubsystemsImpl(false)
+		}, subsystemApplyTimeout); subErr != nil {
+			rollbackErrs = append(rollbackErrs, subErr.Error())
 		}
 		if s.headscaleWanGateManager != nil {
-			_ = s.headscaleWanGateManager.Reconcile()
+			if hErr := s.headscaleWanGateManager.Reconcile(); hErr != nil {
+				log.Printf("[Agent] Rollback: headscale WAN gate reconcile failed: %v", hErr)
+				rollbackErrs = append(rollbackErrs, fmt.Sprintf("headscale WAN gate: %v", hErr))
+			}
 		}
-		if err := s.restartNgfwDaemonsIfEnabled(); err != nil {
-			log.Printf("[Agent] Rollback: %v", err)
-			rollbackErrs = append(rollbackErrs, err.Error())
+		if nErr := s.restartNgfwDaemonsIfEnabled(); nErr != nil {
+			log.Printf("[Agent] Rollback: %v", nErr)
+			rollbackErrs = append(rollbackErrs, nErr.Error())
 		}
 	}
 
-	s.clearPendingLocked()
 	if len(rollbackErrs) > 0 {
-		return fmt.Errorf("%s", strings.Join(rollbackErrs, "; "))
+		return updatedLastGood, updatedActiveHash, fmt.Errorf("%s", strings.Join(rollbackErrs, "; "))
 	}
 	log.Printf("[Agent] Successfully rolled back to last known good configuration (reason: %s).", reason)
-	return nil
+	return updatedLastGood, updatedActiveHash, nil
+}
+
+func (s *AgentServer) rollbackUnlocked(reason string, muHeld *bool) error {
+	if *muHeld {
+		s.mu.Unlock()
+		*muHeld = false
+	}
+	s.mu.Lock()
+	s.rollbackInProgress = true
+	bundleDir := s.bundleDir
+	lastGoodScript := s.lastGoodScript
+	lastGoodHash := s.lastGoodHash
+	s.mu.Unlock()
+
+	updatedLastGood, updatedActiveHash, err := s.runRollbackIO(reason, bundleDir, lastGoodScript, lastGoodHash)
+
+	s.mu.Lock()
+	*muHeld = true
+	s.rollbackInProgress = false
+	if updatedLastGood != "" && s.lastGoodScript == "" {
+		s.lastGoodScript = updatedLastGood
+	}
+	if updatedActiveHash != "" {
+		s.activeHash = updatedActiveHash
+	}
+	s.clearPendingLocked()
+	return err
+}
+
+// executeRollback performs a synchronous rollback for callers that already hold
+// (or intentionally omit) external synchronization, such as direct tests.
+func (s *AgentServer) executeRollback(reason string) error {
+	updatedLastGood, updatedActiveHash, err := s.runRollbackIO(reason, s.bundleDir, s.lastGoodScript, s.lastGoodHash)
+	if updatedLastGood != "" && s.lastGoodScript == "" {
+		s.lastGoodScript = updatedLastGood
+	}
+	if updatedActiveHash != "" {
+		s.activeHash = updatedActiveHash
+	}
+	s.clearPendingLocked()
+	return err
 }
 
 // reapplyRestoredSubsystems re-applies the subsystem configs that
@@ -1725,9 +1745,17 @@ func (s *AgentServer) reapplyRestoredSubsystems() error {
 func (s *AgentServer) reapplyRestoredSubsystemsImpl(includeNetdev bool) error {
 	var errs []string
 	etcDir := axonwallEtcDir()
-	apply := func(name string, fn func([]byte) error) {
+	applyOrDisable := func(name string, fn func([]byte) error, disabledPayload []byte) {
 		data, err := readManagedOrRootConfig(etcDir, name)
 		if err != nil {
+			if os.IsNotExist(err) && len(disabledPayload) > 0 {
+				if dErr := fn(disabledPayload); dErr != nil {
+					errs = append(errs, fmt.Sprintf("%s (disable): %v", name, dErr))
+					log.Printf("[Agent] Rollback: disabling absent %s failed: %v", name, dErr)
+				} else {
+					log.Printf("[Agent] Rollback: disabled %s (absent from LKG)", name)
+				}
+			}
 			return
 		}
 		if err := fn(data); err != nil {
@@ -1737,11 +1765,12 @@ func (s *AgentServer) reapplyRestoredSubsystemsImpl(includeNetdev bool) error {
 			log.Printf("[Agent] Rollback: re-applied %s", name)
 		}
 	}
+	disabledJSON := []byte(`{"enabled":false}`)
 	if includeNetdev {
-		apply("netdev_config.json", func(b []byte) error { return engine.ApplyNetdevBundleJSON(b, json.Unmarshal) })
+		applyOrDisable("netdev_config.json", func(b []byte) error { return engine.ApplyNetdevBundleJSON(b, json.Unmarshal) }, nil)
 	}
 	if s.iapManager != nil {
-		apply("zero_trust_apps.json", func(b []byte) error { return s.iapManager.ApplyConfig(b) })
+		applyOrDisable("zero_trust_apps.json", func(b []byte) error { return s.iapManager.ApplyConfig(b) }, disabledJSON)
 	}
 	if s.sdwanProber != nil {
 		// ReloadConfig reads the file from the path and stops the
@@ -1758,49 +1787,49 @@ func (s *AgentServer) reapplyRestoredSubsystemsImpl(includeNetdev bool) error {
 		}
 	}
 	if s.haEngine != nil {
-		apply("ha_config.json", func(b []byte) error { return s.haEngine.ApplyFromJSON(b) })
+		applyOrDisable("ha_config.json", func(b []byte) error { return s.haEngine.ApplyFromJSON(b) }, disabledJSON)
 	}
 	if s.nasManager != nil {
-		apply("nas_config.json", func(b []byte) error { return s.nasManager.ApplyConfig(b) })
+		applyOrDisable("nas_config.json", func(b []byte) error { return s.nasManager.ApplyConfig(b) }, nil)
 	}
 	if s.virtManager != nil {
-		apply("virt_config.json", func(b []byte) error { return s.virtManager.ApplyVirtBundleJSON(b) })
+		applyOrDisable("virt_config.json", func(b []byte) error { return s.virtManager.ApplyVirtBundleJSON(b) }, nil)
 	}
 	if s.k3sManager != nil {
-		apply("k3s_config.json", func(b []byte) error { return s.k3sManager.ApplyConfig(b) })
-		apply("vow_config.json", func(b []byte) error { return s.k3sManager.ApplyVowConfig(b) })
+		applyOrDisable("k3s_config.json", func(b []byte) error { return s.k3sManager.ApplyConfig(b) }, nil)
+		applyOrDisable("vow_config.json", func(b []byte) error { return s.k3sManager.ApplyVowConfig(b) }, nil)
 	}
 	if s.netboxManager != nil {
-		apply("netbox_config.json", func(b []byte) error { return s.netboxManager.ApplyConfig(b) })
+		applyOrDisable("netbox_config.json", func(b []byte) error { return s.netboxManager.ApplyConfig(b) }, nil)
 	}
 	if s.librenmsManager != nil {
-		apply("librenms_config.json", func(b []byte) error { return s.librenmsManager.ApplyConfig(b) })
+		applyOrDisable("librenms_config.json", func(b []byte) error { return s.librenmsManager.ApplyConfig(b) }, nil)
 	}
 	if s.topologyManager != nil {
-		apply("topology_config.json", func(b []byte) error { return s.topologyManager.ApplyConfig(b) })
+		applyOrDisable("topology_config.json", func(b []byte) error { return s.topologyManager.ApplyConfig(b) }, nil)
 	}
 	if s.netflowManager != nil {
-		apply("netflow_config.json", func(b []byte) error { return s.netflowManager.ApplyConfig(b) })
+		applyOrDisable("netflow_config.json", func(b []byte) error { return s.netflowManager.ApplyConfig(b) }, disabledJSON)
 	}
 	if s.observabilityManager != nil {
-		apply("observability_config.json", func(b []byte) error { return s.observabilityManager.ApplyConfig(b) })
+		applyOrDisable("observability_config.json", func(b []byte) error { return s.observabilityManager.ApplyConfig(b) }, nil)
 	}
 	if s.vigilanteManager != nil {
-		apply("vigilante_config.json", func(b []byte) error { return s.vigilanteManager.ApplyConfig(b) })
+		applyOrDisable("vigilante_config.json", func(b []byte) error { return s.vigilanteManager.ApplyConfig(b) }, disabledJSON)
 	}
 	if s.threatHarvesterManager != nil {
-		apply("threat_harvester_config.json", func(b []byte) error { return s.threatHarvesterManager.ApplyConfig(b) })
+		applyOrDisable("threat_harvester_config.json", func(b []byte) error { return s.threatHarvesterManager.ApplyConfig(b) }, nil)
 	}
 	if s.ddnsManager != nil {
-		apply("ddns_config.json", func(b []byte) error { return s.ddnsManager.ApplyConfigJSON(b) })
+		applyOrDisable("ddns_config.json", func(b []byte) error { return s.ddnsManager.ApplyConfigJSON(b) }, disabledJSON)
 	}
 	if s.headscaleWanGateManager != nil {
-		apply("headscale_wan_config.json", func(b []byte) error {
+		applyOrDisable("headscale_wan_config.json", func(b []byte) error {
 			if err := s.headscaleWanGateManager.ApplyConfig(b); err != nil {
 				return err
 			}
 			return s.headscaleWanGateManager.Reconcile()
-		})
+		}, disabledJSON)
 	}
 	if len(errs) > 0 {
 		return fmt.Errorf("subsystem re-apply failures: %s", strings.Join(errs, "; "))
@@ -1816,7 +1845,7 @@ func (s *AgentServer) reapplyRestoredSubsystemsImpl(includeNetdev bool) error {
 // daemons as they are. `systemctl start` on an already-running unit is
 // a no-op, so this is safe when the bundle never stopped them.
 func (s *AgentServer) restartNgfwDaemonsIfEnabled() error {
-	data, err := os.ReadFile("/etc/axonwall/firewall_config.json")
+	data, err := readManagedOrRootConfig(axonwallEtcDir(), "firewall_config.json")
 	if err != nil {
 		return nil
 	}
@@ -1879,39 +1908,42 @@ func (s *AgentServer) restartNgfwDaemonsIfEnabled() error {
 
 func (s *AgentServer) triggerAutoRollback(jobId string, gen uint64) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if !s.pendingConfirm {
+	if !s.pendingConfirm || jobId != s.pendingJobID || gen != s.rollbackGen {
+		s.mu.Unlock()
 		return
 	}
 
-	// M2: the callback only rolls back the bundle it was armed for.
-	// Timer.Stop cannot stop a callback that already started, so a
-	// stale callback can acquire the lock after a newer bundle went
-	// pending; without the job-id and generation checks it would
-	// roll back the newer bundle.
-	if jobId != s.pendingJobID || gen != s.rollbackGen {
-		return
-	}
-
-	// M2/M1: an apply in progress owns the config files and the
-	// kernel state right now; rolling back underneath it would
-	// restore LKG files under the new bundle's writes. Defer the
-	// rollback instead of dropping it: the re-armed callback
-	// re-checks the job id and generation, so it becomes a no-op
-	// if the apply armed a newer pending bundle in the meantime.
-	if s.applyInProgress {
-		log.Printf("[Agent] WARNING: Commit-confirm deadline expired for job %s, but a configuration apply is in progress; deferring automatic rollback.", jobId)
+	if s.applyInProgress || s.rollbackInProgress {
+		log.Printf("[Agent] WARNING: Commit-confirm deadline expired for job %s, but an apply/rollback is in progress; deferring automatic rollback.", jobId)
 		s.rollbackTimer = time.AfterFunc(autoRollbackDeferDelay, func() {
 			s.triggerAutoRollback(jobId, gen)
 		})
+		s.mu.Unlock()
 		return
 	}
 
+	s.rollbackInProgress = true
+	bundleDir := s.bundleDir
+	lastGoodScript := s.lastGoodScript
+	lastGoodHash := s.lastGoodHash
+	s.mu.Unlock()
+
 	log.Printf("[Agent] WARNING: Commit-confirm deadline expired for job %s! Initiating automatic rollback.", jobId)
-	if err := s.executeRollback(fmt.Sprintf("commit-confirm timeout for job %s", jobId)); err != nil {
+	updatedLastGood, updatedActiveHash, err := s.runRollbackIO(fmt.Sprintf("commit-confirm timeout for job %s", jobId), bundleDir, lastGoodScript, lastGoodHash)
+	if err != nil {
 		log.Printf("[Agent] Automatic rollback failed: %v", err)
 	}
+
+	s.mu.Lock()
+	s.rollbackInProgress = false
+	if updatedLastGood != "" && s.lastGoodScript == "" {
+		s.lastGoodScript = updatedLastGood
+	}
+	if updatedActiveHash != "" {
+		s.activeHash = updatedActiveHash
+	}
+	s.clearPendingLocked()
+	s.mu.Unlock()
 }
 
 func (s *AgentServer) Confirm(ctx context.Context, req *pb.ConfirmRequest) (*pb.ConfirmResponse, error) {
@@ -1920,15 +1952,16 @@ func (s *AgentServer) Confirm(ctx context.Context, req *pb.ConfirmRequest) (*pb.
 
 	log.Printf("[Agent] Received Confirm request for job %s", req.JobId)
 
-	// M1: a confirm arriving while an apply is in progress is
-	// premature — the pending state it would act on belongs to the
-	// previous bundle, while the new bundle's files are already on
-	// disk. Fail fast instead of confirming (and snapshotting) a
-	// half-applied state; the caller retries after the apply returns.
 	if s.applyInProgress {
 		return &pb.ConfirmResponse{
 			Success: false,
 			Message: "Configuration apply in progress; retry the confirm after it completes.",
+		}, nil
+	}
+	if s.rollbackInProgress {
+		return &pb.ConfirmResponse{
+			Success: false,
+			Message: "Configuration rollback in progress; retry after it completes.",
 		}, nil
 	}
 
@@ -1938,15 +1971,6 @@ func (s *AgentServer) Confirm(ctx context.Context, req *pb.ConfirmRequest) (*pb.
 			Message: "No pending configuration to confirm (already confirmed or rolled back).",
 		}, nil
 	}
-	// C10/C11 (daemon side): the literal job id "confirm" used to be
-	// exempt from the mismatch check, so a stale confirm — sent for
-	// a job that is no longer pending, or with no job known at all —
-	// confirmed whatever bundle happened to be pending, promoting a
-	// ruleset the operator never reviewed. The UI now sends real job
-	// ids, and axonwallctl resolves the pending id before confirming,
-	// so the daemon requires an exact match: the confirm must name
-	// the pending job (including both sides being empty for applies
-	// submitted without a job id). Anything else is a mismatch.
 	if req.JobId != s.pendingJobID {
 		return &pb.ConfirmResponse{
 			Success: false,
@@ -1962,7 +1986,6 @@ func (s *AgentServer) Confirm(ctx context.Context, req *pb.ConfirmRequest) (*pb.
 	s.pendingConfirm = false
 	s.pendingJobID = ""
 	_ = os.Remove("/run/axonwall/commit-confirm.pending")
-	// M3: drop the persisted pending-confirm record too.
 	clearPendingConfirmFiles(s.bundleDir)
 	if s.candidateScript != "" {
 		s.lastGoodScript = s.candidateScript
@@ -1973,13 +1996,6 @@ func (s *AgentServer) Confirm(ctx context.Context, req *pb.ConfirmRequest) (*pb.
 		s.lastGoodHash = s.activeHash
 	}
 
-	// Save to bundle directory. L4: the write error used to be
-	// discarded while the success log below was emitted regardless,
-	// so a Confirm on an unwritable bundle dir logged "persisted"
-	// and the next daemon restart silently loaded the previous LKG
-	// as the rollback target. Surface the failure in the response:
-	// the in-memory state is already promoted, but the on-disk
-	// last-known-good is stale.
 	if err := os.MkdirAll(s.bundleDir, 0700); err != nil {
 		log.Printf("[Agent] ERROR: Failed to create bundle directory for last-known-good persist: %v", err)
 		return &pb.ConfirmResponse{
@@ -2009,18 +2025,20 @@ func (s *AgentServer) Confirm(ctx context.Context, req *pb.ConfirmRequest) (*pb.
 
 func (s *AgentServer) Rollback(ctx context.Context, req *pb.RollbackRequest) (*pb.RollbackResponse, error) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	log.Printf("[Agent] Manual Rollback requested: %s", req.Reason)
 
-	// M1: same premature-action guard as Confirm — rolling back
-	// while an apply is mid-flight would restore LKG files under
-	// the new bundle's writes. Fail fast; the caller retries after
-	// the apply returns.
 	if s.applyInProgress {
+		s.mu.Unlock()
 		return &pb.RollbackResponse{
 			Success: false,
 			Message: "Configuration apply in progress; retry the rollback after it completes.",
+		}, nil
+	}
+	if s.rollbackInProgress {
+		s.mu.Unlock()
+		return &pb.RollbackResponse{
+			Success: false,
+			Message: "Configuration rollback already in progress; retry after it completes.",
 		}, nil
 	}
 
@@ -2028,8 +2046,26 @@ func (s *AgentServer) Rollback(ctx context.Context, req *pb.RollbackRequest) (*p
 		s.rollbackTimer.Stop()
 		s.rollbackTimer = nil
 	}
+	s.rollbackInProgress = true
+	bundleDir := s.bundleDir
+	lastGoodScript := s.lastGoodScript
+	lastGoodHash := s.lastGoodHash
+	s.mu.Unlock()
 
-	if err := s.executeRollback(req.Reason); err != nil {
+	updatedLastGood, updatedActiveHash, err := s.runRollbackIO(req.Reason, bundleDir, lastGoodScript, lastGoodHash)
+
+	s.mu.Lock()
+	s.rollbackInProgress = false
+	if updatedLastGood != "" && s.lastGoodScript == "" {
+		s.lastGoodScript = updatedLastGood
+	}
+	if updatedActiveHash != "" {
+		s.activeHash = updatedActiveHash
+	}
+	s.clearPendingLocked()
+	s.mu.Unlock()
+
+	if err != nil {
 		return &pb.RollbackResponse{
 			Success: false,
 			Message: err.Error(),
@@ -2155,7 +2191,7 @@ func (s *AgentServer) ExecuteDiagnostic(ctx context.Context, req *pb.DiagnosticR
 	}
 
 	count := req.Count
-	if count == 0 || count > 10 {
+	if count <= 0 || count > 10 {
 		count = 3
 	}
 
@@ -2170,7 +2206,7 @@ func (s *AgentServer) ExecuteDiagnostic(ctx context.Context, req *pb.DiagnosticR
 		cmd = exec.CommandContext(ctx, "host", "-W", "2", target)
 	case pb.DiagnosticType_DIAGNOSTIC_TYPE_PORT_PROBE:
 		port := req.Port
-		if port == 0 || port > 65535 {
+		if port <= 0 || port > 65535 {
 			port = 80
 		}
 		// Probe TCP port directly using net.DialTimeout
@@ -2238,12 +2274,22 @@ func sanitizeEtcNetworkInterfaces() {
 }
 
 type bootIfaceSpec struct {
-	Name    string
-	Role    string // "wan" or "lan"
-	Device  string
-	Mode    string // "dhcp" or "static"
-	IPv4    string
-	Gateway string
+	Name              string
+	Role              string // "wan", "lan", or "wan-delegated"
+	Device            string
+	Mode              string // "dhcp" or "static"
+	IPv4              string
+	Gateway           string
+	AllowDefaultRoute *bool
+}
+
+func specsHaveWan(specs []bootIfaceSpec) bool {
+	for _, s := range specs {
+		if s.Role == "wan" || s.Role == "wan-delegated" {
+			return true
+		}
+	}
+	return false
 }
 
 func loadAllBootInterfaces(config map[string]string) []bootIfaceSpec {
@@ -2341,29 +2387,32 @@ func loadAllBootInterfaces(config map[string]string) []bootIfaceSpec {
 			lanIP = "192.168.1.1/24"
 		}
 		upsert(bootIfaceSpec{
-			Name:   "lan",
-			Role:   "lan",
-			Device: d,
-			Mode:   lanMode,
-			IPv4:   lanIP,
+			Name:    "lan",
+			Role:    "lan",
+			Device:  d,
+			Mode:    lanMode,
+			IPv4:    lanIP,
+			Gateway: validIP(config["LAN_IPV4_GATEWAY"]),
 		})
 	}
 	if d := validDev(config["OPT1_INTERFACE"]); d != "" {
 		upsert(bootIfaceSpec{
-			Name:   "opt1",
-			Role:   "lan",
-			Device: d,
-			Mode:   config["OPT1_MODE"],
-			IPv4:   validCIDR(config["OPT1_IPV4_ADDRESS"]),
+			Name:    "opt1",
+			Role:    "lan",
+			Device:  d,
+			Mode:    config["OPT1_MODE"],
+			IPv4:    validCIDR(config["OPT1_IPV4_ADDRESS"]),
+			Gateway: validIP(config["OPT1_IPV4_GATEWAY"]),
 		})
 	}
 	if d := validDev(config["OPT2_INTERFACE"]); d != "" {
 		upsert(bootIfaceSpec{
-			Name:   "opt2",
-			Role:   "lan",
-			Device: d,
-			Mode:   config["OPT2_MODE"],
-			IPv4:   validCIDR(config["OPT2_IPV4_ADDRESS"]),
+			Name:    "opt2",
+			Role:    "lan",
+			Device:  d,
+			Mode:    config["OPT2_MODE"],
+			IPv4:    validCIDR(config["OPT2_IPV4_ADDRESS"]),
+			Gateway: validIP(config["OPT2_IPV4_GATEWAY"]),
 		})
 	}
 
@@ -2665,30 +2714,34 @@ func configureSystemdResolvedDNS(dnsServers []string) {
 	_ = exec.Command("systemctl", "--no-ask-password", "reload-or-restart", "systemd-resolved.service").Run()
 }
 
-func configureArchSystemdNetworkd(spec bootIfaceSpec) {
+func configureArchSystemdNetworkd(spec bootIfaceSpec, allowDefaultRoute bool) bool {
 	if engine.DetectOSFamily() != string(engine.OSFamilyArch) || currentRuntimeMode == engine.ModeDev {
-		return
+		return false
 	}
 	if _, err := os.Stat("/etc/network/interfaces"); err == nil {
-		return
+		return false
 	}
 	if !isSystemdUnitActive("systemd-networkd.service") {
-		return
+		return false
 	}
 	_ = os.MkdirAll("/etc/systemd/network", 0755)
 	var b strings.Builder
 	fmt.Fprintf(&b, "[Match]\nName=%s\n\n[Network]\n", spec.Device)
 	if spec.Mode == "static" && spec.IPv4 != "" {
 		fmt.Fprintf(&b, "Address=%s\n", spec.IPv4)
-		if spec.Gateway != "" {
+		if spec.Gateway != "" && allowDefaultRoute {
 			fmt.Fprintf(&b, "Gateway=%s\n", spec.Gateway)
 		}
 	} else {
 		b.WriteString("DHCP=ipv4\n")
+		if !allowDefaultRoute {
+			b.WriteString("\n[DHCPv4]\nUseRoutes=false\nUseDNS=false\n")
+		}
 	}
 	_ = os.WriteFile(filepath.Join("/etc/systemd/network", "10-axonwall-"+spec.Device+".network"), []byte(b.String()), 0644)
 	_ = exec.Command("networkctl", "reload").Run()
 	_ = exec.Command("networkctl", "reconfigure", spec.Device).Run()
+	return true
 }
 
 func discoverActiveNetIfaces() []string {
@@ -2783,12 +2836,13 @@ func applyBootInterfaces() error {
 	// while the WAN is left address-less after a flush.
 	var firstIfaceErr error
 
+	hasWan := specsHaveWan(specs)
+
 	for _, spec := range specs {
 		if isExternallyManagedHostIface(spec.Device) {
 			log.Printf("[Agent] Host mode: skipping externally managed interface %s (%s)", spec.Device, spec.Name)
 			continue
 		}
-		configureArchSystemdNetworkd(spec)
 		if spec.Role == "wan-delegated" {
 			log.Printf("[Agent] Boot-apply: delegating WAN device %s (%s) to br-wan (host L3 disabled)", spec.Device, spec.Name)
 			if err := engine.HardenDelegatedWAN(spec.Device, "br-wan"); err != nil {
@@ -2804,6 +2858,9 @@ func applyBootInterfaces() error {
 			}
 			continue
 		}
+
+		allowDefaultRoute := spec.Role == "wan" || !hasWan
+		networkdManaged := configureArchSystemdNetworkd(spec, allowDefaultRoute)
 
 		_ = exec.Command("ip", "link", "set", spec.Device, "up").Run()
 		if spec.Mode == "static" && spec.IPv4 != "" {
@@ -2833,11 +2890,11 @@ func applyBootInterfaces() error {
 					}
 				}
 			}
-			if spec.Gateway != "" && spec.Role == "wan" {
+			if spec.Gateway != "" && allowDefaultRoute {
 				staticGateways = append(staticGateways, staticWanGateway{gateway: spec.Gateway, device: spec.Device})
 			}
-			if currentRuntimeMode == engine.ModeAppliance && !isResolvConfSymlink() && spec.Role == "wan" && (wanDNS1 != "" || wanDNS2 != "") {
-				if rData, rErr := os.ReadFile("/etc/resolv.conf"); rErr == nil || len(strings.TrimSpace(string(rData))) == 0 {
+			if currentRuntimeMode == engine.ModeAppliance && !isResolvConfSymlink() && allowDefaultRoute && (wanDNS1 != "" || wanDNS2 != "") {
+				if rData, rErr := os.ReadFile("/etc/resolv.conf"); rErr != nil || len(strings.TrimSpace(string(rData))) == 0 {
 					var resolv strings.Builder
 					resolv.WriteString("# Generated by Axonwall\noptions timeout:1 attempts:2\n")
 					if wanDNS1 != "" {
@@ -2850,7 +2907,17 @@ func applyBootInterfaces() error {
 				}
 			}
 		} else if spec.Mode == "dhcp" {
-			dhcpSpecs = append(dhcpSpecs, spec)
+			if networkdManaged {
+				if dhcpClientRunning(spec.Device) {
+					stopDhcpClient(spec.Device)
+				}
+				continue
+			}
+			adr := allowDefaultRoute
+			specCopy := spec
+			specCopy.AllowDefaultRoute = &adr
+			dhcpSpecs = append(dhcpSpecs, specCopy)
+
 			out, _ := exec.Command("ip", "-4", "addr", "show", "dev", spec.Device).CombinedOutput()
 			var staleStaticOnDhcp []string
 			for _, line := range strings.Split(string(out), "\n") {
@@ -2867,9 +2934,9 @@ func applyBootInterfaces() error {
 					log.Printf("[Agent] Boot-apply: warning removing stale static IP %s on DHCP %s: %s", stale, spec.Device, string(delOut))
 				}
 			}
-			if len(staleStaticOnDhcp) > 0 || !strings.Contains(string(out), "inet ") {
-				log.Printf("[Agent] Boot-apply: starting DHCP client on %s (%s, role=%s)", spec.Name, spec.Device, spec.Role)
-				rebindOrStartDhcpClient(spec.Device, spec.Role)
+			if len(staleStaticOnDhcp) > 0 || !strings.Contains(string(out), "inet ") || !dhcpClientRunning(spec.Device) || dhcpClientNeedsRebind(spec.Device, spec.Role, allowDefaultRoute) {
+				log.Printf("[Agent] Boot-apply: starting DHCP client on %s (%s, role=%s, allowDefaultRoute=%v)", spec.Name, spec.Device, spec.Role, allowDefaultRoute)
+				rebindOrStartDhcpClient(spec.Device, spec.Role, allowDefaultRoute)
 			}
 		}
 	}
@@ -2942,6 +3009,7 @@ func schedulePostBootVerification(ifSpecs []bootIfaceSpec) {
 }
 
 func runPostBootVerification(ctx context.Context, ifSpecs []bootIfaceSpec) {
+	hasWan := specsHaveWan(ifSpecs)
 	for _, delay := range postBootVerificationDelays {
 		timer := time.NewTimer(delay)
 		select {
@@ -2954,10 +3022,17 @@ func runPostBootVerification(ctx context.Context, ifSpecs []bootIfaceSpec) {
 			if ctx.Err() != nil {
 				return
 			}
+			allowDefaultRoute := sp.Role == "wan" || sp.Role == "wan-delegated" || !hasWan
+			if sp.AllowDefaultRoute != nil {
+				allowDefaultRoute = *sp.AllowDefaultRoute
+			}
 			out, _ := exec.Command("ip", "-4", "addr", "show", "dev", sp.Device).CombinedOutput()
 			if !dhcpClientRunning(sp.Device) || !strings.Contains(string(out), "inet ") {
 				log.Printf("[Agent] Post-boot check: ensuring DHCP client is active on %s", sp.Device)
-				triggerDhcpClient(sp.Device, sp.Role)
+				triggerDhcpClient(sp.Device, sp.Role, allowDefaultRoute)
+			} else if dhcpClientNeedsRebind(sp.Device, sp.Role, allowDefaultRoute) {
+				log.Printf("[Agent] Post-boot check: rebinding DHCP client on %s (role=%s, allowDefaultRoute=%v)", sp.Device, sp.Role, allowDefaultRoute)
+				rebindOrStartDhcpClient(sp.Device, sp.Role, allowDefaultRoute)
 			}
 		}
 		if ctx.Err() != nil {
@@ -2967,9 +3042,33 @@ func runPostBootVerification(ctx context.Context, ifSpecs []bootIfaceSpec) {
 	}
 }
 
+var bootLockdownNftPath = "/usr/share/axonwall/lockdown.nft"
+
+func findAntiLockoutAnchorHandle(rulesWithHandles string) string {
+	anchorHandle := ""
+	for _, line := range strings.Split(rulesWithHandles, "\n") {
+		if !strings.Contains(line, "@blocked_ips") &&
+			!strings.Contains(line, "@blocked_ips6") &&
+			!strings.Contains(line, "ct state invalid drop") {
+			continue
+		}
+		idx := strings.LastIndex(line, "# handle ")
+		if idx < 0 {
+			continue
+		}
+		h := strings.TrimSpace(line[idx+len("# handle "):])
+		if fields := strings.Fields(h); len(fields) > 0 {
+			if _, err := strconv.Atoi(fields[0]); err == nil {
+				anchorHandle = fields[0]
+			}
+		}
+	}
+	return anchorHandle
+}
+
 func reconcileBootAntiLockoutNft(hasLkgBundle bool) {
 	config := make(map[string]string)
-	if data, err := os.ReadFile("/etc/axonwall/interfaces.conf"); err == nil {
+	if data, err := os.ReadFile(filepath.Join(axonwallEtcDir(), "interfaces.conf")); err == nil {
 		for _, line := range strings.Split(string(data), "\n") {
 			line = strings.TrimSpace(line)
 			if strings.HasPrefix(line, "#") || !strings.Contains(line, "=") {
@@ -3006,8 +3105,8 @@ func reconcileBootAntiLockoutNft(hasLkgBundle bool) {
 		}
 	}
 
-	// Update /usr/share/axonwall/lockdown.nft so wan_interfaces matches actual multi-WAN topology
-	lockdownPath := "/usr/share/axonwall/lockdown.nft"
+	// Update lockdown.nft so wan_interfaces matches actual multi-WAN topology
+	lockdownPath := bootLockdownNftPath
 	if lData, lErr := os.ReadFile(lockdownPath); lErr == nil {
 		content := string(lData)
 		elems := []string{`"wan0"`}
@@ -3034,103 +3133,145 @@ func reconcileBootAntiLockoutNft(hasLkgBundle bool) {
 		}
 	}
 
-	// Ensure all configured LAN interfaces are permitted for anti-lockout in inet axonwall input
-	currentRulesOut, _ := exec.Command("nft", "list", "chain", "inet", "axonwall", "input").CombinedOutput()
+	// When an LKG bundle was applied cleanly, preserve its configured input policy
+	// without injecting extra anti-lockout rules.
+	if hasLkgBundle {
+		return
+	}
+
+	// Fallback anti-lockout (no LKG bundle applied): insert ONLY for primary
+	// "lan" interface, positioned after @blocked_ips / ct state invalid drop.
+	currentRulesOut, _ := exec.Command("nft", "-a", "list", "chain", "inet", "axonwall", "input").CombinedOutput()
 	currentRules := string(currentRulesOut)
+	anchorHandle := findAntiLockoutAnchorHandle(currentRules)
 	for _, entry := range lanSpecs {
-		if entry.Device == "" || wanDevSet[entry.Device] {
+		if entry.Name != "lan" || entry.Device == "" || wanDevSet[entry.Device] {
 			continue
 		}
 		if !strings.Contains(currentRules, fmt.Sprintf(`iifname %q tcp dport`, entry.Device)) {
-			_ = exec.Command(
-				"nft", "insert", "rule", "inet", "axonwall", "input",
-				"iifname", entry.Device,
-				"tcp", "dport", "{ 22, 80, 443, 2966, 3000 }",
-				"accept", "comment", fmt.Sprintf("\"anti-lockout-%s\"", entry.Name),
-			).Run()
+			var args []string
+			if anchorHandle != "" {
+				args = []string{
+					"add", "rule", "inet", "axonwall", "input", "position", anchorHandle,
+					"iifname", entry.Device,
+					"tcp", "dport", "{ 22, 80, 443, 2966, 3000 }",
+					"accept", "comment", fmt.Sprintf("\"anti-lockout-%s\"", entry.Name),
+				}
+			} else {
+				args = []string{
+					"insert", "rule", "inet", "axonwall", "input",
+					"iifname", entry.Device,
+					"tcp", "dport", "{ 22, 80, 443, 2966, 3000 }",
+					"accept", "comment", fmt.Sprintf("\"anti-lockout-%s\"", entry.Name),
+				}
+			}
+			_ = exec.Command("nft", args...).Run()
 		}
+		break
+	}
+}
+
+func writeSyncedFile(targetPath string, data []byte, perm os.FileMode) {
+	if err := os.MkdirAll(filepath.Dir(targetPath), 0755); err != nil {
+		return
+	}
+	if err := os.WriteFile(targetPath, data, perm); err != nil {
+		return
+	}
+	if (perm & 0o070) != 0 {
+		ensureSharedConfigPerm(targetPath, perm)
+	} else {
+		_ = os.Chmod(targetPath, perm)
 	}
 }
 
 func syncFile(srcPath, dstPath string, perm os.FileMode) {
-	base := filepath.Base(srcPath)
-	if base == "admin.env" || base == "axonwall.env" || base == "agent.token" || base == "controller.env" || base == "mfa.env" || base == "slapd.seed" {
-		return
-	}
 	srcInfo, err1 := os.Lstat(srcPath)
-	if err1 != nil || (srcInfo.Mode()&os.ModeSymlink) != 0 {
+	if err1 == nil && ((srcInfo.Mode()&os.ModeSymlink) != 0 || srcInfo.IsDir()) {
 		return
 	}
 	dstInfo, err2 := os.Lstat(dstPath)
-	if err2 == nil && (dstInfo.Mode()&os.ModeSymlink) != 0 {
+	if err2 == nil && ((dstInfo.Mode()&os.ModeSymlink) != 0 || dstInfo.IsDir()) {
 		return
 	}
-	if err2 != nil || srcInfo.ModTime().After(dstInfo.ModTime()) {
+	if err1 != nil && err2 != nil {
+		return
+	}
+	if err2 != nil || (err1 == nil && srcInfo.ModTime().After(dstInfo.ModTime())) {
 		if data, err := os.ReadFile(srcPath); err == nil {
-			_ = os.WriteFile(dstPath, data, perm)
-			ensureSharedConfigPerm(dstPath, perm)
+			writeSyncedFile(dstPath, data, perm)
 		}
-	} else if dstInfo.ModTime().After(srcInfo.ModTime()) {
-		// Also sync newer /etc/axonwall edits back to /var/lib/axonwall/etc-axonwall
+	} else if err1 != nil || dstInfo.ModTime().After(srcInfo.ModTime()) {
+		// Also sync newer or /etc-only edits back to persistent state storage.
 		if data, err := os.ReadFile(dstPath); err == nil {
-			_ = os.WriteFile(srcPath, data, perm)
-			ensureSharedConfigPerm(srcPath, perm)
+			writeSyncedFile(srcPath, data, perm)
 		}
 	}
 }
 
 func syncPersistentYamlConfigs() {
-	srcDir := "/var/lib/axonwall/etc-axonwall"
-	dstDir := "/etc/axonwall"
+	srcDir := filepath.Join(axonwallStateDir(), "etc-axonwall")
+	dstDir := axonwallEtcDir()
 	_ = os.MkdirAll(srcDir, 0775)
 	_ = os.MkdirAll(dstDir, 0775)
+	_ = os.MkdirAll(filepath.Join(srcDir, "conf.d"), 0775)
 	_ = os.MkdirAll(filepath.Join(dstDir, "conf.d"), 0775)
-	entries, err := os.ReadDir(srcDir)
-	if err != nil {
-		normalizeConfigTreePermissions()
-		return
-	}
+	_ = os.MkdirAll(filepath.Join(srcDir, "managed"), 0775)
+	_ = os.MkdirAll(filepath.Join(dstDir, "managed"), 0775)
 
-	for _, entry := range entries {
-		name := entry.Name()
-		if entry.IsDir() {
-			if name == "conf.d" {
-				confEntries, err := os.ReadDir(filepath.Join(srcDir, "conf.d"))
-				if err == nil {
-					for _, ce := range confEntries {
-						if ce.IsDir() {
-							continue
+	if entries, err := os.ReadDir(srcDir); err == nil {
+		for _, entry := range entries {
+			name := entry.Name()
+			if entry.IsDir() {
+				if name == "conf.d" {
+					if confEntries, err := os.ReadDir(filepath.Join(srcDir, "conf.d")); err == nil {
+						for _, ce := range confEntries {
+							if ce.IsDir() {
+								continue
+							}
+							cName := ce.Name()
+							if strings.HasSuffix(cName, ".yaml") || strings.HasSuffix(cName, ".yml") {
+								syncFile(filepath.Join(srcDir, "conf.d", cName), filepath.Join(dstDir, "conf.d", cName), 0660)
+							}
 						}
-						cName := ce.Name()
-						if strings.HasSuffix(cName, ".yaml") || strings.HasSuffix(cName, ".yml") {
-							syncFile(filepath.Join(srcDir, "conf.d", cName), filepath.Join(dstDir, "conf.d", cName), 0660)
+					}
+				} else if name == "managed" {
+					if mgEntries, err := os.ReadDir(filepath.Join(srcDir, "managed")); err == nil {
+						for _, me := range mgEntries {
+							if me.IsDir() {
+								continue
+							}
+							if strings.HasSuffix(me.Name(), ".json") {
+								syncFile(filepath.Join(srcDir, "managed", me.Name()), filepath.Join(dstDir, "managed", me.Name()), 0600)
+							}
 						}
 					}
 				}
+				continue
 			}
-			continue
-		}
 
-		if strings.HasSuffix(name, ".yaml") || strings.HasSuffix(name, ".yml") || name == "state.json" {
-			syncFile(filepath.Join(srcDir, name), filepath.Join(dstDir, name), 0660)
+			if strings.HasSuffix(name, ".yaml") || strings.HasSuffix(name, ".yml") || name == "state.json" {
+				syncFile(filepath.Join(srcDir, name), filepath.Join(dstDir, name), 0660)
+			}
 		}
 	}
 
-	// Also ensure administrative credentials, MFA secrets, MCP configs, controller configs, and interface assignments are synced
+	// Ensure administrative credentials, secrets, MCP configs, controller configs, and interface assignments are synced bidirectionally
+	agentTokenPerm := os.FileMode(0600)
+	if resolveSocketGroupGID() >= 0 {
+		agentTokenPerm = 0640
+	}
 	syncFile(filepath.Join(srcDir, "admin.env"), filepath.Join(dstDir, "admin.env"), 0660)
+	syncFile(filepath.Join(srcDir, "axonwall.env"), filepath.Join(dstDir, "axonwall.env"), 0600)
 	syncFile(filepath.Join(srcDir, "mfa.env"), filepath.Join(dstDir, "mfa.env"), 0660)
+	syncFile(filepath.Join(srcDir, "controller.env"), filepath.Join(dstDir, "controller.env"), 0640)
+	syncFile(filepath.Join(srcDir, "agent.token"), filepath.Join(dstDir, "agent.token"), agentTokenPerm)
+	syncFile(filepath.Join(srcDir, "slapd.seed"), filepath.Join(dstDir, "slapd.seed"), 0600)
 	syncFile(filepath.Join(srcDir, "mcp-keys.json"), filepath.Join(dstDir, "mcp-keys.json"), 0660)
 	syncFile(filepath.Join(srcDir, "mcp-settings.json"), filepath.Join(dstDir, "mcp-settings.json"), 0660)
-	syncFile(filepath.Join(srcDir, "controller.env"), filepath.Join(dstDir, "controller.env"), 0640)
 	syncFile(filepath.Join(srcDir, "interfaces.conf"), filepath.Join(dstDir, "interfaces.conf"), 0664)
 
-	// L5: mirror /etc-only files into the mirror as well. The loop
-	// above only iterates mirror entries, so a config file that never
-	// reached the mirror (a failed mirror write during a bundle
-	// apply) was never healed: after an A/B slot switch the box
-	// booted with the pre-bundle config and no record of why.
-	// syncFile copies a missing destination from the source, so
-	// syncing each /etc-only mirrorable file heals exactly that case.
+	// Heal /etc-only files (including managed/*.json and conf.d/) back into the persistent mirror.
 	mirrorable := func(name string) bool {
 		return strings.HasSuffix(name, ".yaml") || strings.HasSuffix(name, ".yml") ||
 			strings.HasSuffix(name, ".json") || name == "interfaces.conf"
@@ -3138,17 +3279,27 @@ func syncPersistentYamlConfigs() {
 	if etcEntries, err := os.ReadDir(dstDir); err == nil {
 		for _, entry := range etcEntries {
 			if entry.IsDir() {
-				if entry.Name() != "conf.d" {
-					continue
-				}
-				_ = os.MkdirAll(filepath.Join(srcDir, "conf.d"), 0775)
-				if confEntries, err := os.ReadDir(filepath.Join(dstDir, "conf.d")); err == nil {
-					for _, ce := range confEntries {
-						if ce.IsDir() || !mirrorable(ce.Name()) {
-							continue
+				switch entry.Name() {
+				case "conf.d":
+					if confEntries, err := os.ReadDir(filepath.Join(dstDir, "conf.d")); err == nil {
+						for _, ce := range confEntries {
+							if ce.IsDir() || !mirrorable(ce.Name()) {
+								continue
+							}
+							if _, err := os.Lstat(filepath.Join(srcDir, "conf.d", ce.Name())); os.IsNotExist(err) {
+								syncFile(filepath.Join(srcDir, "conf.d", ce.Name()), filepath.Join(dstDir, "conf.d", ce.Name()), 0660)
+							}
 						}
-						if _, err := os.Lstat(filepath.Join(srcDir, "conf.d", ce.Name())); os.IsNotExist(err) {
-							syncFile(filepath.Join(dstDir, "conf.d", ce.Name()), filepath.Join(srcDir, "conf.d", ce.Name()), 0660)
+					}
+				case "managed":
+					if mgEntries, err := os.ReadDir(filepath.Join(dstDir, "managed")); err == nil {
+						for _, me := range mgEntries {
+							if me.IsDir() || !strings.HasSuffix(me.Name(), ".json") {
+								continue
+							}
+							if _, err := os.Lstat(filepath.Join(srcDir, "managed", me.Name())); os.IsNotExist(err) {
+								syncFile(filepath.Join(srcDir, "managed", me.Name()), filepath.Join(dstDir, "managed", me.Name()), 0600)
+							}
 						}
 					}
 				}
@@ -3158,7 +3309,13 @@ func syncPersistentYamlConfigs() {
 				continue
 			}
 			if _, err := os.Lstat(filepath.Join(srcDir, entry.Name())); os.IsNotExist(err) {
-				syncFile(filepath.Join(dstDir, entry.Name()), filepath.Join(srcDir, entry.Name()), 0660)
+				perm := os.FileMode(0660)
+				if strings.HasSuffix(entry.Name(), ".json") && entry.Name() != "state.json" && entry.Name() != "mcp-keys.json" && entry.Name() != "mcp-settings.json" {
+					perm = 0600
+				} else if entry.Name() == "interfaces.conf" {
+					perm = 0664
+				}
+				syncFile(filepath.Join(srcDir, entry.Name()), filepath.Join(dstDir, entry.Name()), perm)
 			}
 		}
 	}
@@ -3180,6 +3337,106 @@ func ensureStandardPath() {
 		}
 	}
 	_ = os.Setenv("PATH", strings.Join(current, string(os.PathListSeparator)))
+}
+
+const defaultMaxHTTPBodyBytes int64 = 4 << 20
+
+func httpMaxBodyMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodPatch:
+			if r.Body != nil {
+				limit := defaultMaxHTTPBodyBytes
+				if r.URL.Path == "/v1/apply" {
+					limit = 64 << 20
+				}
+				r.Body = http.MaxBytesReader(w, r.Body, limit)
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func handleAgentConfirmHTTP(w http.ResponseWriter, r *http.Request, agentServer *AgentServer) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
+	bodyBytes, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("failed to read body: %v", err), http.StatusBadRequest)
+		return
+	}
+	var req pb.ConfirmRequest
+	if len(strings.TrimSpace(string(bodyBytes))) > 0 {
+		unmarshaler := protojson.UnmarshalOptions{DiscardUnknown: true}
+		if err := unmarshaler.Unmarshal(bodyBytes, &req); err != nil {
+			if errJson := json.Unmarshal(bodyBytes, &req); errJson != nil {
+				http.Error(w, fmt.Sprintf("invalid json payload: %v", errJson), http.StatusBadRequest)
+				return
+			}
+		}
+	}
+	resp, err := agentServer.Confirm(r.Context(), &req)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
+func handleAgentRollbackHTTP(w http.ResponseWriter, r *http.Request, agentServer *AgentServer) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
+	bodyBytes, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("failed to read body: %v", err), http.StatusBadRequest)
+		return
+	}
+	var req pb.RollbackRequest
+	if len(strings.TrimSpace(string(bodyBytes))) > 0 {
+		unmarshaler := protojson.UnmarshalOptions{DiscardUnknown: true}
+		if err := unmarshaler.Unmarshal(bodyBytes, &req); err != nil {
+			if errJson := json.Unmarshal(bodyBytes, &req); errJson != nil {
+				http.Error(w, fmt.Sprintf("invalid json payload: %v", errJson), http.StatusBadRequest)
+				return
+			}
+		}
+	}
+	resp, err := agentServer.Rollback(r.Context(), &req)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
+func handleHeadscaleWanSyncHTTP(w http.ResponseWriter, r *http.Request, mgr *engine.HeadscaleWanGateManager) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	st, err := mgr.SyncFromInvites()
+	w.Header().Set("Content-Type", "application/json")
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"success": false,
+			"error":   err.Error(),
+			"data":    st,
+		})
+		return
+	}
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"success": true,
+		"data":    st,
+	})
 }
 
 func main() {
@@ -3237,10 +3494,17 @@ func main() {
 	}
 
 	// If boot-apply is requested in appliance mode, load last-known-good configuration
+	bootNetdevApplied := false
 	if *bootApply && runtimeMode == engine.ModeAppliance {
 		if pendingConfirmFileExists(*bundleDir) && !pendingConfirmIsLive(*bundleDir) {
 			log.Printf("[Agent] Early-boot: expired/corrupt pending-confirm bundle detected; deferring boot interface/firewall apply until startup rollback restores last-known-good")
 		} else {
+			if data, err := readManagedOrRootConfig(axonwallEtcDir(), "netdev_config.json"); err == nil && len(data) > 0 {
+				if err := engine.ApplyNetdevBundleJSON(data, json.Unmarshal); err != nil {
+					log.Printf("[Agent] Boot-apply: netdev topology failed: %v", err)
+				}
+			}
+			bootNetdevApplied = true
 			// A-M16: log a failed interface apply at boot; boot itself
 			// must not abort on one interface (the post-boot checks and
 			// later bundle applies still run).
@@ -3367,6 +3631,7 @@ func main() {
 	}
 	mcpTrafficManager := engine.NewMcpTrafficManager()
 	haEngine.SetDirectoryManager(directoryManager)
+	haEngine.SetPluginManager(pluginManager)
 
 	if runtimeMode == engine.ModeAppliance && pluginManager.IsPluginEnabled("directory-ldap") {
 		domain, serverID := pluginManager.ResolveDirectoryBootstrapParams()
@@ -3391,46 +3656,71 @@ func main() {
 	pb.RegisterAgentServiceServer(grpcServer, agentServer)
 
 	go func() {
-		readManagedOrRoot := func(name string) ([]byte, error) {
-			if data, err := os.ReadFile(filepath.Join(etcDir, "managed", name)); err == nil && len(data) > 0 {
-				return data, nil
-			}
-			return os.ReadFile(filepath.Join(etcDir, name))
-		}
-		if data, err := readManagedOrRoot("netdev_config.json"); err == nil {
-			if err := engine.ApplyNetdevBundleJSON(data, json.Unmarshal); err != nil {
-				log.Printf("[Agent] Startup netdev config load warning: %v", err)
+		if !bootNetdevApplied {
+			if data, err := readManagedOrRootConfig(etcDir, "netdev_config.json"); err == nil && len(data) > 0 {
+				if err := engine.ApplyNetdevBundleJSON(data, json.Unmarshal); err != nil {
+					log.Printf("[Agent] Startup netdev config load warning: %v", err)
+				}
 			}
 		}
-		if data, err := readManagedOrRoot("nas_config.json"); err == nil {
+		sdwanPath := filepath.Join(etcDir, "managed", "sdwan_config.json")
+		if _, err := os.Stat(sdwanPath); err != nil {
+			sdwanPath = filepath.Join(etcDir, "sdwan_config.json")
+		}
+		if _, err := os.Stat(sdwanPath); err == nil {
+			if err := sdwanProber.ReloadConfig(sdwanPath); err != nil {
+				log.Printf("[Agent] Startup SD-WAN config load warning: %v", err)
+			}
+		}
+		if data, err := readManagedOrRootConfig(etcDir, "zero_trust_apps.json"); err == nil {
+			if err := iapManager.ApplyConfig(data); err != nil {
+				log.Printf("[Agent] Startup IAP config load warning: %v", err)
+			}
+		}
+		if data, err := readManagedOrRootConfig(etcDir, "ddns_config.json"); err == nil {
+			if err := agentServer.ddnsManager.ApplyConfigJSON(data); err != nil {
+				log.Printf("[Agent] Startup DDNS config load warning: %v", err)
+			}
+		}
+		if data, err := readManagedOrRootConfig(etcDir, "vigilante_config.json"); err == nil {
+			if err := vigilanteManager.ApplyConfig(data); err != nil {
+				log.Printf("[Agent] Startup Vigilante config load warning: %v", err)
+			}
+		}
+		if data, err := readManagedOrRootConfig(etcDir, "vow_config.json"); err == nil {
+			if err := k3sManager.ApplyVowConfig(data); err != nil {
+				log.Printf("[Agent] Startup VOW config load warning: %v", err)
+			}
+		}
+		if data, err := readManagedOrRootConfig(etcDir, "nas_config.json"); err == nil {
 			if err := nasManager.ApplyConfig(data); err != nil {
 				log.Printf("[Agent] Startup NAS config load warning: %v", err)
 			}
 		}
-		if data, err := readManagedOrRoot("virt_config.json"); err == nil {
+		if data, err := readManagedOrRootConfig(etcDir, "virt_config.json"); err == nil {
 			if err := virtManager.ApplyVirtBundleJSON(data); err != nil {
 				log.Printf("[Agent] Startup virt config load warning: %v", err)
 			}
 		}
-		if data, err := readManagedOrRoot("k3s_config.json"); err == nil {
+		if data, err := readManagedOrRootConfig(etcDir, "k3s_config.json"); err == nil {
 			k3sManager.LoadSavedConfig(data)
 		}
-		if data, err := readManagedOrRoot("netbox_config.json"); err == nil {
+		if data, err := readManagedOrRootConfig(etcDir, "netbox_config.json"); err == nil {
 			if err := netboxManager.ApplyConfig(data); err != nil {
 				log.Printf("[Agent] Startup NetBox config load warning: %v", err)
 			}
 		}
-		if data, err := readManagedOrRoot("librenms_config.json"); err == nil {
+		if data, err := readManagedOrRootConfig(etcDir, "librenms_config.json"); err == nil {
 			if err := librenmsManager.ApplyConfig(data); err != nil {
 				log.Printf("[Agent] Startup LibreNMS config load warning: %v", err)
 			}
 		}
-		if data, err := readManagedOrRoot("topology_config.json"); err == nil {
+		if data, err := readManagedOrRootConfig(etcDir, "topology_config.json"); err == nil {
 			if err := topologyManager.ApplyConfig(data); err != nil {
 				log.Printf("[Agent] Startup Topology Studio config load warning: %v", err)
 			}
 		}
-		if data, err := readManagedOrRoot("ha_config.json"); err == nil {
+		if data, err := readManagedOrRootConfig(etcDir, "ha_config.json"); err == nil {
 			if err := haEngine.ApplyFromJSON(data); err != nil {
 				log.Printf("[Agent] Startup HA config load warning: %v", err)
 			}
@@ -3476,19 +3766,22 @@ func main() {
 
 	headscaleWanGateManager := engine.NewHeadscaleWanGateManager(stateDir, runtimeMode == engine.ModeDev || runtimeMode == engine.ModeCollector || os.Geteuid() != 0)
 	agentServer.SetHeadscaleWanGateManager(headscaleWanGateManager)
+	if data, err := readManagedOrRootConfig(etcDir, "headscale_wan_config.json"); err == nil && len(data) > 0 {
+		if err := headscaleWanGateManager.ApplyConfig(data); err != nil {
+			log.Printf("[Agent] Startup Headscale WAN gate config warning: %v", err)
+		}
+	}
+	if err := headscaleWanGateManager.Reconcile(); err != nil {
+		log.Printf("[Agent] Startup Headscale WAN gate reconcile warning: %v", err)
+	}
+	headscaleWanGateManager.Start()
 
 	go func() {
 		loadedNetFlow := false
-		for _, cand := range []string{
-			filepath.Join(etcDir, "managed", "netflow_config.json"),
-			filepath.Join(etcDir, "netflow_config.json"),
-		} {
-			if data, err := os.ReadFile(cand); err == nil && len(data) > 0 {
-				loadedNetFlow = true
-				if err := netflowManager.ApplyConfig(data); err != nil {
-					log.Printf("[Agent] Startup NetFlow Collector config warning (%s): %v", cand, err)
-				}
-				break
+		if data, err := readManagedOrRootConfig(etcDir, "netflow_config.json"); err == nil && len(data) > 0 {
+			loadedNetFlow = true
+			if err := netflowManager.ApplyConfig(data); err != nil {
+				log.Printf("[Agent] Startup NetFlow Collector config warning: %v", err)
 			}
 		}
 		if pluginManager.IsPluginEnabled("netflow-collector") && (!loadedNetFlow || !netflowManager.GetStatus().Running) {
@@ -3496,29 +3789,11 @@ func main() {
 				log.Printf("[Agent] Warning: netflow-collector plugin is enabled but failed to start: %v", err)
 			}
 		}
-		for _, cand := range []string{
-			filepath.Join(etcDir, "managed", "observability_config.json"),
-			filepath.Join(etcDir, "observability_config.json"),
-		} {
-			if data, err := os.ReadFile(cand); err == nil && len(data) > 0 {
-				if err := observabilityManager.ApplyConfig(data); err != nil {
-					log.Printf("[Agent] Startup Observability config warning (%s): %v", cand, err)
-				}
-				break
+		if data, err := readManagedOrRootConfig(etcDir, "observability_config.json"); err == nil && len(data) > 0 {
+			if err := observabilityManager.ApplyConfig(data); err != nil {
+				log.Printf("[Agent] Startup Observability config warning: %v", err)
 			}
 		}
-		for _, cand := range []string{
-			filepath.Join(etcDir, "managed", "headscale_wan_config.json"),
-			filepath.Join(etcDir, "headscale_wan_config.json"),
-		} {
-			if data, err := os.ReadFile(cand); err == nil && len(data) > 0 {
-				if err := headscaleWanGateManager.ApplyConfig(data); err != nil {
-					log.Printf("[Agent] Startup Headscale WAN gate config warning (%s): %v", cand, err)
-				}
-				break
-			}
-		}
-		headscaleWanGateManager.Start()
 	}()
 	go func() {
 		for _, cand := range []string{
@@ -3652,56 +3927,10 @@ func main() {
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "message": "Static routes reconciled successfully"})
 		})
 		mux.HandleFunc("/v1/confirm", func(w http.ResponseWriter, r *http.Request) {
-			if r.Method != http.MethodPost {
-				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-				return
-			}
-			r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
-			bodyBytes, err := io.ReadAll(r.Body)
-			if err != nil {
-				http.Error(w, fmt.Sprintf("failed to read body: %v", err), http.StatusBadRequest)
-				return
-			}
-			var req pb.ConfirmRequest
-			if len(bodyBytes) > 0 {
-				unmarshaler := protojson.UnmarshalOptions{DiscardUnknown: true}
-				if err := unmarshaler.Unmarshal(bodyBytes, &req); err != nil {
-					_ = json.Unmarshal(bodyBytes, &req)
-				}
-			}
-			resp, err := agentServer.Confirm(r.Context(), &req)
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(resp)
+			handleAgentConfirmHTTP(w, r, agentServer)
 		})
 		mux.HandleFunc("/v1/rollback", func(w http.ResponseWriter, r *http.Request) {
-			if r.Method != http.MethodPost {
-				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-				return
-			}
-			r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
-			bodyBytes, err := io.ReadAll(r.Body)
-			if err != nil {
-				http.Error(w, fmt.Sprintf("failed to read body: %v", err), http.StatusBadRequest)
-				return
-			}
-			var req pb.RollbackRequest
-			if len(bodyBytes) > 0 {
-				unmarshaler := protojson.UnmarshalOptions{DiscardUnknown: true}
-				if err := unmarshaler.Unmarshal(bodyBytes, &req); err != nil {
-					_ = json.Unmarshal(bodyBytes, &req)
-				}
-			}
-			resp, err := agentServer.Rollback(r.Context(), &req)
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(resp)
+			handleAgentRollbackHTTP(w, r, agentServer)
 		})
 		mux.HandleFunc("/v1/diagnostic", func(w http.ResponseWriter, r *http.Request) {
 			if r.Method != http.MethodPost {
@@ -4126,7 +4355,12 @@ func main() {
 				}
 			}()
 		})
-		mux.HandleFunc("/v1/events/packets", packetStreamMgr.HandleStreamSSE)
+		mux.HandleFunc("/v1/events/packets", func(w http.ResponseWriter, r *http.Request) {
+			if !requirePluginEnabled(w, "packet-diagnostics") {
+				return
+			}
+			packetStreamMgr.HandleStreamSSE(w, r)
+		})
 		mux.HandleFunc("/v1/system/telemetry/hardware", func(w http.ResponseWriter, r *http.Request) {
 			telem, err := hardwareMgr.CollectTelemetry()
 			if err != nil {
@@ -6790,15 +7024,7 @@ func main() {
 		})
 
 		mux.HandleFunc("/v1/vpn/headscale/wan-window/sync", func(w http.ResponseWriter, r *http.Request) {
-			if r.Method != http.MethodPost {
-				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-				return
-			}
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]any{
-				"success": true,
-				"data":    headscaleWanGateManager.SyncFromInvites(),
-			})
+			handleHeadscaleWanSyncHTTP(w, r, headscaleWanGateManager)
 		})
 
 		mux.HandleFunc("/v1/vpn/headscale/wan-window/arm", func(w http.ResponseWriter, r *http.Request) {
@@ -7288,7 +7514,7 @@ func main() {
 		})
 
 		apiServer = &http.Server{
-			Handler:           agentTokenHTTPMiddleware(agentToken, mux),
+			Handler:           agentTokenHTTPMiddleware(agentToken, httpMaxBodyMiddleware(mux)),
 			ReadHeaderTimeout: 10 * time.Second,
 		}
 		go func() {

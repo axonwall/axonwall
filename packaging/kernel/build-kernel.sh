@@ -52,7 +52,7 @@ Options:
   --arch <amd64|arm64>        Target architecture (default: ${TARGET_ARCH})
   --capabilities <csv>        Comma-separated packs (default: ${CAPABILITIES})
                               Valid: k3s, zfs, nftables, ebpf, kvm, ipsec, usb, iscsi_nfs
-  --lockdown <tier>           Lockdown LSM mode: 'integrity' (default) or 'confidentiality'
+  --lockdown <tier>           Lockdown LSM mode: 'integrity' (default), 'confidentiality', or 'runtime'/'none'
   --march <target>            CPU microarchitecture: x86-64, x86-64-v2, x86-64-v3, x86-64-v4, armv8-a
                               (a named, auditable baseline; '--march native' is refused --
                               it would produce a host-CPU-locked .deb that must not be
@@ -189,9 +189,9 @@ if [[ "${TARGET_ARCH}" == "arm64" ]] && [[ "$(uname -m)" != "aarch64" && "$(unam
 fi
 
 case "${LOCKDOWN_TIER}" in
-  integrity|confidentiality) ;;
+  integrity|confidentiality|runtime|none) ;;
   *)
-    echo "[!] Invalid --lockdown '${LOCKDOWN_TIER}' (expected integrity or confidentiality)" >&2
+    echo "[!] Invalid --lockdown '${LOCKDOWN_TIER}' (expected integrity, confidentiality, runtime, or none)" >&2
     exit 1
     ;;
 esac
@@ -260,17 +260,31 @@ trap 'rm -rf "${WORK_DIR}"' EXIT
 OVERRIDE_FRAGMENT="${WORK_DIR}/90-cli-overrides.config"
 : > "${OVERRIDE_FRAGMENT}"
 
-if [[ "${LOCKDOWN_TIER}" == "confidentiality" ]]; then
+EFFECTIVE_FORCE_LOCKDOWN="${LOCKDOWN_TIER}"
+if has_cap "zfs" && [[ "${FORCE_MODULE_SIG}" -eq 0 ]] && [[ "${LOCKDOWN_TIER}" == "integrity" || "${LOCKDOWN_TIER}" == "confidentiality" ]]; then
+  echo "[!] Notice: ZFS DKMS capability enabled without --force-module-sig; keeping runtime-selectable Lockdown LSM (CONFIG_LOCK_DOWN_KERNEL_FORCE_NONE=y) so out-of-tree zfs-dkms modules load cleanly." >&2
+  EFFECTIVE_FORCE_LOCKDOWN="runtime"
+fi
+
+if [[ "${EFFECTIVE_FORCE_LOCKDOWN}" == "confidentiality" ]]; then
   cat >> "${OVERRIDE_FRAGMENT}" <<'EOF'
+# CONFIG_LOCK_DOWN_KERNEL_FORCE_NONE is not set
 # CONFIG_LOCK_DOWN_KERNEL_FORCE_INTEGRITY is not set
 CONFIG_LOCK_DOWN_KERNEL_FORCE_CONFIDENTIALITY=y
 EOF
   if has_cap "ebpf"; then
     echo "[!] WARNING: confidentiality lockdown restricts bpf_probe_read_kernel() & BTF trampolines while eBPF capability is enabled." >&2
   fi
+elif [[ "${EFFECTIVE_FORCE_LOCKDOWN}" == "integrity" ]]; then
+  cat >> "${OVERRIDE_FRAGMENT}" <<'EOF'
+# CONFIG_LOCK_DOWN_KERNEL_FORCE_NONE is not set
+CONFIG_LOCK_DOWN_KERNEL_FORCE_INTEGRITY=y
+# CONFIG_LOCK_DOWN_KERNEL_FORCE_CONFIDENTIALITY is not set
+EOF
 else
   cat >> "${OVERRIDE_FRAGMENT}" <<'EOF'
-CONFIG_LOCK_DOWN_KERNEL_FORCE_INTEGRITY=y
+CONFIG_LOCK_DOWN_KERNEL_FORCE_NONE=y
+# CONFIG_LOCK_DOWN_KERNEL_FORCE_INTEGRITY is not set
 # CONFIG_LOCK_DOWN_KERNEL_FORCE_CONFIDENTIALITY is not set
 EOF
 fi
@@ -405,12 +419,15 @@ assert_kconfig_invariants() {
   local cfg="$1"
   local required=(
     "CONFIG_SECURITY_LOCKDOWN_LSM=y"
+    "CONFIG_SECURITY_LOCKDOWN_LSM_EARLY=y"
     "CONFIG_SLAB_FREELIST_HARDENED=y"
   )
-  if [[ "${LOCKDOWN_TIER}" == "confidentiality" ]]; then
+  if [[ "${EFFECTIVE_FORCE_LOCKDOWN}" == "confidentiality" ]]; then
     required+=("CONFIG_LOCK_DOWN_KERNEL_FORCE_CONFIDENTIALITY=y")
-  else
+  elif [[ "${EFFECTIVE_FORCE_LOCKDOWN}" == "integrity" ]]; then
     required+=("CONFIG_LOCK_DOWN_KERNEL_FORCE_INTEGRITY=y")
+  else
+    required+=("CONFIG_LOCK_DOWN_KERNEL_FORCE_NONE=y")
   fi
   if has_cap "ebpf"; then
     required+=("CONFIG_BPF_UNPRIV_DEFAULT_OFF=y" "CONFIG_DEBUG_INFO_BTF=y" "CONFIG_BPF_LSM=y")

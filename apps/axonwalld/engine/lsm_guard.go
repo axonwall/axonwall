@@ -178,6 +178,7 @@ func DecodeLsmEvent(raw []byte, ts time.Time) (BpfLsmDenialEvent, error) {
 
 type LsmGuardManager struct {
 	mu            sync.RWMutex
+	objsMu        sync.RWMutex
 	objs          ebpf.LsmGuardObjects
 	links         []link.Link
 	rbReader      *ringbuf.Reader
@@ -239,7 +240,9 @@ func (m *LsmGuardManager) Start(cfg LsmGuardPolicyConfig) error {
 		delete(spec.Programs, ebpf.LsmGuardProgAuditBpfTokenCmd)
 	}
 
+	m.objsMu.Lock()
 	if err := spec.LoadAndAssign(&m.objs, nil); err != nil {
+		m.objsMu.Unlock()
 		return fmt.Errorf("loading LsmGuard eBPF objects: %w", err)
 	}
 
@@ -358,6 +361,8 @@ func (m *LsmGuardManager) Start(cfg LsmGuardPolicyConfig) error {
 
 	if len(attachedHooks) == 0 {
 		_ = m.objs.Close()
+		m.objs = ebpf.LsmGuardObjects{}
+		m.objsMu.Unlock()
 		return errors.New("no BPF-LSM hooks could be attached")
 	}
 
@@ -366,10 +371,14 @@ func (m *LsmGuardManager) Start(cfg LsmGuardPolicyConfig) error {
 		for _, l := range m.links {
 			_ = l.Close()
 		}
+		m.links = nil
 		_ = m.objs.Close()
+		m.objs = ebpf.LsmGuardObjects{}
+		m.objsMu.Unlock()
 		return fmt.Errorf("opening BPF-LSM ringbuf reader: %w", err)
 	}
 	m.rbReader = rb
+	m.objsMu.Unlock()
 
 	m.mu.Lock()
 	m.attached = true
@@ -386,7 +395,12 @@ func (m *LsmGuardManager) Start(cfg LsmGuardPolicyConfig) error {
 
 // SetBpfTokenPolicy updates live BPF-LSM BPF_TOKEN_CREATE policy flags in-kernel without detaching hooks.
 func (m *LsmGuardManager) SetBpfTokenPolicy(allowDelegated bool, auditDelegated bool) {
-	if m == nil || m.objs.PolicyConfig == nil {
+	if m == nil {
+		return
+	}
+	m.objsMu.RLock()
+	defer m.objsMu.RUnlock()
+	if m.objs.PolicyConfig == nil {
 		return
 	}
 	_ = m.objs.PolicyConfig.Put(PolicyIdxAllowBpfTokens, boolToUint32(allowDelegated))
@@ -444,14 +458,19 @@ func (m *LsmGuardManager) Stop() {
 		return
 	}
 	m.stopOnce.Do(func() {
+		m.objsMu.Lock()
 		if m.rbReader != nil {
 			_ = m.rbReader.Close()
 			<-m.doneChan
+			m.rbReader = nil
 		}
 		for _, l := range m.links {
 			_ = l.Close()
 		}
+		m.links = nil
 		_ = m.objs.Close()
+		m.objs = ebpf.LsmGuardObjects{}
+		m.objsMu.Unlock()
 		m.mu.Lock()
 		m.attached = false
 		m.attachedHooks = nil

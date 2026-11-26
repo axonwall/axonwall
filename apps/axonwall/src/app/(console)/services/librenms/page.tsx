@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import { PluginAwareLink } from '@/components/PluginAwareLink';
 import {
@@ -54,6 +54,8 @@ import {
   type LibreNmsTopologySnapshot,
 } from '@/server/agent';
 import { useDesiredStateApply } from '@/lib/use-desired-state-apply';
+import { safeHttpHref } from '@/lib/safe-href';
+import { parseNonNegativeIntInput } from '@/lib/state-preservation';
 
 const TABS = [
   { id: 'overview', label: 'Overview & Enrollment' },
@@ -113,7 +115,8 @@ export default function LibreNmsStudioPage() {
     void loadAll(false);
   }, [loadAll]);
 
-  const previewCompiled = useMemo(() => {
+  const lastValidBundleRef = useRef<ReturnType<typeof compileLibreNmsBundle> | null>(null);
+  const { previewCompiled, validationError } = useMemo(() => {
     const draftState: Partial<DesiredState> = {
       ...(state ?? {}),
       librenms: config,
@@ -125,16 +128,37 @@ export default function LibreNmsStudioPage() {
           ]
         : (state?.plugins ?? []).map((p) => (p.id === 'librenms' ? { ...p, enabled: false } : p)),
     };
-    return compileLibreNmsBundle(draftState);
+    try {
+      const compiled = compileLibreNmsBundle(draftState);
+      lastValidBundleRef.current = compiled;
+      return { previewCompiled: compiled, validationError: null as string | null };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Invalid LibreNMS configuration';
+      const fallback = lastValidBundleRef.current ?? compileLibreNmsBundle(state);
+      return { previewCompiled: fallback, validationError: msg };
+    }
   }, [state, config]);
 
   const handleSaveAndApply = async (enableOverride?: boolean) => {
     if (!state) return;
+    const targetEnabled = enableOverride !== undefined ? enableOverride : config.enabled;
+    const candidateCfg: LibreNmsConfig = {
+      ...config,
+      enabled: targetEnabled,
+      externalUrl: config.externalUrl?.trim() ? config.externalUrl.trim() : undefined,
+    };
+    const parsedCfg = LibreNmsConfigSchema.safeParse(candidateCfg);
+    if (!parsedCfg.success) {
+      setBanner({
+        type: 'error',
+        text: `Invalid LibreNMS settings: ${parsedCfg.error.issues.map((i) => `${i.path.join('.') || 'librenms'}: ${i.message}`).join('; ')}`,
+      });
+      return;
+    }
     setSaving(true);
     setBanner(null);
     try {
-      const targetEnabled = enableOverride !== undefined ? enableOverride : config.enabled;
-      const updatedCfg: LibreNmsConfig = { ...config, enabled: targetEnabled };
+      const updatedCfg: LibreNmsConfig = parsedCfg.data;
       let nextState: DesiredState = structuredClone(state);
       nextState.librenms = updatedCfg;
       if (targetEnabled) {
@@ -238,6 +262,11 @@ export default function LibreNmsStudioPage() {
   const combinedAlerts = topology?.alerts ?? [];
   const enrollmentTargets = status?.enrollmentPlan?.targets ?? previewCompiled.enrollmentPlan.targets;
 
+  const safeUiHref = safeHttpHref(
+    status?.endpointUrl,
+    safeHttpHref(previewCompiled.endpointUrl, 'https://librenms.axonwall.local')
+  );
+
   return (
     <div className="space-y-6 max-w-7xl mx-auto pb-12">
       <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4 border-b border-slate-800 pb-5">
@@ -272,7 +301,7 @@ export default function LibreNmsStudioPage() {
             Refresh Probe
           </button>
           <a
-            href={status?.endpointUrl || previewCompiled.endpointUrl}
+            href={safeUiHref}
             target="_blank"
             rel="noreferrer"
             className="px-3 py-2 rounded-lg bg-slate-900 border border-slate-700 hover:border-sky-500/50 text-xs font-medium text-sky-300 flex items-center gap-1.5"
@@ -315,6 +344,13 @@ export default function LibreNmsStudioPage() {
           <button onClick={() => setBanner(null)} className="text-slate-400 hover:text-white">
             Dismiss
           </button>
+        </div>
+      )}
+
+      {validationError && (
+        <div className="px-4 py-2.5 rounded-lg border border-amber-500/40 bg-amber-950/40 text-amber-200 text-xs flex items-center gap-2">
+          <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
+          <span>Draft contains incomplete/invalid values (preview showing last valid config): {validationError}</span>
         </div>
       )}
 
@@ -468,15 +504,25 @@ export default function LibreNmsStudioPage() {
                     <input
                       type="number"
                       min={5}
-                      value={config.dataVolumeSizeGb}
-                      onChange={(e) => setConfig((p) => ({ ...p, dataVolumeSizeGb: Number(e.target.value) || 20 }))}
+                      value={config.dataVolumeSizeGb || ''}
+                      onChange={(e) =>
+                        setConfig((p) => ({
+                          ...p,
+                          dataVolumeSizeGb: parseNonNegativeIntInput(e.target.value, p.dataVolumeSizeGb),
+                        }))
+                      }
                       className="w-1/2 px-3 py-2 rounded-lg bg-slate-950 border border-slate-800 text-slate-100 font-mono text-xs"
                     />
                     <input
                       type="number"
                       min={5}
-                      value={config.dbVolumeSizeGb}
-                      onChange={(e) => setConfig((p) => ({ ...p, dbVolumeSizeGb: Number(e.target.value) || 15 }))}
+                      value={config.dbVolumeSizeGb || ''}
+                      onChange={(e) =>
+                        setConfig((p) => ({
+                          ...p,
+                          dbVolumeSizeGb: parseNonNegativeIntInput(e.target.value, p.dbVolumeSizeGb),
+                        }))
+                      }
                       className="w-1/2 px-3 py-2 rounded-lg bg-slate-950 border border-slate-800 text-slate-100 font-mono text-xs"
                     />
                   </div>
@@ -650,11 +696,14 @@ export default function LibreNmsStudioPage() {
                 <span>SNMP Port</span>
                 <input
                   type="number"
-                  value={config.snmpDefaults.port}
+                  value={config.snmpDefaults.port || ''}
                   onChange={(e) =>
                     setConfig((p) => ({
                       ...p,
-                      snmpDefaults: { ...p.snmpDefaults, port: Number(e.target.value) || 161 },
+                      snmpDefaults: {
+                        ...p.snmpDefaults,
+                        port: parseNonNegativeIntInput(e.target.value, p.snmpDefaults.port),
+                      },
                     }))
                   }
                   className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-800 text-slate-100 font-mono text-xs"
@@ -811,7 +860,7 @@ export default function LibreNmsStudioPage() {
                 </div>
               ) : (
                 config.discoverySubnets.map((sub, idx) => (
-                  <div key={`${idx}-${sub.cidr}`} className="flex items-center gap-2">
+                  <div key={idx} className="flex items-center gap-2">
                     <input
                       type="checkbox"
                       checked={sub.enabled}

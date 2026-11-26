@@ -5,8 +5,8 @@ import fs from 'node:fs/promises';
 import { BaseModule } from '../base.js';
 import { execStream } from '../../utils/exec.js';
 import { applyK8sTlsSecret } from '../../engine/certs.js';
-import { ensureNamespace } from '../../engine/k8s.js';
-import { resolveChartValuesArgs } from '../../engine/helm.js';
+import { ensureNamespace, ensureGeneratedK8sSecret, generateStrongSecret, getClusterContextArgs, getHelmContextArgs, getKubeExecutionEnv } from '../../engine/k8s.js';
+import { resolveChartValuesArgs, cleanupHelmTempValues } from '../../engine/helm.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -64,6 +64,8 @@ export class OpenVASModule extends BaseModule {
     if (onLog) onLog(`[openvas] Deploying Greenbone Community Edition '${releaseName}' (Ingress: https://${ingressHost})...`);
     const openvasChartPath = path.join(__dirname, 'charts', 'openvas');
     const openvasDefaultValues = path.join(__dirname, 'values', 'openvas.yaml');
+    const kubeEnv = getKubeExecutionEnv();
+    const helmCtxArgs = await getHelmContextArgs(clusterName);
 
     const openvasValuesArgs = await resolveChartValuesArgs({
       moduleId: this.id,
@@ -78,21 +80,39 @@ export class OpenVASModule extends BaseModule {
       onLog
     });
 
-    const helmArgs = [
-      'upgrade', '--install', releaseName, openvasChartPath,
-      '--namespace', targetNamespace,
-      '--timeout', options?.timeout || '10m',
-      ...openvasValuesArgs
-    ];
+    try {
+      const secretName = `${releaseName}-admin`;
+      await ensureGeneratedK8sSecret({
+        namespace: targetNamespace,
+        secretName,
+        clusterName,
+        keys: {
+          username: 'admin',
+          password: () => generateStrongSecret(),
+          postgresPassword: () => generateStrongSecret()
+        }
+      });
 
-    await execStream('helm', helmArgs, { onLog });
+      const helmArgs = [
+        'upgrade', '--install', releaseName, openvasChartPath,
+        ...helmCtxArgs,
+        '--namespace', targetNamespace,
+        '--timeout', options?.timeout || '10m',
+        '--set', `existingSecret=${secretName}`,
+        ...openvasValuesArgs
+      ];
+
+      await execStream('helm', helmArgs, { onLog, env: kubeEnv });
+    } finally {
+      await cleanupHelmTempValues(openvasValuesArgs);
+    }
 
     if (onLog) {
       onLog(`[openvas] Successfully deployed OpenVAS / Greenbone in namespace '${targetNamespace}'! Ingress: https://${ingressHost}`);
       try {
         const creds = await this.getCredentials({ clusterName, namespace: targetNamespace });
         if (creds) {
-          onLog(`[openvas] Greenbone Security Assistant login: ${creds.username} / ${creds.password}`);
+          onLog(`[openvas] Greenbone Security Assistant login: ${creds.username} / [stored in secret ${releaseName}-admin]`);
         }
       } catch {
         // Ignore if credentials secret is not yet readable
@@ -107,10 +127,13 @@ export class OpenVASModule extends BaseModule {
     const targetNamespace = namespace || this.namespace;
     const isStandardNs = targetNamespace === 'default' || targetNamespace === 'openvas';
     const releaseName = isStandardNs ? 'openvas' : `${targetNamespace}-openvas`;
+    const kubeEnv = getKubeExecutionEnv();
+    const helmCtxArgs = await getHelmContextArgs(clusterName);
+    const ctxArgs = await getClusterContextArgs(clusterName);
 
     if (onLog) onLog(`[openvas] Uninstalling Greenbone Community Edition from namespace '${targetNamespace}'...`);
     try {
-      await execa('helm', ['uninstall', releaseName, '-n', targetNamespace]);
+      await execa('helm', ['uninstall', releaseName, '-n', targetNamespace, ...helmCtxArgs], { env: kubeEnv });
     } catch {
       // Ignore if already uninstalled
     }
@@ -118,7 +141,7 @@ export class OpenVASModule extends BaseModule {
     if (deleteNamespace && targetNamespace !== 'default' && targetNamespace !== 'kube-system') {
       if (onLog) onLog(`[openvas] Deleting namespace '${targetNamespace}'...`);
       try {
-        await execa('kubectl', ['delete', 'namespace', targetNamespace, '--timeout=60s']);
+        await execa('kubectl', ['delete', 'namespace', targetNamespace, '--timeout=60s', ...ctxArgs], { env: kubeEnv });
       } catch {
         // Ignore if already deleted
       }
@@ -132,14 +155,16 @@ export class OpenVASModule extends BaseModule {
     const targetNamespace = namespace || this.namespace;
 
     try {
+      const kubeEnv = getKubeExecutionEnv();
+      const ctxArgs = await getClusterContextArgs(clusterName);
       const { stdout: podsJson } = await execa('kubectl', [
         'get', 'pods',
         '-n', targetNamespace,
         '-l', 'app.kubernetes.io/name=openvas',
-        '--context', `k3d-${clusterName}`,
+        ...ctxArgs,
         '--request-timeout=3s',
         '-o', 'json'
-      ]);
+      ], { env: kubeEnv });
       const parsed = JSON.parse(podsJson);
       const pods = (parsed.items || []).map(p => ({
         name: p.metadata.name,
@@ -181,16 +206,19 @@ export class OpenVASModule extends BaseModule {
    */
   async getCredentials({ clusterName = 'vigilante-dev', namespace = null } = {}) {
     const targetNamespace = namespace || this.namespace;
-    const secretName = 'openvas-admin';
+    const isStandardNs = targetNamespace === 'default' || targetNamespace === 'openvas';
+    const secretName = isStandardNs ? 'openvas-admin' : `${targetNamespace}-openvas-admin`;
 
     try {
+      const kubeEnv = getKubeExecutionEnv();
+      const ctxArgs = await getClusterContextArgs(clusterName);
       const { stdout: b64Data } = await execa('kubectl', [
         'get', 'secret', secretName,
         '-n', targetNamespace,
-        '--context', `k3d-${clusterName}`,
+        ...ctxArgs,
         '--request-timeout=5s',
         '-o', 'jsonpath={.data.username}|{.data.password}'
-      ]);
+      ], { env: kubeEnv });
 
       if (!b64Data || !b64Data.includes('|')) return null;
       const [b64User, b64Pass] = b64Data.split('|');

@@ -10,6 +10,7 @@ COPY pnpm-lock.yaml pnpm-workspace.yaml package.json turbo.json tsconfig.base.js
 COPY packages/axonwall_lib ./packages/axonwall_lib
 COPY packages/nastymap ./packages/nastymap
 COPY packages/vigilante_lib ./packages/vigilante_lib
+COPY apps/axonwall/package.json ./apps/axonwall/package.json
 COPY apps/axonwall-controller ./apps/axonwall-controller
 
 RUN pnpm install --frozen-lockfile

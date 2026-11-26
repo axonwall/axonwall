@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { getSession } from '@/server/auth';
 import { assertActionPermitted } from '@/server/auth-guard';
 import { fetchObservabilityNodes } from '@/server/observability-clients';
+import { checkPluginApiGuard } from '@/server/plugin-guard';
 
 function errStatus(err: unknown): number {
   const msg = String((err as { message?: string })?.message || '');
@@ -14,6 +15,8 @@ export async function GET() {
   try {
     const session = await getSession();
     assertActionPermitted(session);
+    const guard = await checkPluginApiGuard('netflow-collector');
+    if (guard) return guard;
     const nodes = await fetchObservabilityNodes();
     return NextResponse.json({ status: 'ok', nodes });
   } catch (err: unknown) {

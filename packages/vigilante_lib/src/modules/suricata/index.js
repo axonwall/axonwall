@@ -4,8 +4,8 @@ import { fileURLToPath } from 'node:url';
 import { BaseModule } from '../base.js';
 import { execStream } from '../../utils/exec.js';
 import { applyK8sTlsSecret } from '../../engine/certs.js';
-import { ensureNamespace } from '../../engine/k8s.js';
-import { resolveChartValuesArgs } from '../../engine/helm.js';
+import { ensureNamespace, getClusterContextArgs, getHelmContextArgs, getKubeExecutionEnv } from '../../engine/k8s.js';
+import { resolveChartValuesArgs, cleanupHelmTempValues } from '../../engine/helm.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -60,6 +60,8 @@ export class SuricataModule extends BaseModule {
     const chartPath = path.join(__dirname, 'charts', 'suricata');
     const defaultValues = path.join(__dirname, 'values', 'suricata.yaml');
 
+    const kubeEnv = getKubeExecutionEnv();
+    const helmCtxArgs = await getHelmContextArgs(clusterName);
     const valuesArgs = await resolveChartValuesArgs({
       moduleId: this.id,
       chartName: 'suricata',
@@ -73,16 +75,21 @@ export class SuricataModule extends BaseModule {
       onLog
     });
 
-    const helmArgs = [
-      'upgrade', '--install', '--wait', releaseName, chartPath,
-      '--namespace', targetNamespace,
-      ...valuesArgs,
-      '--set', `ingress.hosts[0].host=${ingressHost}`,
-      '--set', `ingress.tls[0].secretName=${targetTlsSecret}`,
-      '--set', `ingress.tls[0].hosts[0]=${ingressHost}`
-    ];
+    try {
+      const helmArgs = [
+        'upgrade', '--install', '--wait', releaseName, chartPath,
+        ...helmCtxArgs,
+        '--namespace', targetNamespace,
+        ...valuesArgs,
+        '--set', `ingress.hosts[0].host=${ingressHost}`,
+        '--set', `ingress.tls[0].secretName=${targetTlsSecret}`,
+        '--set', `ingress.tls[0].hosts[0]=${ingressHost}`
+      ];
 
-    await execStream('helm', helmArgs, { onLog });
+      await execStream('helm', helmArgs, { onLog, env: kubeEnv });
+    } finally {
+      await cleanupHelmTempValues(valuesArgs);
+    }
 
     if (onLog) {
       onLog(`[suricata] Successfully deployed Suricata in namespace '${targetNamespace}'! Ingress: https://${ingressHost}`);
@@ -96,10 +103,13 @@ export class SuricataModule extends BaseModule {
     const targetNamespace = namespace || this.namespace;
     const isStandardNs = targetNamespace === 'default' || targetNamespace === 'suricata';
     const releaseName = isStandardNs ? 'suricata' : `${targetNamespace}-suricata`;
+    const kubeEnv = getKubeExecutionEnv();
+    const helmCtxArgs = await getHelmContextArgs(clusterName);
+    const ctxArgs = await getClusterContextArgs(clusterName);
 
     if (onLog) onLog(`[suricata] Uninstalling Suricata from namespace '${targetNamespace}'...`);
     try {
-      await execa('helm', ['uninstall', releaseName, '-n', targetNamespace]);
+      await execa('helm', ['uninstall', releaseName, '-n', targetNamespace, ...helmCtxArgs], { env: kubeEnv });
     } catch {
       // Ignore if already uninstalled
     }
@@ -107,7 +117,7 @@ export class SuricataModule extends BaseModule {
     if (deleteNamespace && targetNamespace !== 'default' && targetNamespace !== 'kube-system') {
       if (onLog) onLog(`[suricata] Deleting namespace '${targetNamespace}'...`);
       try {
-        await execa('kubectl', ['delete', 'namespace', targetNamespace, '--timeout=60s']);
+        await execa('kubectl', ['delete', 'namespace', targetNamespace, '--timeout=60s', ...ctxArgs], { env: kubeEnv });
       } catch {
         // Ignore if already deleted
       }
@@ -121,13 +131,15 @@ export class SuricataModule extends BaseModule {
     const targetNamespace = namespace || this.namespace;
 
     try {
+      const kubeEnv = getKubeExecutionEnv();
+      const ctxArgs = await getClusterContextArgs(clusterName);
       const { stdout: podsJson } = await execa('kubectl', [
         'get', 'pods',
         '-n', targetNamespace,
-        '--context', `k3d-${clusterName}`,
+        ...ctxArgs,
         '--request-timeout=3s',
         '-o', 'json'
-      ]);
+      ], { env: kubeEnv });
       const parsed = JSON.parse(podsJson);
       const pods = (parsed.items || []).map(p => ({
         name: p.metadata.name,

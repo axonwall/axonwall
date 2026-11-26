@@ -22,6 +22,7 @@ import (
 var BpfTokenProfilesPath = "/var/lib/axonwall/bpf-token-profiles.json"
 
 var safeTokenProfileIDRe = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{1,62}$`)
+var safeBpffsMountPathRe = regexp.MustCompile(`^/[A-Za-z0-9._/-]+$`)
 
 // Exact Linux kernel symbolic tables for bpffs delegation mount options (Linux 6.9+).
 var kernelBpfCmdBits = map[string]uint64{
@@ -456,7 +457,11 @@ func ValidateAndCompileBpfTokenProfile(in BpfTokenDelegationProfile) (BpfTokenDe
 	if in.BpffsMountPath == "" {
 		in.BpffsMountPath = filepath.Join("/run/axonwall/bpffs-tokens", in.ID)
 	} else {
-		cleanMount := filepath.Clean(strings.TrimSpace(in.BpffsMountPath))
+		rawMount := in.BpffsMountPath
+		if !safeBpffsMountPathRe.MatchString(rawMount) || strings.Contains(rawMount, "..") {
+			return BpfTokenDelegationProfile{}, fmt.Errorf("bpffsMountPath %q contains invalid characters or traversal", rawMount)
+		}
+		cleanMount := filepath.Clean(rawMount)
 		if !strings.HasPrefix(cleanMount, "/run/axonwall/bpffs-tokens/") &&
 			!strings.HasPrefix(cleanMount, "/mnt/") &&
 			!strings.HasPrefix(cleanMount, "/var/lib/lxc/") {

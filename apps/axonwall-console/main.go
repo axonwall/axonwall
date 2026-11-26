@@ -27,6 +27,7 @@ import (
 
 	"github.com/skip2/go-qrcode"
 	"golang.org/x/crypto/scrypt"
+	"gopkg.in/yaml.v3"
 )
 
 var currentSessionUser = "admin"
@@ -860,23 +861,38 @@ func updateStateJSONWithPaths(cfg NetworkConfig, etcDir, varDir, lockPath string
 	if rawSubnets == nil {
 		rawSubnets = []interface{}{}
 	}
+	// When any interface has Authoritative DHCP enabled, ensure state.dhcp.enabled is true
+	// even if an existing state.json previously had dhcp.enabled=false (e.g. Minimal edition).
+	for _, dhcpSpec := range []bool{
+		cfg.LanDevice != "" && cfg.LanMode == "static" && cfg.LanDHCP,
+		cfg.Opt1Device != "" && cfg.Opt1Mode == "static" && cfg.Opt1DHCP,
+		cfg.Opt2Device != "" && cfg.Opt2Mode == "static" && cfg.Opt2DHCP,
+	} {
+		if dhcpSpec {
+			dhcpMap["enabled"] = true
+			break
+		}
+	}
 	dhcpMap["subnets"] = rawSubnets
 	state["dhcp"] = dhcpMap
 
-	// Ensure antiLockout includes all LAN interfaces
-	allowedIfaces := []string{"lan"}
+	// Preserve existing system.antiLockout.interfaces / ports / enabled while pruning removed or WAN interfaces.
+	validInternal := map[string]bool{"lan": true}
 	if cfg.Opt1Device != "" {
-		allowedIfaces = append(allowedIfaces, "opt1")
+		validInternal["opt1"] = true
 	}
 	if cfg.Opt2Device != "" {
-		allowedIfaces = append(allowedIfaces, "opt2")
+		validInternal["opt2"] = true
 	}
 	for _, entry := range extraIfaces {
 		name, _ := entry["name"].(string)
 		roleStr, _ := entry["role"].(string)
-		en, _ := entry["enabled"].(bool)
-		if en && roleStr != "wan" && !strings.HasPrefix(name, "wan") {
-			allowedIfaces = append(allowedIfaces, name)
+		en := true
+		if b, hasEn := entry["enabled"].(bool); hasEn {
+			en = b
+		}
+		if name != "" && en && roleStr != "wan" && !strings.HasPrefix(name, "wan") {
+			validInternal[strings.ToLower(strings.TrimSpace(name))] = true
 		}
 	}
 	sysMap, _ := state["system"].(map[string]interface{})
@@ -887,14 +903,23 @@ func updateStateJSONWithPaths(cfg NetworkConfig, etcDir, varDir, lockPath string
 	if alMap == nil {
 		alMap = make(map[string]interface{})
 	}
-	alMap["enabled"] = true
-	alMap["interface"] = "lan"
-	var alIfaceList []interface{}
+	alEnabled, allowedIfaces, alPorts := extractAntiLockoutSettings(alMap, validInternal)
+	alMap["enabled"] = alEnabled
+	if len(allowedIfaces) > 0 {
+		alMap["interface"] = allowedIfaces[0]
+	} else {
+		alMap["interface"] = "lan"
+	}
+	alIfaceList := make([]interface{}, 0, len(allowedIfaces))
 	for _, it := range allowedIfaces {
 		alIfaceList = append(alIfaceList, it)
 	}
 	alMap["interfaces"] = alIfaceList
-	alMap["ports"] = []interface{}{22, 80, 443, 2966, 3000}
+	alPortList := make([]interface{}, 0, len(alPorts))
+	for _, p := range alPorts {
+		alPortList = append(alPortList, p)
+	}
+	alMap["ports"] = alPortList
 	sysMap["antiLockout"] = alMap
 	state["system"] = sysMap
 
@@ -905,7 +930,7 @@ func updateStateJSONWithPaths(cfg NetworkConfig, etcDir, varDir, lockPath string
 	}
 
 	if etcDir == "/etc/axonwall" && varDir == "/var/lib/axonwall" {
-		writeSystemYamlAntiLockout(allowedIfaces)
+		writeSystemYamlAntiLockoutWithOptions(allowedIfaces, alPorts, alEnabled)
 	}
 
 	if etcDir != "/etc/axonwall" || varDir != "/var/lib/axonwall" {
@@ -1034,18 +1059,37 @@ func writeSharedConfigFile(path string, data []byte, mode os.FileMode) {
 	if fi, err := os.Lstat(path); err == nil && (fi.Mode()&os.ModeSymlink) != 0 {
 		return
 	}
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, mode)
+	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp-*")
 	if err != nil {
 		return
 	}
-	_, _ = f.Write(data)
-	_ = f.Chmod(mode)
-	_ = f.Close()
+	tmpPath := tmp.Name()
+	renamed := false
+	defer func() {
+		if !renamed {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return
+	}
+	_ = tmp.Sync()
+	_ = tmp.Chmod(mode)
+	if err := tmp.Close(); err != nil {
+		return
+	}
 	if grp, err := user.LookupGroup("axonwall-api"); err == nil {
 		if gid, err := strconv.Atoi(grp.Gid); err == nil {
 			_ = os.Lchown(dir, -1, gid)
-			_ = os.Lchown(path, -1, gid)
+			_ = os.Lchown(tmpPath, -1, gid)
 		}
+	}
+	if fi, err := os.Lstat(path); err == nil && (fi.Mode()&os.ModeSymlink) != 0 {
+		return
+	}
+	if err := os.Rename(tmpPath, path); err == nil {
+		renamed = true
 	}
 }
 
@@ -1314,55 +1358,242 @@ func persistNetworkInterfaces(cfg NetworkConfig) {
 	reconcileConsoleAntiLockoutNft(cfg, extraIfaces)
 }
 
+func extractAntiLockoutSettings(alMap map[string]interface{}, validInternal map[string]bool) (bool, []string, []int) {
+	enabled := true
+	if alMap != nil {
+		if b, ok := alMap["enabled"].(bool); ok {
+			enabled = b
+		}
+	}
+
+	var ifaces []string
+	seen := make(map[string]bool)
+	addIface := func(raw string) {
+		norm := strings.ToLower(strings.TrimSpace(raw))
+		if norm == "" || seen[norm] {
+			return
+		}
+		if validInternal != nil && !validInternal[norm] {
+			return
+		}
+		seen[norm] = true
+		ifaces = append(ifaces, norm)
+	}
+	if alMap != nil {
+		if rawList, ok := alMap["interfaces"].([]interface{}); ok {
+			for _, item := range rawList {
+				if s, ok := item.(string); ok {
+					addIface(s)
+				}
+			}
+		} else if rawStrList, ok := alMap["interfaces"].([]string); ok {
+			for _, s := range rawStrList {
+				addIface(s)
+			}
+		}
+		if len(ifaces) == 0 {
+			if single, ok := alMap["interface"].(string); ok {
+				addIface(single)
+			}
+		}
+	}
+	if len(ifaces) == 0 {
+		ifaces = []string{"lan"}
+	}
+
+	var ports []int
+	seenPort := make(map[int]bool)
+	addPort := func(p int) {
+		if p >= 1 && p <= 65535 && !seenPort[p] {
+			seenPort[p] = true
+			ports = append(ports, p)
+		}
+	}
+	if alMap != nil {
+		switch rawPorts := alMap["ports"].(type) {
+		case []interface{}:
+			for _, item := range rawPorts {
+				switch v := item.(type) {
+				case float64:
+					addPort(int(v))
+				case int:
+					addPort(v)
+				case int64:
+					addPort(int(v))
+				}
+			}
+		case []int:
+			for _, p := range rawPorts {
+				addPort(p)
+			}
+		}
+	}
+	if len(ports) == 0 {
+		ports = []int{22, 80, 443, 2966, 3000}
+	}
+	return enabled, ifaces, ports
+}
+
+func readAntiLockoutFromStatePaths(etcDir, varDir string) (bool, []string, []int) {
+	var state map[string]interface{}
+	if dataVar, errVar := os.ReadFile(filepath.Join(varDir, "state.json")); errVar == nil {
+		_ = json.Unmarshal(dataVar, &state)
+	} else if data, err := os.ReadFile(filepath.Join(etcDir, "state.json")); err == nil {
+		_ = json.Unmarshal(data, &state)
+	}
+	if state != nil {
+		if sysMap, ok := state["system"].(map[string]interface{}); ok {
+			if alMap, ok := sysMap["antiLockout"].(map[string]interface{}); ok {
+				return extractAntiLockoutSettings(alMap, nil)
+			}
+		}
+	}
+	return extractAntiLockoutSettings(nil, nil)
+}
+
 func writeSystemYamlAntiLockout(allowedIfaces []string) {
+	writeSystemYamlAntiLockoutWithOptions(allowedIfaces, []int{22, 80, 443, 2966, 3000}, true)
+}
+
+func writeSystemYamlAntiLockoutWithOptions(allowedIfaces []string, ports []int, enabled bool) {
+	writeSystemYamlAntiLockoutToPaths(
+		[]string{"/etc/axonwall/system.yaml", "/var/lib/axonwall/etc-axonwall/system.yaml"},
+		allowedIfaces,
+		ports,
+		enabled,
+	)
+}
+
+func buildYamlScalar(tag, val string) *yaml.Node {
+	return &yaml.Node{Kind: yaml.ScalarNode, Tag: tag, Value: val}
+}
+
+func setYamlMappingKey(m *yaml.Node, key string, val *yaml.Node) {
+	for i := 0; i+1 < len(m.Content); i += 2 {
+		if m.Content[i].Value == key {
+			m.Content[i+1] = val
+			return
+		}
+	}
+	m.Content = append(m.Content, buildYamlScalar("!!str", key), val)
+}
+
+func findYamlMappingVal(m *yaml.Node, key string) *yaml.Node {
+	for i := 0; i+1 < len(m.Content); i += 2 {
+		if m.Content[i].Value == key {
+			return m.Content[i+1]
+		}
+	}
+	return nil
+}
+
+func buildAntiLockoutYamlNode(enabled bool, allowedIfaces []string, ports []int) *yaml.Node {
 	if len(allowedIfaces) == 0 {
 		allowedIfaces = []string{"lan"}
 	}
-	var yList []string
-	for _, item := range allowedIfaces {
-		yList = append(yList, fmt.Sprintf("      - %s", item))
+	if len(ports) == 0 {
+		ports = []int{22, 80, 443, 2966, 3000}
 	}
-	newAntiLockoutBlock := fmt.Sprintf("  antiLockout:\n    enabled: true\n    interface: %s\n    interfaces:\n%s\n    ports:\n      - 22\n      - 80\n      - 443\n      - 2966\n      - 3000", allowedIfaces[0], strings.Join(yList, "\n"))
-
-	for _, yamlPath := range []string{"/etc/axonwall/system.yaml", "/var/lib/axonwall/etc-axonwall/system.yaml"} {
-		_ = os.MkdirAll(filepath.Dir(yamlPath), 0755)
-		if yamlData, err := os.ReadFile(yamlPath); err == nil && len(strings.TrimSpace(string(yamlData))) > 0 {
-			content := string(yamlData)
-			if idx := strings.Index(content, "  antiLockout:"); idx != -1 {
-				prefix := strings.TrimRight(content[:idx], "\n")
-				rest := content[idx+len("  antiLockout:"):]
-				var trailingLines []string
-				inAntiLockout := true
-				for _, line := range strings.Split(rest, "\n")[1:] {
-					trimmed := strings.TrimSpace(line)
-					if inAntiLockout {
-						if trimmed != "" && !strings.HasPrefix(trimmed, "#") && !strings.HasPrefix(line, "    ") {
-							inAntiLockout = false
-							trailingLines = append(trailingLines, line)
-						}
-					} else {
-						trailingLines = append(trailingLines, line)
-					}
-				}
-				suffix := strings.TrimRight(strings.Join(trailingLines, "\n"), "\n")
-				updated := prefix + "\n" + newAntiLockoutBlock + "\n"
-				if suffix != "" {
-					updated += suffix + "\n"
-				}
-				writeSharedConfigFile(yamlPath, []byte(updated), 0660)
-				continue
-			}
-		}
-		hostname, _ := os.Hostname()
-		if hostname == "" {
-			hostname = "axonwall"
-		}
-		defaultYaml := fmt.Sprintf("# ============================================================================\n# Axonwall Firewall Configuration — /etc/axonwall/system.yaml\n# ============================================================================\n\nsystem:\n  hostname: %s\n  domain: local\n  timezone: UTC\n  flowtableOffload: true\n  dnsServers:\n    - 1.1.1.1\n    - 8.8.8.8\n%s\n", hostname, newAntiLockoutBlock)
-		writeSharedConfigFile(yamlPath, []byte(defaultYaml), 0660)
+	enabledVal := "false"
+	if enabled {
+		enabledVal = "true"
+	}
+	ifacesSeq := &yaml.Node{Kind: yaml.SequenceNode, Tag: "!!seq"}
+	for _, it := range allowedIfaces {
+		ifacesSeq.Content = append(ifacesSeq.Content, buildYamlScalar("!!str", it))
+	}
+	portsSeq := &yaml.Node{Kind: yaml.SequenceNode, Tag: "!!seq"}
+	for _, p := range ports {
+		portsSeq.Content = append(portsSeq.Content, buildYamlScalar("!!int", strconv.Itoa(p)))
+	}
+	return &yaml.Node{
+		Kind: yaml.MappingNode,
+		Tag:  "!!map",
+		Content: []*yaml.Node{
+			buildYamlScalar("!!str", "enabled"), buildYamlScalar("!!bool", enabledVal),
+			buildYamlScalar("!!str", "interface"), buildYamlScalar("!!str", allowedIfaces[0]),
+			buildYamlScalar("!!str", "interfaces"), ifacesSeq,
+			buildYamlScalar("!!str", "ports"), portsSeq,
+		},
 	}
 }
 
+func writeSystemYamlAntiLockoutToPaths(paths []string, allowedIfaces []string, ports []int, enabled bool) {
+	if len(allowedIfaces) == 0 {
+		allowedIfaces = []string{"lan"}
+	}
+	if len(ports) == 0 {
+		ports = []int{22, 80, 443, 2966, 3000}
+	}
+
+	for _, yamlPath := range paths {
+		_ = os.MkdirAll(filepath.Dir(yamlPath), 0755)
+		yamlData, readErr := os.ReadFile(yamlPath)
+		var doc yaml.Node
+		if readErr == nil && len(strings.TrimSpace(string(yamlData))) > 0 {
+			if unmarshalErr := yaml.Unmarshal(yamlData, &doc); unmarshalErr != nil {
+				// Never wipe an existing system.yaml if it fails to parse; leave user file intact.
+				continue
+			}
+		} else {
+			hostname, _ := os.Hostname()
+			if hostname == "" {
+				hostname = "axonwall"
+			}
+			defaultSeed := fmt.Sprintf("# ============================================================================\n# Axonwall Firewall Configuration — /etc/axonwall/system.yaml\n# ============================================================================\n\nsystem:\n  hostname: %s\n  domain: local\n  timezone: UTC\n  flowtableOffload: true\n  dnsServers:\n    - 1.1.1.1\n    - 8.8.8.8\n", hostname)
+			_ = yaml.Unmarshal([]byte(defaultSeed), &doc)
+		}
+
+		if doc.Kind != yaml.DocumentNode || len(doc.Content) == 0 || doc.Content[0].Kind != yaml.MappingNode {
+			doc = yaml.Node{
+				Kind: yaml.DocumentNode,
+				Content: []*yaml.Node{
+					{Kind: yaml.MappingNode, Tag: "!!map"},
+				},
+			}
+		}
+		rootMap := doc.Content[0]
+		sysNode := findYamlMappingVal(rootMap, "system")
+		if sysNode == nil || sysNode.Kind != yaml.MappingNode {
+			sysNode = &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
+			setYamlMappingKey(rootMap, "system", sysNode)
+		}
+		setYamlMappingKey(sysNode, "antiLockout", buildAntiLockoutYamlNode(enabled, allowedIfaces, ports))
+
+		var buf bytes.Buffer
+		enc := yaml.NewEncoder(&buf)
+		enc.SetIndent(2)
+		if encErr := enc.Encode(&doc); encErr != nil {
+			_ = enc.Close()
+			continue
+		}
+		_ = enc.Close()
+		writeSharedConfigFile(yamlPath, buf.Bytes(), 0660)
+	}
+}
+
+func formatNftPortSet(ports []int) string {
+	if len(ports) == 0 {
+		ports = []int{22, 80, 443, 2966, 3000}
+	}
+	parts := make([]string, 0, len(ports))
+	for _, p := range ports {
+		if p >= 1 && p <= 65535 {
+			parts = append(parts, strconv.Itoa(p))
+		}
+	}
+	if len(parts) == 0 {
+		return "{ 22, 80, 443, 2966, 3000 }"
+	}
+	return "{ " + strings.Join(parts, ", ") + " }"
+}
+
 func reconcileConsoleAntiLockoutNft(cfg NetworkConfig, extraIfaces []map[string]interface{}) {
+	alEnabled, allowedIfaces, alPorts := readAntiLockoutFromStatePaths("/etc/axonwall", "/var/lib/axonwall")
+	reconcileConsoleAntiLockoutNftWithConfig(cfg, extraIfaces, allowedIfaces, alPorts, alEnabled)
+}
+
+func reconcileConsoleAntiLockoutNftWithConfig(cfg NetworkConfig, extraIfaces []map[string]interface{}, allowedIfaces []string, ports []int, alEnabled bool) {
 	lockdownPath := "/usr/share/axonwall/lockdown.nft"
 	internalDevs := []struct {
 		role string
@@ -1441,17 +1672,56 @@ func reconcileConsoleAntiLockoutNft(cfg NetworkConfig, extraIfaces []map[string]
 		}
 	}
 
-	currentRulesOut, _ := exec.Command("nft", "list", "chain", "inet", "axonwall", "input").CombinedOutput()
+	allowedSet := make(map[string]bool, len(allowedIfaces))
+	for _, name := range allowedIfaces {
+		if norm := strings.ToLower(strings.TrimSpace(name)); norm != "" {
+			allowedSet[norm] = true
+		}
+	}
+	portSet := formatNftPortSet(ports)
+
+	// Inspect live chain rules (with handles) so we remove stale anti-lockout-* rules
+	// for interfaces no longer permitted, and only insert rules for allowedIfaces.
+	currentRulesOut, _ := exec.Command("nft", "-a", "list", "chain", "inet", "axonwall", "input").CombinedOutput()
 	currentRules := string(currentRulesOut)
+	reCommentHandle := regexp.MustCompile(`comment\s+"(anti-lockout(?:-[^"]+)?)"\s+#\s+handle\s+(\d+)`)
+	for _, line := range strings.Split(currentRules, "\n") {
+		m := reCommentHandle.FindStringSubmatch(line)
+		if len(m) != 3 {
+			continue
+		}
+		commentTag, handle := m[1], m[2]
+		roleName := "lan"
+		if commentTag != "anti-lockout" {
+			roleName = strings.ToLower(strings.TrimPrefix(commentTag, "anti-lockout-"))
+		}
+		if !alEnabled || !allowedSet[roleName] {
+			_ = exec.Command("nft", "delete", "rule", "inet", "axonwall", "input", "handle", handle).Run()
+		}
+	}
+
+	if !alEnabled {
+		return
+	}
+
+	// Re-read chain output after pruning stale rules so insertion check reflects current rules.
+	if strings.Contains(currentRules, "anti-lockout") {
+		if freshOut, err := exec.Command("nft", "list", "chain", "inet", "axonwall", "input").CombinedOutput(); err == nil {
+			currentRules = string(freshOut)
+		}
+	}
 	for _, entry := range internalDevs {
 		if entry.dev == "" || entry.dev == cfg.WanDevice {
+			continue
+		}
+		if !allowedSet[strings.ToLower(strings.TrimSpace(entry.role))] {
 			continue
 		}
 		if !strings.Contains(currentRules, fmt.Sprintf(`iifname %q tcp dport`, entry.dev)) {
 			_ = exec.Command(
 				"nft", "insert", "rule", "inet", "axonwall", "input",
 				"iifname", entry.dev,
-				"tcp", "dport", "{ 22, 80, 443, 2966, 3000 }",
+				"tcp", "dport", portSet,
 				"accept", "comment", fmt.Sprintf("\"anti-lockout-%s\"", entry.role),
 			).Run()
 		}
@@ -3070,6 +3340,70 @@ func actionResetMFA(reader *bufio.Reader) {
 	pause(reader)
 }
 
+// saveAntiLockoutSelectionWithPaths persists the operator's anti-lockout interface selection
+// under the DesiredState lock while preserving configured ports.
+func saveAntiLockoutSelectionWithPaths(etcDir, varDir, lockPath string, currentIfaces []string) ([]int, error) {
+	if len(currentIfaces) == 0 {
+		currentIfaces = []string{"lan"}
+	}
+	releaseLock, lockErr := acquireConsoleLockFile(lockPath, 10*time.Second)
+	if lockErr != nil {
+		return nil, lockErr
+	}
+	defer releaseLock()
+
+	canonicalPath := filepath.Join(varDir, "state.json")
+	etcStatePath := filepath.Join(etcDir, "state.json")
+	_ = os.MkdirAll(etcDir, 0775)
+	_ = os.MkdirAll(varDir, 0775)
+
+	var state map[string]interface{}
+	if data, err := os.ReadFile(canonicalPath); err == nil {
+		_ = json.Unmarshal(data, &state)
+	} else if data, err := os.ReadFile(etcStatePath); err == nil {
+		_ = json.Unmarshal(data, &state)
+	}
+	if state == nil {
+		state = make(map[string]interface{})
+	}
+	sys, ok := state["system"].(map[string]interface{})
+	if !ok {
+		sys = make(map[string]interface{})
+	}
+	al, ok := sys["antiLockout"].(map[string]interface{})
+	if !ok {
+		al = make(map[string]interface{})
+	}
+	_, _, preservedPorts := extractAntiLockoutSettings(al, nil)
+	al["enabled"] = true
+	al["interface"] = currentIfaces[0]
+	ifaceInterfaces := make([]interface{}, 0, len(currentIfaces))
+	for _, it := range currentIfaces {
+		ifaceInterfaces = append(ifaceInterfaces, it)
+	}
+	al["interfaces"] = ifaceInterfaces
+	alPorts := make([]interface{}, 0, len(preservedPorts))
+	for _, p := range preservedPorts {
+		alPorts = append(alPorts, p)
+	}
+	al["ports"] = alPorts
+	sys["antiLockout"] = al
+	state["system"] = sys
+
+	out, err := json.MarshalIndent(state, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	writeSharedConfigFile(canonicalPath, out, 0660)
+	writeSharedConfigFile(etcStatePath, out, 0660)
+	writeSharedConfigFile(filepath.Join(varDir, "etc-axonwall", "state.json"), out, 0660)
+
+	if etcDir == "/etc/axonwall" && varDir == "/var/lib/axonwall" {
+		writeSystemYamlAntiLockoutWithOptions(currentIfaces, preservedPorts, true)
+	}
+	return preservedPorts, nil
+}
+
 func actionManageAntiLockout(reader *bufio.Reader) {
 	clearScreen()
 	fmt.Printf("%s=== Manage Anti-Lockout Protected Interfaces ===%s\n\n", colorCyan+colorBold, colorReset)
@@ -3079,7 +3413,7 @@ func actionManageAntiLockout(reader *bufio.Reader) {
 
 	wan, lan, opt1, opt2 := getInterfaceAssignments()
 
-	// Read current anti-lockout config from /etc/axonwall/system.yaml or state.json
+	// Read current anti-lockout config from /var/lib/axonwall/state.json (fallback /etc/axonwall/state.json)
 	currentIfaces := []string{"lan"}
 	statePath := "/var/lib/axonwall/state.json"
 	var state map[string]interface{}
@@ -3094,19 +3428,7 @@ func actionManageAntiLockout(reader *bufio.Reader) {
 	if state != nil {
 		if sys, ok := state["system"].(map[string]interface{}); ok {
 			if al, ok := sys["antiLockout"].(map[string]interface{}); ok {
-				if ifList, ok := al["interfaces"].([]interface{}); ok && len(ifList) > 0 {
-					var loaded []string
-					for _, item := range ifList {
-						if s, ok := item.(string); ok && s != "" {
-							loaded = append(loaded, s)
-						}
-					}
-					if len(loaded) > 0 {
-						currentIfaces = loaded
-					}
-				} else if single, ok := al["interface"].(string); ok && single != "" {
-					currentIfaces = []string{single}
-				}
+				_, currentIfaces, _ = extractAntiLockoutSettings(al, nil)
 			}
 		}
 	}
@@ -3189,30 +3511,15 @@ func actionManageAntiLockout(reader *bufio.Reader) {
 		return
 	}
 
-	// Persist to state.json
-	if state == nil {
-		state = make(map[string]interface{})
+	lockPath := consoleDesiredStateLockPath("/etc/axonwall", "/var/lib/axonwall")
+	preservedPorts, err := saveAntiLockoutSelectionWithPaths("/etc/axonwall", "/var/lib/axonwall", lockPath, currentIfaces)
+	if err != nil {
+		fmt.Printf("\n%s[!] Failed to save Anti-Lockout configuration (DesiredState locked): %v%s\n", colorRed, err, colorReset)
+		pause(reader)
+		return
 	}
-	sys, ok := state["system"].(map[string]interface{})
-	if !ok {
-		sys = make(map[string]interface{})
-	}
-	al, ok := sys["antiLockout"].(map[string]interface{})
-	if !ok {
-		al = make(map[string]interface{})
-	}
-	al["enabled"] = true
-	al["interface"] = currentIfaces[0]
-	var ifaceInterfaces []interface{}
-	for _, it := range currentIfaces {
-		ifaceInterfaces = append(ifaceInterfaces, it)
-	}
-	al["interfaces"] = ifaceInterfaces
-	al["ports"] = []interface{}{22, 80, 443, 2966, 3000}
-	sys["antiLockout"] = al
-	state["system"] = sys
 
-	// Ensure all current interfaces are present in NetworkConfig and persisted to interfaces.conf / interfaces.yaml / state.json
+	// Ensure all current interfaces are present in NetworkConfig and persisted while preserving the updated antiLockout selection
 	cfg := readCurrentNetworkConfig()
 	if cfg.LanDevice == "" && lan != "" {
 		cfg.LanDevice = lan
@@ -3231,51 +3538,14 @@ func actionManageAntiLockout(reader *bufio.Reader) {
 	}
 	persistNetworkInterfaces(cfg)
 
-	// Refresh state from state.json after persistNetworkInterfaces
-	if data, err := os.ReadFile(statePath); err == nil {
-		var refreshed map[string]interface{}
-		if err := json.Unmarshal(data, &refreshed); err == nil {
-			state = refreshed
-			if s, ok := state["system"].(map[string]interface{}); ok {
-				s["antiLockout"] = al
-			} else {
-				state["system"] = sys
-			}
-		}
-	}
-
-	if out, err := json.MarshalIndent(state, "", "  "); err == nil {
-		writeSharedConfigFile(statePath, out, 0660)
-		writeSharedConfigFile("/etc/axonwall/state.json", out, 0660)
-		writeSharedConfigFile("/var/lib/axonwall/etc-axonwall/state.json", out, 0660)
-	}
-
-	// Update /etc/axonwall/system.yaml and /var/lib/axonwall/etc-axonwall/system.yaml
-	writeSystemYamlAntiLockout(currentIfaces)
-
-	// Recompile and apply ruleset via axonwallctl or axonwalld
+	// Recompile and apply ruleset via axonwallctl (never send SIGHUP to axonwalld, which terminates it)
 	fmt.Printf("\n%sApplying new Anti-Lockout ruleset...%s\n", colorCyan, colorReset)
-	if err := exec.Command("axonwallctl", "apply").Run(); err != nil {
-		// Fallback: trigger axonwalld or direct nft reload
-		_ = exec.Command("pkill", "-HUP", "axonwalld").Run()
-	}
-
-	// Ensure immediate nftables rules are present at the top of chain input for zero-downtime access
-	devMap := map[string]string{
-		"lan":  lan,
-		"opt1": opt1,
-		"opt2": opt2,
-	}
-	currentRulesOut, _ := exec.Command("nft", "list", "chain", "inet", "axonwall", "input").CombinedOutput()
-	currentRules := string(currentRulesOut)
-	for _, ifName := range currentIfaces {
-		dev := devMap[strings.ToLower(ifName)]
-		if dev != "" {
-			_ = exec.Command("nft", "delete", "element", "inet", "axonwall", "wan_interfaces", fmt.Sprintf("{ %q }", dev)).Run()
-			if !strings.Contains(currentRules, fmt.Sprintf(`iifname %q tcp dport`, dev)) {
-				_ = exec.Command("nft", "insert", "rule", "inet", "axonwall", "input", "iifname", dev, "tcp", "dport", "{ 22, 80, 443, 2966, 3000 }", "accept", "comment", fmt.Sprintf("\"anti-lockout-%s\"", ifName)).Run()
-			}
-		}
+	if out, applyErr := exec.Command("axonwallctl", "apply").CombinedOutput(); applyErr != nil {
+		fmt.Printf("%s[!] Warning: 'axonwallctl apply' failed (%v): %s%s\n", colorYellow, applyErr, strings.TrimSpace(string(out)), colorReset)
+		fmt.Printf("%s[i] Live nftables anti-lockout rules remain synchronized directly.%s\n", colorCyan, colorReset)
+	} else {
+		// Re-ensure immediate live nftables state aligns with preservedPorts & currentIfaces
+		reconcileConsoleAntiLockoutNftWithConfig(cfg, nil, currentIfaces, preservedPorts, true)
 	}
 
 	fmt.Printf("\n%s[✓] Anti-Lockout updated successfully!%s\n", colorGreen, colorReset)

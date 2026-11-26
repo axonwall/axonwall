@@ -14,6 +14,12 @@ export async function GET(req: NextRequest) {
         { status: pwdEnforced ? 403 : 401 }
       );
     }
+    if (session.source === 'service_token') {
+      return NextResponse.json(
+        { error: 'Forbidden: Service tokens cannot authenticate ZeroTrust gateway sessions' },
+        { status: 403 }
+      );
+    }
 
     const searchParams =
       req.nextUrl?.searchParams ?? new URL(req.url, 'http://localhost').searchParams;

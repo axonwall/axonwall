@@ -20,16 +20,23 @@ import (
 )
 
 type LogShipper struct {
-	mu          sync.RWMutex
-	cfg         *ObservabilityRuntimeBundle
-	running     bool
-	stopCh      chan struct{}
-	wg          sync.WaitGroup
-	queue       *TelemetryQueue
-	nflog       *NflogReader
-	eventCh     chan StructuredLogEntry
-	lastPushAt  atomic.Int64
-	lastErr     atomic.Value
+	mu            sync.RWMutex
+	cfg           *ObservabilityRuntimeBundle
+	running       bool
+	stopCh        chan struct{}
+	stopCtx       context.Context
+	stopCancel    context.CancelFunc
+	wg            sync.WaitGroup
+	httpClient    *http.Client
+	httpTransport *http.Transport
+	httpClientErr error
+	nextRetryAt   time.Time
+	retryBackoff  time.Duration
+	queue         *TelemetryQueue
+	nflog         *NflogReader
+	eventCh       chan StructuredLogEntry
+	lastPushAt    atomic.Int64
+	lastErr       atomic.Value
 }
 
 func NewLogShipper() *LogShipper {
@@ -63,8 +70,18 @@ func (s *LogShipper) ApplyConfig(b *ObservabilityRuntimeBundle) {
 	if b == nil {
 		return
 	}
+	targetURL := b.Offload.ResolvedVictoriaLogsURLOrDefault()
+	client, tr, clientErr := buildObservabilityHTTPClient(b, targetURL)
 	s.mu.Lock()
+	if s.httpTransport != nil {
+		s.httpTransport.CloseIdleConnections()
+	}
 	s.cfg = b
+	s.httpClient = client
+	s.httpTransport = tr
+	s.httpClientErr = clientErr
+	s.nextRetryAt = time.Time{}
+	s.retryBackoff = 0
 	s.mu.Unlock()
 	s.queue.Configure(
 		b.Offload.Buffer.MaxMemoryMB,
@@ -73,7 +90,7 @@ func (s *LogShipper) ApplyConfig(b *ObservabilityRuntimeBundle) {
 		b.Offload.Buffer.DiskSpoolMaxMB,
 	)
 
-	if !b.Offload.Enabled || !b.Offload.Logs.Enabled || b.Offload.ResolvedVictoriaLogsURLOrDefault() == "" {
+	if !b.Offload.Enabled || !b.Offload.Logs.Enabled || targetURL == "" {
 		return
 	}
 	s.Start()
@@ -87,7 +104,10 @@ func (s *LogShipper) Start() {
 	}
 	cfg := s.cfg
 	stopCh := make(chan struct{})
+	stopCtx, stopCancel := context.WithCancel(context.Background())
 	s.stopCh = stopCh
+	s.stopCtx = stopCtx
+	s.stopCancel = stopCancel
 	s.running = true
 	s.mu.Unlock()
 
@@ -124,7 +144,7 @@ func (s *LogShipper) Start() {
 	}
 
 	s.wg.Add(1)
-	go s.batchAndFlushLoop(stopCh, cfg)
+	go s.batchAndFlushLoop(stopCh, stopCtx, cfg)
 }
 
 func (s *LogShipper) Stop() {
@@ -134,15 +154,24 @@ func (s *LogShipper) Stop() {
 		return
 	}
 	stopCh := s.stopCh
+	stopCancel := s.stopCancel
 	s.running = false
 	s.mu.Unlock()
 
 	s.nflog.Stop()
+	if stopCancel != nil {
+		stopCancel()
+	}
 	close(stopCh)
 	s.wg.Wait()
+	s.mu.Lock()
+	if s.httpTransport != nil {
+		s.httpTransport.CloseIdleConnections()
+	}
+	s.mu.Unlock()
 }
 
-func (s *LogShipper) batchAndFlushLoop(stopCh chan struct{}, cfg *ObservabilityRuntimeBundle) {
+func (s *LogShipper) batchAndFlushLoop(stopCh chan struct{}, stopCtx context.Context, cfg *ObservabilityRuntimeBundle) {
 	defer s.wg.Done()
 	flushSec := cfg.Offload.Logs.FlushIntervalSec
 	if flushSec < 1 {
@@ -163,7 +192,7 @@ func (s *LogShipper) batchAndFlushLoop(stopCh chan struct{}, cfg *ObservabilityR
 			}
 			batch = batch[:0]
 		}
-		s.flushQueue(cfg)
+		s.flushQueue(stopCtx, cfg)
 	}
 
 	for {
@@ -182,40 +211,91 @@ func (s *LogShipper) batchAndFlushLoop(stopCh chan struct{}, cfg *ObservabilityR
 	}
 }
 
-func (s *LogShipper) flushQueue(cfg *ObservabilityRuntimeBundle) {
+func (s *LogShipper) recordRetryableFailure(errMsg string) {
+	s.mu.Lock()
+	if s.retryBackoff <= 0 {
+		s.retryBackoff = 2 * time.Second
+	} else {
+		s.retryBackoff *= 2
+		if s.retryBackoff > 60*time.Second {
+			s.retryBackoff = 60 * time.Second
+		}
+	}
+	s.nextRetryAt = time.Now().Add(s.retryBackoff)
+	s.mu.Unlock()
+	s.lastErr.Store(errMsg)
+}
+
+func (s *LogShipper) resetRetryBackoff() {
+	s.mu.Lock()
+	s.retryBackoff = 0
+	s.nextRetryAt = time.Time{}
+	s.mu.Unlock()
+}
+
+func (s *LogShipper) flushQueue(parentCtx context.Context, cfg *ObservabilityRuntimeBundle) {
+	if parentCtx == nil {
+		parentCtx = context.Background()
+	}
+	if parentCtx.Err() != nil {
+		return
+	}
 	targetURL := cfg.Offload.ResolvedVictoriaLogsURLOrDefault()
 	if targetURL == "" {
 		return
 	}
-	batches := s.queue.PopBatch(8)
-	if len(batches) == 0 {
+
+	s.mu.RLock()
+	client := s.httpClient
+	clientErr := s.httpClientErr
+	nextRetry := s.nextRetryAt
+	s.mu.RUnlock()
+
+	if !nextRetry.IsZero() && time.Now().Before(nextRetry) {
 		return
 	}
-	client := &http.Client{Timeout: 6 * time.Second}
-	if strings.HasPrefix(targetURL, "https://") {
-		if tlsCfg, err := buildTLSConfigFromBundleParams(
-			cfg.Offload.UseHaMtls,
-			cfg.Offload.TLSCACert,
-			"", "", "",
-			cfg.Offload.TLSInsecureSkipVerify,
-			false,
-			false,
-		); err == nil {
-			client.Transport = &http.Transport{TLSClientConfig: tlsCfg}
+	if clientErr != nil {
+		s.lastErr.Store(clientErr.Error())
+		return
+	}
+	if client == nil {
+		var tr *http.Transport
+		client, tr, clientErr = buildObservabilityHTTPClient(cfg, targetURL)
+		if clientErr != nil {
+			s.lastErr.Store(clientErr.Error())
+			return
 		}
+		s.mu.Lock()
+		if s.httpClient == nil {
+			s.httpClient = client
+			s.httpTransport = tr
+		} else {
+			if tr != nil {
+				tr.CloseIdleConnections()
+			}
+			client = s.httpClient
+		}
+		s.mu.Unlock()
+	}
+
+	batches := s.queue.PeekBatch(8)
+	if len(batches) == 0 {
+		return
 	}
 	token := strings.TrimSpace(cfg.Offload.IngestToken)
 	if token == "" {
 		token = strings.TrimSpace(cfg.VictoriaLogs.BearerToken)
 	}
 
-	for idx, gzBody := range batches {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	for _, gzBody := range batches {
+		if parentCtx.Err() != nil {
+			return
+		}
+		ctx, cancel := context.WithTimeout(parentCtx, 5*time.Second)
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, bytes.NewReader(gzBody))
 		if err != nil {
 			cancel()
-			s.queue.RequeueFront(batches[idx:])
-			s.lastErr.Store(err.Error())
+			s.recordRetryableFailure(err.Error())
 			return
 		}
 		req.Header.Set("Content-Type", "application/stream+json")
@@ -226,21 +306,31 @@ func (s *LogShipper) flushQueue(cfg *ObservabilityRuntimeBundle) {
 		resp, err := client.Do(req)
 		if err != nil {
 			cancel()
-			s.queue.RequeueFront(batches[idx:])
-			s.lastErr.Store(err.Error())
+			s.recordRetryableFailure(err.Error())
 			return
 		}
 		_, _ = io.Copy(io.Discard, resp.Body)
 		_ = resp.Body.Close()
 		cancel()
-		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			s.queue.RequeueFront(batches[idx:])
-			s.lastErr.Store(fmt.Sprintf("HTTP %d from VictoriaLogs ingest", resp.StatusCode))
-			return
+
+		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			s.queue.AckBatch(1)
+			s.queue.MarkSent(1)
+			s.resetRetryBackoff()
+			s.lastPushAt.Store(time.Now().UnixMilli())
+			s.lastErr.Store("")
+			continue
 		}
-		s.queue.MarkSent(1)
-		s.lastPushAt.Store(time.Now().UnixMilli())
-		s.lastErr.Store("")
+		if resp.StatusCode >= 400 && resp.StatusCode < 500 &&
+			resp.StatusCode != http.StatusRequestTimeout &&
+			resp.StatusCode != http.StatusTooManyRequests {
+			s.queue.AckBatch(1)
+			s.queue.MarkDropped(1)
+			s.lastErr.Store(fmt.Sprintf("HTTP %d from VictoriaLogs ingest (dropped non-retryable batch)", resp.StatusCode))
+			continue
+		}
+		s.recordRetryableFailure(fmt.Sprintf("HTTP %d from VictoriaLogs ingest", resp.StatusCode))
+		return
 	}
 }
 
@@ -319,7 +409,7 @@ func (s *LogShipper) tailFileLoop(
 			r := bufio.NewReaderSize(f, 64*1024)
 			for {
 				line, rerr := r.ReadString('\n')
-				if len(line) > 0 {
+				if len(line) > 0 && strings.HasSuffix(line, "\n") {
 					offset += int64(len(line))
 					trimmed := strings.TrimSpace(line)
 					if trimmed != "" {
@@ -389,6 +479,32 @@ func parseSuricataLine(line, nodeID, hostname string) (StructuredLogEntry, bool)
 	}, true
 }
 
+func buildJournalctlArgs(cfg *ObservabilityRuntimeBundle) []string {
+	args := []string{"-f", "-o", "json", "-n", "0"}
+	if cfg == nil {
+		return args
+	}
+	hasExplicitUnits := false
+	hasUnbound := false
+	if cfg.Offload.Logs.Journald.Enabled {
+		for _, u := range cfg.Offload.Logs.Journald.Units {
+			if u = strings.TrimSpace(u); u != "" {
+				args = append(args, "-u", u)
+				hasExplicitUnits = true
+				if u == "unbound" || u == "unbound.service" {
+					hasUnbound = true
+				}
+			}
+		}
+	}
+	if cfg.Offload.Logs.UnboundDns.Enabled && !hasUnbound {
+		if !cfg.Offload.Logs.Journald.Enabled || hasExplicitUnits {
+			args = append(args, "-u", "unbound")
+		}
+	}
+	return args
+}
+
 func (s *LogShipper) journaldLoop(stopCh chan struct{}, cfg *ObservabilityRuntimeBundle, nodeID, hostname string) {
 	defer s.wg.Done()
 	jPath, err := exec.LookPath("journalctl")
@@ -402,16 +518,7 @@ func (s *LogShipper) journaldLoop(stopCh chan struct{}, cfg *ObservabilityRuntim
 		default:
 		}
 		ctx, cancel := context.WithCancel(context.Background())
-		args := []string{"-f", "-o", "json", "-n", "0"}
-		if cfg.Offload.Logs.Journald.Enabled {
-			for _, u := range cfg.Offload.Logs.Journald.Units {
-				if u = strings.TrimSpace(u); u != "" {
-					args = append(args, "-u", u)
-				}
-			}
-		} else if cfg.Offload.Logs.UnboundDns.Enabled {
-			args = append(args, "-u", "unbound")
-		}
+		args := buildJournalctlArgs(cfg)
 
 		cmd := exec.CommandContext(ctx, jPath, args...)
 		stdout, err := cmd.StdoutPipe()

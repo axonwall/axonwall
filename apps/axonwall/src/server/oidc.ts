@@ -1,6 +1,7 @@
-import { createRemoteJWKSet, jwtVerify, type JWTPayload } from 'jose';
+import { createLocalJWKSet, jwtVerify, type JSONWebKeySet, type JWTPayload } from 'jose';
 import { isPluginEnabled } from '@axonwall/lib/plugins';
 import { getDesiredStateInternal } from './desired-state-internal';
+import { assertSafeOutboundUrl, ssrfSafeFetch } from './ssrf-guard';
 
 /**
  * OIDC helpers for SSO sign-in.
@@ -79,8 +80,9 @@ export async function getOidcConfig(): Promise<OidcConfig | null> {
 const SAFE_FORWARDED_HOST_RE = /^(?:\[[0-9a-fA-F:]+\]|[a-zA-Z0-9.-]+)(?::\d{1,5})?$/;
 
 /**
- * Resolves the external browser-facing origin behind a reverse proxy (e.g. axonwall-controller
- * on :2966 forwarding to Next.js on 127.0.0.1:3000) rather than using internal request.nextUrl.origin.
+ * Resolves the external browser-facing origin.
+ * Never trusts untrusted X-Forwarded-Host / X-Forwarded-Proto headers unless
+ * explicitly opted in via AXONWALL_TRUST_PROXY=1 or AXONWALL_TRUSTED_HOSTS.
  */
 export function resolvePublicOrigin(
   reqHeaders: Pick<Headers, 'get'>,
@@ -98,9 +100,22 @@ export function resolvePublicOrigin(
     } catch {}
   }
 
+  const trustProxy =
+    process.env.AXONWALL_TRUST_PROXY === '1' || process.env.AXONWALL_TRUST_PROXY === 'true';
+  const trustedHosts = new Set(
+    (process.env.AXONWALL_TRUSTED_HOSTS || '')
+      .split(',')
+      .map((h) => h.trim().toLowerCase())
+      .filter(Boolean)
+  );
+
   const rawFwdHost = reqHeaders.get('x-forwarded-host')?.split(',')[0]?.trim();
-  const rawHost = rawFwdHost || reqHeaders.get('host')?.split(',')[0]?.trim();
-  if (rawHost && SAFE_FORWARDED_HOST_RE.test(rawHost)) {
+  const fwdHostTrusted =
+    Boolean(rawFwdHost) &&
+    SAFE_FORWARDED_HOST_RE.test(rawFwdHost!) &&
+    (trustProxy || trustedHosts.has(rawFwdHost!.toLowerCase()));
+
+  if (fwdHostTrusted && rawFwdHost) {
     const rawProto = reqHeaders.get('x-forwarded-proto')?.split(',')[0]?.trim().toLowerCase();
     const proto =
       rawProto === 'http' || rawProto === 'https'
@@ -108,7 +123,15 @@ export function resolvePublicOrigin(
         : fallbackOrigin.startsWith('http://')
           ? 'http'
           : 'https';
-    return `${proto}://${rawHost}`;
+    return `${proto}://${rawFwdHost}`;
+  }
+
+  const rawHost = reqHeaders.get('host')?.split(',')[0]?.trim();
+  if (rawHost && SAFE_FORWARDED_HOST_RE.test(rawHost)) {
+    if (trustedHosts.size === 0 || trustedHosts.has(rawHost.toLowerCase())) {
+      const proto = fallbackOrigin.startsWith('http://') ? 'http' : 'https';
+      return `${proto}://${rawHost}`;
+    }
   }
 
   return fallbackOrigin;
@@ -143,9 +166,15 @@ export async function discoverOidc(cfg: OidcConfig): Promise<OidcDiscovery> {
   ) {
     return discoveryCache.doc;
   }
-  const res = await fetch(`${cfg.issuerUrl}/.well-known/openid-configuration`, {
-    headers: { accept: 'application/json' },
-  });
+  const allowHttp = cfg.issuerUrl.startsWith('http://');
+  const res = await ssrfSafeFetch(
+    `${cfg.issuerUrl}/.well-known/openid-configuration`,
+    {
+      headers: { accept: 'application/json' },
+      timeoutMs: 10000,
+    },
+    { allowHttp, allowPrivate: false }
+  );
   if (!res.ok) {
     throw new Error(`OIDC discovery failed: ${res.status}`);
   }
@@ -153,6 +182,10 @@ export async function discoverOidc(cfg: OidcConfig): Promise<OidcDiscovery> {
   if (!doc.authorization_endpoint || !doc.token_endpoint || !doc.jwks_uri) {
     throw new Error('OIDC discovery document is incomplete');
   }
+  await Promise.all([
+    assertSafeOutboundUrl(doc.token_endpoint, { allowHttp, allowPrivate: false }),
+    assertSafeOutboundUrl(doc.jwks_uri, { allowHttp, allowPrivate: false }),
+  ]);
   discoveryCache = { issuer: cfg.issuerUrl, doc, fetchedAt: Date.now() };
   return doc;
 }
@@ -176,6 +209,11 @@ export async function exchangeCodeForIdentity(
   redirectUri: string,
   expectedNonce: string | undefined
 ): Promise<JWTPayload> {
+  if (!expectedNonce || !expectedNonce.trim()) {
+    throw new Error('OIDC nonce missing');
+  }
+
+  const allowHttp = cfg.issuerUrl.startsWith('http://');
   const body = new URLSearchParams({
     grant_type: 'authorization_code',
     code,
@@ -186,14 +224,19 @@ export async function exchangeCodeForIdentity(
     body.set('client_secret', cfg.clientSecret);
   }
 
-  const res = await fetch(discovery.token_endpoint, {
-    method: 'POST',
-    headers: {
-      'content-type': 'application/x-www-form-urlencoded',
-      accept: 'application/json',
+  const res = await ssrfSafeFetch(
+    discovery.token_endpoint,
+    {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/x-www-form-urlencoded',
+        accept: 'application/json',
+      },
+      body: body.toString(),
+      timeoutMs: 10000,
     },
-    body,
-  });
+    { allowHttp, allowPrivate: false }
+  );
   if (!res.ok) {
     throw new Error(`OIDC token exchange failed: ${res.status}`);
   }
@@ -202,14 +245,23 @@ export async function exchangeCodeForIdentity(
     throw new Error('OIDC token response contains no id_token');
   }
 
-  const jwks = createRemoteJWKSet(new URL(discovery.jwks_uri));
+  const jwksRes = await ssrfSafeFetch(
+    discovery.jwks_uri,
+    {
+      headers: { accept: 'application/json' },
+      timeoutMs: 10000,
+    },
+    { allowHttp, allowPrivate: false }
+  );
+  if (!jwksRes.ok) {
+    throw new Error(`OIDC JWKS fetch failed: ${jwksRes.status}`);
+  }
+  const jwksDoc = (await jwksRes.json()) as JSONWebKeySet;
+  const jwks = createLocalJWKSet(jwksDoc);
   const { payload } = await jwtVerify(tokens.id_token, jwks, {
     issuer: cfg.issuerUrl,
     audience: cfg.clientId,
   });
-  if (!expectedNonce || !expectedNonce.trim()) {
-    throw new Error('OIDC nonce missing');
-  }
   if (payload.nonce !== expectedNonce) {
     throw new Error('OIDC nonce mismatch');
   }
@@ -218,12 +270,12 @@ export async function exchangeCodeForIdentity(
 
 /**
  * Map verified IdP group claims to an Axonwall RBAC role. Anything
- * unrecognized fails closed to the least-privileged role.
+ * unrecognized fails closed and returns null.
  */
 export function roleFromGroups(
   groups: unknown,
   roleMappings?: OidcRoleMapping[]
-): 'admin' | 'operator' | 'readonly' | 'vpn_user' {
+): 'admin' | 'operator' | 'readonly' | 'vpn_user' | null {
   const list = Array.isArray(groups)
     ? groups.filter((g): g is string => typeof g === 'string')
     : [];
@@ -287,5 +339,5 @@ export function roleFromGroups(
     if (vpnSet.has(group)) return 'vpn_user';
   }
 
-  return 'readonly';
+  return null;
 }

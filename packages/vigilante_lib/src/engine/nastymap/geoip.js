@@ -25,16 +25,36 @@ const KNOWN_GEO_SUBNETS = [
  */
 export function isPrivateIp(ip) {
   if (!ip || typeof ip !== 'string') return true;
-  if (ip === '127.0.0.1' || ip === 'localhost' || ip === '::1') return true;
-  if (ip.startsWith('10.')) return true;
-  if (ip.startsWith('192.168.')) return true;
-  if (ip.startsWith('172.')) {
-    const parts = ip.split('.');
+  const normalized = ip.trim().toLowerCase().split('%')[0];
+  if (!normalized) return true;
+  if (normalized === 'localhost' || normalized === '::1' || normalized === '::' || normalized === '0.0.0.0') return true;
+
+  // Unwrap IPv4-mapped IPv6 addresses (e.g. ::ffff:192.168.1.1)
+  if (normalized.startsWith('::ffff:')) {
+    const mapped = normalized.slice(7);
+    if (mapped.includes('.')) return isPrivateIp(mapped);
+    const hexParts = mapped.split(':').filter(Boolean);
+    if (hexParts.length === 2) {
+      const hi = parseInt(hexParts[0], 16);
+      const lo = parseInt(hexParts[1], 16);
+      if (!Number.isNaN(hi) && !Number.isNaN(lo)) {
+        return isPrivateIp(`${(hi >> 8) & 0xff}.${hi & 0xff}.${(lo >> 8) & 0xff}.${lo & 0xff}`);
+      }
+    }
+  }
+
+  if (normalized.startsWith('127.')) return true; // Loopback 127.0.0.0/8
+  if (normalized.startsWith('10.')) return true;
+  if (normalized.startsWith('192.168.')) return true;
+  if (normalized.startsWith('172.')) {
+    const parts = normalized.split('.');
     const second = parseInt(parts[1], 10);
     if (!isNaN(second) && second >= 16 && second <= 31) return true;
   }
-  if (ip.startsWith('169.254.')) return true; // Link-local
-  if (ip.startsWith('fc00:') || ip.startsWith('fe80:')) return true; // IPv6 local
+  if (normalized.startsWith('169.254.')) return true; // Link-local
+  if (/^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./.test(normalized)) return true; // CGNAT 100.64.0.0/10
+  // IPv6 Unique Local fc00::/7 (fc00:: - fdff::) and Link-Local fe80::/10
+  if (/^f[cd][0-9a-f]{2}:/.test(normalized) || /^fe[89ab][0-9a-f]:/.test(normalized)) return true;
   return false;
 }
 
@@ -88,7 +108,9 @@ export function geocodeIp(ip) {
   }
 
   // Deterministic fallback geocoding hash for demo/simulation of public IPs
-  const hash = ip.split('.').reduce((acc, octet) => (acc * 31 + parseInt(octet || '0', 10)) % 10000, 0);
+  const hash = ip.includes(':')
+    ? ip.split(':').reduce((acc, part) => (acc * 31 + (parseInt(part || '0', 16) || 0)) % 10000, 0)
+    : ip.split('.').reduce((acc, octet) => (acc * 31 + (parseInt(octet || '0', 10) || 0)) % 10000, 0);
   const fallbackLat = ((hash % 1400) - 700) / 10; // -70 to +70
   const fallbackLon = (((hash * 7) % 3600) - 1800) / 10; // -180 to +180
 

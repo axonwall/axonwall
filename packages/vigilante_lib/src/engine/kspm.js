@@ -177,90 +177,114 @@ export function evaluatePodSecurityStandards(podOrPods = []) {
 export async function generateKspmScorecard(options = {}) {
   await ensureVigilanteConfig();
 
-  // 1. Gather live or mock pods
+  // 1. Gather live or explicit pods (only use mock sample workloads when options.mock === true)
   let workloadPods = options.pods || null;
   if (!workloadPods) {
+    let widePods = [];
+    let liveQueryError = null;
     try {
-      const widePods = await getPodsWide(options.namespace || null);
-      if (widePods && widePods.length > 0) {
-        workloadPods = widePods.map(p => ({
-          name: p.name,
-          namespace: p.namespace,
-          spec: {
-            hostNetwork: p.ip === p.node,
-            containers: [{ name: p.name, securityContext: { privileged: false, runAsNonRoot: true } }]
-          }
-        }));
-      }
-    } catch {
-      // ignore
+      widePods = await getPodsWide({
+        namespace: options.namespace || null,
+        clusterName: options.clusterName || 'vigilante-dev',
+        throwOnError: true
+      });
+    } catch (err) {
+      liveQueryError = err;
     }
-  }
 
-  if (!workloadPods || workloadPods.length === 0) {
-    // Standard baseline sample workloads
-    workloadPods = [
-      {
-        name: 'opensearch-cluster-master-0',
-        namespace: 'opensearch',
-        spec: { containers: [{ name: 'opensearch', securityContext: { privileged: false, runAsNonRoot: true, runAsUser: 1000 } }] }
-      },
-      {
-        name: 'falco-ebpf-daemonset-88fa',
-        namespace: 'falco',
-        spec: { hostPID: true, hostNetwork: true, containers: [{ name: 'falco', securityContext: { privileged: true, runAsUser: 0 } }] }
-      },
-      {
-        name: 'suricata-sensor-daemonset-22bb',
-        namespace: 'suricata',
-        spec: { hostNetwork: true, containers: [{ name: 'suricata', securityContext: { privileged: false, runAsNonRoot: false } }] }
-      },
-      {
-        name: 'wazuh-manager-master-0',
-        namespace: 'wazuh',
-        spec: { containers: [{ name: 'wazuh-manager', securityContext: { privileged: false, runAsNonRoot: true, runAsUser: 1001 } }] }
-      },
-      {
-        name: 'traefik-ingress-controller-44cc',
-        namespace: 'kube-system',
-        spec: { containers: [{ name: 'traefik', securityContext: { privileged: false, runAsNonRoot: true } }] }
-      },
-      {
-        name: 'coredns-6799fc88d8-jk88',
-        namespace: 'kube-system',
-        spec: { containers: [{ name: 'coredns', securityContext: { privileged: false, runAsNonRoot: true } }] }
-      },
-      {
-        name: 'local-path-provisioner-7b89',
-        namespace: 'kube-system',
-        spec: { containers: [{ name: 'local-path-provisioner', securityContext: { privileged: false, runAsNonRoot: true } }] }
-      },
-      {
-        name: 'metrics-server-54fd9b-pp9',
-        namespace: 'kube-system',
-        spec: { containers: [{ name: 'metrics-server', securityContext: { privileged: false, runAsNonRoot: true } }] }
-      }
-    ];
+    if (liveQueryError && !options.mock) {
+      throw new Error(`KSPM failed to query cluster pods: ${liveQueryError.message}`);
+    }
+
+    if (Array.isArray(widePods) && widePods.length > 0) {
+      workloadPods = widePods.map(p => ({
+        name: p.name,
+        namespace: p.namespace,
+        spec: {
+          hostNetwork: p.ip === p.node && p.ip !== '<none>',
+          containers: [{ name: p.name, securityContext: { privileged: false, runAsNonRoot: true } }]
+        }
+      }));
+    } else if (options.mock === true) {
+      // Standard baseline sample workloads (explicit mock mode only)
+      workloadPods = [
+        {
+          name: 'opensearch-cluster-master-0',
+          namespace: 'opensearch',
+          spec: { containers: [{ name: 'opensearch', securityContext: { privileged: false, runAsNonRoot: true, runAsUser: 1000 } }] }
+        },
+        {
+          name: 'falco-ebpf-daemonset-88fa',
+          namespace: 'falco',
+          spec: { hostPID: true, hostNetwork: true, containers: [{ name: 'falco', securityContext: { privileged: true, runAsUser: 0 } }] }
+        },
+        {
+          name: 'suricata-sensor-daemonset-22bb',
+          namespace: 'suricata',
+          spec: { hostNetwork: true, containers: [{ name: 'suricata', securityContext: { privileged: false, runAsNonRoot: false } }] }
+        },
+        {
+          name: 'wazuh-manager-master-0',
+          namespace: 'wazuh',
+          spec: { containers: [{ name: 'wazuh-manager', securityContext: { privileged: false, runAsNonRoot: true, runAsUser: 1001 } }] }
+        },
+        {
+          name: 'traefik-ingress-controller-44cc',
+          namespace: 'kube-system',
+          spec: { containers: [{ name: 'traefik', securityContext: { privileged: false, runAsNonRoot: true } }] }
+        },
+        {
+          name: 'coredns-6799fc88d8-jk88',
+          namespace: 'kube-system',
+          spec: { containers: [{ name: 'coredns', securityContext: { privileged: false, runAsNonRoot: true } }] }
+        },
+        {
+          name: 'local-path-provisioner-7b89',
+          namespace: 'kube-system',
+          spec: { containers: [{ name: 'local-path-provisioner', securityContext: { privileged: false, runAsNonRoot: true } }] }
+        },
+        {
+          name: 'metrics-server-54fd9b-pp9',
+          namespace: 'kube-system',
+          spec: { containers: [{ name: 'metrics-server', securityContext: { privileged: false, runAsNonRoot: true } }] }
+        }
+      ];
+    } else {
+      throw new Error('No live cluster pods found for KSPM scorecard (pass mock: true to evaluate sample baseline workloads)');
+    }
   }
 
   // 2. Evaluate Pod Security Standards (PSS)
   const pssResult = evaluatePodSecurityStandards(workloadPods);
 
   // 3. Gather CIS Benchmarks (Kube-Bench)
-  let cisPass = 38;
-  let cisFail = 4;
-  let cisWarn = 2;
+  let cisPass = options.mock === true ? 38 : 0;
+  let cisFail = options.mock === true ? 4 : 0;
+  let cisWarn = options.mock === true ? 2 : 0;
 
   try {
     const kubeAudits = await listSavedKubeAudits();
-    if (kubeAudits.length > 0 && kubeAudits[0].summary?.totals) {
-      const t = kubeAudits[0].summary.totals;
-      cisPass = t.pass || cisPass;
-      cisFail = t.fail || cisFail;
-      cisWarn = t.warn || cisWarn;
+    const benchAudits = kubeAudits.filter(a => !a.tool || a.tool === 'kube-bench');
+    if (benchAudits.length > 0) {
+      let latest = benchAudits[0];
+      let totals = latest.summary?.totals || latest.totals || null;
+      if (!totals && latest.filePath) {
+        try {
+          const fullRaw = await fs.readFile(latest.filePath, 'utf8');
+          const fullJson = JSON.parse(fullRaw);
+          totals = fullJson.summary?.totals || fullJson.totals || null;
+        } catch {
+          // Ignore malformed audit file
+        }
+      }
+      if (totals) {
+        cisPass = totals.pass ?? 0;
+        cisFail = totals.fail ?? 0;
+        cisWarn = totals.warn ?? 0;
+      }
     }
   } catch {
-    // fallback
+    // No saved kube-bench audits
   }
 
   const cisTotal = Math.max(1, cisPass + cisFail + cisWarn);

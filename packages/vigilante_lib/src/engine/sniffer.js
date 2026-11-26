@@ -73,6 +73,7 @@ export function dissectIpPacket(buf) {
   if (version !== 4) return null;
 
   const ihl = (buf[0] & 0x0f) * 4;
+  if (ihl < 20 || ihl > buf.length) return null;
   const totalLength = buf.readUInt16BE(2);
   const ttl = buf[8];
   const protocol = buf[9];
@@ -112,6 +113,7 @@ export function dissectTcpSegment(buf) {
   const seqNum = buf.readUInt32BE(4);
   const ackNum = buf.readUInt32BE(8);
   const dataOffset = (buf[12] >> 4) * 4;
+  if (dataOffset < 20 || dataOffset > buf.length) return null;
   const flagsByte = buf[13];
 
   const flags = {
@@ -306,10 +308,10 @@ export function dissectFullPacket(rawBuf, packetIndex = 1) {
               summary = `${app.handshakeType} ${app.sni ? `SNI=${app.sni}` : ''} (${app.tlsVersion})`.trim();
             }
           } else if (transport.payload && transport.payload.length > 4) {
-            const firstChars = transport.payload.subarray(0, 8).toString('ascii');
-            if (firstChars.startsWith('GET') || firstChars.startsWith('POST') || firstChars.startsWith('HTTP')) {
+            const httpText = transport.payload.subarray(0, 256).toString('ascii');
+            if (/^(?:GET|POST|PUT|DELETE|HEAD|OPTIONS|PATCH)\s+|HTTP\/\d/.test(httpText)) {
               protocol = 'HTTP';
-              summary = firstChars.split('\r\n')[0].substring(0, 48);
+              summary = httpText.split(/\r?\n/)[0].substring(0, 64);
             }
           }
         }
@@ -369,7 +371,11 @@ export function filterPacket(packet, filterExpr = '') {
 
   if (f.startsWith('port ')) {
     const port = f.replace('port ', '').trim();
-    return packet.src.includes(`:${port}`) || packet.dst.includes(`:${port}`);
+    const portNum = Number(port);
+    return packet.src.endsWith(`:${port}`) ||
+           packet.dst.endsWith(`:${port}`) ||
+           packet.layers?.transport?.srcPort === portNum ||
+           packet.layers?.transport?.dstPort === portNum;
   }
 
   if (f.startsWith('host ')) {
@@ -445,8 +451,12 @@ export async function exportToPcap(packets = [], filePath) {
   for (const pkt of packets) {
     const raw = pkt.rawBuffer || Buffer.alloc(14);
     const pcapPktHeader = Buffer.alloc(16);
-    const sec = Math.floor(pkt.timestamp / 1000);
-    const usec = (pkt.timestamp % 1000) * 1000;
+    const tsMs = typeof pkt.timestamp === 'number'
+      ? pkt.timestamp
+      : (Date.parse(String(pkt.timestamp || '')) || Date.now());
+    const safeTsMs = Number.isFinite(tsMs) && tsMs >= 0 ? tsMs : Date.now();
+    const sec = Math.floor(safeTsMs / 1000) >>> 0;
+    const usec = (Math.floor(safeTsMs % 1000) * 1000) >>> 0;
 
     pcapPktHeader.writeUInt32BE(sec, 0);
     pcapPktHeader.writeUInt32BE(usec, 4);

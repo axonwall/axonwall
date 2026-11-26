@@ -44,7 +44,6 @@ export default function VirtualMachinesPage() {
   // C-M8: the save/delete actions take the fingerprint this page loaded
   // with, so a concurrent save in another tab cannot be silently
   // reverted by this page's apply.
-  const { getFingerprint } = useDesiredStateApply();
   const [vms, setVms] = useState<VMStatusItem[]>([]);
   const [isos, setIsos] = useState<IsoItem[]>([]);
   const [loading, setLoading] = useState(true);
@@ -87,7 +86,7 @@ export default function VirtualMachinesPage() {
   const [ciSshKey, setCiSshKey] = useState('');
   const [ciIpConfig, setCiIpConfig] = useState('dhcp');
 
-  const loadData = async () => {
+  const loadData = React.useCallback(async () => {
     try {
       setLoading(true);
       const [vmList, isoList, virtConf] = await Promise.all([
@@ -112,13 +111,19 @@ export default function VirtualMachinesPage() {
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
+
+  const { getFingerprint, refreshFingerprint } = useDesiredStateApply({
+    onConfigChanged: () => {
+      void loadData();
+    },
+  });
 
   useEffect(() => {
-    loadData();
-    const interval = setInterval(loadData, 5000);
+    void loadData();
+    const interval = setInterval(() => void loadData(), 5000);
     return () => clearInterval(interval);
-  }, []);
+  }, [loadData]);
 
   const handlePower = async (targetVmid: number, action: 'start' | 'stop' | 'reset' | 'pause' | 'resume', force = false) => {
     setActionLoading(targetVmid);
@@ -212,6 +217,10 @@ export default function VirtualMachinesPage() {
       const res = await deleteVmAction(targetVmid, fingerprint ? { expectedFingerprint: fingerprint } : undefined);
       setStatusBanner({ type: res.success ? 'success' : 'error', message: res.message });
       if (res.success) {
+        await refreshFingerprint();
+        if (typeof window !== 'undefined') {
+          window.dispatchEvent(new Event('axonwall:status-refresh'));
+        }
         await loadData();
       }
     } catch (err: any) {
@@ -310,6 +319,10 @@ export default function VirtualMachinesPage() {
       setStatusBanner({ type: 'success', message: res.message });
       setShowCreateModal(false);
       setName('');
+      await refreshFingerprint();
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new Event('axonwall:status-refresh'));
+      }
       await loadData();
     } catch (err: any) {
       setStatusBanner({ type: 'error', message: err?.message || 'Failed to create VM' });

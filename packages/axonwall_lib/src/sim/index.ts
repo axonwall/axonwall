@@ -66,19 +66,26 @@ export function simulatePacket(query: PacketTracerQuery, state: DesiredState): S
   });
 
   const isWanIngress = inferInterfaceRole(inIface) === 'wan';
-  const localHostIps = new Set(
-    state.interfaces
-      .filter((i) => i.enabled && i.ipv4Address)
-      .map((i) => i.ipv4Address!.split('/')[0]),
-  );
+  const localHostIps = new Set<string>();
+  for (const i of state.interfaces) {
+    if (!i.enabled) continue;
+    if (i.ipv4Address) localHostIps.add(i.ipv4Address.split('/')[0]!.trim().toLowerCase());
+    if (i.ipv6Address) localHostIps.add(i.ipv6Address.split('/')[0]!.trim().toLowerCase());
+  }
+  for (const vip of state.virtualIps ?? []) {
+    if (vip.ip) localHostIps.add(vip.ip.split('/')[0]!.trim().toLowerCase());
+  }
 
   // 2. Anti-Lockout check (matches compileNftables: uses configured antiLockout interfaces, never WAN)
   const antiLockoutIfaces = new Set(normalizeAntiLockoutInterfaces(state.system.antiLockout));
   if (!isWanIngress && state.system.antiLockout?.enabled && antiLockoutIfaces.has(inIface.name)) {
+    const ifaceLocalIps = [inIface.ipv4Address?.split('/')[0], inIface.ipv6Address?.split('/')[0]]
+      .filter((v): v is string => Boolean(v))
+      .map((v) => v.trim().toLowerCase());
     if (
       query.protocol === 'tcp' &&
       state.system.antiLockout.ports.includes(query.dstPort) &&
-      (inIface.ipv4Address ? currentDstIp === inIface.ipv4Address.split('/')[0] : true)
+      (ifaceLocalIps.length > 0 ? ifaceLocalIps.includes(currentDstIp.trim().toLowerCase()) : true)
     ) {
       steps.push({
         stage: 'filter',
@@ -98,16 +105,22 @@ export function simulatePacket(query: PacketTracerQuery, state: DesiredState): S
   const sortedNat = [...state.nat].sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0));
   for (const nat of sortedNat) {
     if (!nat.enabled || nat.type !== 'dnat') continue;
-    if (nat.interface !== inIface.name && nat.interface !== 'any') continue;
-    if (nat.source && nat.source !== 'any' && !matchAddress(nat.source, query.srcIp, state.aliases, state.interfaces)) continue;
-    if (nat.destination && nat.destination !== 'any' && !matchAddress(nat.destination, currentDstIp, state.aliases, state.interfaces)) continue;
+    if (nat.interface !== inIface.name && nat.interface !== 'any' && nat.interface !== 'floating') continue;
+    if (nat.source && nat.source !== 'any' && !matchAddress(nat.source, query.srcIp, state.aliases, state.interfaces, localHostIps)) continue;
+    if (nat.destination && nat.destination !== 'any' && !matchAddress(nat.destination, currentDstIp, state.aliases, state.interfaces, localHostIps)) continue;
 
     if (matchProtocol(nat.protocol, query.protocol)) {
       const portMatch = !nat.destinationPort || nat.destinationPort === 'any' || matchPort(nat.destinationPort, query.dstPort, state.aliases);
       if (portMatch && nat.targetIp) {
         currentDstIp = nat.targetIp;
-        if (nat.targetPort) {
-          currentDstPort = Number.parseInt(nat.targetPort, 10);
+        if (nat.targetPort && nat.targetPort !== 'any') {
+          const trimmedTargetPort = nat.targetPort.trim();
+          if (/^\d+$/.test(trimmedTargetPort)) {
+            const parsedPort = Number.parseInt(trimmedTargetPort, 10);
+            if (parsedPort >= 1 && parsedPort <= 65535) {
+              currentDstPort = parsedPort;
+            }
+          }
         }
         natResult = {
           type: 'dnat',
@@ -128,24 +141,28 @@ export function simulatePacket(query: PacketTracerQuery, state: DesiredState): S
 
   // 4. Firewall Filter Rules Evaluation
   // On WAN interfaces, floating ('any'/'floating') rules only apply to forwarded transit traffic, not local host input.
-  const isLocalInputOnWan = isWanIngress && natResult?.type !== 'dnat' && localHostIps.has(currentDstIp);
+  const isLocalInputOnWan = isWanIngress && natResult?.type !== 'dnat' && localHostIps.has(currentDstIp.trim().toLowerCase());
   const applicableRules = state.rules
-    .filter(
-      (r) =>
-        r.enabled &&
-        (r.interface === inIface.name || (!isLocalInputOnWan && (r.interface === 'any' || r.interface === 'floating'))) &&
-        r.direction !== 'out'
-    )
+    .filter((r) => {
+      if (!r.enabled || r.direction === 'out') return false;
+      if (r.interface === inIface.name) return true;
+      if (r.interface === 'any' || r.interface === 'floating') {
+        if (isLocalInputOnWan) return false;
+        if (isWanIngress && natResult?.type !== 'dnat' && (r.destination === 'self' || r.destination === 'wan_ip')) {
+          return false;
+        }
+        return true;
+      }
+      return false;
+    })
     .sort((a, b) => a.sortOrder - b.sortOrder);
 
   let matchedRule: FirewallRule | undefined;
 
   for (const rule of applicableRules) {
     if (!matchProtocol(rule.protocol, query.protocol)) continue;
-    const srcMatch = matchAddress(rule.source, query.srcIp, state.aliases, state.interfaces);
-    if (rule.invertSource ? srcMatch : !srcMatch) continue;
-    const dstMatch = matchAddress(rule.destination, currentDstIp, state.aliases, state.interfaces);
-    if (rule.invertDestination ? dstMatch : !dstMatch) continue;
+    if (!matchesEndpointWithInvert(rule.source, query.srcIp, Boolean(rule.invertSource), state.aliases, state.interfaces, localHostIps)) continue;
+    if (!matchesEndpointWithInvert(rule.destination, currentDstIp, Boolean(rule.invertDestination), state.aliases, state.interfaces, localHostIps)) continue;
     if (!matchPort(rule.sourcePort, query.srcPort, state.aliases)) continue;
     if (!matchPort(rule.destinationPort, currentDstPort, state.aliases)) continue;
 
@@ -240,27 +257,88 @@ function matchProtocol(ruleProto: string, packetProto: string): boolean {
   return ruleProto.toLowerCase() === packetProto.toLowerCase();
 }
 
-function matchAddress(ruleAddr: string, packetIp: string, aliases: Alias[], interfaces: Interface[] = []): boolean {
+function matchesEndpointWithInvert(
+  ruleAddr: string,
+  packetIp: string,
+  invert: boolean,
+  aliases: Alias[],
+  interfaces: Interface[] = [],
+  localHostIps?: Set<string>,
+): boolean {
+  if (!ruleAddr || ruleAddr === 'any') return true;
+  const pktIsV6 = packetIp.includes(':');
+  if (invert) {
+    if (ruleAddr === 'lan_net' && pktIsV6) return false;
+    if (ruleAddr.startsWith('$')) {
+      const aliasName = ruleAddr.slice(1);
+      const alias = aliases.find((a) => a.name.toLowerCase() === aliasName.toLowerCase());
+      if (!alias || !alias.enabled) return false;
+      const hasFamilyEntry = alias.entries.some((entry) => {
+        const upper = entry.trim().toUpperCase();
+        if (COUNTRY_CIDR_TABLE[upper]) return !pktIsV6;
+        return pktIsV6 ? entry.includes(':') : !entry.includes(':');
+      });
+      if (!hasFamilyEntry) return false;
+    } else if (ruleAddr !== 'self' && ruleAddr !== 'wan_ip') {
+      const upper = ruleAddr.trim().toUpperCase();
+      if (COUNTRY_CIDR_TABLE[upper]) {
+        if (pktIsV6) return false;
+      } else if (ruleAddr.includes(':') !== pktIsV6) {
+        return false;
+      }
+    }
+  }
+  const matched = matchAddress(ruleAddr, packetIp, aliases, interfaces, localHostIps);
+  return invert ? !matched : matched;
+}
+
+function matchAddress(
+  ruleAddr: string,
+  packetIp: string,
+  aliases: Alias[],
+  interfaces: Interface[] = [],
+  localHostIps?: Set<string>,
+): boolean {
   if (!ruleAddr || ruleAddr === 'any') return true;
   if (ruleAddr.startsWith('$')) {
     const aliasName = ruleAddr.slice(1);
     const alias = aliases.find((a) => a.name.toLowerCase() === aliasName.toLowerCase());
     if (!alias || !alias.enabled) return false;
-    return alias.entries.some((entry) => matchSingleAddress(entry, packetIp, interfaces));
+    return alias.entries.some((entry) => matchSingleAddress(entry, packetIp, interfaces, localHostIps));
   }
-  return matchSingleAddress(ruleAddr, packetIp, interfaces);
+  return matchSingleAddress(ruleAddr, packetIp, interfaces, localHostIps);
 }
 
-function matchSingleAddress(spec: string, ip: string, interfaces: Interface[] = []): boolean {
+function matchSingleAddress(
+  spec: string,
+  ip: string,
+  interfaces: Interface[] = [],
+  localHostIps?: Set<string>,
+): boolean {
   if (spec === 'any') return true;
   if (spec === 'wan_ip') {
-    const wanIfaces = interfaces.filter((i) => i.enabled && inferInterfaceRole(i) === 'wan' && i.ipv4Address);
+    const wanIfaces = interfaces.filter((i) => i.enabled && inferInterfaceRole(i) === 'wan' && (i.ipv4Address || i.ipv6Address));
     if (wanIfaces.length === 0) return true;
-    return wanIfaces.some((i) => i.ipv4Address!.split('/')[0] === ip);
+    const normIp = ip.trim().toLowerCase();
+    return wanIfaces.some(
+      (i) =>
+        i.ipv4Address?.split('/')[0]?.trim().toLowerCase() === normIp ||
+        i.ipv6Address?.split('/')[0]?.trim().toLowerCase() === normIp,
+    );
   }
   if (spec === 'self') {
-    const selfIps = interfaces.filter((i) => i.enabled && i.ipv4Address).map((i) => i.ipv4Address!.split('/')[0]);
-    return selfIps.includes(ip);
+    const normIp = ip.trim().toLowerCase();
+    if (localHostIps && localHostIps.size > 0) {
+      return localHostIps.has(normIp);
+    }
+    const selfIps = interfaces.flatMap((i) =>
+      i.enabled
+        ? [i.ipv4Address?.split('/')[0]?.trim().toLowerCase(), i.ipv6Address?.split('/')[0]?.trim().toLowerCase()].filter(
+            (v): v is string => Boolean(v),
+          )
+        : [],
+    );
+    return selfIps.includes(normIp);
   }
   if (spec === 'lan_net') {
     const lanIfaces = interfaces.filter((i) => i.enabled && inferInterfaceRole(i) === 'lan' && i.ipv4Address);

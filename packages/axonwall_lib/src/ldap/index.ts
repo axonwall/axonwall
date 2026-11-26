@@ -11,6 +11,8 @@ export interface LdapConfig {
   userSearchFilter: string; // e.g. (&(objectClass=inetOrgPerson)(uid={{username}}))
   groupSearchFilter: string; // e.g. (&(objectClass=groupOfNames)(member={{userDn}}))
   groupRoleMap?: Record<string, string>; // e.g. { "admins": "admin", "operators": "operator" }
+  groupMapping?: Record<string, string>;
+  allowUnmappedReadonly?: boolean;
   timeoutMs?: number;
 }
 
@@ -75,22 +77,32 @@ export async function authenticateLdap(
     } catch {
       return { success: false, error: 'Invalid credentials' };
     } finally {
-      await userClient.unbind();
+      try {
+        await userClient.unbind();
+      } catch {
+        // ignore unbind errors on disconnect
+      }
     }
 
     // 4. Resolve group memberships
     let groups: string[] = [];
-    if (userEntry.memberOf) {
-      const raw = Array.isArray(userEntry.memberOf) ? userEntry.memberOf : [userEntry.memberOf];
-      groups = raw.map((g) => {
+    const memberOfRaw = userEntry.memberOf
+      ? (Array.isArray(userEntry.memberOf) ? userEntry.memberOf : [userEntry.memberOf])
+          .map((g) => String(g).trim())
+          .filter(Boolean)
+      : [];
+    if (memberOfRaw.length > 0) {
+      groups = memberOfRaw.map((g) => {
         // extract CN if full DN
-        const match = /cn=([^,]+)/i.exec(String(g));
-        return (match ? match[1] : String(g)).trim().toLowerCase();
+        const match = /cn=([^,]+)/i.exec(g);
+        return (match ? match[1] : g).trim().toLowerCase();
       });
-    } else {
-      // Query groupOfNames by member
+    } else if (config.groupSearchFilter) {
+      // Query groupOfNames / posixGroup by member DN or username
       const safeUserDn = escapeLdapFilter(userDn);
-      const groupFilter = config.groupSearchFilter.replace(/\{\{userDn\}\}/g, () => safeUserDn);
+      const groupFilter = config.groupSearchFilter
+        .replace(/\{\{userDn\}\}/g, () => safeUserDn)
+        .replace(/\{\{username\}\}/g, () => safeUsername);
       const groupSearch = await client.search(config.baseDn, {
         filter: groupFilter,
         scope: 'sub',
@@ -102,7 +114,8 @@ export async function authenticateLdap(
     }
 
     // 5. Map LDAP groups to Axonwall roles and privileges
-    const rawRoleMap = config.groupRoleMap || {
+    const configuredRoleMap = config.groupRoleMap ?? config.groupMapping;
+    const rawRoleMap = configuredRoleMap || {
       admins: 'admin',
       operators: 'operator',
       readonly: 'readonly',
@@ -118,8 +131,11 @@ export async function authenticateLdap(
         roles.add(roleMap[g]);
       }
     }
-    // Default fallback to readonly if no roles matched
+    // Fail-closed for unmapped users when groupMapping/groupRoleMap is explicitly configured (unless allowUnmappedReadonly)
     if (roles.size === 0) {
+      if (configuredRoleMap !== undefined && !config.allowUnmappedReadonly) {
+        return { success: false, error: 'User is not a member of any mapped LDAP group' };
+      }
       roles.add('readonly');
     }
 

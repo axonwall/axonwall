@@ -161,6 +161,7 @@ type ZfsSnapshotInfo struct {
 
 type NasManager struct {
 	mu          sync.Mutex
+	applyMu     sync.Mutex
 	cfg         NasRuntimeBundle
 	installSpec *InstallZfsBootstrapSpec
 }
@@ -976,6 +977,9 @@ func (m *NasManager) ScrubPool(poolName string) error {
 }
 
 func (m *NasManager) ApplyConfig(rawJSON []byte) error {
+	m.applyMu.Lock()
+	defer m.applyMu.Unlock()
+
 	var bundle NasRuntimeBundle
 	if err := json.Unmarshal(rawJSON, &bundle); err != nil {
 		return fmt.Errorf("invalid NAS config json: %w", err)

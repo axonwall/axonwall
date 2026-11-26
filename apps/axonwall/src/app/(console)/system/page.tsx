@@ -17,7 +17,7 @@ import {
   AlertCircle,
   Terminal,
 } from 'lucide-react';
-import { useState, useEffect } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import {
   getGitOpsHistory,
@@ -36,7 +36,12 @@ import { useDesiredStateApply } from '@/lib/use-desired-state-apply';
 import { AXONWALL_YAML_DOMAINS, type AxonwallYamlDomainFile } from '@axonwall/lib/yaml';
 
 export default function SystemPage() {
-  const { applyState, getFingerprint } = useDesiredStateApply();
+  const loadAllRef = useRef<(() => Promise<void>) | null>(null);
+  const { applyState, getFingerprint, refreshFingerprint } = useDesiredStateApply({
+    onConfigChanged: () => {
+      void loadAllRef.current?.();
+    },
+  });
   const [activeTab, setActiveTab] = useState<'yaml' | 'general' | 'gitops'>('yaml');
 
   // General System Settings
@@ -64,13 +69,11 @@ export default function SystemPage() {
   const [selectedDiff, setSelectedDiff] = useState<{ hash: string; diff: string } | null>(null);
   const [isLoadingDiff, setIsLoadingDiff] = useState(false);
   const [rollingBackHash, setRollingBackHash] = useState<string | null>(null);
-  const [actionMessage, setActionMessage] = useState<string | null>(null);
+  const [actionMessage, setActionMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+  const selectedFilenameRef = useRef(selectedFilename);
+  selectedFilenameRef.current = selectedFilename;
 
-  useEffect(() => {
-    loadAll();
-  }, []);
-
-  const loadAll = async () => {
+  const loadAll = useCallback(async () => {
     setIsLoading(true);
     try {
       const [gitData, state, snapshot, etcStatus] = await Promise.all([
@@ -94,12 +97,19 @@ export default function SystemPage() {
       }
 
       setYamlFiles(snapshot.files);
-      if (snapshot.files[selectedFilename]) {
-        setEditorContent(snapshot.files[selectedFilename]);
+      const curFile = selectedFilenameRef.current;
+      if (snapshot.files[curFile]) {
+        setEditorContent(snapshot.files[curFile]);
       }
     } catch {}
     setIsLoading(false);
-  };
+  }, []);
+
+  loadAllRef.current = loadAll;
+
+  useEffect(() => {
+    void loadAll();
+  }, [loadAll]);
 
   const handleSelectDomain = (filename: AxonwallYamlDomainFile) => {
     setSelectedFilename(filename);
@@ -124,7 +134,14 @@ export default function SystemPage() {
       if (!res.success) {
         setYamlErrors([{ file: selectedFilename, path: '', message: res.message || 'Validation failed' }]);
       } else {
-        setActionMessage(`Validated and applied /etc/axonwall/${selectedFilename} to daemon & GitOps.`);
+        setActionMessage({
+          type: 'success',
+          text: `Validated and applied /etc/axonwall/${selectedFilename} to daemon & GitOps.`,
+        });
+        await refreshFingerprint();
+        if (typeof window !== 'undefined') {
+          window.dispatchEvent(new Event('axonwall:status-refresh'));
+        }
         await loadAll();
       }
     } catch (err: any) {
@@ -163,10 +180,10 @@ export default function SystemPage() {
           webGuiPort,
         },
       });
-      setActionMessage('Saved General System Settings to /etc/axonwall/system.yaml');
+      setActionMessage({ type: 'success', text: 'Saved General System Settings to /etc/axonwall/system.yaml' });
       await loadAll();
     } catch (err: any) {
-      setActionMessage(`Failed to save system settings: ${err?.message || 'Unknown error'}`);
+      setActionMessage({ type: 'error', text: `Failed to save system settings: ${err?.message || 'Unknown error'}` });
     } finally {
       setIsSavingGeneral(false);
     }
@@ -198,10 +215,19 @@ export default function SystemPage() {
     setActionMessage(null);
     try {
       const res = await rollbackToGitOpsCommit(hash);
-      setActionMessage(res.message);
-      await loadAll();
+      setActionMessage({
+        type: res.success ? 'success' : 'error',
+        text: res.message,
+      });
+      if (res.success) {
+        await refreshFingerprint();
+        if (typeof window !== 'undefined') {
+          window.dispatchEvent(new Event('axonwall:status-refresh'));
+        }
+        await loadAll();
+      }
     } catch (err: any) {
-      setActionMessage(`Rollback failed: ${err?.message || 'Unknown error'}`);
+      setActionMessage({ type: 'error', text: `Rollback failed: ${err?.message || 'Unknown error'}` });
     } finally {
       setRollingBackHash(null);
     }
@@ -232,9 +258,19 @@ export default function SystemPage() {
       </div>
 
       {actionMessage && (
-        <div className="p-3 bg-emerald-500/10 border border-emerald-500/30 rounded-lg text-xs text-emerald-300 flex items-center gap-2">
-          <CheckCircle2 className="w-4 h-4 shrink-0 text-emerald-400" />
-          <span>{actionMessage}</span>
+        <div
+          className={`p-3 rounded-lg text-xs flex items-center gap-2 border ${
+            actionMessage.type === 'error'
+              ? 'bg-red-500/10 border-red-500/30 text-red-300'
+              : 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300'
+          }`}
+        >
+          {actionMessage.type === 'error' ? (
+            <AlertCircle className="w-4 h-4 shrink-0 text-red-400" />
+          ) : (
+            <CheckCircle2 className="w-4 h-4 shrink-0 text-emerald-400" />
+          )}
+          <span>{actionMessage.text}</span>
         </div>
       )}
 

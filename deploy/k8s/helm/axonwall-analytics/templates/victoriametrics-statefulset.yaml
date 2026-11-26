@@ -28,12 +28,13 @@ spec:
             - "-retentionPeriod={{ .Values.victoriametrics.retentionPeriod }}"
             - "-storageDataPath=/vm-data"
             - "-httpListenAddr=:8428"
+            - "-http.pathPrefix=/vm"
           ports:
             - name: http
               containerPort: 8428
           readinessProbe:
             httpGet:
-              path: /health
+              path: /vm/health
               port: http
             initialDelaySeconds: 5
             periodSeconds: 10
@@ -42,6 +43,12 @@ spec:
           volumeMounts:
             - name: vm-data
               mountPath: /vm-data
+      {{- if not .Values.victoriametrics.persistence.enabled }}
+      volumes:
+        - name: vm-data
+          emptyDir: {}
+      {{- end }}
+  {{- if .Values.victoriametrics.persistence.enabled }}
   volumeClaimTemplates:
     - metadata:
         name: vm-data
@@ -53,4 +60,5 @@ spec:
         resources:
           requests:
             storage: {{ .Values.victoriametrics.persistence.size | quote }}
+  {{- end }}
 {{- end }}

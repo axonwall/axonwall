@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   AlertTriangle,
   ChevronDown,
@@ -42,6 +42,7 @@ const WINDOWS = [
 
 export default function ReportingLogsPage() {
   const [queryText, setQueryText] = useState('');
+  const [submittedQuery, setSubmittedQuery] = useState('');
   const [nodeId, setNodeId] = useState('all');
   const [source, setSource] = useState<string>('all');
   const [level, setLevel] = useState<string>('all');
@@ -54,49 +55,65 @@ export default function ReportingLogsPage() {
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
   const [unconfigured, setUnconfigured] = useState(false);
   const [expandedIdx, setExpandedIdx] = useState<number | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
 
-  const fetchLogs = useCallback(async () => {
-    setLoading(true);
-    try {
-      const res = await fetch('/api/v1/observability/logs/query', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          q: queryText.trim(),
-          nodeId,
-          source,
-          level,
-          start: windowId,
-          limit: 250,
-        }),
-      });
-      const json = (await res.json().catch(() => null)) as {
-        data?: {
-          configured?: boolean;
-          unavailable?: boolean;
-          entries?: LogEntry[];
-          reason?: string;
-        };
-        error?: string;
-      } | null;
+  const fetchLogs = useCallback(
+    async (queryOverride?: string) => {
+      abortRef.current?.abort();
+      const controller = new AbortController();
+      abortRef.current = controller;
+      setLoading(true);
+      const effectiveQuery = (queryOverride !== undefined ? queryOverride : submittedQuery).trim();
+      try {
+        const res = await fetch('/api/v1/observability/logs/query', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          signal: controller.signal,
+          body: JSON.stringify({
+            q: effectiveQuery,
+            nodeId,
+            source,
+            level,
+            start: windowId,
+            limit: 250,
+          }),
+        });
+        const json = (await res.json().catch(() => null)) as {
+          data?: {
+            configured?: boolean;
+            unavailable?: boolean;
+            entries?: LogEntry[];
+            reason?: string;
+          };
+          error?: string;
+        } | null;
 
-      if (!res.ok) {
-        setStatusMsg(json?.error || `HTTP ${res.status}`);
+        if (abortRef.current !== controller) return;
+
+        if (!res.ok) {
+          setStatusMsg(json?.error || `HTTP ${res.status}`);
+          setEntries([]);
+          return;
+        }
+
+        const d = json?.data;
+        setUnconfigured(d?.configured === false);
+        setStatusMsg(d?.reason || null);
+        setEntries(Array.isArray(d?.entries) ? d.entries : []);
+      } catch (err: any) {
+        if (err?.name === 'AbortError' || abortRef.current !== controller) {
+          return;
+        }
+        setStatusMsg(err?.message || 'Failed to query logs');
         setEntries([]);
-        return;
+      } finally {
+        if (abortRef.current === controller) {
+          setLoading(false);
+        }
       }
-
-      const d = json?.data;
-      setUnconfigured(d?.configured === false);
-      setStatusMsg(d?.reason || null);
-      setEntries(Array.isArray(d?.entries) ? d.entries : []);
-    } catch (err: any) {
-      setStatusMsg(err?.message || 'Failed to query logs');
-      setEntries([]);
-    } finally {
-      setLoading(false);
-    }
-  }, [level, nodeId, queryText, source, windowId]);
+    },
+    [level, nodeId, source, submittedQuery, windowId]
+  );
 
   useEffect(() => {
     fetch('/api/v1/netflow/nodes', { cache: 'no-store' })
@@ -109,6 +126,9 @@ export default function ReportingLogsPage() {
 
   useEffect(() => {
     void fetchLogs();
+    return () => {
+      abortRef.current?.abort();
+    };
   }, [fetchLogs]);
 
   useEffect(() => {
@@ -172,7 +192,11 @@ export default function ReportingLogsPage() {
       <form
         onSubmit={(e) => {
           e.preventDefault();
-          void fetchLogs();
+          if (submittedQuery === queryText) {
+            void fetchLogs(queryText);
+          } else {
+            setSubmittedQuery(queryText);
+          }
         }}
         className="bg-slate-900 border border-slate-800 rounded-xl p-4 space-y-3"
       >
@@ -223,7 +247,6 @@ export default function ReportingLogsPage() {
           </select>
           <button
             type="submit"
-            disabled={loading}
             className="px-4 py-2 rounded-lg bg-sky-600 hover:bg-sky-500 text-xs font-semibold text-white"
           >
             Run LogsQL

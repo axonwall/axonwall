@@ -32,13 +32,23 @@ function normalizeProtocol(proto: string): string {
   return proto.toLowerCase();
 }
 
-function protocolsOverlap(p1: string, p2: string): boolean {
-  const norm1 = normalizeProtocol(p1);
-  const norm2 = normalizeProtocol(p2);
-  if (norm1 === 'any' || norm2 === 'any') return true;
-  if (norm1 === 'tcp_udp' && (norm2 === 'tcp' || norm2 === 'udp' || norm2 === 'tcp_udp')) return true;
-  if (norm2 === 'tcp_udp' && (norm1 === 'tcp' || norm1 === 'udp')) return true;
-  return norm1 === norm2;
+function protocolEncloses(parent: string, child: string): boolean {
+  const normParent = normalizeProtocol(parent);
+  const normChild = normalizeProtocol(child);
+  if (normParent === 'any') return true;
+  if (normChild === 'any') return false;
+  if (normParent === 'tcp_udp') {
+    return normChild === 'tcp' || normChild === 'udp' || normChild === 'tcp_udp';
+  }
+  return normParent === normChild;
+}
+
+function ifaceEncloses(parentIface: string, childIface: string): boolean {
+  const p = (parentIface || '').trim().toLowerCase();
+  const c = (childIface || '').trim().toLowerCase();
+  if (p === 'any' || p === 'floating') return true;
+  if (c === 'any' || c === 'floating') return false;
+  return p === c;
 }
 
 function parseIpv4ToUint(ip: string): number | null {
@@ -79,6 +89,34 @@ function ipEncloses(parent: string, child: string): boolean {
   return (cCidr.base & pCidr.mask) >>> 0 === pCidr.base;
 }
 
+function ipEndpointEncloses(
+  parent: string,
+  child: string,
+  parentInvert = false,
+  childInvert = false,
+): boolean {
+  const p = (parent || 'any').trim();
+  const c = (child || 'any').trim();
+  const pInv = Boolean(parentInvert) && p !== 'any';
+  const cInv = Boolean(childInvert) && c !== 'any';
+
+  if (!pInv && !cInv) {
+    return ipEncloses(p, c);
+  }
+  if (pInv && cInv) {
+    return ipEncloses(c, p);
+  }
+  if (pInv && !cInv) {
+    if (c === 'any') return false;
+    const pCidr = parseCidrOrIp(p);
+    const cCidr = parseCidrOrIp(c);
+    if (!pCidr || !cCidr) return false;
+    const minMask = ((pCidr.mask >>> 0) < (cCidr.mask >>> 0) ? pCidr.mask : cCidr.mask) >>> 0;
+    return (pCidr.base & minMask) >>> 0 !== (cCidr.base & minMask) >>> 0;
+  }
+  return false;
+}
+
 function portEncloses(parentPort: string, childPort: string): boolean {
   const p = parentPort?.trim() || '';
   const c = childPort?.trim() || '';
@@ -96,68 +134,80 @@ function portEncloses(parentPort: string, childPort: string): boolean {
  */
 export function analyzeRuleShadowing(rules: FirewallRule[]): RuleAnalysisReport {
   const issues: RuleShadowIssue[] = [];
+  const ordered = rules
+    .map((rule, idx) => ({ rule, ruleNumber: idx + 1 }))
+    .sort((a, b) => (a.rule.sortOrder ?? 0) - (b.rule.sortOrder ?? 0));
 
-  for (let i = 0; i < rules.length; i++) {
-    const current = rules[i];
+  for (let i = 0; i < ordered.length; i++) {
+    const current = ordered[i]!.rule;
+    const currentIdx = ordered[i]!.ruleNumber;
     if (current.enabled === false) continue;
 
     for (let j = 0; j < i; j++) {
-      const prev = rules[j];
+      const prev = ordered[j]!.rule;
+      const prevIdx = ordered[j]!.ruleNumber;
       if (prev.enabled === false) continue;
+      if (prev.quick === false) continue;
 
-      // Rules must be on matching interface and direction
-      const ifaceMatch =
-        prev.interface === 'any' ||
-        current.interface === 'any' ||
-        prev.interface === 'floating' ||
-        current.interface === 'floating' ||
-        prev.interface.toLowerCase() === current.interface.toLowerCase();
-
+      // Prev rule's interface must enclose current's interface and match direction
       const dirMatch = prev.direction === current.direction;
-      if (!ifaceMatch || !dirMatch) continue;
+      if (!ifaceEncloses(prev.interface, current.interface) || !dirMatch) continue;
 
-      // Check protocol overlap
-      if (!protocolsOverlap(prev.protocol, current.protocol)) continue;
+      // Prev protocol must enclose current protocol
+      if (!protocolEncloses(prev.protocol, current.protocol)) continue;
 
-      // Check if prev encloses current's source & destination
-      const srcEnclosed = ipEncloses(prev.source, current.source);
-      const dstEnclosed = ipEncloses(prev.destination, current.destination);
+      // Check if prev encloses current's source & destination (respecting invert flags)
+      const srcEnclosed = ipEndpointEncloses(
+        prev.source,
+        current.source,
+        Boolean(prev.invertSource),
+        Boolean(current.invertSource),
+      );
+      const dstEnclosed = ipEndpointEncloses(
+        prev.destination,
+        current.destination,
+        Boolean(prev.invertDestination),
+        Boolean(current.invertDestination),
+      );
       const srcPortEnclosed = portEncloses(prev.sourcePort, current.sourcePort);
       const dstPortEnclosed = portEncloses(prev.destinationPort, current.destinationPort);
 
       if (srcEnclosed && dstEnclosed && srcPortEnclosed && dstPortEnclosed) {
         const isExactDuplicate =
           prev.action === current.action &&
-          prev.source === current.source &&
-          prev.destination === current.destination &&
+          (prev.source || 'any') === (current.source || 'any') &&
+          (prev.destination || 'any') === (current.destination || 'any') &&
+          Boolean(prev.invertSource) === Boolean(current.invertSource) &&
+          Boolean(prev.invertDestination) === Boolean(current.invertDestination) &&
           prev.protocol === current.protocol &&
-          prev.destinationPort === current.destinationPort &&
-          prev.sourcePort === current.sourcePort;
+          (prev.destinationPort || '') === (current.destinationPort || '') &&
+          (prev.sourcePort || '') === (current.sourcePort || '') &&
+          prev.interface.toLowerCase() === current.interface.toLowerCase();
 
         if (isExactDuplicate) {
           issues.push({
             type: 'duplicate',
-            ruleIndex: i + 1,
-            shadowedByIndex: j + 1,
-            description: `Rule #${i + 1} is an identical duplicate of Rule #${j + 1}.`,
-            suggestion: `Remove Rule #${i + 1} to eliminate redundancy and reduce kernel table overhead.`,
+            ruleIndex: currentIdx,
+            shadowedByIndex: prevIdx,
+            description: `Rule #${currentIdx} is an identical duplicate of Rule #${prevIdx}.`,
+            suggestion: `Remove Rule #${currentIdx} to eliminate redundancy and reduce kernel table overhead.`,
           });
         } else if (prev.action !== current.action) {
           issues.push({
             type: 'shadowed',
-            ruleIndex: i + 1,
-            shadowedByIndex: j + 1,
-            description: `Rule #${i + 1} (${current.action.toUpperCase()}) is completely shadowed by preceding Rule #${j + 1} (${prev.action.toUpperCase()}).`,
-            suggestion: `Move Rule #${i + 1} above Rule #${j + 1}, or refine Rule #${j + 1}'s scope so Rule #${i + 1} can be reached.`,
+            ruleIndex: currentIdx,
+            shadowedByIndex: prevIdx,
+            description: `Rule #${currentIdx} (${current.action.toUpperCase()}) is completely shadowed by preceding Rule #${prevIdx} (${prev.action.toUpperCase()}).`,
+            suggestion: `Move Rule #${currentIdx} above Rule #${prevIdx}, or refine Rule #${prevIdx}'s scope so Rule #${currentIdx} can be reached.`,
           });
         } else {
           // Same action, but prev is a superset
           issues.push({
             type: 'redundant',
-            ruleIndex: i + 1,
-            shadowedByIndex: j + 1,
-            description: `Rule #${i + 1} is redundant; traffic is already handled by preceding Rule #${j + 1} with action ${prev.action.toUpperCase()}.`,
-            suggestion: `Rule #${i + 1} can safely be removed unless required for distinct logging.`,
+            ruleIndex: currentIdx,
+            shadowedByIndex: prevIdx,
+            description: `Rule #${currentIdx} is redundant; traffic is already handled by preceding Rule #${prevIdx} with action ${prev.action.toUpperCase()}.`,
+            suggestion: `Rule #${currentIdx} can safely be removed unless required for distinct logging.`,
           });
         }
         break; // Only report the first preceding rule that shadows it

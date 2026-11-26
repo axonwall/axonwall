@@ -194,6 +194,8 @@ if [[ "${FLAVOR}" == "vault" ]]; then
   # the vault branch never downloads.
   rm -rf config/includes.chroot/var/lib/axonwall/core-k3s
   rm -rf config/includes.chroot/etc/systemd/system/suricata.service.d
+  rm -f config/includes.chroot/usr/lib/sysusers.d/axonwall.conf \
+        config/includes.chroot/usr/lib/tmpfiles.d/axonwall.conf
   rmdir config/includes.chroot/etc/headscale 2>/dev/null || true
   # Vault markers: .vault-edition tells shared hooks (e.g. the
   # installer's credentials step) to stand down; .vault-firstboot
@@ -216,6 +218,8 @@ elif [[ "${FLAVOR}" == "k3s-storage" ]]; then
         config/includes.chroot/usr/local/bin/axonwall-import \
         config/includes.chroot/etc/headscale/config.yaml
   rm -rf config/includes.chroot/etc/systemd/system/suricata.service.d
+  rm -f config/includes.chroot/usr/lib/sysusers.d/axonwall.conf \
+        config/includes.chroot/usr/lib/tmpfiles.d/axonwall.conf
   rmdir config/includes.chroot/etc/headscale 2>/dev/null || true
   mkdir -p config/includes.chroot/etc/axonwall/ \
            config/includes.chroot/etc/sysctl.d/ \
@@ -517,6 +521,33 @@ write_core_k3s_bundled_json() {
   chmod 0644 "${_dir}/bundled.json"
 }
 
+stage_pinned_k3s() {
+  local dest_bin="$1"
+  K3S_VERSION="${K3S_VERSION:-v1.32.3+k3s1}"
+  local k3s_url_version="${K3S_VERSION//+/%2B}"
+  case "${K3S_VERSION}" in
+    v1.31.5+k3s1) K3S_SHA256="${K3S_SHA256:-399b87b432ce55013fa81adad572a8e4ecf56e0df97369cf02d4b8a41f039091}" ;;
+    v1.32.3+k3s1) K3S_SHA256="${K3S_SHA256:-b19216803650b567bf980888dec39035edaf664339c55bc4462f7a003edbef83}" ;;
+    *) K3S_SHA256="${K3S_SHA256:-}" ;;
+  esac
+  mkdir -p "$(dirname "${dest_bin}")"
+  if [[ -f "${dest_bin}" ]] && [[ -n "${K3S_SHA256}" ]] && echo "${K3S_SHA256}  ${dest_bin}" | sha256sum -c - >/dev/null 2>&1; then
+    echo "[+] K3s ${K3S_VERSION} already staged at ${dest_bin} and verified; keeping."
+  else
+    echo "[+] Fetching K3s ${K3S_VERSION} -> ${dest_bin}..."
+    curl -fsSL -o "${dest_bin}" "https://github.com/k3s-io/k3s/releases/download/${k3s_url_version}/k3s"
+    if [[ -z "${K3S_SHA256}" ]]; then
+      K3S_SHA256="$(curl -fsSL "https://github.com/k3s-io/k3s/releases/download/${k3s_url_version}/sha256sum-amd64.txt" | awk '$2 == "k3s" {print $1; exit}')"
+    fi
+    if [[ -z "${K3S_SHA256}" ]]; then
+      echo "[!] ERROR: Unable to determine SHA-256 checksum for K3s ${K3S_VERSION}" >&2
+      exit 1
+    fi
+    echo "${K3S_SHA256}  ${dest_bin}" | sha256sum -c -
+    chmod 0755 "${dest_bin}"
+  fi
+}
+
 if [[ "${FLAVOR}" == "axonwall" ]]; then
 # Fetch Headscale binary
 HEADSCALE_VERSION="0.29.4"
@@ -598,10 +629,12 @@ chmod +x config/includes.chroot/usr/share/axonwall/vault/axonwall-vault-provisio
   fi
 
   # Stage K3s + ZFS Storage Host payload into /usr/share/axonwall/k3s-storage/
-  # and OpenEBS manifest into /usr/share/axonwall/k3s/zfs-operator.yaml so the
-  # unified ISO can install axonwall, vault, OR k3s-storage offline.
+  # (including the pinned k3s binary, parallel to weed under vault/) and OpenEBS
+  # manifest into /usr/share/axonwall/k3s/zfs-operator.yaml so the unified ISO
+  # can install axonwall, vault, OR k3s-storage offline while keeping NGFW Lean Core clean.
   mkdir -p config/includes.chroot/usr/share/axonwall/k3s-storage \
            config/includes.chroot/usr/share/axonwall/k3s
+  stage_pinned_k3s "config/includes.chroot/usr/share/axonwall/k3s-storage/k3s"
   cp "${SCRIPT_DIR}/../k3s-storage/nftables.conf" \
      "${SCRIPT_DIR}/../k3s-storage/90-k3s-storage.conf" \
      "${SCRIPT_DIR}/../k3s-storage/k3s-storage.modules.conf" \
@@ -624,29 +657,7 @@ elif [[ "${FLAVOR}" == "k3s-storage" ]]; then
   # axonwall-flavor block above for the layout). A pre-existing
   # staged binary is kept only if its sha256 still matches the
   # resolved pin.
-  K3S_VERSION="${K3S_VERSION:-v1.32.3+k3s1}"
-  K3S_URL_VERSION="${K3S_VERSION//+/%2B}"
-  case "${K3S_VERSION}" in
-    v1.31.5+k3s1) K3S_SHA256="${K3S_SHA256:-399b87b432ce55013fa81adad572a8e4ecf56e0df97369cf02d4b8a41f039091}" ;;
-    v1.32.3+k3s1) K3S_SHA256="${K3S_SHA256:-b19216803650b567bf980888dec39035edaf664339c55bc4462f7a003edbef83}" ;;
-    *) K3S_SHA256="${K3S_SHA256:-}" ;;
-  esac
-  mkdir -p config/includes.chroot/var/lib/axonwall/core-k3s/bin
-  if [[ -f config/includes.chroot/var/lib/axonwall/core-k3s/bin/k3s ]] && [[ -n "${K3S_SHA256}" ]] && echo "${K3S_SHA256}  config/includes.chroot/var/lib/axonwall/core-k3s/bin/k3s" | sha256sum -c - >/dev/null 2>&1; then
-    echo "[+] K3s ${K3S_VERSION} already staged and verified; keeping."
-  else
-    echo "[+] Fetching K3s ${K3S_VERSION}..."
-    curl -fsSL -o config/includes.chroot/var/lib/axonwall/core-k3s/bin/k3s "https://github.com/k3s-io/k3s/releases/download/${K3S_URL_VERSION}/k3s"
-    if [[ -z "${K3S_SHA256}" ]]; then
-      K3S_SHA256="$(curl -fsSL "https://github.com/k3s-io/k3s/releases/download/${K3S_URL_VERSION}/sha256sum-amd64.txt" | awk '$2 == "k3s" {print $1; exit}')"
-    fi
-    if [[ -z "${K3S_SHA256}" ]]; then
-      echo "[!] ERROR: Unable to determine SHA-256 checksum for K3s ${K3S_VERSION}" >&2
-      exit 1
-    fi
-    echo "${K3S_SHA256}  config/includes.chroot/var/lib/axonwall/core-k3s/bin/k3s" | sha256sum -c -
-    chmod 0755 config/includes.chroot/var/lib/axonwall/core-k3s/bin/k3s
-  fi
+  stage_pinned_k3s "config/includes.chroot/var/lib/axonwall/core-k3s/bin/k3s"
   # A pre-existing staged k9s is always re-downloaded and
   # re-extracted: the pinned sha256 covers the tarball, not the
   # extracted binary, so there is no digest a staged binary could

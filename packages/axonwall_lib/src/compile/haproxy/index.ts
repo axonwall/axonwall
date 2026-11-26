@@ -53,6 +53,7 @@ export function compileHaProxy(config: HaProxyPluginConfig): string {
   lines.push('    timeout connect 5000ms');
   lines.push('    timeout client  50000ms');
   lines.push('    timeout server  50000ms');
+  lines.push('    timeout tunnel 3600s');
   lines.push('');
 
   for (const fe of config.frontends) {
@@ -127,13 +128,13 @@ export function compileHaProxy(config: HaProxyPluginConfig): string {
         }
       }
 
-      for (const hr of fe.hostRules ?? []) {
+      (fe.hostRules ?? []).forEach((hr, idx) => {
         const cleanHost = sanitizeHaProxyHostname(hr.hostname);
-        if (!cleanHost) continue;
-        const aclId = `host_${safeIdentifier(cleanHost)}`;
-        lines.push(`    acl ${aclId} hdr_dom(host) -i ${cleanHost}`);
+        if (!cleanHost) return;
+        const aclId = `host_rule_${idx}`;
+        lines.push(`    acl ${aclId} req.hdr(host),field(1,:) -i ${cleanHost}`);
         lines.push(`    use_backend ${safeIdentifier(hr.backend)} if ${aclId}`);
-      }
+      });
 
       for (const pr of compiledPathRules) {
         lines.push(`    use_backend ${pr.backend} if ${pr.cond}`);
@@ -151,7 +152,8 @@ export function compileHaProxy(config: HaProxyPluginConfig): string {
     lines.push(`    mode ${safeIdentifier(be.mode)}`);
     lines.push(`    balance ${safeIdentifier(be.balance)}`);
     if (be.mode === 'http') {
-      lines.push('    option httpchk GET /');
+      const checkPath = be.healthCheckPath ? safeHaProxyPath(be.healthCheckPath) || '/' : '/';
+      lines.push(`    option httpchk GET ${checkPath}`);
     }
     for (const srv of be.servers) {
       const safeSrvName = safeIdentifier(srv.name);

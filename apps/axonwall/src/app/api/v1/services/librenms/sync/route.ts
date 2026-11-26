@@ -5,7 +5,7 @@ function errStatus(err: unknown): number {
   const msg = String((err as { message?: string })?.message || '');
   if (msg.includes('Unauthorized')) return 401;
   if (msg.includes('Forbidden')) return 403;
-  if (msg.includes('Rate limit')) return 429;
+  if (msg.includes('Rate limit') || msg.includes('Too Many Requests')) return 429;
   return 500;
 }
 

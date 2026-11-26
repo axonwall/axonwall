@@ -74,6 +74,8 @@ export async function GET(req: NextRequest) {
       headscaleError = 'Mesh VPN (Headscale) is currently disabled by your administrator';
     }
 
+    const { wanInvite: _omitWanInvite, ...safeNetwork } = network;
+
     return NextResponse.json({
       status: 'ok',
       data: {
@@ -86,7 +88,7 @@ export async function GET(req: NextRequest) {
           canChangePassword: session.source === 'local',
         },
         network: {
-          ...network,
+          ...safeNetwork,
           serviceRunning,
         },
         headscaleError,

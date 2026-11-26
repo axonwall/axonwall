@@ -26,7 +26,7 @@ export const NETEXEC_PROFILES = [
     name: '🔓 Anonymous / Null Session Check',
     description: 'Probe for guest and anonymous RPC/SMB null session access',
     protocol: 'smb',
-    buildArgs: (target) => ['smb', target, '-u', "''", '-p', "''"]
+    buildArgs: (target) => ['smb', target, '-u', '', '-p', '']
   },
   {
     id: 'pass-policy',

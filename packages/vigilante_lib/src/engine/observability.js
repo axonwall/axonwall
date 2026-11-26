@@ -149,7 +149,8 @@ export function buildSocketConnectionMatrix(networkEvents = []) {
     const bytesSent = Number(event.bytesSent || event.bytes_sent || 0);
     const bytesReceived = Number(event.bytesReceived || event.bytes_recv || 0);
 
-    const key = `${src}->${dst}:${dstPort}/${protocol}`;
+    const destNamespace = event.destNamespace || event.dstNamespace || null;
+    const key = `${src}->${dst}:${dstPort}/${protocol}${destNamespace ? `@${destNamespace}` : ''}`;
 
     summary.uniqueSources.add(src);
     summary.uniqueDestinations.add(dst);
@@ -165,6 +166,7 @@ export function buildSocketConnectionMatrix(networkEvents = []) {
       existing.bytesReceived += bytesReceived;
       existing.lastSeen = event.timestamp || new Date().toISOString();
       if (event.state) existing.state = event.state;
+      if (destNamespace && !existing.destNamespace) existing.destNamespace = destNamespace;
     } else {
       connectionMap.set(key, {
         key,
@@ -179,7 +181,8 @@ export function buildSocketConnectionMatrix(networkEvents = []) {
         firstSeen: event.timestamp || new Date().toISOString(),
         lastSeen: event.timestamp || new Date().toISOString(),
         pod: event.pod || null,
-        namespace: event.namespace || null
+        namespace: event.namespace || null,
+        destNamespace
       });
     }
   }

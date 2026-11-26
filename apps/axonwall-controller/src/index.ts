@@ -56,6 +56,7 @@ import { isPluginEnabled } from '@axonwall/lib/plugins';
 import {
   bridgeSatelliteFlowsAndLogs,
   bridgeSatelliteMetricsToVM,
+  readCachedDesiredStateBestEffort,
 } from './telemetry-bridge.js';
 import * as os from 'node:os';
 import * as child_process from 'node:child_process';
@@ -1388,6 +1389,8 @@ async function main() {
     });
   }
 
+  const isFleetPluginPermitted = (): boolean => isFleetPluginEnabledForController(loadLocalDesiredState());
+
   // B-H1: the fleet-sync body is validated by parseFleetSyncBody
   // (exported above, beside validateHaTransition) before any
   // means "re-sync from the on-disk state" (desired === undefined,
@@ -1616,6 +1619,8 @@ const lastRxTxBytes = new Map<string, {rx: number, tx: number}>();
 
   const uiPort = parseInt(process.env.UI_PORT || '3000', 10);
   const port = parseInt(process.env.CONTROLLER_PORT || '2966', 10);
+  const tlsConfig = ensureControllerTls(certPath, keyPath, caPath);
+  const hasFleetMtlsCa = Boolean(tlsConfig?.ca);
   let server: net.Server | http.Server;
   let mainServer: https.Server | http.Server;
   const requestHandler = (req: any, res: any) => {
@@ -1664,12 +1669,7 @@ const lastRxTxBytes = new Map<string, {rx: number, tx: number}>();
     };
 
     const requireFleetPluginEnabled = (res: any): boolean => {
-      const envFleet = process.env.AXONWALL_FLEET_ENABLED?.toLowerCase();
-      if (envFleet === 'true' || envFleet === '1') {
-        return true;
-      }
-      const st = loadLocalDesiredState();
-      if (!st || !isPluginEnabled('fleet-controller', st)) {
+      if (!isFleetPluginPermitted()) {
         res.writeHead(403, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: "Forbidden: Plugin 'fleet-controller' is not enabled. Enable it in System -> Plugins." }));
         return false;
@@ -1700,9 +1700,10 @@ const lastRxTxBytes = new Map<string, {rx: number, tx: number}>();
 
     if (pathname === '/metrics' && req.method === 'GET') {
       // Metrics disclose fleet size, versions and traffic counters: they
-      // require the fleet token or a CA-verified client certificate.
+      // require the fleet token or a client certificate verified against a
+      // configured local fleet CA (never Node's default public root CA store).
       const tlsSocket = req.socket as any;
-      if (!(tlsSocket && tlsSocket.authorized === true) && !verifyFleetAuth(req, res)) return;
+      if (!isMetricsMtlsAuthorized(tlsSocket, hasFleetMtlsCa) && !verifyFleetAuth(req, res)) return;
       prometheusRegistry.metrics().then((metricsStr) => {
         res.writeHead(200, { 'Content-Type': prometheusRegistry.contentType });
         res.end(metricsStr);
@@ -2219,8 +2220,6 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
     req.pipe(uiReq);
   };
 
-  const tlsConfig = ensureControllerTls(certPath, keyPath, caPath);
-
   if (tlsConfig) {
     console.log(`[Axonwall Controller] Starting in SECURE mTLS mode (HTTP auto-upgrade enabled on port ${port})`);
     const httpsServer = https.createServer({
@@ -2459,6 +2458,12 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
     }
     
     if (pathname === '/ws/satellite') {
+      if (!isFleetPluginPermitted()) {
+        console.log(`[Fleet Manager] Rejected /ws/satellite upgrade: plugin 'fleet-controller' is disabled`);
+        socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
+        socket.destroy();
+        return;
+      }
       // Basic ZTP token validation
       const satId = (request.headers['x-axonwall-satellite-id'] as string || '').trim();
       const token = request.headers['x-axonwall-ztp-token'] as string;
@@ -2927,7 +2932,8 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
             // configured role wins over telemetry, and when pid1Mode
             // stops being reported the latched edge role is cleared
             // instead of sticking forever.
-            const fleetNode = loadLocalDesiredState()?.fleet?.nodes?.find((n) => n.id === satId);
+            const localState = readCachedDesiredStateBestEffort();
+            const fleetNode = localState?.fleet?.nodes?.find((n) => n.id === satId);
             state.role = deriveSatelliteRole({
               configuredRole: fleetNode?.role,
               currentRole: state.role,
@@ -2960,7 +2966,7 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
             lastRxTxBytes.set(satId, { rx: currentRx, tx: currentTx });
 
             const satHost = fleetNode?.name || satId;
-            void bridgeSatelliteMetricsToVM(satId, satHost, report.metrics);
+            void bridgeSatelliteMetricsToVM(satId, satHost, report.metrics, { stateOverride: localState });
           } else {
             console.log(`[Fleet Manager] Telemetry from ${satId} without metrics; keeping last-known metrics.`);
           }
@@ -2979,10 +2985,12 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
             state.edgeFirewallLogs = [...batch.firewallLogs, ...existingLogs].slice(0, 100);
             satFlowsCounter.inc({ satellite_id: satId }, batch.firewallLogs.length);
           }
-          const fleetNode = loadLocalDesiredState()?.fleet?.nodes?.find((n) => n.id === satId);
+          const localState = readCachedDesiredStateBestEffort();
+          const fleetNode = localState?.fleet?.nodes?.find((n) => n.id === satId);
           const satHost = fleetNode?.name || satId;
-          const exporterIp = state.wireguard?.tunnelIp || state.tunnelIp || state.ip || '';
-          void bridgeSatelliteFlowsAndLogs(satId, satHost, exporterIp, batch);
+          const rawExporterIp = state.wireguard?.tunnelIp || state.tunnelIp || state.ip || '';
+          const exporterIp = String(rawExporterIp).trim().split('/')[0] || '';
+          void bridgeSatelliteFlowsAndLogs(satId, satHost, exporterIp, batch, { stateOverride: localState });
         }
       } catch {
         // Ping or non-JSON message
@@ -3129,10 +3137,27 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
   });
 }
 
+export function isFleetPluginEnabledForController(state: DesiredState | null | undefined): boolean {
+  const envFleet = process.env.AXONWALL_FLEET_ENABLED?.toLowerCase();
+  if (envFleet === 'true' || envFleet === '1') {
+    return true;
+  }
+  return Boolean(state && isPluginEnabled('fleet-controller', state));
+}
+
+export function isMetricsMtlsAuthorized(
+  tlsSocket: { authorized?: boolean } | null | undefined,
+  hasConfiguredFleetCa: boolean
+): boolean {
+  return Boolean(hasConfiguredFleetCa && tlsSocket && tlsSocket.authorized === true);
+}
+
 export {
   bridgeSatelliteFlowsAndLogs,
   bridgeSatelliteMetricsToVM,
   formatSatellitePromMetrics,
+  normalizeFlowProtocol,
+  readCachedDesiredStateBestEffort,
   resolveControllerObservabilityTargets,
 } from './telemetry-bridge.js';
 

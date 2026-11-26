@@ -5,8 +5,8 @@ import fs from 'node:fs/promises';
 import { BaseModule } from '../base.js';
 import { execStream } from '../../utils/exec.js';
 import { applyK8sTlsSecret } from '../../engine/certs.js';
-import { ensureNamespace } from '../../engine/k8s.js';
-import { resolveChartValuesArgs } from '../../engine/helm.js';
+import { ensureNamespace, ensureGeneratedK8sSecret, generateStrongSecret, getClusterContextArgs, getHelmContextArgs, getKubeExecutionEnv } from '../../engine/k8s.js';
+import { resolveChartValuesArgs, cleanupHelmTempValues } from '../../engine/helm.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -59,12 +59,25 @@ export class OpenSearchModule extends BaseModule {
     }
 
     // 3. Add and update OpenSearch Helm repository
+    const kubeEnv = getKubeExecutionEnv();
+    const helmCtxArgs = await getHelmContextArgs(clusterName);
+    const ctxArgs = await getClusterContextArgs(clusterName);
     if (onLog) onLog('[opensearch] Configuring OpenSearch Helm repository...');
-    await execa('helm', ['repo', 'add', 'opensearch', 'https://opensearch-project.github.io/helm-charts/']);
-    await execa('helm', ['repo', 'update', 'opensearch']);
+    await execa('helm', ['repo', 'add', 'opensearch', 'https://opensearch-project.github.io/helm-charts/'], { env: kubeEnv });
+    await execa('helm', ['repo', 'update', 'opensearch'], { env: kubeEnv });
 
     // 4. Install OpenSearch Single-Node Dev Cluster
     if (onLog) onLog(`[opensearch] Deploying OpenSearch cluster '${osRelease}' in namespace '${targetNamespace}'...`);
+    const adminSecretName = `${osRelease}-admin-secret`;
+    await ensureGeneratedK8sSecret({
+      namespace: targetNamespace,
+      secretName: adminSecretName,
+      clusterName,
+      keys: {
+        OPENSEARCH_INITIAL_ADMIN_PASSWORD: () => generateStrongSecret({ requireComplex: true })
+      }
+    });
+
     const osDefaultValues = path.join(__dirname, 'values', 'opensearch.yaml');
     const osValuesArgs = await resolveChartValuesArgs({
       moduleId: this.id,
@@ -76,20 +89,11 @@ export class OpenSearchModule extends BaseModule {
       tlsSecretName: targetTlsSecret,
       namespace: targetNamespace,
       clusterName,
+      replacements: { '{{OPENSEARCH_ADMIN_SECRET}}': adminSecretName },
       onLog
     });
 
-    const osArgs = [
-      'upgrade', '--install', '--wait', osRelease, 'opensearch/opensearch',
-      '--namespace', targetNamespace,
-      '--timeout', options?.timeout || '10m',
-      ...osValuesArgs
-    ];
-    await execStream('helm', osArgs, { onLog });
-
-    // 5. Install OpenSearch Dashboards with Ingress and TLS
     const dashboardHost = isStandardNs ? `siem.${domain}` : `${targetNamespace}-siem.${domain}`;
-    if (onLog) onLog(`[opensearch] Deploying Dashboards '${dashboardsRelease}' (Ingress: https://${dashboardHost})...`);
     const dashboardsDefaultValues = path.join(__dirname, 'values', 'opensearch-dashboards.yaml');
     const dashboardsValuesArgs = await resolveChartValuesArgs({
       moduleId: this.id,
@@ -104,20 +108,37 @@ export class OpenSearchModule extends BaseModule {
       onLog
     });
 
-    const dashboardsArgs = [
-      'upgrade', '--install', '--wait', dashboardsRelease, 'opensearch/opensearch-dashboards',
-      '--namespace', targetNamespace,
-      '--timeout', options?.timeout || '10m',
-      ...dashboardsValuesArgs
-    ];
-    await execStream('helm', dashboardsArgs, { onLog });
+    try {
+      const osArgs = [
+        'upgrade', '--install', '--wait', osRelease, 'opensearch/opensearch',
+        ...helmCtxArgs,
+        '--namespace', targetNamespace,
+        '--timeout', options?.timeout || '10m',
+        ...osValuesArgs
+      ];
+      await execStream('helm', osArgs, { onLog, env: kubeEnv });
+
+      // 5. Install OpenSearch Dashboards with Ingress and TLS
+      if (onLog) onLog(`[opensearch] Deploying Dashboards '${dashboardsRelease}' (Ingress: https://${dashboardHost})...`);
+      const dashboardsArgs = [
+        'upgrade', '--install', '--wait', dashboardsRelease, 'opensearch/opensearch-dashboards',
+        ...helmCtxArgs,
+        '--namespace', targetNamespace,
+        '--timeout', options?.timeout || '10m',
+        ...dashboardsValuesArgs
+      ];
+      await execStream('helm', dashboardsArgs, { onLog, env: kubeEnv });
+    } finally {
+      await cleanupHelmTempValues(osValuesArgs);
+      await cleanupHelmTempValues(dashboardsValuesArgs);
+    }
 
     // 6. Apply Network Threat Detection Rules Manifest
     const rulesManifestPath = path.join(__dirname, 'manifests', 'network-threat-pipeline.yaml');
     try {
       await fs.access(rulesManifestPath);
       if (onLog) onLog(`[opensearch] Applying SIGMA network threat detection rules ConfigMap to '${targetNamespace}'...`);
-      await execa('kubectl', ['apply', '-f', rulesManifestPath, '-n', targetNamespace]);
+      await execa('kubectl', ['apply', '-f', rulesManifestPath, '-n', targetNamespace, ...ctxArgs], { env: kubeEnv });
     } catch {
       // Manifest application error is non-fatal
     }
@@ -133,17 +154,20 @@ export class OpenSearchModule extends BaseModule {
     const isStandardNs = targetNamespace === 'default' || targetNamespace === 'opensearch';
     const osRelease = isStandardNs ? 'opensearch' : `${targetNamespace}-opensearch`;
     const dashboardsRelease = isStandardNs ? 'opensearch-dashboards' : `${targetNamespace}-opensearch-dashboards`;
+    const kubeEnv = getKubeExecutionEnv();
+    const helmCtxArgs = await getHelmContextArgs(clusterName);
+    const ctxArgs = await getClusterContextArgs(clusterName);
 
     if (onLog) onLog(`[opensearch] Uninstalling OpenSearch Dashboards from namespace '${targetNamespace}'...`);
     try {
-      await execa('helm', ['uninstall', dashboardsRelease, '-n', targetNamespace]);
+      await execa('helm', ['uninstall', dashboardsRelease, '-n', targetNamespace, ...helmCtxArgs], { env: kubeEnv });
     } catch {
       // Ignore if not present
     }
 
     if (onLog) onLog(`[opensearch] Uninstalling OpenSearch core cluster from namespace '${targetNamespace}'...`);
     try {
-      await execa('helm', ['uninstall', osRelease, '-n', targetNamespace]);
+      await execa('helm', ['uninstall', osRelease, '-n', targetNamespace, ...helmCtxArgs], { env: kubeEnv });
     } catch {
       // Ignore if not present
     }
@@ -151,7 +175,7 @@ export class OpenSearchModule extends BaseModule {
     if (deleteNamespace && targetNamespace !== 'default' && targetNamespace !== 'kube-system') {
       if (onLog) onLog(`[opensearch] Deleting namespace '${targetNamespace}'...`);
       try {
-        await execa('kubectl', ['delete', 'namespace', targetNamespace, '--timeout=60s']);
+        await execa('kubectl', ['delete', 'namespace', targetNamespace, '--timeout=60s', ...ctxArgs], { env: kubeEnv });
       } catch {
         // Ignore if already deleted
       }
@@ -165,13 +189,15 @@ export class OpenSearchModule extends BaseModule {
     const targetNamespace = namespace || this.namespace;
 
     try {
+      const kubeEnv = getKubeExecutionEnv();
+      const ctxArgs = await getClusterContextArgs(clusterName);
       const { stdout: podsJson } = await execa('kubectl', [
         'get', 'pods',
         '-n', targetNamespace,
-        '--context', `k3d-${clusterName}`,
+        ...ctxArgs,
         '--request-timeout=3s',
         '-o', 'json'
-      ]);
+      ], { env: kubeEnv });
       const parsed = JSON.parse(podsJson);
       const pods = (parsed.items || []).map(p => ({
         name: p.metadata.name,

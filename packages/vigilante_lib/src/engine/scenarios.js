@@ -10,6 +10,7 @@ import { execFileSync } from 'child_process';
 
 import { fileURLToPath } from 'url';
 import { resolvePathInside, assertDnsLabel, getVigilanteScenariosDir } from './config.js';
+import { getKubeExecutionEnv } from './k8s.js';
 
 /**
  * Split a scenario step command into argv words using shell quoting rules
@@ -151,23 +152,22 @@ export class ScenarioEngine {
   }
 
   executeKubectl(command, namespace = 'default') {
-    try {
-      assertDnsLabel(namespace, 'namespace');
-      const args = [...splitCommandWords(command), '-n', namespace];
-      console.log(`    > kubectl ${args.join(' ')}`);
-      execFileSync('kubectl', args, { stdio: 'inherit' });
-    } catch (err) {
-      console.error(`[-] Error executing kubectl command: ${err.message}`);
-    }
+    assertDnsLabel(namespace, 'namespace');
+    const words = splitCommandWords(command);
+    const hasNamespaceFlag = words.some((w, idx) => w === '-n' || w === '--namespace' || w.startsWith('--namespace=') || (idx > 0 && words[idx - 1] === '-n'));
+    const dashDashIdx = words.indexOf('--');
+    const args = hasNamespaceFlag
+      ? words
+      : (dashDashIdx >= 0
+          ? [...words.slice(0, dashDashIdx), '-n', namespace, ...words.slice(dashDashIdx)]
+          : [...words, '-n', namespace]);
+    console.log(`    > kubectl ${args.join(' ')}`);
+    execFileSync('kubectl', args, { stdio: 'inherit', env: getKubeExecutionEnv() });
   }
 
   executeHelm(command) {
-    try {
-      const args = splitCommandWords(command);
-      console.log(`    > helm ${args.join(' ')}`);
-      execFileSync('helm', args, { stdio: 'inherit' });
-    } catch (err) {
-      console.error(`[-] Error executing helm command: ${err.message}`);
-    }
+    const args = splitCommandWords(command);
+    console.log(`    > helm ${args.join(' ')}`);
+    execFileSync('helm', args, { stdio: 'inherit', env: getKubeExecutionEnv() });
   }
 }

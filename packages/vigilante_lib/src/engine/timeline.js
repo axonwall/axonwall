@@ -47,7 +47,8 @@ export function buildCausalTimeline(rawEvents = [], options = {}) {
       isoTime: new Date(ts).toISOString(),
       type: evt.type || 'SECURITY_ALERT',
       title: evt.title || evt.name || evt.type || 'Event',
-      entity: evt.entity || evt.workload || evt.pod || 'unknown-host',
+      entity: evt.entity || evt.workload || evt.pod || evt.podName || 'unknown-host',
+      containerId: evt.containerId || null,
       pid: evt.pid != null ? Number(evt.pid) : null,
       ppid: evt.ppid != null ? Number(evt.ppid) : null,
       command: evt.command || evt.cmdline || null,
@@ -101,8 +102,9 @@ export function buildCausalTimeline(rawEvents = [], options = {}) {
       const child = nodes[j];
       const timeDiffMs = child.timestamp - parent.timestamp;
 
-      // Link A: Process Lineage (Parent PID -> Child PID / PPID)
-      if (parent.pid != null && child.ppid != null && parent.pid === child.ppid) {
+      // Link A: Process Lineage (Parent PID -> Child PID / PPID, scoped by workload/container entity)
+      const sameScope = parent.entity === child.entity && (!parent.containerId || !child.containerId || parent.containerId === child.containerId);
+      if (sameScope && parent.pid != null && child.ppid != null && parent.pid === child.ppid) {
         addEdge(
           parent.id,
           child.id,

@@ -33,10 +33,15 @@ export function compileAcme(config?: AcmeConfig): CompiledAcme {
 
   const hookScripts: Record<string, string> = {
     webgui: 'systemctl reload-or-restart axonwall || true',
-    openvpn: 'systemctl reload-or-restart openvpn@* || true',
+    openvpn: 'systemctl reload-or-restart openvpn-server@*.service || true',
     ipsec: 'swanctl --load-creds && swanctl --load-conns || true',
     haproxy: 'systemctl reload haproxy || true',
   };
+
+  const activeAccount = (config.accounts || []).find((acc) => acc.enabled !== false && acc.email && acc.email.trim());
+  const rawEmail = activeAccount?.email?.trim() || '';
+  const safeEmail = /^[a-zA-Z0-9.!#$%&*+/=?^_`{|}~@-]+$/.test(rawEmail) ? rawEmail : '';
+  const emailFlag = safeEmail ? `--email '${safeEmail}'` : '--register-unsafely-without-email';
 
   const deployHooks: { path: string; content: string }[] = [];
 
@@ -64,7 +69,7 @@ export function compileAcme(config?: AcmeConfig): CompiledAcme {
         `# HTTP-01 Webroot challenge`,
         `certbot certonly --webroot -w /var/www/acme-challenge \\`,
         `  ${allDomains} \\`,
-        `  --non-interactive --agree-tos \\`,
+        `  --non-interactive --agree-tos ${emailFlag} \\`,
         `  --deploy-hook "/var/lib/axonwall/certs/deploy-${safeName}.sh" || true`
       );
     } else {
@@ -72,7 +77,7 @@ export function compileAcme(config?: AcmeConfig): CompiledAcme {
         `# DNS-01 API challenge via ${safeDns}`,
         `certbot certonly --dns-${safeDns} \\`,
         `  ${allDomains} \\`,
-        `  --non-interactive --agree-tos \\`,
+        `  --non-interactive --agree-tos ${emailFlag} \\`,
         `  --deploy-hook "/var/lib/axonwall/certs/deploy-${safeName}.sh" || true`
       );
     }

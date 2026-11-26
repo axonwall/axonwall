@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import {
   AlertTriangle,
@@ -23,6 +23,7 @@ import {
   type TopologyPortSpec,
 } from '@axonwall/lib/schemas';
 import type { TopologyFabricSnapshot } from '@/server/agent';
+import { parseCsvVlanIds } from '@/lib/state-preservation';
 import {
   HEALTH_TONE_CLASSES,
   type FabricHealthEvaluation,
@@ -72,6 +73,26 @@ export function InspectorDrawer({
   const [scaleReplicasInput, setScaleReplicasInput] = useState('');
   const [nodeRolesInput, setNodeRolesInput] = useState('');
   const [peerDraftHostname, setPeerDraftHostname] = useState('');
+  const [vlanInputText, setVlanInputText] = useState(() => selectedEdge?.vlanIds.join(', ') ?? '');
+  const lastEdgeIdRef = React.useRef<string | null>(selectedEdge?.id ?? null);
+  const vlanInputTextRef = React.useRef(vlanInputText);
+  vlanInputTextRef.current = vlanInputText;
+
+  useEffect(() => {
+    const nextEdgeId = selectedEdge?.id ?? null;
+    if (!selectedEdge) {
+      lastEdgeIdRef.current = null;
+      setVlanInputText('');
+      return;
+    }
+    const edgeChanged = nextEdgeId !== lastEdgeIdRef.current;
+    lastEdgeIdRef.current = nextEdgeId;
+    const externalCsv = selectedEdge.vlanIds.join(',');
+    const localCsv = parseCsvVlanIds(vlanInputTextRef.current).join(',');
+    if (edgeChanged || externalCsv !== localCsv) {
+      setVlanInputText(selectedEdge.vlanIds.join(', '));
+    }
+  }, [selectedEdge]);
 
   const localHostId = useMemo(() => {
     const raw = (fabric?.local?.localHostId || draftState?.system?.hostname || 'axonwall-local')
@@ -259,13 +280,16 @@ export function InspectorDrawer({
                 <span className="text-slate-400 font-medium block mb-1">VLAN IDs (CSV)</span>
                 <input
                   type="text"
-                  value={selectedEdge.vlanIds.join(', ')}
+                  value={vlanInputText}
                   onChange={(e) => {
-                    const vlans = e.target.value
-                      .split(',')
-                      .map((v) => Number(v.trim()))
-                      .filter((n) => Number.isInteger(n) && n >= 1 && n <= 4094);
-                    onUpdateEdge({ ...selectedEdge, vlanIds: vlans });
+                    const nextText = e.target.value;
+                    setVlanInputText(nextText);
+                    vlanInputTextRef.current = nextText;
+                    onUpdateEdge({ ...selectedEdge, vlanIds: parseCsvVlanIds(nextText) });
+                  }}
+                  onBlur={() => {
+                    const normalized = parseCsvVlanIds(vlanInputTextRef.current).join(', ');
+                    setVlanInputText(normalized);
                   }}
                   placeholder="10, 20"
                   className="w-full px-2 py-1.5 rounded bg-slate-900 border border-slate-700 text-white font-mono"
@@ -760,16 +784,14 @@ export function InspectorDrawer({
                 type="button"
                 disabled={!peerDraftHostname.trim()}
                 onClick={() => {
-                  if (!draftState) return;
                   const hostNameNext = peerDraftHostname.trim();
+                  if (!hostNameNext) return;
                   onStagePeerEdit({
                     peerId: matchedPeer.id,
                     name: matchedPeer.name,
                     summary: `Set hostname=${hostNameNext} on peer ${matchedPeer.name}`,
-                    state: {
-                      ...draftState,
-                      system: { ...draftState.system, hostname: hostNameNext },
-                    },
+                    hostname: hostNameNext,
+                    patch: { system: { hostname: hostNameNext } },
                   });
                   setPeerDraftHostname('');
                 }}

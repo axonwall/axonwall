@@ -30,25 +30,37 @@ type cachedTemplate struct {
 	packetsUsing uint64
 }
 
+const (
+	maxDecoderTemplates   = 4096
+	maxDecoderMetaEntries = 4096
+	maxDecoderIfNames     = 16384
+)
+
 type cachedNodeMeta struct {
-	nodeID   string
-	hostname string
+	nodeID     string
+	hostname   string
+	lastSeenAt int64
 }
 
 type FlowDecoder struct {
 	mu           sync.RWMutex
 	templates    map[netflowTemplateKey]*cachedTemplate
 	samplingRate map[string]uint32         // key: exporterIP|sourceID
+	samplingSeen map[string]int64          // monotonic access/update order
 	nodeMeta     map[string]cachedNodeMeta // key: exporterIP|sourceID
 	ifNames      map[ifAliasKey]string     // key: (exporterIP, ifIndex)
+	ifNamesSeen  map[ifAliasKey]int64      // monotonic access/update order
+	metaSeq      int64
 }
 
 func NewFlowDecoder() *FlowDecoder {
 	return &FlowDecoder{
 		templates:    make(map[netflowTemplateKey]*cachedTemplate),
 		samplingRate: make(map[string]uint32),
+		samplingSeen: make(map[string]int64),
 		nodeMeta:     make(map[string]cachedNodeMeta),
 		ifNames:      make(map[ifAliasKey]string),
+		ifNamesSeen:  make(map[ifAliasKey]int64),
 	}
 }
 
@@ -367,25 +379,94 @@ func (d *FlowDecoder) stampDecodedMetadata(exporterIP string, domainID uint32, r
 	}
 }
 
+func evictOldestSeen[K comparable](vals any, seen map[K]int64) (K, bool) {
+	var oldestKey K
+	var oldestSeq int64
+	found := false
+	for k, seq := range seen {
+		if !found || seq < oldestSeq {
+			oldestKey = k
+			oldestSeq = seq
+			found = true
+		}
+	}
+	return oldestKey, found
+}
+
+func (d *FlowDecoder) touchMetaMapsLocked() {
+	if d.templates == nil {
+		d.templates = make(map[netflowTemplateKey]*cachedTemplate)
+	}
+	if d.samplingRate == nil {
+		d.samplingRate = make(map[string]uint32)
+	}
+	if d.samplingSeen == nil {
+		d.samplingSeen = make(map[string]int64)
+	}
+	if d.nodeMeta == nil {
+		d.nodeMeta = make(map[string]cachedNodeMeta)
+	}
+	if d.ifNames == nil {
+		d.ifNames = make(map[ifAliasKey]string)
+	}
+	if d.ifNamesSeen == nil {
+		d.ifNamesSeen = make(map[ifAliasKey]int64)
+	}
+}
+
 func (d *FlowDecoder) applyOptionsRecord(exporterIP string, domainID uint32, rec FlowRecord) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	d.touchMetaMapsLocked()
+	d.metaSeq++
+	seq := d.metaSeq
 	expKey := fmt.Sprintf("%s|%d", exporterIP, domainID)
 	if rec.SamplingRate > 1 {
+		if _, exists := d.samplingRate[expKey]; !exists && len(d.samplingRate) >= maxDecoderMetaEntries {
+			if k, ok := evictOldestSeen(d.samplingRate, d.samplingSeen); ok {
+				delete(d.samplingRate, k)
+				delete(d.samplingSeen, k)
+			}
+		}
 		d.samplingRate[expKey] = rec.SamplingRate
+		d.samplingSeen[expKey] = seq
 	}
 	if rec.HostID != "" || rec.HostName != "" {
-		cur := d.nodeMeta[expKey]
+		cur, exists := d.nodeMeta[expKey]
+		if !exists && len(d.nodeMeta) >= maxDecoderMetaEntries {
+			var oldestKey string
+			var oldestSeq int64
+			first := true
+			for k, nm := range d.nodeMeta {
+				if first || nm.lastSeenAt < oldestSeq {
+					oldestKey = k
+					oldestSeq = nm.lastSeenAt
+					first = false
+				}
+			}
+			if !first {
+				delete(d.nodeMeta, oldestKey)
+			}
+		}
 		if rec.HostID != "" {
 			cur.nodeID = rec.HostID
 		}
 		if rec.HostName != "" {
 			cur.hostname = rec.HostName
 		}
+		cur.lastSeenAt = seq
 		d.nodeMeta[expKey] = cur
 	}
 	if rec.InIfIndex > 0 && rec.InIfName != "" {
-		d.ifNames[ifAliasKey{exporterIP: exporterIP, ifIndex: rec.InIfIndex}] = rec.InIfName
+		k := ifAliasKey{exporterIP: exporterIP, ifIndex: rec.InIfIndex}
+		if _, exists := d.ifNames[k]; !exists && len(d.ifNames) >= maxDecoderIfNames {
+			if oldKey, ok := evictOldestSeen(d.ifNames, d.ifNamesSeen); ok {
+				delete(d.ifNames, oldKey)
+				delete(d.ifNamesSeen, oldKey)
+			}
+		}
+		d.ifNames[k] = rec.InIfName
+		d.ifNamesSeen[k] = seq
 	}
 }
 func (d *FlowDecoder) decodeIPFIX(exporterIP string, raw []byte, recvTime time.Time) ([]FlowRecord, error) {
@@ -451,6 +532,31 @@ func (d *FlowDecoder) decodeIPFIX(exporterIP string, raw []byte, recvTime time.T
 	return flows, nil
 }
 
+func (d *FlowDecoder) withdrawIPFIXTemplates(exporterIP string, domainID uint32, tid uint16) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if len(d.templates) == 0 {
+		return
+	}
+	// RFC 7011 §8.1: template ID 2/3 withdraws all Data/Options templates for the Observation Domain;
+	// specific IDs >= 256 withdraw that single template.
+	if tid == 2 || tid == 3 {
+		wantOptions := tid == 3
+		for k, tmpl := range d.templates {
+			if k.exporterIP == exporterIP && k.sourceID == domainID && k.version == "ipfix" && tmpl.isOptions == wantOptions {
+				delete(d.templates, k)
+			}
+		}
+		return
+	}
+	delete(d.templates, netflowTemplateKey{
+		exporterIP: exporterIP,
+		sourceID:   domainID,
+		version:    "ipfix",
+		templateID: tid,
+	})
+}
+
 func (d *FlowDecoder) parseIPFIXTemplates(exporterIP string, domainID uint32, body []byte, isOptions bool, now time.Time) {
 	off := 0
 	for off+4 <= len(body) {
@@ -458,7 +564,8 @@ func (d *FlowDecoder) parseIPFIXTemplates(exporterIP string, domainID uint32, bo
 		fCount := int(binary.BigEndian.Uint16(body[off+2 : off+4]))
 		off += 4
 		if fCount == 0 {
-			continue // template withdrawal
+			d.withdrawIPFIXTemplates(exporterIP, domainID, tid)
+			continue
 		}
 		scopeCount := 0
 		if isOptions {
@@ -467,11 +574,23 @@ func (d *FlowDecoder) parseIPFIXTemplates(exporterIP string, domainID uint32, bo
 			}
 			scopeCount = int(binary.BigEndian.Uint16(body[off : off+2]))
 			off += 2
+			if scopeCount > fCount {
+				break
+			}
+		}
+		remaining := len(body) - off
+		if fCount*4 > remaining {
+			break
 		}
 		fields := make([]TemplateFieldSpec, 0, fCount)
 		fixedLen := 0
 		hasVarLen := false
-		for i := 0; i < fCount && off+4 <= len(body); i++ {
+		partial := false
+		for i := 0; i < fCount; i++ {
+			if off+4 > len(body) {
+				partial = true
+				break
+			}
 			rawIE := binary.BigEndian.Uint16(body[off : off+2])
 			fl := binary.BigEndian.Uint16(body[off+2 : off+4])
 			off += 4
@@ -480,6 +599,7 @@ func (d *FlowDecoder) parseIPFIXTemplates(exporterIP string, domainID uint32, bo
 			if rawIE&0x8000 != 0 {
 				ft = rawIE & 0x7FFF
 				if off+4 > len(body) {
+					partial = true
 					break
 				}
 				entID = binary.BigEndian.Uint32(body[off : off+4])
@@ -497,6 +617,9 @@ func (d *FlowDecoder) parseIPFIXTemplates(exporterIP string, domainID uint32, bo
 				Length:       fl,
 				IsScope:      isOptions && i < scopeCount,
 			})
+		}
+		if partial || len(fields) != fCount {
+			break
 		}
 		d.storeTemplate(&cachedTemplate{
 			key:        netflowTemplateKey{exporterIP: exporterIP, sourceID: domainID, version: "ipfix", templateID: tid},
@@ -522,8 +645,27 @@ func (d *FlowDecoder) parseOptionsData(exporterIP string, sourceID uint32, tmpl 
 func (d *FlowDecoder) storeTemplate(t *cachedTemplate) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	d.touchMetaMapsLocked()
 	if prev, ok := d.templates[t.key]; ok {
 		t.packetsUsing = prev.packetsUsing
+	} else if len(d.templates) >= maxDecoderTemplates {
+		var oldestKey netflowTemplateKey
+		var oldestTime time.Time
+		first := true
+		for k, cur := range d.templates {
+			ts := cur.lastUsedAt
+			if ts.IsZero() {
+				ts = cur.updatedAt
+			}
+			if first || ts.Before(oldestTime) {
+				oldestKey = k
+				oldestTime = ts
+				first = false
+			}
+		}
+		if !first {
+			delete(d.templates, oldestKey)
+		}
 	}
 	d.templates[t.key] = t
 }

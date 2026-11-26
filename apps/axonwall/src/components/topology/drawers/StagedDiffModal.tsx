@@ -12,10 +12,7 @@ import {
 } from 'lucide-react';
 import { buildFabricApplyPlan } from '@axonwall/lib/compile/topology';
 import type { DesiredState } from '@axonwall/lib/schemas';
-import {
-  applyFabricPlanAction,
-  type TopologyApplyPlanResultSnapshot,
-} from '@/server/agent';
+import type { TopologyApplyPlanResultSnapshot } from '@/server/agent';
 import type { StagedK3sEdit, StagedPeerEdit } from '../types';
 
 interface StagedDiffModalProps {
@@ -89,27 +86,48 @@ export function StagedDiffModal({
   const executePlan = async (dryRun: boolean) => {
     setRunning(true);
     try {
-      const res = await applyFabricPlanAction({
-        dryRun,
-        confirmTimeoutSeconds: confirmTimeoutSec,
-        k3sEdits: k3sEdits.map((k) => ({
-          kind: k.kind,
-          name: k.name,
-          namespace: k.namespace,
-          manifestYaml: k.manifestYaml,
-          scaleReplicas: k.scaleReplicas,
-          nodeRoles: k.nodeRoles,
-        })),
-        peerEdits: peerEdits.map((p) => ({
-          peerId: p.peerId,
-          name: p.name,
-          state: p.state as DesiredState,
-        })),
-        localState: changedSections.length > 0 && draftState ? draftState : undefined,
+      const resp = await fetch('/api/v1/topology/apply', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          dryRun,
+          confirmTimeoutSeconds: confirmTimeoutSec,
+          k3sEdits: k3sEdits.map((k) => ({
+            kind: k.kind,
+            name: k.name,
+            namespace: k.namespace,
+            manifestYaml: k.manifestYaml,
+            scaleReplicas: k.scaleReplicas,
+            nodeRoles: k.nodeRoles,
+          })),
+          peerEdits: peerEdits.map((p) => ({
+            peerId: p.peerId,
+            name: p.name,
+            ...(p.hostname ? { hostname: p.hostname } : {}),
+            ...(p.patch ? { patch: p.patch } : {}),
+            ...(p.state ? { state: p.state as DesiredState } : {}),
+          })),
+          localState: changedSections.length > 0 && draftState ? draftState : undefined,
+        }),
       });
-      setLastResult(res);
-      if (res.success && !dryRun) {
-        onApplyComplete(changedSections.length > 0);
+      const json = (await resp.json().catch(() => null)) as
+        | { status?: string; data?: TopologyApplyPlanResultSnapshot; error?: string }
+        | null;
+      if (json?.data) {
+        setLastResult(json.data);
+        if (json.data.success && !dryRun) {
+          onApplyComplete(changedSections.length > 0);
+        }
+      } else {
+        setLastResult({
+          success: false,
+          dryRun,
+          timestamp: new Date().toISOString(),
+          confirmTimeoutSeconds: confirmTimeoutSec,
+          rolledBackAny: false,
+          results: [],
+          error: json?.error || `Fabric apply request failed (HTTP ${resp.status})`,
+        });
       }
     } catch (err) {
       setLastResult({

@@ -193,6 +193,11 @@ func (m *ObservabilityManager) ApplyConfig(rawJSON []byte) error {
 	if err := json.Unmarshal(rawJSON, &b); err != nil {
 		return fmt.Errorf("invalid observability_config.json: %w", err)
 	}
+	if b.Offload.Buffer.DiskSpoolEnabled && strings.TrimSpace(b.Offload.Buffer.DiskSpoolDir) != "" {
+		if _, err := confineTelemetrySpoolDir(b.Offload.Buffer.DiskSpoolDir); err != nil {
+			return fmt.Errorf("invalid diskSpoolDir: %w", err)
+		}
+	}
 	m.mu.Lock()
 	m.bundle = &b
 	m.mu.Unlock()
@@ -267,8 +272,10 @@ func (m *ObservabilityManager) HandleRemoteMitigate(req RemoteMitigateRequest) (
 	if err != nil {
 		return RemoteMitigateResponse{Accepted: false}, fmt.Errorf("invalid targetIp %q", ipStr)
 	}
+	addr = addr.Unmap()
+	canonicalIP := addr.String()
 	if addr.IsLoopback() || addr.IsMulticast() || addr.IsLinkLocalUnicast() || addr.IsUnspecified() {
-		return RemoteMitigateResponse{Accepted: false}, fmt.Errorf("targetIp %s is protected", ipStr)
+		return RemoteMitigateResponse{Accepted: false}, fmt.Errorf("targetIp %s is protected", canonicalIP)
 	}
 
 	// Enforce configured anti-lockout protected CIDRs
@@ -278,16 +285,19 @@ func (m *ObservabilityManager) HandleRemoteMitigate(req RemoteMitigateRequest) (
 			continue
 		}
 		if p, perr := netip.ParsePrefix(c); perr == nil && p.Contains(addr) {
-			return RemoteMitigateResponse{Accepted: false}, fmt.Errorf("targetIp %s is inside protectedCidr %s", ipStr, c)
+			return RemoteMitigateResponse{Accepted: false}, fmt.Errorf("targetIp %s is inside protectedCidr %s", canonicalIP, c)
 		}
 	}
 	// Never allow blocking any local interface subnet (including wg0 / mgmt)
 	if ifAddrs, err := net.InterfaceAddrs(); err == nil {
 		for _, ia := range ifAddrs {
 			if p, perr := netip.ParsePrefix(ia.String()); perr == nil && p.Contains(addr) {
-				return RemoteMitigateResponse{Accepted: false}, fmt.Errorf("targetIp %s falls within local interface subnet %s", ipStr, p.String())
+				return RemoteMitigateResponse{Accepted: false}, fmt.Errorf("targetIp %s falls within local interface subnet %s", canonicalIP, p.String())
 			}
 		}
+	}
+	if _, _, _, err := ValidateTargetSafety(canonicalIP, "", 0, 32, 128); err != nil {
+		return RemoteMitigateResponse{Accepted: false}, fmt.Errorf("targetIp %s rejected by safety guard: %w", canonicalIP, err)
 	}
 
 	ttl := req.TTLSec
@@ -309,13 +319,13 @@ func (m *ObservabilityManager) HandleRemoteMitigate(req RemoteMitigateRequest) (
 	if reason == "" {
 		reason = "Remote Analytics Hub mitigation"
 	}
-	if err := m.ebpf.AddXdpBlock(ipStr, ttl, XdpReasonSoarQuarantine, reason); err != nil {
+	if err := m.ebpf.AddXdpBlock(canonicalIP, ttl, XdpReasonSoarQuarantine, reason); err != nil {
 		return RemoteMitigateResponse{Accepted: false}, err
 	}
 	return RemoteMitigateResponse{
 		Accepted: true,
-		TargetIP: ipStr,
+		TargetIP: canonicalIP,
 		TTLSec:   ttl,
-		Message:  fmt.Sprintf("XDP blocked %s for %ds", ipStr, ttl),
+		Message:  fmt.Sprintf("XDP blocked %s for %ds", canonicalIP, ttl),
 	}, nil
 }

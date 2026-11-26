@@ -1,0 +1,174 @@
+{{- if and .Values.ingress.enabled (or .Values.victoriametrics.enabled .Values.victorialogs.enabled) }}
+{{- $fullname := include "axonwall-analytics.fullname" . -}}
+{{- $ns := include "axonwall-analytics.namespace" . -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $fullname }}-obs-proxy-config
+  namespace: {{ $ns }}
+  labels:
+    {{- include "axonwall-analytics.labels" . | nindent 4 }}
+data:
+  proxy.js: |
+    const http = require('node:http');
+    const crypto = require('node:crypto');
+
+    const expectedToken = (process.env.AXONWALL_OBSERVABILITY_TOKEN || '').trim();
+    const vmTarget = process.env.VM_UPSTREAM || '';
+    const vlTarget = process.env.VL_UPSTREAM || '';
+    const port = parseInt(process.env.PROXY_PORT || '8480', 10);
+
+    function tokenMatches(presented) {
+      if (!expectedToken || !presented) return false;
+      const a = crypto.createHash('sha256').update(String(presented).trim()).digest();
+      const b = crypto.createHash('sha256').update(expectedToken).digest();
+      return crypto.timingSafeEqual(a, b);
+    }
+
+    const server = http.createServer((req, res) => {
+      const reqUrl = req.url || '/';
+      if (reqUrl === '/healthz') {
+        res.writeHead(200, { 'Content-Type': 'text/plain' });
+        res.end('ok');
+        return;
+      }
+      if (!expectedToken) {
+        res.writeHead(503, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Observability ingest token unconfigured' }));
+        return;
+      }
+      const authHdr = String(req.headers['authorization'] || '');
+      const bearer = authHdr.toLowerCase().startsWith('bearer ') ? authHdr.slice(7).trim() : '';
+      const obsHdr = String(req.headers['x-axonwall-observability-token'] || '').trim();
+      if (!tokenMatches(bearer) && !tokenMatches(obsHdr)) {
+        res.writeHead(401, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Unauthorized: valid bearer token required' }));
+        return;
+      }
+
+      let upstream = null;
+      if (reqUrl === '/vm' || reqUrl.startsWith('/vm/') || reqUrl.startsWith('/vm?')) {
+        upstream = vmTarget;
+      } else if (reqUrl === '/vl' || reqUrl.startsWith('/vl/') || reqUrl.startsWith('/vl?')) {
+        upstream = vlTarget;
+      }
+      if (!upstream) {
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Observability backend disabled or unknown path' }));
+        return;
+      }
+
+      const target = new URL(upstream);
+      const headers = { ...req.headers, host: target.host };
+      delete headers['authorization'];
+      delete headers['x-axonwall-observability-token'];
+
+      const proxyReq = http.request(
+        {
+          hostname: target.hostname,
+          port: target.port,
+          path: reqUrl,
+          method: req.method,
+          headers,
+        },
+        (proxyRes) => {
+          res.writeHead(proxyRes.statusCode || 502, proxyRes.headers);
+          proxyRes.pipe(res);
+        }
+      );
+      proxyReq.on('error', (err) => {
+        if (!res.headersSent) {
+          res.writeHead(502, { 'Content-Type': 'application/json' });
+        }
+        res.end(JSON.stringify({ error: err.message }));
+      });
+      req.pipe(proxyReq);
+    });
+
+    server.listen(port, '0.0.0.0', () => {
+      console.log(`[obs-proxy] Listening on 0.0.0.0:${port}`);
+    });
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $fullname }}-obs-proxy
+  namespace: {{ $ns }}
+  labels:
+    {{- include "axonwall-analytics.labels" . | nindent 4 }}
+    app.kubernetes.io/component: obs-proxy
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: obs-proxy
+  template:
+    metadata:
+      labels:
+        {{- include "axonwall-analytics.labels" . | nindent 8 }}
+        app.kubernetes.io/component: obs-proxy
+      annotations:
+        checksum/secret: {{ include (print $.Template.BasePath "/secrets.yaml") . | sha256sum }}
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        runAsGroup: 1001
+      containers:
+        - name: obs-proxy
+          image: "{{ .Values.controller.image.repository }}:{{ .Values.controller.image.tag }}"
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          command: ["node", "/etc/axonwall/obs-proxy/proxy.js"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          env:
+            - name: PROXY_PORT
+              value: "8480"
+            - name: VM_UPSTREAM
+              value: {{ if .Values.victoriametrics.enabled }}"http://{{ $fullname }}-vm:8428"{{ else }}""{{ end }}
+            - name: VL_UPSTREAM
+              value: {{ if .Values.victorialogs.enabled }}"http://{{ $fullname }}-vl:9428"{{ else }}""{{ end }}
+            - name: AXONWALL_OBSERVABILITY_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "axonwall-analytics.secretName" . }}
+                  key: observability-ingest-token
+          ports:
+            - name: http
+              containerPort: 8480
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          volumeMounts:
+            - name: proxy-config
+              mountPath: /etc/axonwall/obs-proxy
+              readOnly: true
+      volumes:
+        - name: proxy-config
+          configMap:
+            name: {{ $fullname }}-obs-proxy-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $fullname }}-obs-proxy
+  namespace: {{ $ns }}
+  labels:
+    {{- include "axonwall-analytics.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: obs-proxy
+  ports:
+    - name: http
+      port: 8480
+      targetPort: http
+{{- end }}

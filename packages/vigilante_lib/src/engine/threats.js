@@ -7,7 +7,17 @@ import { execa } from 'execa';
 import { logger } from '../utils/logger.js';
 import { execStream, exec } from '../utils/exec.js';
 import { getVigilantePlaybooksDir, loadConfig, sanitizePathComponent, shQuote, assertDnsLabel, resolvePathInside } from './config.js';
+import { getClusterContextArgs, getKubeExecutionEnv } from './k8s.js';
 import { NIST_ATTACK_VECTORS } from './nist.js';
+
+export function sanitizeThreatJobName(playbookId) {
+  const cleaned = String(playbookId || 'scenario')
+    .toLowerCase()
+    .replace(/[^a-z0-9-]/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-+|-+$/g, '') || 'scenario';
+  return `threat-sim-${cleaned}`.slice(0, 50).replace(/-+$/, '');
+}
 
 /**
  * Built-in standard threat simulation playbooks representing major MITRE ATT&CK & NIST SP 800-61 categories
@@ -555,7 +565,7 @@ export function generateThreatJobManifest(playbook, options = {}) {
   // The namespace lands in YAML fields and in the default OpenSearch URL:
   // it must be a plain DNS label, never free text.
   const namespace = assertDnsLabel(options.namespace || 'opensearch', 'namespace');
-  const jobName = `threat-sim-${String(playbook.id || 'scenario').toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/^-+|-+$/g, '') || 'scenario'}`.slice(0, 50);
+  const jobName = sanitizeThreatJobName(playbook.id);
   const osUrl = options.osUrl || `http://opensearch-cluster-master.${namespace}.svc.cluster.local:9200`;
 
   const playbookLabel = /^[a-zA-Z0-9]([a-zA-Z0-9_.-]{0,61}[a-zA-Z0-9])?$/.test(String(playbook.id || ''))
@@ -655,17 +665,20 @@ export async function executeThreatPlaybook({
   const tempManifestPath = path.join(tempManifestDir, `vigilante-threat-job-${sanitizePathComponent(targetPlaybook.id)}.yaml`);
   await fs.writeFile(tempManifestPath, jobManifest, 'utf8');
 
+  const kubeEnv = getKubeExecutionEnv();
+  const ctxArgs = await getClusterContextArgs(clusterName);
+
   try {
     // Delete existing job if already present
-    const jobName = `threat-sim-${targetPlaybook.id.toLowerCase().replace(/[^a-z0-9-]/g, '-')}`.slice(0, 50);
+    const jobName = sanitizeThreatJobName(targetPlaybook.id);
     try {
-      await execa('kubectl', ['delete', 'job', jobName, '-n', targetNamespace, '--ignore-not-found=true']);
+      await execa('kubectl', [...ctxArgs, 'delete', 'job', jobName, '-n', targetNamespace, '--ignore-not-found=true'], { env: kubeEnv });
     } catch {
       // Ignore
     }
 
     if (onLog) onLog(`[threat-sim] Applying simulation Job '${jobName}' to namespace '${targetNamespace}'...`);
-    await execa('kubectl', ['apply', '-f', tempManifestPath, '-n', targetNamespace]);
+    await execa('kubectl', [...ctxArgs, 'apply', '-f', tempManifestPath, '-n', targetNamespace], { env: kubeEnv });
 
     if (onLog) {
       onLog(`✔ [threat-sim] Simulation Job launched successfully in namespace '${targetNamespace}'!`);

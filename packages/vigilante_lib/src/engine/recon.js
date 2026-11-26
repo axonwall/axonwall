@@ -14,6 +14,7 @@ import {
 import { autoSignIfConfigured } from './gpg.js';
 import { saveEvidenceFile } from './evidence.js';
 import { detectNetworkSubnets } from './nmap.js';
+import { assertSafeOutboundTarget } from './ssrf.js';
 import { logger } from '../utils/logger.js';
 
 function assertBoundedInt(value, label, min, max) {
@@ -32,31 +33,14 @@ function assertPortsSpec(ports) {
   return spec;
 }
 
-function isLinkLocalOrMetadataHost(hostname) {
-  const host = String(hostname || '').replace(/^\[|\]$/g, '').toLowerCase();
-  if (!host) return true;
-  if (host === 'metadata.google.internal' || host.startsWith('169.254.')) return true;
-  if (host.startsWith('::ffff:169.254.') || host.startsWith('fe80:') || host.startsWith('fe80%')) return true;
-  return false;
-}
-
-function assertSafeProbeHttpUrl(targetUrl) {
-  const normUrl = String(targetUrl || '').trim();
-  if (!normUrl) throw new Error('Empty probe URL');
-  const isBareIp = Boolean(net.isIP(normUrl.replace(/^\[|\]$/g, '')));
-  const hasHostPortPrefix = /^[^/:?#]+:\d+(?:[/?#]|$)/.test(normUrl);
-  const hasExplicitScheme = !isBareIp && !hasHostPortPrefix && /^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(normUrl);
-  const withScheme = hasExplicitScheme
-    ? normUrl
-    : (isBareIp && net.isIP(normUrl) === 6 ? `http://[${normUrl}]` : `http://${normUrl}`);
-  const parsed = new URL(withScheme);
-  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-    throw new Error(`Disallowed URL scheme '${parsed.protocol}'`);
-  }
-  if (isLinkLocalOrMetadataHost(parsed.hostname)) {
-    throw new Error(`Access to link-local/metadata host '${parsed.hostname}' is blocked`);
-  }
-  return parsed.toString();
+async function assertSafeReconTarget(targetUrl, label = 'recon target', opts = {}) {
+  return assertSafeOutboundTarget(targetUrl, {
+    label,
+    allowBareHost: true,
+    allowPrivate: opts.allowPrivate,
+    allowLoopback: opts.allowLoopback,
+    allowMetadata: false
+  });
 }
 
 function validateReconTargetAndOptions(target, opts = {}) {
@@ -185,21 +169,26 @@ export async function checkReconToolsInstalled() {
  * @param {string} host 
  * @param {number[]} ports 
  * @param {number} [timeoutMs=800]
+ * @param {object} [opts={}]
  * @returns {Promise<Array<{ host: string, ip: string, port: number }>>}
  */
-export async function probePortsNative(host, ports = [80, 443, 22, 53, 8080, 8443, 3000], timeoutMs = 800) {
-  const cleanHost = String(host || '').trim();
-  if (!isValidHostname(cleanHost) && !net.isIP(cleanHost)) {
+export async function probePortsNative(host, ports = [80, 443, 22, 53, 8080, 8443, 3000], timeoutMs = 800, opts = {}) {
+  const cleanHost = assertCliTarget(String(host || '').trim(), 'probe host');
+  const bareHost = cleanHost.replace(/^\[|\]$/g, '');
+  if (!isValidHostname(bareHost) && !net.isIP(bareHost)) {
     throw new Error(`Invalid probe host '${host}': must be a valid hostname or IP`);
   }
+  const { hostname: safeHost } = await assertSafeReconTarget(cleanHost, 'recon port probe target', opts);
+  const validPorts = ports.map((p) => Number(assertBoundedInt(p, 'probe port', 1, 65535)));
+
   const open = [];
-  const promises = ports.map((port) => {
+  const promises = validPorts.map((port) => {
     return new Promise((resolve) => {
       const socket = new net.Socket();
       socket.setTimeout(timeoutMs);
 
       socket.on('connect', () => {
-        open.push({ host: cleanHost, ip: socket.remoteAddress || cleanHost, port });
+        open.push({ host: safeHost, ip: socket.remoteAddress || safeHost, port });
         socket.destroy();
         resolve(true);
       });
@@ -214,7 +203,7 @@ export async function probePortsNative(host, ports = [80, 443, 22, 53, 8080, 844
         resolve(false);
       });
 
-      socket.connect(port, cleanHost);
+      socket.connect(port, safeHost);
     });
   });
 
@@ -225,27 +214,27 @@ export async function probePortsNative(host, ports = [80, 443, 22, 53, 8080, 844
 /**
  * Native Node.js HTTP/HTTPS service probe fallback (when Httpx is missing)
  * @param {string} targetUrl 
+ * @param {object} [opts={}]
  * @returns {Promise<object>}
  */
-export async function probeHttpNative(targetUrl) {
-  const safeUrl = assertSafeProbeHttpUrl(targetUrl);
+export async function probeHttpNative(targetUrl, opts = {}) {
+  const { url: parsedUrl } = await assertSafeReconTarget(targetUrl, 'recon HTTP probe URL', opts);
+  const safeUrl = parsedUrl.toString();
 
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 3500);
   try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 3500);
     const res = await fetch(safeUrl, {
       method: 'GET',
       redirect: 'error',
       signal: controller.signal,
       headers: { 'User-Agent': 'Vigilante-Recon/1.0' }
     });
-    clearTimeout(timeout);
 
     const bodyText = await res.text();
     const titleMatch = bodyText.match(/<title[^>]*>([^<]+)<\/title>/i);
     const title = titleMatch ? titleMatch[1].trim() : '';
     const server = res.headers.get('server') || 'unknown';
-    const parsedUrl = new URL(safeUrl);
 
     return {
       url: safeUrl,
@@ -260,11 +249,13 @@ export async function probeHttpNative(targetUrl) {
   } catch (err) {
     return {
       url: safeUrl,
-      host: targetUrl,
+      host: parsedUrl.hostname,
       status_code: 0,
       failed: true,
       error: err.message
     };
+  } finally {
+    clearTimeout(timeout);
   }
 }
 
@@ -373,6 +364,7 @@ async function runScannerCli(bin, args) {
 
 export async function runReconScan(target, profileId = 'fast-ports', opts = {}) {
   const { cleanTarget } = validateReconTargetAndOptions(target, opts);
+  const { hostname: safeHost } = await assertSafeReconTarget(cleanTarget, 'recon scan target', opts);
   await ensureVigilanteConfig();
   const reconDir = getVigilanteReconDir();
   const profile = RECON_PROFILES.find((p) => p.id === profileId) || RECON_PROFILES[0];
@@ -392,7 +384,7 @@ export async function runReconScan(target, profileId = 'fast-ports', opts = {}) 
     } else {
       // Native socket probe fallback
       const ports = opts.topPorts ? [80, 443, 22, 21, 53, 161, 389, 8080, 8443, 9000] : [80, 443, 22, 8080];
-      openPorts = await probePortsNative(cleanTarget, ports);
+      openPorts = await probePortsNative(safeHost, ports, 800, opts);
       rawOutput = JSON.stringify(openPorts, null, 2);
     }
   } else if (profile.tool === 'httpx') {
@@ -402,18 +394,18 @@ export async function runReconScan(target, profileId = 'fast-ports', opts = {}) 
       webServices = parseHttpxOutput(rawOutput);
     } else {
       // Native fetch fallback
-      const webResult = await probeHttpNative(cleanTarget);
+      const webResult = await probeHttpNative(cleanTarget, opts);
       if (!webResult.failed) webServices.push(webResult);
       rawOutput = JSON.stringify(webServices, null, 2);
     }
   } else if (profile.tool === 'combined') {
     // Pipeline ports into web services
     const ports = [80, 443, 8080, 8443, 3000];
-    openPorts = await probePortsNative(cleanTarget, ports);
+    openPorts = await probePortsNative(safeHost, ports, 800, opts);
     for (const p of openPorts) {
       const scheme = p.port === 443 || p.port === 8443 ? 'https' : 'http';
-      const authority = net.isIP(cleanTarget) === 6 ? `[${cleanTarget}]` : cleanTarget;
-      const webResult = await probeHttpNative(`${scheme}://${authority}:${p.port}`);
+      const authority = net.isIP(safeHost) === 6 ? `[${safeHost}]` : safeHost;
+      const webResult = await probeHttpNative(`${scheme}://${authority}:${p.port}`, opts);
       if (!webResult.failed) webServices.push(webResult);
     }
     rawOutput = JSON.stringify({ openPorts, webServices }, null, 2);
@@ -437,7 +429,7 @@ export async function runReconScan(target, profileId = 'fast-ports', opts = {}) 
 
   // Also save as formal evidence artifact
   try {
-    await saveEvidenceFile('scans', target, `${scanId}.json`, record);
+    await saveEvidenceFile('scans', safeHost, `${scanId}.json`, record);
   } catch (err) {
     logger.warn('RECON', `Could not save evidence file: ${err.message}`);
   }

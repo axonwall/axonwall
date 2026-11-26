@@ -2,10 +2,11 @@
 
 import { useState, useEffect } from 'react';
 import { PluginDisabledGate } from '@/components/PluginDisabledGate';
-import { KeyRound, Terminal, Download, Cpu, CheckCircle2, Copy, Plus, Trash2 } from 'lucide-react';
+import { KeyRound, Terminal, Download, Cpu, CheckCircle2, AlertCircle, Copy, Plus, Trash2 } from 'lucide-react';
 import { compileOpenVpn, generateClientOvpnProfile } from '@axonwall/lib/compile/openvpn';
 import { getCurrentDesiredState } from '@/server/agent';
 import { useDesiredStateApply } from '@/lib/use-desired-state-apply';
+import { allocateLowestUnusedSuffixedName } from '@/lib/state-preservation';
 import type { DesiredState, OpenVpnServer } from '@axonwall/lib/schemas';
 
 function OpenVpnPageContent() {
@@ -14,7 +15,7 @@ function OpenVpnPageContent() {
   const [servers, setServers] = useState<OpenVpnServer[]>([]);
   const [copied, setCopied] = useState(false);
   const [saving, setSaving] = useState(false);
-  const [statusMsg, setStatusMsg] = useState<string | null>(null);
+  const [statusMsg, setStatusMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
   // Add server form
   const [newName, setNewName] = useState('');
@@ -51,11 +52,17 @@ function OpenVpnPageContent() {
       };
       setFullState(nextState);
       const res = await applyState(nextState);
-      setStatusMsg(res.message || 'Saved OpenVPN configuration to /etc/axonwall/vpn.yaml');
+      setStatusMsg({
+        type: 'success',
+        text: res.message || 'Saved OpenVPN configuration to /etc/axonwall/vpn.yaml',
+      });
     } catch (err: any) {
       setServers(prevServers);
       setFullState(prevFullState);
-      setStatusMsg(`Error: ${err?.message || 'Failed to save OpenVPN servers'}`);
+      setStatusMsg({
+        type: 'error',
+        text: err?.message || 'Failed to save OpenVPN servers',
+      });
     } finally {
       setSaving(false);
     }
@@ -64,6 +71,10 @@ function OpenVpnPageContent() {
   const handleAddServer = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newName.trim()) return;
+    const devName = allocateLowestUnusedSuffixedName(
+      servers.map((s) => s.devName),
+      newDcoEnabled ? 'ovpn-dco' : 'tun'
+    );
     const nextServers: OpenVpnServer[] = [
       ...servers,
       {
@@ -72,7 +83,7 @@ function OpenVpnPageContent() {
         protocol: newProto,
         port: Number(newPort) || 1194,
         deviceType: 'tun',
-        devName: newDcoEnabled ? `ovpn-dco${servers.length}` : `tun${servers.length}`,
+        devName,
         dcoEnabled: newDcoEnabled,
         tunnelNetwork: newTunnelNet.trim() || '10.8.0.0/24',
         cipher: 'AES-256-GCM',
@@ -149,9 +160,19 @@ function OpenVpnPageContent() {
       </div>
 
       {statusMsg && (
-        <div className="p-3 bg-emerald-500/10 border border-emerald-500/30 rounded-lg text-xs text-emerald-300 flex items-center gap-2">
-          <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
-          <span>{statusMsg}</span>
+        <div
+          className={`p-3 rounded-lg text-xs flex items-center gap-2 border ${
+            statusMsg.type === 'error'
+              ? 'bg-red-500/10 border-red-500/30 text-red-300'
+              : 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300'
+          }`}
+        >
+          {statusMsg.type === 'error' ? (
+            <AlertCircle className="w-4 h-4 text-red-400 shrink-0" />
+          ) : (
+            <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+          )}
+          <span>{statusMsg.text}</span>
         </div>
       )}
 

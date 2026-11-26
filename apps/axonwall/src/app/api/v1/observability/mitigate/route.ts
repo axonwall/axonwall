@@ -14,7 +14,7 @@ function errStatus(err: unknown): number {
 export async function POST(req: NextRequest) {
   try {
     const session = await getSession();
-    assertActionPermitted(session, 'admin');
+    assertActionPermitted(session, 'admin', 'observability:mitigate');
     if (!hasServiceTokenScope(session, 'observability:mitigate')) {
       return NextResponse.json(
         { status: 'error', accepted: false, error: 'Forbidden: token lacks observability:mitigate scope.' },

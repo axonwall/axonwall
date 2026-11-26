@@ -18,6 +18,11 @@ pnpm test
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${REPO_ROOT}"
 
+if [ -n "$(git status --porcelain)" ]; then
+  echo "Error: Working tree has uncommitted changes. Commit or stash them before running release-tagger.sh." >&2
+  exit 1
+fi
+
 VERSION_FILE="${REPO_ROOT}/VERSION"
 
 if [ ! -f "${VERSION_FILE}" ]; then
@@ -225,12 +230,36 @@ if [ -f packaging/k3s-storage/axonwall-k3s-firstboot ]; then
 fi
 
 echo ">> Staging and creating git commit..."
-git add VERSION \
-        package.json \
-        apps/ \
-        packages/ \
-        packaging/ \
-        deploy/
+STAGE_FILES=()
+for cand in \
+  VERSION \
+  package.json \
+  apps/axonwall/package.json \
+  apps/axonwall-controller/package.json \
+  packages/axonwall_lib/package.json \
+  apps/axonwall-satellite/Makefile \
+  apps/axonwall-satellite/main.go \
+  apps/axonwalld/main.go \
+  apps/axonwalld/engine/watchdog.go \
+  packaging/debian/build-deb.sh \
+  apps/axonwall/src/components/ConsoleHeader.tsx \
+  apps/axonwall/src/components/ConsoleSidebar.tsx \
+  apps/axonwall/src/app/api/v1/openapi.json/route.ts \
+  "apps/axonwall/src/app/(console)/system/updates/page.tsx" \
+  apps/axonwall/src/server/agent.ts \
+  deploy/k8s/daemonset.yaml \
+  deploy/k8s/router-pod.yaml \
+  deploy/k8s/helm/axonwall/Chart.yaml \
+  deploy/k8s/helm/axonwall/values.yaml \
+  deploy/k8s/helm/axonwall-analytics/Chart.yaml \
+  deploy/k8s/helm/axonwall-analytics/values.yaml \
+  packaging/k3s-storage/02-axonwall-analytics-helmchart.yaml.example \
+  packaging/k3s-storage/axonwall-k3s-firstboot; do
+  if [ -e "${cand}" ]; then
+    STAGE_FILES+=("${cand}")
+  fi
+done
+git add -- "${STAGE_FILES[@]}"
 
 git commit -m "chore(release): bump version to ${NEW_VERSION}"
 
@@ -244,8 +273,8 @@ echo " Tag:    ${TAG_NAME}"
 echo "============================================================"
 
 if [ "${PUSH_FLAG}" = true ]; then
-  echo ">> Pushing branch and tag to origin..."
-  git push origin main
+  echo ">> Pushing HEAD and tag to origin..."
+  git push origin HEAD
   git push origin "${TAG_NAME}"
   echo ">> Pushed! GitHub Actions workflow \"Build Axonwall Appliance ISO\" will now trigger on tag ${TAG_NAME}."
 else

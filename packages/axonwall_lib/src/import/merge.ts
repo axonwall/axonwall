@@ -69,11 +69,12 @@ export function mergeFirewallConfigs(
     merged.aliases = merged.aliases || [];
     const existingNames = new Set(merged.aliases.map((a) => a.name));
     for (const a of imported.aliases) {
-      let finalName = a.name;
-      if (aliasPrefix) {
-        finalName = `${aliasPrefix}_${a.name}`;
-      } else if (existingNames.has(a.name)) {
-        finalName = `${a.name}_imported`;
+      let baseCandidate = aliasPrefix ? `${aliasPrefix}_${a.name}` : existingNames.has(a.name) ? `${a.name}_imported` : a.name;
+      let finalName = baseCandidate;
+      let suffix = 2;
+      while (existingNames.has(finalName)) {
+        finalName = `${baseCandidate}_${suffix}`;
+        suffix += 1;
       }
       aliasNameMap.set(a.name, finalName);
 
@@ -101,11 +102,14 @@ export function mergeFirewallConfigs(
       destinationPort: remapAliasRef(rule.destinationPort) ?? rule.destinationPort,
     }));
 
-    if (rulePlacement === 'prepend') {
-      merged.rules = [...rewrittenRules, ...(merged.rules || [])];
-    } else {
-      merged.rules = [...(merged.rules || []), ...rewrittenRules];
-    }
+    const combinedRules =
+      rulePlacement === 'prepend'
+        ? [...rewrittenRules, ...(merged.rules || [])]
+        : [...(merged.rules || []), ...rewrittenRules];
+    merged.rules = combinedRules.map((rule, idx) => ({
+      ...rule,
+      sortOrder: (idx + 1) * 10,
+    }));
   }
 
   // 5. NAT Rules
@@ -118,7 +122,10 @@ export function mergeFirewallConfigs(
       destinationPort: remapAliasRef(rule.destinationPort) ?? rule.destinationPort,
       targetPort: remapAliasRef(rule.targetPort) ?? rule.targetPort,
     }));
-    merged.nat = [...(merged.nat || []), ...rewrittenNat];
+    merged.nat = [...(merged.nat || []), ...rewrittenNat].map((rule, idx) => ({
+      ...rule,
+      sortOrder: (idx + 1) * 10,
+    }));
   }
 
   // 6. DHCP Static Mappings

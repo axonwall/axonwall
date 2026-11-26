@@ -46,18 +46,21 @@ type PromMetricSample struct {
 }
 
 type MetricsShipper struct {
-	mu           sync.RWMutex
-	cfg          *ObservabilityRuntimeBundle
-	running      bool
-	stopCh       chan struct{}
-	wg           sync.WaitGroup
-	httpSrv      *http.Server
-	queue        *TelemetryQueue
-	ebpf         *EBPFManager
-	hardware     *HardwareManager
-	nas          *NasManager
-	sdwanFn      func() []GatewayProbeStats
-	extraStatsFn func() []TelemetryQueueStats
+	mu            sync.RWMutex
+	cfg           *ObservabilityRuntimeBundle
+	running       bool
+	stopCh        chan struct{}
+	wg            sync.WaitGroup
+	httpSrv       *http.Server
+	httpClient    *http.Client
+	httpTransport *http.Transport
+	httpClientErr error
+	queue         *TelemetryQueue
+	ebpf          *EBPFManager
+	hardware      *HardwareManager
+	nas           *NasManager
+	sdwanFn       func() []GatewayProbeStats
+	extraStatsFn  func() []TelemetryQueueStats
 
 	prevCpuTotal uint64
 	prevCpuIdle  uint64
@@ -95,8 +98,16 @@ func (m *MetricsShipper) ApplyConfig(b *ObservabilityRuntimeBundle) {
 	if b == nil {
 		return
 	}
+	targetURL := b.Offload.ResolvedRemoteWriteUrlOrDefault()
+	client, tr, clientErr := buildObservabilityHTTPClient(b, targetURL)
 	m.mu.Lock()
+	if m.httpTransport != nil {
+		m.httpTransport.CloseIdleConnections()
+	}
 	m.cfg = b
+	m.httpClient = client
+	m.httpTransport = tr
+	m.httpClientErr = clientErr
 	m.mu.Unlock()
 	m.queue.Configure(
 		b.Offload.Buffer.MaxMemoryMB,
@@ -105,7 +116,7 @@ func (m *MetricsShipper) ApplyConfig(b *ObservabilityRuntimeBundle) {
 		b.Offload.Buffer.DiskSpoolMaxMB,
 	)
 
-	shouldRun := (b.Offload.Enabled && b.Offload.Metrics.Enabled && b.Offload.ResolvedRemoteWriteURL != "") ||
+	shouldRun := (b.Offload.Enabled && b.Offload.Metrics.Enabled && targetURL != "") ||
 		b.Offload.Metrics.ExposeScrape
 	if !shouldRun {
 		return
@@ -188,6 +199,11 @@ func (m *MetricsShipper) Stop() {
 		cancel()
 	}
 	m.wg.Wait()
+	m.mu.Lock()
+	if m.httpTransport != nil {
+		m.httpTransport.CloseIdleConnections()
+	}
+	m.mu.Unlock()
 }
 
 func (m *MetricsShipper) collectLoop(stopCh chan struct{}) {
@@ -241,22 +257,48 @@ func (m *MetricsShipper) flushQueue(cfg *ObservabilityRuntimeBundle) {
 	if targetURL == "" {
 		return
 	}
-	batches := m.queue.PopBatch(8)
+	m.mu.RLock()
+	client := m.httpClient
+	clientErr := m.httpClientErr
+	m.mu.RUnlock()
+	if clientErr != nil {
+		m.lastErr.Store(clientErr.Error())
+		return
+	}
+	if client == nil {
+		var tr *http.Transport
+		client, tr, clientErr = buildObservabilityHTTPClient(cfg, targetURL)
+		if clientErr != nil {
+			m.lastErr.Store(clientErr.Error())
+			return
+		}
+		m.mu.Lock()
+		if m.httpClient == nil {
+			m.httpClient = client
+			m.httpTransport = tr
+		} else {
+			if tr != nil {
+				tr.CloseIdleConnections()
+			}
+			client = m.httpClient
+		}
+		m.mu.Unlock()
+	}
+
+	batches := m.queue.PeekBatch(8)
 	if len(batches) == 0 {
 		return
 	}
-	client := m.buildHTTPClient(cfg, targetURL)
 	token := strings.TrimSpace(cfg.Offload.IngestToken)
 	if token == "" {
 		token = strings.TrimSpace(cfg.VictoriaMetrics.BearerToken)
 	}
 
-	for idx, body := range batches {
+	for _, body := range batches {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, bytes.NewReader(body))
 		if err != nil {
 			cancel()
-			m.queue.RequeueFront(batches[idx:])
 			m.lastErr.Store(err.Error())
 			return
 		}
@@ -269,7 +311,6 @@ func (m *MetricsShipper) flushQueue(cfg *ObservabilityRuntimeBundle) {
 		resp, err := client.Do(req)
 		if err != nil {
 			cancel()
-			m.queue.RequeueFront(batches[idx:])
 			m.lastErr.Store(err.Error())
 			return
 		}
@@ -277,31 +318,33 @@ func (m *MetricsShipper) flushQueue(cfg *ObservabilityRuntimeBundle) {
 		_ = resp.Body.Close()
 		cancel()
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			m.queue.RequeueFront(batches[idx:])
 			m.lastErr.Store(fmt.Sprintf("HTTP %d from VictoriaMetrics remote-write", resp.StatusCode))
 			return
 		}
+		m.queue.AckBatch(1)
 		m.queue.MarkSent(1)
 		m.lastPushAt.Store(time.Now().UnixMilli())
 		m.lastErr.Store("")
 	}
 }
 
-func (m *MetricsShipper) buildHTTPClient(cfg *ObservabilityRuntimeBundle, targetURL string) *http.Client {
-	client := &http.Client{Timeout: 6 * time.Second}
-	if strings.HasPrefix(targetURL, "https://") {
-		if tlsCfg, err := buildTLSConfigFromBundleParams(
+func buildObservabilityHTTPClient(cfg *ObservabilityRuntimeBundle, targetURL string) (*http.Client, *http.Transport, error) {
+	tr := &http.Transport{}
+	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(targetURL)), "https://") {
+		tlsCfg, err := buildTLSConfigFromBundleParams(
 			cfg.Offload.UseHaMtls,
 			cfg.Offload.TLSCACert,
 			"", "", "",
 			cfg.Offload.TLSInsecureSkipVerify,
 			false,
 			false,
-		); err == nil {
-			client.Transport = &http.Transport{TLSClientConfig: tlsCfg}
+		)
+		if err != nil {
+			return nil, nil, fmt.Errorf("TLS config error for %s: %w", targetURL, err)
 		}
+		tr.TLSClientConfig = tlsCfg
 	}
-	return client
+	return &http.Client{Timeout: 6 * time.Second, Transport: tr}, tr, nil
 }
 
 func (m *MetricsShipper) collectAllSamples(cfg *ObservabilityRuntimeBundle) []PromMetricSample {
@@ -331,6 +374,9 @@ func (m *MetricsShipper) collectAllSamples(cfg *ObservabilityRuntimeBundle) []Pr
 			TimestampMs: nowMs,
 		})
 	}
+
+	// 0. Host/agent liveness
+	add("axonwall_up", 1)
 
 	// 1. CPU & Load
 	if cpuPct, ok := m.sampleCPUPercent(); ok {
@@ -582,12 +628,17 @@ func (m *MetricsShipper) sampleCPUPercent() (float64, bool) {
 		m.hasPrevCpu = true
 		return 0, false
 	}
+	if total <= m.prevCpuTotal || idle < m.prevCpuIdle {
+		m.prevCpuTotal = total
+		m.prevCpuIdle = idle
+		return 0, false
+	}
 	dTotal := total - m.prevCpuTotal
 	dIdle := idle - m.prevCpuIdle
 	m.prevCpuTotal = total
 	m.prevCpuIdle = idle
-	if dTotal == 0 {
-		return 0, true
+	if dIdle > dTotal {
+		return 0, false
 	}
 	return (float64(dTotal-dIdle) / float64(dTotal)) * 100.0, true
 }

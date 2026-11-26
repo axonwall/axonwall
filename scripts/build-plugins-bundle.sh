@@ -263,7 +263,7 @@ const extractMeta = (filePath, filename) => {
         depends: Array.from(new Set([...parseDebDeps(fields.Depends), ...parseDebDeps(fields['Pre-Depends'])])),
       };
     }
-    const pkgInfo = execFileSync('tar', ['-xOf', filePath, '.PKGINFO'], {
+    const pkgInfo = execFileSync('tar', ['-i', '-xOf', filePath, '.PKGINFO'], {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
     });

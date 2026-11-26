@@ -2,11 +2,14 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getSession } from '@/server/auth';
 import { assertActionPermitted } from '@/server/auth-guard';
 import { callAgentApiDetailed } from '@/server/agent-client';
+import { checkPluginApiGuard } from '@/server/plugin-guard';
 
 export async function GET() {
   try {
     const session = await getSession();
     assertActionPermitted(session);
+    const guard = await checkPluginApiGuard('librenms');
+    if (guard) return guard;
     const res = await callAgentApiDetailed<{ alerts: unknown[] }>('/v1/librenms/webhook', 'GET', undefined, 5_000);
     if (res.kind !== 'ok') {
       return NextResponse.json({ status: 'error', error: res.kind === 'http_error' ? res.message : 'Daemon unreachable' }, { status: 502 });
@@ -29,6 +32,8 @@ export async function POST(req: NextRequest) {
     if (!headerSecret) {
       return NextResponse.json({ status: 'error', error: 'Missing X-Axonwall-Webhook-Secret header' }, { status: 401 });
     }
+    const guard = await checkPluginApiGuard('librenms');
+    if (guard) return guard;
     const payload = await req.json().catch(() => null);
     if (!payload || typeof payload !== 'object') {
       return NextResponse.json({ status: 'error', error: 'Invalid webhook JSON payload' }, { status: 400 });

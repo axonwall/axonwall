@@ -285,7 +285,7 @@ func (e *EdgeNetworkEngine) AddRoute(route EdgeRouteSpec) error {
 }
 
 // RemoveRoute deletes a static or default route from the kernel via native Netlink RTM_DELROUTE.
-// A route that is already gone is a success (ENOENT) — the desired end state is "route absent".
+// A route that is already gone is a success (ESRCH / ENOENT) — the desired end state is "route absent".
 // Unlike AddRoute it does not require the route device to exist: a deleted device takes its
 // routes with it, so a missing device means the route is already gone.
 func (e *EdgeNetworkEngine) RemoveRoute(route EdgeRouteSpec) error {
@@ -294,7 +294,7 @@ func (e *EdgeNetworkEngine) RemoveRoute(route EdgeRouteSpec) error {
 	}
 
 	if err := removeRouteNetlink(route); err != nil {
-		if errors.Is(err, syscall.ENOENT) {
+		if errors.Is(err, syscall.ENOENT) || errors.Is(err, syscall.ESRCH) {
 			return nil
 		}
 		if ipBin, lookErr := exec.LookPath("ip"); lookErr == nil {

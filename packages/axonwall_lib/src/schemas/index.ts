@@ -18,7 +18,7 @@ export type InterfaceRole = z.infer<typeof InterfaceRoleSchema>;
 export const InterfaceSchema = z.object({
   id: z.string().uuid().optional(),
   name: z.string().min(1).max(32).regex(/^[a-zA-Z0-9_.-]+$/, 'Invalid interface name'), // e.g. "wan1", "wan2", "lan1", "lan2"
-  device: z.string().min(1).max(32).regex(/^[a-zA-Z0-9_.:-]+$/, 'Invalid device identifier'), // e.g. "eth0", "enp1s0", "ens18"
+  device: z.string().min(1).max(15).regex(/^[a-zA-Z0-9_.:-]+$/, 'Invalid device identifier'), // e.g. "eth0", "enp1s0", "ens18"
   role: InterfaceRoleSchema.optional(),
   ipv6Mode: z.enum(['disabled', 'auto', 'static', 'delegated', 'ula-only']).optional(),
   dhcpServer: z.boolean().optional(),
@@ -164,9 +164,9 @@ export const NatRuleSchema = z.object({
   targetIp: z.string().refine((v) => !v || isValidIPv4(v) || isValidIPv6(v) || isValidCIDR(v) || v === 'wan_ip', {
     message: 'Invalid NAT target IP',
   }).optional(), // translated internal IP or NPTv6 prefix
-  targetPort: z.string().refine((v) => !v || isValidPortSpec(v) || v === 'any', {
+  targetPort: z.string().refine((v) => !v || v === 'any' || (!v.includes(',') && !v.startsWith('$') && isValidPortRange(v)), {
     message: 'Invalid NAT target port',
-  }).optional(), // translated internal port
+  }).optional(), // translated internal port (single port or start-end range)
   natReflection: z.boolean().optional(), // hairpin NAT reflection override
   log: z.boolean().default(false),
   enabled: z.boolean().default(true),
@@ -818,6 +818,7 @@ export const VrrpInstanceSchema = z.object({
   vrid: z.number().int().min(1).max(255).default(1),
   interface: z.string().min(1).default('eth0'),
   priority: z.number().int().min(1).max(255).default(100),
+  nopreempt: z.boolean().optional(),
   virtualIps: z.array(z.string()).default([]),
   authPassword: z.string().optional(),
 });
@@ -1112,6 +1113,7 @@ export const HaProxyBackendSchema = z.object({
   name: z.string().min(1),
   mode: z.enum(['http', 'tcp']).default('http'),
   balance: z.enum(['roundrobin', 'leastconn', 'source']).default('roundrobin'),
+  healthCheckPath: z.string().optional(),
   servers: z.array(HaProxyBackendServerSchema).default([]),
 });
 export type HaProxyBackend = z.infer<typeof HaProxyBackendSchema>;
@@ -1675,7 +1677,7 @@ export const GeoIpConfigSchema = z.object({
   mode: GeoIpModeSchema.default('block'),
   direction: GeoIpDirectionSchema.default('in'),
   countries: z.array(z.string().length(2)).default([]),
-  excludedSubnets: z.array(z.string()).default(['10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16']),
+  excludedSubnets: z.array(z.string()).default(['10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16', '100.64.0.0/10', '127.0.0.0/8']),
   log: z.boolean().default(true),
   description: z.string().max(255).default(''),
 });
@@ -1964,6 +1966,57 @@ export const BpfTokenPresetSchema = z.enum([
 ]);
 export type BpfTokenPreset = z.infer<typeof BpfTokenPresetSchema>;
 
+function validateBpfTokenDelegationFields(
+  val: {
+    enabled?: boolean;
+    preset: BpfTokenPreset;
+    delegateCmds?: string;
+    delegateProgs?: string;
+    delegateMaps?: string;
+    delegateAttachs?: string;
+  },
+  ctx: z.RefinementCtx,
+): void {
+  if (val.enabled === false || val.preset === 'disabled') return;
+  if (val.preset === 'custom') {
+    for (const field of ['delegateCmds', 'delegateProgs', 'delegateMaps', 'delegateAttachs'] as const) {
+      const tokens = (val[field] ?? '')
+        .split(':')
+        .map((s) => s.trim())
+        .filter(Boolean);
+      if (tokens.length === 0) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: [field],
+          message: `Custom BPF_TOKEN preset requires explicit non-empty ${field}`,
+        });
+      }
+    }
+  }
+  if (val.delegateProgs) {
+    const progs = val.delegateProgs.split(':').map((s) => s.trim().toLowerCase()).filter(Boolean);
+    for (const p of progs) {
+      if ((FORBIDDEN_RING0_BPF_PROGS as readonly string[]).includes(p) || p === 'any') {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['delegateProgs'],
+          message: `BPF_TOKEN delegation rejects Ring-0 program type '${p}' (prevents bpf_probe_read_kernel() arbitrary host memory access)`,
+        });
+      }
+    }
+  }
+  for (const field of ['delegateCmds', 'delegateMaps', 'delegateAttachs'] as const) {
+    const v = val[field];
+    if (v && v.split(':').some((tok) => tok.trim().toLowerCase() === 'any')) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [field],
+        message: `${field} cannot use wildcard 'any'; specify explicit least-privilege bitmasks`,
+      });
+    }
+  }
+}
+
 export const BpfTokenDelegationSpecSchema = z
   .object({
     enabled: z.boolean().default(false),
@@ -1974,44 +2027,22 @@ export const BpfTokenDelegationSpecSchema = z
     delegateAttachs: z.string().regex(/^[a-z0-9_:]*$/).optional(),
     auditViaBpfLsm: z.boolean().default(true),
   })
-  .superRefine((val, ctx) => {
-    if (!val.enabled || val.preset === 'disabled') return;
-    if (val.delegateProgs) {
-      const progs = val.delegateProgs.split(':').map((s) => s.trim().toLowerCase()).filter(Boolean);
-      for (const p of progs) {
-        if ((FORBIDDEN_RING0_BPF_PROGS as readonly string[]).includes(p) || p === 'any') {
-          ctx.addIssue({
-            code: z.ZodIssueCode.custom,
-            path: ['delegateProgs'],
-            message: `BPF_TOKEN delegation rejects Ring-0 program type '${p}' (prevents bpf_probe_read_kernel() arbitrary host memory access)`,
-          });
-        }
-      }
-    }
-    for (const field of ['delegateCmds', 'delegateMaps', 'delegateAttachs'] as const) {
-      const v = val[field];
-      if (v && v.split(':').some((tok) => tok.trim().toLowerCase() === 'any')) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: [field],
-          message: `${field} cannot use wildcard 'any'; specify explicit least-privilege bitmasks`,
-        });
-      }
-    }
-  });
+  .superRefine(validateBpfTokenDelegationFields);
 export type BpfTokenDelegationSpec = z.infer<typeof BpfTokenDelegationSpecSchema>;
 
-export const K3sBpfTokenProfileSchema = z.object({
-  id: z.string().min(2).max(63).regex(/^[a-z0-9][a-z0-9._-]*$/),
-  preset: BpfTokenPresetSchema.default('network-dataplane'),
-  enabled: z.boolean().default(true),
-  delegateCmds: z.string().regex(/^[a-z0-9_:]*$/).optional(),
-  delegateProgs: z.string().regex(/^[a-z0-9_:]*$/).optional(),
-  delegateMaps: z.string().regex(/^[a-z0-9_:]*$/).optional(),
-  delegateAttachs: z.string().regex(/^[a-z0-9_:]*$/).optional(),
-  auditViaBpfLsm: z.boolean().default(true),
-  description: z.string().max(255).optional(),
-});
+export const K3sBpfTokenProfileSchema = z
+  .object({
+    id: z.string().min(2).max(63).regex(/^[a-z0-9][a-z0-9._-]*$/),
+    preset: BpfTokenPresetSchema.default('network-dataplane'),
+    enabled: z.boolean().default(true),
+    delegateCmds: z.string().regex(/^[a-z0-9_:]*$/).optional(),
+    delegateProgs: z.string().regex(/^[a-z0-9_:]*$/).optional(),
+    delegateMaps: z.string().regex(/^[a-z0-9_:]*$/).optional(),
+    delegateAttachs: z.string().regex(/^[a-z0-9_:]*$/).optional(),
+    auditViaBpfLsm: z.boolean().default(true),
+    description: z.string().max(255).optional(),
+  })
+  .superRefine(validateBpfTokenDelegationFields);
 export type K3sBpfTokenProfile = z.infer<typeof K3sBpfTokenProfileSchema>;
 
 export const K3sServiceLbPoolSchema = z.object({
@@ -2428,7 +2459,7 @@ export const VigilanteSoarPolicySchema = z.object({
 export type VigilanteSoarPolicy = z.infer<typeof VigilanteSoarPolicySchema>;
 
 export const McpServerConfigSchema = z.object({
-  enabled: z.boolean().default(true),
+  enabled: z.boolean().default(false),
   disabledReason: z.string().optional(),
 });
 export type McpServerConfig = z.infer<typeof McpServerConfigSchema>;
@@ -2892,6 +2923,18 @@ export const NetBoxSyncConfigSchema = z.object({
 });
 export type NetBoxSyncConfig = z.infer<typeof NetBoxSyncConfigSchema>;
 
+const isOptionalHttpUrl = (v: string): boolean => {
+  const trimmed = v.trim();
+  if (!trimmed) return true;
+  if (/[\r\n\0\s]/.test(trimmed)) return false;
+  try {
+    const u = new URL(trimmed);
+    return u.protocol === 'http:' || u.protocol === 'https:';
+  } catch {
+    return false;
+  }
+};
+
 export const NetBoxConfigSchema = z.object({
   enabled: z.boolean().default(false),
   namespace: z.string().regex(/^[a-z0-9]([-a-z0-9]*[a-z0-9])?$/).default('netbox'),
@@ -2912,7 +2955,10 @@ export const NetBoxConfigSchema = z.object({
   superuserEmail: z.string().email().default('admin@axonwall.local'),
   superuserPassword: z.string().optional(),
   apiToken: z.string().optional(),
-  externalUrl: z.string().optional(),
+  externalUrl: z
+    .string()
+    .refine(isOptionalHttpUrl, { message: 'externalUrl must be an http:// or https:// URL' })
+    .optional(),
   siteName: z.string().min(1).max(100).default('Axonwall Appliance'),
   siteSlug: z.string().regex(/^[a-z0-9-]+$/).default('axonwall-appliance'),
   ldapAuth: NetBoxLdapAuthSchema.prefault({}),
@@ -2983,7 +3029,10 @@ export const LibreNmsConfigSchema = z.object({
   adminUsername: z.string().regex(/^[a-zA-Z0-9._-]+$/).default('admin'),
   adminEmail: z.string().email().default('admin@axonwall.local'),
   adminPassword: z.string().optional(),
-  externalUrl: z.string().optional(),
+  externalUrl: z
+    .string()
+    .refine(isOptionalHttpUrl, { message: 'externalUrl must be an http:// or https:// URL' })
+    .optional(),
   apiToken: z.string().optional(),
   webhookSecret: z.string().optional(),
   timezone: z.string().default('UTC'),
@@ -3027,7 +3076,9 @@ export type TopologyPortSpec = z.infer<typeof TopologyPortSpecSchema>;
 export const TopologyLldpConfigSchema = z.object({
   enabled: z.boolean().default(false),
   excludeWan: z.boolean().default(true),
-  interfaces: z.array(z.string()).default([]),
+  interfaces: z
+    .array(z.string().regex(/^[a-zA-Z0-9_.:*-]+$/, 'Invalid LLDP interface pattern'))
+    .default([]),
   systemDescription: z.string().optional(),
 });
 export type TopologyLldpConfig = z.infer<typeof TopologyLldpConfigSchema>;

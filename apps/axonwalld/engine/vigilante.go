@@ -3,6 +3,7 @@ package engine
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -94,12 +95,20 @@ func writeFilesAtomic(writes []atomicFileWrite) error {
 			return fmt.Errorf("refusing to write %q: destination is a symlink", w.path)
 		}
 		prior, err := os.ReadFile(w.path)
-		existed := err == nil
+		existed := false
+		if err == nil {
+			existed = true
+		} else if !errors.Is(err, os.ErrNotExist) {
+			cleanup()
+			return fmt.Errorf("failed to read existing %q before atomic update: %w", w.path, err)
+		}
 		tmp, err := os.CreateTemp(filepath.Dir(w.path), ".axonwall-tmp-*")
 		if err != nil {
 			cleanup()
 			return fmt.Errorf("failed to create temp file for %q: %w", w.path, err)
 		}
+		tmpPath := tmp.Name()
+		stagedList = append(stagedList, staged{write: w, tmpPath: tmpPath, existed: existed, prior: prior})
 		if _, err := tmp.WriteString(w.content); err != nil {
 			_ = tmp.Close()
 			cleanup()
@@ -109,11 +118,10 @@ func writeFilesAtomic(writes []atomicFileWrite) error {
 			cleanup()
 			return fmt.Errorf("failed to close %q: %w", w.path, err)
 		}
-		if err := os.Chmod(tmp.Name(), w.perm); err != nil {
+		if err := os.Chmod(tmpPath, w.perm); err != nil {
 			cleanup()
 			return fmt.Errorf("failed to set permissions on %q: %w", w.path, err)
 		}
-		stagedList = append(stagedList, staged{write: w, tmpPath: tmp.Name(), existed: existed, prior: prior})
 	}
 	var renamed []staged
 	for _, s := range stagedList {
@@ -192,14 +200,29 @@ func ValidateIPOrCIDR(raw string) (string, string, error) {
 	return clean, "ipv6", nil
 }
 
+func (vm *VigilanteManager) pruneExpiredBlockedIPsLocked(now time.Time) {
+	for k, rec := range vm.blockedIPs {
+		if !rec.ExpiresAt.IsZero() && !rec.ExpiresAt.After(now) {
+			delete(vm.blockedIPs, k)
+		}
+	}
+}
+
 // BlockIP adds an offending IP address into the live nftables SOAR set
 func (vm *VigilanteManager) BlockIP(rawIP string, timeoutSec int) error {
 	cleanIP, family, err := ValidateIPOrCIDR(rawIP)
 	if err != nil {
 		return err
 	}
-	if _, _, _, err := ValidateTargetSafety(cleanIP, "", 0, 24, 64); err != nil {
+	normIP, isV6, _, err := ValidateTargetSafety(cleanIP, "", 0, 24, 64)
+	if err != nil {
 		return err
+	}
+	cleanIP = normIP
+	if isV6 {
+		family = "ipv6"
+	} else {
+		family = "ipv4"
 	}
 
 	if timeoutSec <= 0 {
@@ -225,6 +248,7 @@ func (vm *VigilanteManager) BlockIP(rawIP string, timeoutSec int) error {
 
 	vm.mu.Lock()
 	now := time.Now().UTC()
+	vm.pruneExpiredBlockedIPsLocked(now)
 	vm.blockedIPs[cleanIP] = BlockedIPRecord{
 		IP:        cleanIP,
 		Family:    family,
@@ -242,6 +266,14 @@ func (vm *VigilanteManager) UnblockIP(rawIP string) error {
 	cleanIP, family, err := ValidateIPOrCIDR(rawIP)
 	if err != nil {
 		return err
+	}
+	if _, _, isV6, _, canon, parseErr := ParseTargetIPOrCIDR(cleanIP); parseErr == nil {
+		cleanIP = canon
+		if isV6 {
+			family = "ipv6"
+		} else {
+			family = "ipv4"
+		}
 	}
 
 	setName := "vigilante_soar_blocklist_v4"
@@ -269,15 +301,14 @@ func (vm *VigilanteManager) UnblockIP(rawIP string) error {
 
 // ListBlockedIPs returns the list of currently active SOAR IP containments
 func (vm *VigilanteManager) ListBlockedIPs() []BlockedIPRecord {
-	vm.mu.RLock()
-	defer vm.mu.RUnlock()
+	vm.mu.Lock()
+	defer vm.mu.Unlock()
 
 	now := time.Now().UTC()
+	vm.pruneExpiredBlockedIPsLocked(now)
 	res := make([]BlockedIPRecord, 0, len(vm.blockedIPs))
 	for _, rec := range vm.blockedIPs {
-		if rec.ExpiresAt.IsZero() || rec.ExpiresAt.After(now) {
-			res = append(res, rec)
-		}
+		res = append(res, rec)
 	}
 	return res
 }
@@ -566,14 +597,24 @@ func (vm *VigilanteManager) StreamLiveTelemetry(w http.ResponseWriter, r *http.R
 
 	logFile, err := os.Open(vm.telemetryLog)
 	if err != nil {
-		// If suricata eve.json is missing (e.g. fresh boot), emit heartbeat
-		ticker := time.NewTicker(3 * time.Second)
-		defer ticker.Stop()
-		for {
+		// If suricata eve.json is missing (e.g. fresh boot), emit heartbeats while retrying open.
+		retryTicker := time.NewTicker(1 * time.Second)
+		hbTicker := time.NewTicker(3 * time.Second)
+		defer retryTicker.Stop()
+		defer hbTicker.Stop()
+		for logFile == nil {
 			select {
 			case <-r.Context().Done():
 				return
-			case t := <-ticker.C:
+			case <-retryTicker.C:
+				if f, openErr := os.Open(vm.telemetryLog); openErr == nil {
+					logFile = f
+				}
+			case t := <-hbTicker.C:
+				if f, openErr := os.Open(vm.telemetryLog); openErr == nil {
+					logFile = f
+					continue
+				}
 				sample := map[string]any{
 					"source":    "axonwall-sensor",
 					"severity":  "INFO",
@@ -583,15 +624,23 @@ func (vm *VigilanteManager) StreamLiveTelemetry(w http.ResponseWriter, r *http.R
 					"timestamp": t.UnixMilli(),
 				}
 				data, _ := json.Marshal(sample)
-				_, _ = fmt.Fprintf(w, "event: telemetry\ndata: %s\n\n", data)
+				if _, wErr := fmt.Fprintf(w, "event: telemetry\ndata: %s\n\n", data); wErr != nil {
+					return
+				}
 				flusher.Flush()
 			}
 		}
+		_, _ = logFile.Seek(0, io.SeekStart)
+	} else {
+		// Seek to end of pre-existing file to stream only new alerts
+		_, _ = logFile.Seek(0, io.SeekEnd)
 	}
-	defer logFile.Close()
+	defer func() {
+		if logFile != nil {
+			_ = logFile.Close()
+		}
+	}()
 
-	// Seek to end of file to stream only new alerts
-	_, _ = logFile.Seek(0, os.SEEK_END)
 	reader := bufio.NewReader(logFile)
 	var pendingLine string
 	const maxPendingTelemetryLine = 256 * 1024
@@ -661,7 +710,7 @@ func (vm *VigilanteManager) StreamLiveTelemetry(w http.ResponseWriter, r *http.R
 						if reopened, err := os.Open(vm.telemetryLog); err == nil {
 							_ = logFile.Close()
 							logFile = reopened
-							_, _ = logFile.Seek(0, io.SeekEnd)
+							_, _ = logFile.Seek(0, io.SeekStart)
 							reader = bufio.NewReader(logFile)
 							pendingLine = ""
 							log.Printf("[VigilanteManager] Telemetry log rotated; reopened %s", vm.telemetryLog)

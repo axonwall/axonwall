@@ -60,7 +60,9 @@ describe('High Availability & Distributed SQLite Sync Compilers', () => {
     const conf = compileKeepalived(baseHaConfig, 'axon-node-1');
     expect(conf).toContain('router_id axon-node-1');
     expect(conf).toContain('vrrp_instance VI_LAN');
-    expect(conf).toContain('state MASTER');
+    expect(conf).toContain('state BACKUP');
+    expect(conf).toContain('nopreempt');
+    expect(conf).not.toContain('state MASTER');
     expect(conf).toContain('notify_master "/usr/local/bin/axonwall-ha-notify MASTER"');
     expect(conf).toContain('notify_backup "/usr/local/bin/axonwall-ha-notify BACKUP"');
     expect(conf).toContain('notify_fault  "/usr/local/bin/axonwall-ha-notify FAULT"');

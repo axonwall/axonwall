@@ -6,6 +6,26 @@ import path from 'node:path';
 import { logger } from '../utils/logger.js';
 import { runInteractiveTerminal } from '../utils/terminal-runner.js';
 import { sanitizePathComponent, assertDnsLabel, assertCliTarget } from './config.js';
+import { getClusterContextArgs, getKubeExecutionEnv } from './k8s.js';
+
+function getSyncClusterContextArgs(clusterName) {
+  if (!clusterName) return [];
+  const clean = assertDnsLabel(clusterName, 'clusterName');
+  try {
+    const res = spawnSync('kubectl', ['config', 'get-contexts', '-o', 'name'], {
+      encoding: 'utf8',
+      env: getKubeExecutionEnv()
+    });
+    const contexts = String(res.stdout || '').split('\n').map(c => c.trim()).filter(Boolean);
+    if (contexts.includes(`k3d-${clean}`)) return ['--context', `k3d-${clean}`];
+    if (contexts.includes(`k3s-${clean}`)) return ['--context', `k3s-${clean}`];
+    if (contexts.includes('k3s')) return ['--context', 'k3s'];
+    if (contexts.includes('default')) return ['--context', 'default'];
+  } catch {
+    // Ignore context discovery failure
+  }
+  return [];
+}
 
 function assertContainerName(container) {
   const clean = assertCliTarget(container, 'container');
@@ -104,7 +124,7 @@ export function computePodStatus(pod) {
  * @param {string} [options.namespace]
  * @returns {Promise<Array<Object>>}
  */
-export async function getPodsWide({ clusterName = 'vigilante-dev', namespace = null } = {}) {
+export async function getPodsWide({ clusterName = 'vigilante-dev', namespace = null, throwOnError = false } = {}) {
   const args = ['get', 'pods'];
   if (namespace && namespace !== 'all') {
     args.push('-n', assertDnsLabel(namespace, 'namespace'));
@@ -113,13 +133,13 @@ export async function getPodsWide({ clusterName = 'vigilante-dev', namespace = n
   }
 
   if (clusterName) {
-    args.push('--context', `k3d-${assertDnsLabel(clusterName, 'clusterName')}`);
+    args.push(...(await getClusterContextArgs(assertDnsLabel(clusterName, 'clusterName'))));
   }
 
   args.push('--request-timeout=4s', '-o', 'json');
 
   try {
-    const { stdout } = await execa('kubectl', args);
+    const { stdout } = await execa('kubectl', args, { env: getKubeExecutionEnv() });
     const parsed = JSON.parse(stdout || '{"items":[]}');
     const items = parsed.items || [];
 
@@ -158,6 +178,7 @@ export async function getPodsWide({ clusterName = 'vigilante-dev', namespace = n
     });
   } catch (err) {
     logger.debug('PODS:GET', `kubectl get pods query failed: ${err.message}`);
+    if (throwOnError) throw err;
     return [];
   }
 }
@@ -304,10 +325,10 @@ export async function getPodLogs({ clusterName = 'vigilante-dev', namespace = 'd
     args.push('-c', assertContainerName(container));
   }
   if (clusterName) {
-    args.push('--context', `k3d-${assertDnsLabel(clusterName, 'clusterName')}`);
+    args.push(...(await getClusterContextArgs(assertDnsLabel(clusterName, 'clusterName'))));
   }
   try {
-    const { stdout } = await execa('kubectl', args);
+    const { stdout } = await execa('kubectl', args, { env: getKubeExecutionEnv() });
     return stdout || '(No logs returned)';
   } catch (err) {
     return `Error retrieving logs for ${cleanNs}/${cleanPod}: ${err.message}`;
@@ -328,10 +349,10 @@ export async function describePod({ clusterName = 'vigilante-dev', namespace = '
   const cleanNs = assertDnsLabel(namespace, 'namespace');
   const args = ['describe', 'pod', cleanPod, '-n', cleanNs];
   if (clusterName) {
-    args.push('--context', `k3d-${assertDnsLabel(clusterName, 'clusterName')}`);
+    args.push(...(await getClusterContextArgs(assertDnsLabel(clusterName, 'clusterName'))));
   }
   try {
-    const { stdout } = await execa('kubectl', args);
+    const { stdout } = await execa('kubectl', args, { env: getKubeExecutionEnv() });
     return stdout || '(No describe output returned)';
   } catch (err) {
     return `Error describing ${cleanNs}/${cleanPod}: ${err.message}`;
@@ -353,9 +374,8 @@ export function describePodInteractive({ clusterName = 'vigilante-dev', namespac
   logger.info('PODS:DESCRIBE', `Running kubectl describe pod ${cleanPod} -n ${cleanNs}`);
   let output = '';
   try {
-    const args = ['describe', 'pod', cleanPod, '-n', cleanNs];
-    if (cleanCluster) args.push('--context', `k3d-${cleanCluster}`);
-    const res = spawnSync('kubectl', args, { encoding: 'utf8' });
+    const args = ['describe', 'pod', cleanPod, '-n', cleanNs, ...getSyncClusterContextArgs(cleanCluster)];
+    const res = spawnSync('kubectl', args, { encoding: 'utf8', env: getKubeExecutionEnv() });
     output = res.stdout || res.stderr || 'No describe output available.';
   } catch (err) {
     output = `Failed to execute kubectl describe: ${err.message}`;
@@ -378,10 +398,8 @@ export function viewPodLogsInteractive({ clusterName = 'vigilante-dev', namespac
   logger.info('PODS:LOGS', `Viewing kubectl logs for ${cleanPod} -n ${cleanNs}`);
   let output = '';
   try {
-    const args = ['logs', '--tail=5000', cleanPod, '-n', cleanNs];
-    if (cleanCluster) args.push('--context', `k3d-${cleanCluster}`);
-    args.push('--all-containers=true');
-    const res = spawnSync('kubectl', args, { encoding: 'utf8' });
+    const args = ['logs', '--tail=5000', cleanPod, '-n', cleanNs, ...getSyncClusterContextArgs(cleanCluster), '--all-containers=true'];
+    const res = spawnSync('kubectl', args, { encoding: 'utf8', env: getKubeExecutionEnv() });
     output = res.stdout || res.stderr || 'No logs available for this pod.';
   } catch (err) {
     output = `Failed to retrieve logs: ${err.message}`;
@@ -409,9 +427,7 @@ export function openPodShellInteractive({ clusterName = 'vigilante-dev', namespa
   logger.info('PODS:SHELL', `Opening shell into pod ${cleanPod} -n ${cleanNs}`);
   runInteractiveTerminal(() => {
     console.log(`\x1b[1;32m=== Connecting interactive shell to pod: ${cleanNs}/${cleanPod} (Type 'exit' to return to Vigilante) ===\x1b[0m\n`);
-    const args = ['exec', '-it', cleanPod, '-n', cleanNs];
-    if (cleanCluster) args.push('--context', `k3d-${cleanCluster}`);
-    args.push('--', '/bin/sh', '-c', 'command -v bash >/dev/null 2>&1 && exec bash || exec sh');
-    spawnSync('kubectl', args, { stdio: 'inherit' });
+    const args = ['exec', '-it', cleanPod, '-n', cleanNs, ...getSyncClusterContextArgs(cleanCluster), '--', '/bin/sh', '-c', 'command -v bash >/dev/null 2>&1 && exec bash || exec sh'];
+    spawnSync('kubectl', args, { stdio: 'inherit', env: getKubeExecutionEnv() });
   });
 }

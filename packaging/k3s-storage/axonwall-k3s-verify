@@ -42,7 +42,7 @@ if [ -f "$AGENT_FLAG" ]; then
     _elapsed=0
     while [ "$_elapsed" -lt 60 ]; do
         _agent_live=0
-        if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet k3s-agent; then
+        if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ] && systemctl is-active --quiet k3s-agent; then
             _pid1="$(systemctl show -p MainPID --value k3s-agent 2>/dev/null || echo 0)"
             sleep 3
             _elapsed=$(( _elapsed + 3 ))

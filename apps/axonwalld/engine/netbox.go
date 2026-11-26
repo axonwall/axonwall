@@ -465,6 +465,20 @@ func (m *NetBoxManager) ApplyConfig(rawJSON []byte) error {
 	if err := json.Unmarshal(rawJSON, &bundle); err != nil {
 		return fmt.Errorf("invalid netbox runtime bundle json: %w", err)
 	}
+	if strings.TrimSpace(bundle.EndpointURL) != "" {
+		validURL, err := validateNetBoxEndpointURL(bundle.EndpointURL)
+		if err != nil {
+			return fmt.Errorf("netbox bundle rejected: %w", err)
+		}
+		bundle.EndpointURL = validURL
+	}
+	if strings.TrimSpace(bundle.InternalServiceURL) != "" {
+		validInternal, err := validatePluginHTTPURL(bundle.InternalServiceURL, "netbox internal")
+		if err != nil {
+			return fmt.Errorf("netbox bundle rejected: %w", err)
+		}
+		bundle.InternalServiceURL = validInternal
+	}
 
 	sanitizedBundle := bundle
 	sanitizedBundle.APIToken = ""
@@ -865,7 +879,11 @@ func (c *netBoxAPIClient) doJSON(ctx context.Context, method, path string, paylo
 		_ = json.Unmarshal(respBytes, &decoded)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return resp.StatusCode, decoded, fmt.Errorf("%s %s returned HTTP %d: %s", method, path, resp.StatusCode, strings.TrimSpace(string(respBytes)))
+		errSnippet := sanitizeHTTPErrorBody(respBytes, 256)
+		if errSnippet == "" {
+			return resp.StatusCode, decoded, fmt.Errorf("%s %s returned HTTP %d", method, path, resp.StatusCode)
+		}
+		return resp.StatusCode, decoded, fmt.Errorf("%s %s returned HTTP %d: %s", method, path, resp.StatusCode, errSnippet)
 	}
 	return resp.StatusCode, decoded, nil
 }
@@ -961,15 +979,18 @@ func (m *NetBoxManager) SyncInventory(ctx context.Context, req *NetBoxSyncReques
 		liveCTs = m.virtManager.ListContainers()
 	}
 
+	_, clusterIP := m.inspectK3sResources(ctx, bundle.Namespace)
+	autoEndpoint := m.resolveReachableBaseURL(ctx, bundle, clusterIP)
 	endpoint := strings.TrimSpace(req.EndpointOverride)
 	if endpoint == "" {
-		_, clusterIP := m.inspectK3sResources(ctx, bundle.Namespace)
-		endpoint = m.resolveReachableBaseURL(ctx, bundle, clusterIP)
+		endpoint = autoEndpoint
 	}
 	validEndpoint, err := validateNetBoxEndpointURL(endpoint)
 	if err != nil {
 		return nil, err
 	}
+	configuredBases := []string{bundle.EndpointURL, bundle.InternalServiceURL, autoEndpoint}
+	netboxToken := tokenIfSameOrigin(req.EndpointOverride, configuredBases, secrets.APIToken)
 
 	res := &NetBoxSyncResult{
 		Success:   true,
@@ -1034,7 +1055,7 @@ func (m *NetBoxManager) SyncInventory(ctx context.Context, req *NetBoxSyncReques
 
 	client := &netBoxAPIClient{
 		baseURL:    validEndpoint,
-		token:      secrets.APIToken,
+		token:      netboxToken,
 		httpClient: m.httpClient,
 	}
 
@@ -1426,18 +1447,21 @@ func (m *NetBoxManager) resolveClient(ctx context.Context, endpointOverride stri
 	if secErr != nil {
 		return nil, bundle, secErr
 	}
+	_, clusterIP := m.inspectK3sResources(ctx, bundle.Namespace)
+	autoEndpoint := m.resolveReachableBaseURL(ctx, bundle, clusterIP)
 	endpoint := strings.TrimSpace(endpointOverride)
 	if endpoint == "" {
-		_, clusterIP := m.inspectK3sResources(ctx, bundle.Namespace)
-		endpoint = m.resolveReachableBaseURL(ctx, bundle, clusterIP)
+		endpoint = autoEndpoint
 	}
 	validEndpoint, urlErr := validateNetBoxEndpointURL(endpoint)
 	if urlErr != nil {
 		return nil, bundle, urlErr
 	}
+	configuredBases := []string{bundle.EndpointURL, bundle.InternalServiceURL, autoEndpoint}
+	tok := tokenIfSameOrigin(endpointOverride, configuredBases, secrets.APIToken)
 	return &netBoxAPIClient{
 		baseURL:    validEndpoint,
-		token:      secrets.APIToken,
+		token:      tok,
 		httpClient: m.httpClient,
 	}, bundle, nil
 }

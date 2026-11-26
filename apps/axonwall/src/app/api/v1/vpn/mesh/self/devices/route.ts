@@ -8,12 +8,20 @@ import {
   renameMachine,
   resolveHeadscaleUsername,
 } from '@/server/headscale';
+import { resolveHeadscaleNetworkInfo } from '@/server/headscale-network';
 
 export async function POST(req: NextRequest) {
   try {
     const session = await getSession();
     assertMeshSelfServicePermitted(session);
     const ownerUser = resolveHeadscaleUsername(session);
+    const network = await resolveHeadscaleNetworkInfo(req);
+    if (!network.enabled) {
+      return NextResponse.json(
+        { status: 'error', error: 'Forbidden: Mesh VPN (Headscale) is currently disabled by your administrator' },
+        { status: 403 }
+      );
+    }
 
     const body = await req.json().catch(() => ({}));
     const { action, machineId, newName } = body || {};

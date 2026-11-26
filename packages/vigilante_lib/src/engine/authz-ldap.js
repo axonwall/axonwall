@@ -590,13 +590,21 @@ class MinimalLdapSession {
     this.buffer = Buffer.alloc(0);
     this.nextMsgId = 1;
     this.pending = null;
+    this.connectTimer = null;
   }
 
   connect() {
     const { isTls, host, port } = parseLdapTarget(this.uri);
     return new Promise((resolve, reject) => {
       let settled = false;
-      const timer = setTimeout(() => {
+      const clearConnectTimer = () => {
+        if (this.connectTimer) {
+          clearTimeout(this.connectTimer);
+          this.connectTimer = null;
+        }
+      };
+      this.connectTimer = setTimeout(() => {
+        this.connectTimer = null;
         if (!settled) {
           settled = true;
           this.close();
@@ -607,19 +615,20 @@ class MinimalLdapSession {
       const onConnect = () => {
         if (!settled) {
           settled = true;
-          clearTimeout(timer);
+          clearConnectTimer();
           resolve();
         }
       };
 
       const onError = err => {
+        clearConnectTimer();
         if (!settled) {
           settled = true;
-          clearTimeout(timer);
           reject(err);
         } else if (this.pending) {
           const p = this.pending;
           this.pending = null;
+          clearTimeout(p.timer);
           p.reject(err);
         }
       };
@@ -634,9 +643,14 @@ class MinimalLdapSession {
         this._drainBuffer();
       });
       this.socket.on('close', () => {
-        if (this.pending) {
+        clearConnectTimer();
+        if (!settled) {
+          settled = true;
+          reject(new Error('LDAP socket closed before connection established'));
+        } else if (this.pending) {
           const p = this.pending;
           this.pending = null;
+          clearTimeout(p.timer);
           p.reject(new Error('LDAP socket closed unexpectedly'));
         }
       });
@@ -658,11 +672,16 @@ class MinimalLdapSession {
       if (opEl.tag === 0x61 && this.pending.type === 'bind') {
         // BindResponse [APPLICATION 1]
         const bindChildren = berReadChildren(opEl.value);
-        const resultCode = berReadInt(bindChildren[0]);
-        const diagnosticMessage = bindChildren[2] ? bindChildren[2].value.toString('utf8') : '';
+        const resultEl = bindChildren[0];
         const p = this.pending;
         this.pending = null;
         clearTimeout(p.timer);
+        if (!resultEl || resultEl.tag !== 0x0a || resultEl.value.length < 1) {
+          p.reject(new Error('Malformed LDAP BindResponse: missing ENUMERATED resultCode'));
+          continue;
+        }
+        const resultCode = berReadInt(resultEl);
+        const diagnosticMessage = bindChildren[2] ? bindChildren[2].value.toString('utf8') : '';
         p.resolve({ resultCode, diagnosticMessage });
       } else if (opEl.tag === 0x64 && this.pending.type === 'search') {
         // SearchResultEntry [APPLICATION 4]
@@ -684,10 +703,15 @@ class MinimalLdapSession {
       } else if (opEl.tag === 0x65 && this.pending.type === 'search') {
         // SearchResultDone [APPLICATION 5]
         const doneChildren = berReadChildren(opEl.value);
-        const resultCode = berReadInt(doneChildren[0]);
+        const resultEl = doneChildren[0];
         const p = this.pending;
         this.pending = null;
         clearTimeout(p.timer);
+        if (!resultEl || resultEl.tag !== 0x0a || resultEl.value.length < 1) {
+          p.reject(new Error('Malformed LDAP SearchResultDone: missing ENUMERATED resultCode'));
+          continue;
+        }
+        const resultCode = berReadInt(resultEl);
         p.resolve({ resultCode, entries: p.entries });
       }
     }
@@ -720,6 +744,16 @@ class MinimalLdapSession {
   }
 
   close() {
+    if (this.connectTimer) {
+      clearTimeout(this.connectTimer);
+      this.connectTimer = null;
+    }
+    if (this.pending) {
+      const p = this.pending;
+      this.pending = null;
+      clearTimeout(p.timer);
+      p.reject(new Error('LDAP session closed'));
+    }
     try {
       if (this.socket && !this.socket.destroyed) {
         const msgId = this.nextMsgId++;
@@ -773,17 +807,23 @@ export async function authenticateLdapUser(username, password, configOverrides =
     };
   }
 
-  const lookupSession = new MinimalLdapSession(cfg.uri, cfg.timeoutMs, cfg.tlsRejectUnauthorized);
+  const hasServiceBind = Boolean(cfg.bindDN && cfg.bindPassword);
+  const lookupSession = hasServiceBind
+    ? new MinimalLdapSession(cfg.uri, cfg.timeoutMs, cfg.tlsRejectUnauthorized)
+    : null;
+  let userSession = null;
   let userDN = '';
   let displayName = cleanUser;
   let email = undefined;
   let groups = [];
 
   try {
-    await lookupSession.connect();
+    let groupSearchSession = null;
 
-    // Phase 1: Bind with service account (if configured) and search for the user entry
-    if (cfg.bindDN && cfg.bindPassword) {
+    if (hasServiceBind && lookupSession) {
+      await lookupSession.connect();
+
+      // Phase 1: Bind with service account and search for the user entry
       const svcBind = await lookupSession.bind(cfg.bindDN, cfg.bindPassword);
       if (svcBind.resultCode !== 0) {
         return {
@@ -835,13 +875,29 @@ export async function authenticateLdapUser(username, password, configOverrides =
       if (attrs.memberof && attrs.memberof.length > 0) {
         groups.push(...attrs.memberof);
       }
+
+      // Phase 2: Verify user password on a separate LDAP session
+      const verifySession = new MinimalLdapSession(cfg.uri, cfg.timeoutMs, cfg.tlsRejectUnauthorized);
+      try {
+        await verifySession.connect();
+        const userBind = await verifySession.bind(userDN, cleanPass);
+        if (userBind.resultCode !== 0) {
+          return {
+            ok: false,
+            code: 'INVALID_CREDENTIALS',
+            error: 'Invalid OpenLDAP username or password.'
+          };
+        }
+      } finally {
+        verifySession.close();
+      }
+
+      groupSearchSession = lookupSession;
     } else {
       userDN = `uid=${escapeLdapDnValue(cleanUser)},${cfg.userSearchBase}`;
-    }
 
-    // Phase 2: Verify user password on a separate LDAP session
-    const userSession = new MinimalLdapSession(cfg.uri, cfg.timeoutMs, cfg.tlsRejectUnauthorized);
-    try {
+      // Phase 2 (direct bind): Authenticate user and reuse the authenticated session for group lookup
+      userSession = new MinimalLdapSession(cfg.uri, cfg.timeoutMs, cfg.tlsRejectUnauthorized);
       await userSession.connect();
       const userBind = await userSession.bind(userDN, cleanPass);
       if (userBind.resultCode !== 0) {
@@ -851,8 +907,8 @@ export async function authenticateLdapUser(username, password, configOverrides =
           error: 'Invalid OpenLDAP username or password.'
         };
       }
-    } finally {
-      userSession.close();
+
+      groupSearchSession = userSession;
     }
 
     // Phase 3: Query POSIX / groupOfNames memberships in ou=groups,<baseDN>
@@ -862,7 +918,7 @@ export async function authenticateLdapUser(username, password, configOverrides =
       userDn: userDN,
       dn: userDN
     });
-    const groupSearch = await lookupSession.search(cfg.groupSearchBase, groupFilter, ['cn']);
+    const groupSearch = await groupSearchSession.search(cfg.groupSearchBase, groupFilter, ['cn']);
     if (groupSearch.entries && groupSearch.entries.length > 0) {
       for (const ge of groupSearch.entries) {
         const cns = ge.attributes?.cn || [];
@@ -909,7 +965,8 @@ export async function authenticateLdapUser(username, password, configOverrides =
       error: err?.message || 'Failed to communicate with OpenLDAP server.'
     };
   } finally {
-    lookupSession.close();
+    if (userSession) userSession.close();
+    if (lookupSession) lookupSession.close();
   }
 }
 

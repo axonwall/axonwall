@@ -1,6 +1,7 @@
 import type { DesiredState } from '@axonwall/lib/schemas';
 import { callAgentApiDetailed } from './agent-client';
 import { getDesiredStateInternal } from './desired-state-internal';
+import { ssrfSafeFetch } from './ssrf-guard';
 
 export interface ObservabilityEndpointInfo {
   configured: boolean;
@@ -47,6 +48,14 @@ function stripTrailingSlash(url: string): string {
   return url.trim().replace(/\/+$/, '');
 }
 
+function sameOrigin(urlA: string, urlB: string): boolean {
+  try {
+    return new URL(urlA).origin === new URL(urlB).origin;
+  } catch {
+    return false;
+  }
+}
+
 export function resolveObservabilityEndpoints(state?: DesiredState | null): ResolvedObservabilityEndpoints {
   const vmEnv = process.env.VICTORIAMETRICS_URL?.trim();
   const vmTokenEnv = process.env.VICTORIAMETRICS_TOKEN?.trim() || process.env.AXONWALL_OBSERVABILITY_TOKEN?.trim();
@@ -59,37 +68,47 @@ export function resolveObservabilityEndpoints(state?: DesiredState | null): Reso
   const hubBase = offload?.hubUrl ? stripTrailingSlash(offload.hubUrl) : '';
 
   let vmUrl = '';
-  let vmToken = vmTokenEnv;
+  let vmToken: string | undefined;
   if (vmEnv) {
     vmUrl = stripTrailingSlash(vmEnv);
+    vmToken = vmTokenEnv;
   } else if (obs?.victoriaMetrics?.enabled && obs.victoriaMetrics.url?.trim()) {
     vmUrl = stripTrailingSlash(obs.victoriaMetrics.url);
-    vmToken = obs.victoriaMetrics.bearerToken?.trim() || vmToken;
+    vmToken = obs.victoriaMetrics.bearerToken?.trim() || undefined;
   } else if (offload?.enabled && offload.metrics?.enabled) {
     const rw = offload.metrics.remoteWriteUrl?.trim();
     if (rw) {
       vmUrl = stripTrailingSlash(rw.replace(/\/api\/v1\/write\/?$/, ''));
+      // Only forward the hub ingestToken to remoteWriteUrl if no separate hubBase is set
+      // or if remoteWriteUrl shares the configured hub origin.
+      if (!hubBase || sameOrigin(vmUrl, hubBase)) {
+        vmToken = offload.ingestToken?.trim() || undefined;
+      }
     } else if (hubBase) {
       vmUrl = `${hubBase}/vm`;
+      vmToken = offload.ingestToken?.trim() || undefined;
     }
-    vmToken = offload.ingestToken?.trim() || vmToken;
   }
 
   let vlUrl = '';
-  let vlToken = vlTokenEnv;
+  let vlToken: string | undefined;
   if (vlEnv) {
     vlUrl = stripTrailingSlash(vlEnv);
+    vlToken = vlTokenEnv;
   } else if (obs?.victoriaLogs?.enabled && obs.victoriaLogs.url?.trim()) {
     vlUrl = stripTrailingSlash(obs.victoriaLogs.url);
-    vlToken = obs.victoriaLogs.bearerToken?.trim() || vlToken;
+    vlToken = obs.victoriaLogs.bearerToken?.trim() || undefined;
   } else if (offload?.enabled && offload.logs?.enabled) {
     const ins = offload.logs.victoriaLogsUrl?.trim();
     if (ins) {
       vlUrl = stripTrailingSlash(ins.replace(/\/insert\/jsonline\/?$/, ''));
+      if (!hubBase || sameOrigin(vlUrl, hubBase)) {
+        vlToken = offload.ingestToken?.trim() || undefined;
+      }
     } else if (hubBase) {
       vlUrl = `${hubBase}/vl`;
+      vlToken = offload.ingestToken?.trim() || undefined;
     }
-    vlToken = offload.ingestToken?.trim() || vlToken;
   }
 
   let chUrl = '';
@@ -149,14 +168,19 @@ export async function queryVictoriaMetricsInstant(
   }
 
   try {
-    const res = await fetch(`${victoriaMetrics.url}/api/v1/query?${params.toString()}`, {
-      method: 'GET',
-      headers: victoriaMetrics.bearerToken
-        ? { Authorization: `Bearer ${victoriaMetrics.bearerToken}` }
-        : undefined,
-      signal: AbortSignal.timeout(opts?.timeoutMs ?? 5000),
-      cache: 'no-store',
-    });
+    const timeoutMs = opts?.timeoutMs ?? 5000;
+    const res = await ssrfSafeFetch(
+      `${victoriaMetrics.url}/api/v1/query?${params.toString()}`,
+      {
+        method: 'GET',
+        headers: victoriaMetrics.bearerToken
+          ? { Authorization: `Bearer ${victoriaMetrics.bearerToken}` }
+          : undefined,
+        signal: AbortSignal.timeout(timeoutMs),
+        timeoutMs,
+      },
+      { allowHttp: true, allowPrivate: true }
+    );
     if (!res.ok) {
       const text = await res.text().catch(() => '');
       return {
@@ -226,14 +250,19 @@ export async function queryVictoriaMetricsRange(
   });
 
   try {
-    const res = await fetch(`${victoriaMetrics.url}/api/v1/query_range?${params.toString()}`, {
-      method: 'GET',
-      headers: victoriaMetrics.bearerToken
-        ? { Authorization: `Bearer ${victoriaMetrics.bearerToken}` }
-        : undefined,
-      signal: AbortSignal.timeout(opts?.timeoutMs ?? 5000),
-      cache: 'no-store',
-    });
+    const timeoutMs = opts?.timeoutMs ?? 5000;
+    const res = await ssrfSafeFetch(
+      `${victoriaMetrics.url}/api/v1/query_range?${params.toString()}`,
+      {
+        method: 'GET',
+        headers: victoriaMetrics.bearerToken
+          ? { Authorization: `Bearer ${victoriaMetrics.bearerToken}` }
+          : undefined,
+        signal: AbortSignal.timeout(timeoutMs),
+        timeoutMs,
+      },
+      { allowHttp: true, allowPrivate: true }
+    );
     if (!res.ok) {
       const text = await res.text().catch(() => '');
       return {
@@ -294,16 +323,21 @@ export async function queryVictoriaLogs(
   if (opts?.end?.trim()) form.set('end', opts.end.trim());
 
   try {
-    const res = await fetch(`${victoriaLogs.url}/select/logsql/query`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
-        ...(victoriaLogs.bearerToken ? { Authorization: `Bearer ${victoriaLogs.bearerToken}` } : {}),
+    const timeoutMs = opts?.timeoutMs ?? 5000;
+    const res = await ssrfSafeFetch(
+      `${victoriaLogs.url}/select/logsql/query`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          ...(victoriaLogs.bearerToken ? { Authorization: `Bearer ${victoriaLogs.bearerToken}` } : {}),
+        },
+        body: form.toString(),
+        signal: AbortSignal.timeout(timeoutMs),
+        timeoutMs,
       },
-      body: form.toString(),
-      signal: AbortSignal.timeout(opts?.timeoutMs ?? 5000),
-      cache: 'no-store',
-    });
+      { allowHttp: true, allowPrivate: true }
+    );
     if (!res.ok) {
       const text = await res.text().catch(() => '');
       return {

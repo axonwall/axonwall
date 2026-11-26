@@ -19,6 +19,10 @@ export function calculateFileEntropy(bufferOrPath) {
   let buf;
   if (typeof bufferOrPath === 'string') {
     if (fsSync.existsSync(bufferOrPath)) {
+      const stat = fsSync.statSync(bufferOrPath);
+      if (!stat.isFile()) {
+        return 0;
+      }
       buf = fsSync.readFileSync(bufferOrPath);
     } else {
       buf = Buffer.from(bufferOrPath, 'utf8');
@@ -166,27 +170,37 @@ export async function triggerRansomwareContainment(podName, namespace = 'default
   }
 
   // 2. Isolate pod network to prevent C2 key exchange and lateral propagation
+  const shouldApply = options.apply !== undefined ? Boolean(options.apply) : false;
   let isolateResult = null;
+  let isolateError = null;
   try {
     isolateResult = await soar.isolatePod(podName, namespace, {
       reason: 'Active Ransomware Encryption & Data Encrypted for Impact (T1486)',
-      apply: options.apply !== undefined ? options.apply : false
+      apply: shouldApply
     });
   } catch (err) {
+    isolateError = err.message;
     logger.error('RANSOMWARE', `Isolate pod failed: ${err.message}`);
   }
 
-  // Success means both containment actions actually completed. The
-  // previous implementation returned containmentSuccess: true even when
-  // both SOAR calls had thrown and their results were nulled by the
-  // catches above.
+  // Success requires real enforcement when cluster application was requested,
+  // and must never report success when containment actions were skipped/staged only.
   const containmentFailures = [];
   if (!freezeResult) containmentFailures.push('freeze');
-  if (!isolateResult) containmentFailures.push('isolate');
+  if (!isolateResult || isolateResult.status === 'FAILED') {
+    containmentFailures.push('isolate');
+  } else if (!isolateResult.appliedToCluster) {
+    containmentFailures.push('isolate-not-enforced');
+  }
+  if (!freezeResult?.appliedToCluster) {
+    containmentFailures.push('freeze-not-enforced');
+  }
 
   return {
     containmentSuccess: containmentFailures.length === 0,
+    stagedOnly: Boolean(isolateResult && !isolateResult.appliedToCluster),
     containmentFailures,
+    error: isolateError,
     podName,
     namespace,
     pid,

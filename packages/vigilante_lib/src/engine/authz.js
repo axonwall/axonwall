@@ -302,43 +302,70 @@ export function assertNotLastOwner(store, targetPrincipalId, actionDescription) 
   }
 }
 
+const authzFileLocks = new Map();
+
+async function withAuthzLock(filePath, fn) {
+  const key = path.resolve(filePath || getVigilanteAuthzFile());
+  const prev = authzFileLocks.get(key) || Promise.resolve();
+  const next = prev.then(
+    () => fn(),
+    () => fn()
+  );
+  const tracked = next.then(
+    () => {
+      if (authzFileLocks.get(key) === tracked) {
+        authzFileLocks.delete(key);
+      }
+    },
+    () => {
+      if (authzFileLocks.get(key) === tracked) {
+        authzFileLocks.delete(key);
+      }
+    }
+  );
+  authzFileLocks.set(key, tracked);
+  return next;
+}
+
 /**
  * Create a new browser session for a principal
  */
 export async function createSession(principalId, filePath = getVigilanteAuthzFile()) {
-  const loaded = loadAuthzStore(filePath);
-  if (loaded.state !== 'ready' || !loaded.store) {
-    throw new Error('Authz store not ready to create session');
-  }
-  const store = loaded.store;
-  const p = store.principals.find(x => x.id === principalId);
-  if (!p) throw new Error(`Principal ${principalId} not found`);
-  if (p.disabled) throw new Error(`Principal ${principalId} is disabled`);
+  return withAuthzLock(filePath, async () => {
+    const loaded = loadAuthzStore(filePath, { forceReload: true });
+    if (loaded.state !== 'ready' || !loaded.store) {
+      throw new Error('Authz store not ready to create session');
+    }
+    const store = loaded.store;
+    const p = store.principals.find(x => x.id === principalId);
+    if (!p) throw new Error(`Principal ${principalId} not found`);
+    if (p.disabled) throw new Error(`Principal ${principalId} is disabled`);
 
-  const rawSessionToken = `${TOKEN_PREFIX}sess_${crypto.randomBytes(32).toString('base64url')}`;
-  const idHash = hashToken(rawSessionToken);
+    const rawSessionToken = `${TOKEN_PREFIX}sess_${crypto.randomBytes(32).toString('base64url')}`;
+    const idHash = hashToken(rawSessionToken);
 
-  const now = new Date();
-  const expiresAt = new Date(now.getTime() + SESSION_TTL_MS);
+    const now = new Date();
+    const expiresAt = new Date(now.getTime() + SESSION_TTL_MS);
 
-  // Prune existing sessions for this principal to MAX_SESSIONS_PER_PRINCIPAL - 1
-  const others = store.sessions.filter(s => s.principalId !== principalId);
-  const mine = store.sessions
-    .filter(s => s.principalId === principalId && new Date(s.expiresAt).getTime() > now.getTime())
-    .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
-    .slice(0, MAX_SESSIONS_PER_PRINCIPAL - 1);
+    // Prune existing sessions for this principal to MAX_SESSIONS_PER_PRINCIPAL - 1
+    const others = store.sessions.filter(s => s.principalId !== principalId);
+    const mine = store.sessions
+      .filter(s => s.principalId === principalId && new Date(s.expiresAt).getTime() > now.getTime())
+      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+      .slice(0, MAX_SESSIONS_PER_PRINCIPAL - 1);
 
-  mine.push({
-    idHash,
-    principalId,
-    createdAt: now.toISOString(),
-    expiresAt: expiresAt.toISOString()
+    mine.push({
+      idHash,
+      principalId,
+      createdAt: now.toISOString(),
+      expiresAt: expiresAt.toISOString()
+    });
+
+    store.sessions = [...others, ...mine];
+    await saveAuthzStore(store, filePath);
+
+    return { sessionToken: rawSessionToken, expiresAt };
   });
-
-  store.sessions = [...others, ...mine];
-  await saveAuthzStore(store, filePath);
-
-  return { sessionToken: rawSessionToken, expiresAt };
 }
 
 /**
@@ -368,14 +395,16 @@ export function resolvePrincipalBySession(store, rawSessionToken) {
  * Revoke a session token
  */
 export async function revokeSession(rawSessionToken, filePath = getVigilanteAuthzFile()) {
-  const loaded = loadAuthzStore(filePath);
-  if (loaded.state !== 'ready' || !loaded.store) return;
-  const idHash = hashToken(rawSessionToken);
-  const before = loaded.store.sessions.length;
-  loaded.store.sessions = loaded.store.sessions.filter(s => s.idHash !== idHash);
-  if (loaded.store.sessions.length !== before) {
-    await saveAuthzStore(loaded.store, filePath);
-  }
+  return withAuthzLock(filePath, async () => {
+    const loaded = loadAuthzStore(filePath, { forceReload: true });
+    if (loaded.state !== 'ready' || !loaded.store) return;
+    const idHash = hashToken(rawSessionToken);
+    const before = loaded.store.sessions.length;
+    loaded.store.sessions = loaded.store.sessions.filter(s => s.idHash !== idHash);
+    if (loaded.store.sessions.length !== before) {
+      await saveAuthzStore(loaded.store, filePath);
+    }
+  });
 }
 
 /**
@@ -425,76 +454,67 @@ export async function syncLdapPrincipal(
     throw new Error('Cannot sync unauthenticated LDAP result');
   }
 
-  const loaded = loadAuthzStore(filePath);
-  if (loaded.state !== 'ready' || !loaded.store) {
-    throw new Error('Authz store invalid or unreadable');
-  }
-
-  const store = loaded.store;
-  const uid = String(authResult.username).trim();
-  const mappedRole = ROLES.includes(authResult.role) ? authResult.role : 'viewer';
-  const groups = Array.isArray(authResult.groups) ? authResult.groups : [];
-  const now = new Date().toISOString();
-
-  let existing = findPrincipalByLdapUid(store, uid);
-  if (!existing) {
-    existing =
-      store.principals.find(
-        p =>
-          !p.ldapUid &&
-          p.kind === 'human' &&
-          p.role !== 'owner' &&
-          p.role !== 'admin' &&
-          p.name.toLowerCase() === uid.toLowerCase()
-      ) || null;
-  }
-
-  if (existing) {
-    if (existing.disabled) {
-      throw new Error(`Principal '${existing.name}' is disabled.`);
+  return withAuthzLock(filePath, async () => {
+    const loaded = loadAuthzStore(filePath, { forceReload: true });
+    if (loaded.state !== 'ready' || !loaded.store) {
+      throw new Error('Authz store invalid or unreadable');
     }
 
-    // Protect last active owner from demotion
-    let nextRole = mappedRole;
-    if (existing.role === 'owner' && mappedRole !== 'owner') {
-      const activeOwners = store.principals.filter(p => p.role === 'owner' && !p.disabled);
-      if (activeOwners.length <= 1) {
-        nextRole = 'owner';
+    const store = loaded.store;
+    const uid = String(authResult.username).trim();
+    const mappedRole = ROLES.includes(authResult.role) ? authResult.role : 'viewer';
+    const groups = Array.isArray(authResult.groups) ? authResult.groups : [];
+    const now = new Date().toISOString();
+
+    const existing = findPrincipalByLdapUid(store, uid);
+
+    if (existing) {
+      if (existing.disabled) {
+        throw new Error(`Principal '${existing.name}' is disabled.`);
       }
+
+      // Protect last active owner from demotion
+      let nextRole = mappedRole;
+      if (existing.role === 'owner' && mappedRole !== 'owner') {
+        const activeOwners = store.principals.filter(p => p.role === 'owner' && !p.disabled);
+        if (activeOwners.length <= 1) {
+          nextRole = 'owner';
+        }
+      }
+
+      existing.ldapUid = uid;
+      existing.ldapGroups = groups;
+      existing.role = nextRole;
+      existing.updatedAt = now;
+
+      await saveAuthzStore(store, filePath);
+      return existing;
     }
 
-    existing.ldapUid = uid;
-    existing.ldapGroups = groups;
-    existing.role = nextRole;
-    existing.updatedAt = now;
+    if (!autoProvision) {
+      return null;
+    }
 
+    // If store has no principals yet, ensure the first provisioned admin/owner or initial user works seamlessly
+    const id = `user_${crypto.randomBytes(6).toString('hex')}`;
+    const newPrincipal = {
+      id,
+      name: authResult.displayName || uid,
+      kind: 'human',
+      role: mappedRole,
+      ldapUid: uid,
+      ldapGroups: groups,
+      disabled: false,
+      grants: [],
+      revocations: [],
+      createdAt: now,
+      updatedAt: now
+    };
+
+    store.principals.push(newPrincipal);
     await saveAuthzStore(store, filePath);
-    return existing;
-  }
-
-  if (!autoProvision) {
-    return null;
-  }
-
-  // If store has no principals yet, ensure the first provisioned admin/owner or initial user works seamlessly
-  const id = `user_${crypto.randomBytes(6).toString('hex')}`;
-  const newPrincipal = {
-    id,
-    name: authResult.displayName || uid,
-    kind: 'human',
-    role: mappedRole,
-    ldapUid: uid,
-    ldapGroups: groups,
-    disabled: false,
-    grants: [],
-    revocations: [],
-    createdAt: now,
-    updatedAt: now
-  };
-
-  store.principals.push(newPrincipal);
-  await saveAuthzStore(store, filePath);
-  return newPrincipal;
+    return newPrincipal;
+  });
 }
 
 /**
@@ -505,55 +525,57 @@ export async function syncLdapPrincipal(
  * @param {string} [options.token] - Custom API token; a random one is generated when neither is given
  */
 export async function initOwner({ name = 'Owner', password, token }, filePath = getVigilanteAuthzFile()) {
-  const loaded = loadAuthzStore(filePath);
-  if (loaded.state !== 'ready' || !loaded.store) {
-    throw new Error('Authz store invalid or unreadable');
-  }
-  const store = loaded.store;
-  if (store.principals.length > 0) {
-    throw new AuthzInvariantError('Authz already initialized with existing principals.');
-  }
+  return withAuthzLock(filePath, async () => {
+    const loaded = loadAuthzStore(filePath, { forceReload: true });
+    if (loaded.state !== 'ready' || !loaded.store) {
+      throw new Error('Authz store invalid or unreadable');
+    }
+    const store = loaded.store;
+    if (store.principals.length > 0) {
+      throw new AuthzInvariantError('Authz already initialized with existing principals.');
+    }
 
-  const id = `user_${crypto.randomBytes(6).toString('hex')}`;
-  const now = new Date().toISOString();
+    const id = `user_${crypto.randomBytes(6).toString('hex')}`;
+    const now = new Date().toISOString();
 
-  let secretToReturn = '';
-  let tokenHash = '';
-  let isCustomPassword = false;
+    let secretToReturn = '';
+    let tokenHash = '';
+    let isCustomPassword = false;
 
-  if (password && password.trim()) {
-    tokenHash = hashPassword(password.trim());
-    secretToReturn = password.trim();
-    isCustomPassword = true;
-  } else if (token && token.trim()) {
-    secretToReturn = token.trim();
-    tokenHash = hashToken(secretToReturn);
-  } else {
-    secretToReturn = generateToken();
-    tokenHash = hashToken(secretToReturn);
-  }
+    if (password && password.trim()) {
+      tokenHash = hashPassword(password.trim());
+      secretToReturn = password.trim();
+      isCustomPassword = true;
+    } else if (token && token.trim()) {
+      secretToReturn = token.trim();
+      tokenHash = hashToken(secretToReturn);
+    } else {
+      secretToReturn = generateToken();
+      tokenHash = hashToken(secretToReturn);
+    }
 
-  const owner = {
-    id,
-    name,
-    kind: 'human',
-    role: 'owner',
-    tokenHash,
-    disabled: false,
-    grants: [],
-    revocations: [],
-    createdAt: now,
-    updatedAt: now
-  };
+    const owner = {
+      id,
+      name,
+      kind: 'human',
+      role: 'owner',
+      tokenHash,
+      disabled: false,
+      grants: [],
+      revocations: [],
+      createdAt: now,
+      updatedAt: now
+    };
 
-  store.principals = [owner];
-  await saveAuthzStore(store, filePath);
+    store.principals = [owner];
+    await saveAuthzStore(store, filePath);
 
-  return {
-    principal: toPublicPrincipal(owner),
-    secret: secretToReturn,
-    isCustomPassword
-  };
+    return {
+      principal: toPublicPrincipal(owner),
+      secret: secretToReturn,
+      isCustomPassword
+    };
+  });
 }
 
 /**
@@ -563,126 +585,134 @@ export async function addPrincipal(
   { name, kind = 'human', role = 'viewer', oidcSubject = undefined, ldapUid = undefined, ldapGroups = undefined, grants = [], revocations = [] },
   filePath = getVigilanteAuthzFile()
 ) {
-  const loaded = loadAuthzStore(filePath);
-  if (loaded.state !== 'ready' || !loaded.store) throw new Error('Authz store not ready');
-  const store = loaded.store;
+  return withAuthzLock(filePath, async () => {
+    const loaded = loadAuthzStore(filePath, { forceReload: true });
+    if (loaded.state !== 'ready' || !loaded.store) throw new Error('Authz store not ready');
+    const store = loaded.store;
 
-  const id = `${kind === 'service' ? 'svc' : 'user'}_${crypto.randomBytes(6).toString('hex')}`;
-  const token = generateToken();
-  const tokenHash = hashToken(token);
-  const now = new Date().toISOString();
+    const id = `${kind === 'service' ? 'svc' : 'user'}_${crypto.randomBytes(6).toString('hex')}`;
+    const token = generateToken();
+    const tokenHash = hashToken(token);
+    const now = new Date().toISOString();
 
-  const newP = {
-    id,
-    name,
-    kind,
-    role,
-    tokenHash,
-    oidcSubject: oidcSubject || undefined,
-    ldapUid: ldapUid ? String(ldapUid).trim() : undefined,
-    ldapGroups: Array.isArray(ldapGroups) ? ldapGroups : undefined,
-    disabled: false,
-    grants,
-    revocations,
-    createdAt: now,
-    updatedAt: now
-  };
+    const newP = {
+      id,
+      name,
+      kind,
+      role,
+      tokenHash,
+      oidcSubject: oidcSubject || undefined,
+      ldapUid: ldapUid ? String(ldapUid).trim() : undefined,
+      ldapGroups: Array.isArray(ldapGroups) ? ldapGroups : undefined,
+      disabled: false,
+      grants,
+      revocations,
+      createdAt: now,
+      updatedAt: now
+    };
 
-  store.principals.push(newP);
-  await saveAuthzStore(store, filePath);
+    store.principals.push(newP);
+    await saveAuthzStore(store, filePath);
 
-  return {
-    principal: toPublicPrincipal(newP),
-    token
-  };
+    return {
+      principal: toPublicPrincipal(newP),
+      token
+    };
+  });
 }
 
 /**
  * Update a principal
  */
 export async function updatePrincipal(id, patch, filePath = getVigilanteAuthzFile()) {
-  const loaded = loadAuthzStore(filePath);
-  if (loaded.state !== 'ready' || !loaded.store) throw new Error('Authz store not ready');
-  const store = loaded.store;
+  return withAuthzLock(filePath, async () => {
+    const loaded = loadAuthzStore(filePath, { forceReload: true });
+    if (loaded.state !== 'ready' || !loaded.store) throw new Error('Authz store not ready');
+    const store = loaded.store;
 
-  const p = store.principals.find(x => x.id === id);
-  if (!p) throw new Error(`Principal ${id} not found`);
+    const p = store.principals.find(x => x.id === id);
+    if (!p) throw new Error(`Principal ${id} not found`);
 
-  if (patch.disabled === true) {
-    assertNotLastOwner(store, id, 'disable principal');
-  }
-  if (patch.role && patch.role !== 'owner' && p.role === 'owner') {
-    assertNotLastOwner(store, id, 'change role away from owner');
-  }
+    if (patch.disabled === true) {
+      assertNotLastOwner(store, id, 'disable principal');
+    }
+    if (patch.role && patch.role !== 'owner' && p.role === 'owner') {
+      assertNotLastOwner(store, id, 'change role away from owner');
+    }
 
-  if (patch.name !== undefined) p.name = patch.name;
-  if (patch.role !== undefined) p.role = patch.role;
-  if (patch.disabled !== undefined) p.disabled = patch.disabled;
-  if (patch.oidcSubject !== undefined) p.oidcSubject = patch.oidcSubject || undefined;
-  if (patch.ldapUid !== undefined) p.ldapUid = patch.ldapUid ? String(patch.ldapUid).trim() : undefined;
-  if (patch.ldapGroups !== undefined) p.ldapGroups = Array.isArray(patch.ldapGroups) ? patch.ldapGroups : undefined;
-  if (patch.grants !== undefined) p.grants = patch.grants;
-  if (patch.revocations !== undefined) p.revocations = patch.revocations;
-  p.updatedAt = new Date().toISOString();
+    if (patch.name !== undefined) p.name = patch.name;
+    if (patch.role !== undefined) p.role = patch.role;
+    if (patch.disabled !== undefined) p.disabled = patch.disabled;
+    if (patch.oidcSubject !== undefined) p.oidcSubject = patch.oidcSubject || undefined;
+    if (patch.ldapUid !== undefined) p.ldapUid = patch.ldapUid ? String(patch.ldapUid).trim() : undefined;
+    if (patch.ldapGroups !== undefined) p.ldapGroups = Array.isArray(patch.ldapGroups) ? patch.ldapGroups : undefined;
+    if (patch.grants !== undefined) p.grants = patch.grants;
+    if (patch.revocations !== undefined) p.revocations = patch.revocations;
+    p.updatedAt = new Date().toISOString();
 
-  await saveAuthzStore(store, filePath);
-  return toPublicPrincipal(p);
+    await saveAuthzStore(store, filePath);
+    return toPublicPrincipal(p);
+  });
 }
 
 /**
  * Remove a principal
  */
 export async function removePrincipal(id, filePath = getVigilanteAuthzFile()) {
-  const loaded = loadAuthzStore(filePath);
-  if (loaded.state !== 'ready' || !loaded.store) throw new Error('Authz store not ready');
-  const store = loaded.store;
+  return withAuthzLock(filePath, async () => {
+    const loaded = loadAuthzStore(filePath, { forceReload: true });
+    if (loaded.state !== 'ready' || !loaded.store) throw new Error('Authz store not ready');
+    const store = loaded.store;
 
-  assertNotLastOwner(store, id, 'delete principal');
+    assertNotLastOwner(store, id, 'delete principal');
 
-  const before = store.principals.length;
-  store.principals = store.principals.filter(x => x.id !== id);
-  store.sessions = store.sessions.filter(s => s.principalId !== id);
+    const before = store.principals.length;
+    store.principals = store.principals.filter(x => x.id !== id);
+    store.sessions = store.sessions.filter(s => s.principalId !== id);
 
-  if (store.principals.length === before) {
-    throw new Error(`Principal ${id} not found`);
-  }
+    if (store.principals.length === before) {
+      throw new Error(`Principal ${id} not found`);
+    }
 
-  await saveAuthzStore(store, filePath);
+    await saveAuthzStore(store, filePath);
+  });
 }
 
 /**
  * Rotate principal token or set password
  */
 export async function rotatePrincipalToken(id, { password } = {}, filePath = getVigilanteAuthzFile()) {
-  const loaded = loadAuthzStore(filePath);
-  if (loaded.state !== 'ready' || !loaded.store) throw new Error('Authz store not ready');
-  const store = loaded.store;
+  return withAuthzLock(filePath, async () => {
+    const loaded = loadAuthzStore(filePath, { forceReload: true });
+    if (loaded.state !== 'ready' || !loaded.store) throw new Error('Authz store not ready');
+    const store = loaded.store;
 
-  const p = store.principals.find(x => x.id === id);
-  if (!p) throw new Error(`Principal ${id} not found`);
+    const p = store.principals.find(x => x.id === id);
+    if (!p) throw new Error(`Principal ${id} not found`);
 
-  let secretToReturn = '';
-  let tokenHash = '';
-  let isCustomPassword = false;
+    let secretToReturn = '';
+    let tokenHash = '';
+    let isCustomPassword = false;
 
-  if (password && password.trim()) {
-    tokenHash = hashPassword(password.trim());
-    secretToReturn = password.trim();
-    isCustomPassword = true;
-  } else {
-    secretToReturn = generateToken();
-    tokenHash = hashToken(secretToReturn);
-  }
+    if (password && password.trim()) {
+      tokenHash = hashPassword(password.trim());
+      secretToReturn = password.trim();
+      isCustomPassword = true;
+    } else {
+      secretToReturn = generateToken();
+      tokenHash = hashToken(secretToReturn);
+    }
 
-  p.tokenHash = tokenHash;
-  p.updatedAt = new Date().toISOString();
+    p.tokenHash = tokenHash;
+    p.updatedAt = new Date().toISOString();
 
-  // Invalidate existing sessions for this principal on credential rotation
-  store.sessions = store.sessions.filter(s => s.principalId !== id);
+    // Invalidate existing sessions for this principal on credential rotation
+    store.sessions = store.sessions.filter(s => s.principalId !== id);
 
-  await saveAuthzStore(store, filePath);
+    await saveAuthzStore(store, filePath);
 
-  return { secret: secretToReturn, isCustomPassword };
+    return { secret: secretToReturn, isCustomPassword };
+  });
 }
 
 /**

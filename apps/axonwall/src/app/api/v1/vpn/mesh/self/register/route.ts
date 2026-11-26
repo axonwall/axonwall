@@ -11,6 +11,12 @@ export async function POST(req: NextRequest) {
     const ownerUser = resolveHeadscaleUsername(session);
 
     const network = await resolveHeadscaleNetworkInfo(req);
+    if (!network.enabled) {
+      return NextResponse.json(
+        { status: 'error', error: 'Forbidden: Mesh VPN (Headscale) is currently disabled by your administrator' },
+        { status: 403 }
+      );
+    }
     if (!network.allowSelfRegistration) {
       return NextResponse.json(
         { status: 'error', error: 'Forbidden: Device self-registration is disabled by your administrator' },

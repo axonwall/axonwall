@@ -409,7 +409,7 @@ def normalize_zbm_cmdline(raw_cmd: str, font: str | None = None) -> str:
     if font and font not in ("auto", "default", "ter-132b"):
         tokens = [t for t in tokens if not t.startswith("rd.vconsole.font=")]
         tokens.append(f"rd.vconsole.font={font}")
-    elif font in ("auto", "default", "ter-132b", None):
+    elif font in ("auto", "default", "ter-132b"):
         tokens = [t for t in tokens if not t.startswith("rd.vconsole.font=")]
 
     required = [
@@ -475,6 +475,7 @@ def theme_zbm_uki(
     extract_linux: str | None = None,
     extract_initrd: str | None = None,
     hooks_dir: str | None = None,
+    preserve_cmdline: bool = False,
 ) -> None:
     if not os.path.isfile(in_efi):
         raise FileNotFoundError(f"Input EFI file not found: {in_efi}")
@@ -522,9 +523,21 @@ def theme_zbm_uki(
                     raw_cmd = f.read().decode("ascii", "ignore").strip("\x00 \r\n")
             except Exception:
                 raw_cmd = "ro quiet loglevel=3 net.ifnames=0"
-            cmdline_str = normalize_zbm_cmdline(raw_cmd, font=font)
+            if preserve_cmdline:
+                cmdline_str = raw_cmd
+            else:
+                cmdline_str = normalize_zbm_cmdline(raw_cmd, font=font)
         else:
-            cmdline_str = normalize_zbm_cmdline(cmdline_str, font=font)
+            if preserve_cmdline:
+                cmdline_str = cmdline_str.strip()
+            else:
+                cmdline_str = normalize_zbm_cmdline(cmdline_str, font=font)
+
+        if preserve_cmdline and font is not None:
+            _toks = [t for t in cmdline_str.split() if not t.startswith("rd.vconsole.font=")]
+            if font not in ("auto", "default", "ter-132b"):
+                _toks.append(f"rd.vconsole.font={font}")
+            cmdline_str = " ".join(_toks)
 
         with open(cmdline_path, "wb") as f:
             f.write(cmdline_str.strip().encode("ascii") + b"\x00")
@@ -602,7 +615,8 @@ def main() -> int:
     parser.add_argument("-o", "--output", required=True, help="Destination themed .EFI binary")
     parser.add_argument("-s", "--splash", help="Path to 24-bit uncompressed BMP splash image")
     parser.add_argument("-c", "--cmdline", help="Override kernel command line string")
-    parser.add_argument("-f", "--font", default="auto", help="Console font face (default: auto)")
+    parser.add_argument("--preserve-cmdline", action="store_true", help="Preserve exact .cmdline tokens without rewriting console/timeout/hookroot defaults")
+    parser.add_argument("-f", "--font", default=None, help="Console font face (default: preserve existing unless 'auto' or explicit font)")
     parser.add_argument("--extract-linux", help="Also write extracted .linux bzImage to this path")
     parser.add_argument("--extract-initrd", help="Also write themed .initrd image to this path")
     parser.add_argument("--hooks-dir", help="Optional path to ZFSBootMenu hooks directory")
@@ -618,6 +632,7 @@ def main() -> int:
         extract_linux=args.extract_linux,
         extract_initrd=args.extract_initrd,
         hooks_dir=args.hooks_dir,
+        preserve_cmdline=args.preserve_cmdline,
     )
     return 0
 

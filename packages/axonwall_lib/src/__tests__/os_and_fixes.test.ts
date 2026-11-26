@@ -92,7 +92,7 @@ describe('OS Detection & Multi-Distro Adapters (Arch / Omarchy / Debian / Alpine
 });
 
 describe('Compiler, Importer & Simulator Bug Fixes', () => {
-  it('adds IDS repeat mark guard to Suricata NFQUEUE rules so IDS mode avoids infinite loop', () => {
+  it('adds repeat mark guard to Suricata NFQUEUE rules in both IDS and IPS modes', () => {
     const ids = compileSuricata({
       enabled: true,
       mode: 'ids',
@@ -103,6 +103,7 @@ describe('Compiler, Importer & Simulator Bug Fixes', () => {
       rulesets: ['et-open'],
       customRules: '',
     });
+    expect(ids.suricataYaml).toContain('mode: repeat');
     expect(ids.nftRules[0]).toContain('meta mark & 0x1 == 0');
     expect(ids.nftRules[0]).toContain('suricata-ids-inbound');
 
@@ -116,7 +117,9 @@ describe('Compiler, Importer & Simulator Bug Fixes', () => {
       rulesets: ['et-open'],
       customRules: '',
     });
-    expect(ips.nftRules[0]).not.toContain('meta mark & 0x1 == 0');
+    expect(ips.suricataYaml).toContain('mode: repeat');
+    expect(ips.nftRules[0]).toContain('meta mark & 0x1 == 0');
+    expect(ips.nftRules[0]).toContain('suricata-ips-inbound');
   });
 
   it('emits valid YAML when K3s workload has both storageClass and bpfTokenProfileId', () => {

@@ -1,12 +1,13 @@
 import { NextResponse } from 'next/server';
 import { getSession } from '@/server/auth';
-import { assertActionPermitted } from '@/server/auth-guard';
+import { assertActionPermitted, assertInteractiveSession } from '@/server/auth-guard';
 import { createLocalGroup, getLocalGroups } from '@/server/users';
 
 export async function GET() {
   try {
     const session = await getSession();
-    assertActionPermitted(session);
+    assertInteractiveSession(session);
+    assertActionPermitted(session, 'admin');
     const groups = await getLocalGroups();
     return NextResponse.json({ groups });
   } catch (err: any) {
@@ -19,6 +20,7 @@ export async function GET() {
 export async function POST(req: Request) {
   try {
     const session = await getSession();
+    assertInteractiveSession(session);
     assertActionPermitted(session, 'admin');
 
     const body = await req.json();

@@ -4,8 +4,8 @@ import { fileURLToPath } from 'node:url';
 import { BaseModule } from '../base.js';
 import { execStream } from '../../utils/exec.js';
 import { applyK8sTlsSecret } from '../../engine/certs.js';
-import { ensureNamespace } from '../../engine/k8s.js';
-import { resolveChartValuesArgs } from '../../engine/helm.js';
+import { ensureNamespace, getClusterContextArgs, getHelmContextArgs, getKubeExecutionEnv } from '../../engine/k8s.js';
+import { resolveChartValuesArgs, cleanupHelmTempValues } from '../../engine/helm.js';
 
 import {
   BUILTIN_FALCO_RULES,
@@ -118,6 +118,8 @@ export class FalcoModule extends BaseModule {
     const chartPath = path.join(__dirname, 'charts', 'falco');
     const defaultValues = path.join(__dirname, 'values', 'falco.yaml');
 
+    const kubeEnv = getKubeExecutionEnv();
+    const helmCtxArgs = await getHelmContextArgs(clusterName);
     const valuesArgs = await resolveChartValuesArgs({
       moduleId: this.id,
       chartName: 'falco',
@@ -131,16 +133,21 @@ export class FalcoModule extends BaseModule {
       onLog
     });
 
-    const helmArgs = [
-      'upgrade', '--install', '--wait', releaseName, chartPath,
-      '--namespace', targetNamespace,
-      ...valuesArgs,
-      '--set', `ingress.hosts[0].host=${ingressHost}`,
-      '--set', `ingress.tls[0].secretName=${targetTlsSecret}`,
-      '--set', `ingress.tls[0].hosts[0]=${ingressHost}`
-    ];
+    try {
+      const helmArgs = [
+        'upgrade', '--install', '--wait', releaseName, chartPath,
+        ...helmCtxArgs,
+        '--namespace', targetNamespace,
+        ...valuesArgs,
+        '--set', `ingress.hosts[0].host=${ingressHost}`,
+        '--set', `ingress.tls[0].secretName=${targetTlsSecret}`,
+        '--set', `ingress.tls[0].hosts[0]=${ingressHost}`
+      ];
 
-    await execStream('helm', helmArgs, { onLog });
+      await execStream('helm', helmArgs, { onLog, env: kubeEnv });
+    } finally {
+      await cleanupHelmTempValues(valuesArgs);
+    }
 
     if (onLog) {
       onLog(`[falco] Successfully deployed Falco in namespace '${targetNamespace}'! Ingress: https://${ingressHost}`);
@@ -154,10 +161,13 @@ export class FalcoModule extends BaseModule {
     const targetNamespace = namespace || this.namespace;
     const isStandardNs = targetNamespace === 'default' || targetNamespace === 'falco';
     const releaseName = isStandardNs ? 'falco' : `${targetNamespace}-falco`;
+    const kubeEnv = getKubeExecutionEnv();
+    const helmCtxArgs = await getHelmContextArgs(clusterName);
+    const ctxArgs = await getClusterContextArgs(clusterName);
 
     if (onLog) onLog(`[falco] Uninstalling Falco from namespace '${targetNamespace}'...`);
     try {
-      await execa('helm', ['uninstall', releaseName, '-n', targetNamespace]);
+      await execa('helm', ['uninstall', releaseName, '-n', targetNamespace, ...helmCtxArgs], { env: kubeEnv });
     } catch {
       // Ignore if already uninstalled
     }
@@ -165,7 +175,7 @@ export class FalcoModule extends BaseModule {
     if (deleteNamespace && targetNamespace !== 'default' && targetNamespace !== 'kube-system') {
       if (onLog) onLog(`[falco] Deleting namespace '${targetNamespace}'...`);
       try {
-        await execa('kubectl', ['delete', 'namespace', targetNamespace, '--timeout=60s']);
+        await execa('kubectl', ['delete', 'namespace', targetNamespace, '--timeout=60s', ...ctxArgs], { env: kubeEnv });
       } catch {
         // Ignore if already deleted
       }
@@ -179,14 +189,16 @@ export class FalcoModule extends BaseModule {
     const targetNamespace = namespace || this.namespace;
 
     try {
+      const kubeEnv = getKubeExecutionEnv();
+      const ctxArgs = await getClusterContextArgs(clusterName);
       const { stdout: podsJson } = await execa('kubectl', [
         'get', 'pods',
         '-n', targetNamespace,
         '-l', 'app.kubernetes.io/name=falco',
-        '--context', `k3d-${clusterName}`,
+        ...ctxArgs,
         '--request-timeout=3s',
         '-o', 'json'
-      ]);
+      ], { env: kubeEnv });
       const parsed = JSON.parse(podsJson);
       const pods = (parsed.items || []).map(p => ({
         name: p.metadata.name,

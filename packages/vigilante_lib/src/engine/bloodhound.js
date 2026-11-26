@@ -18,14 +18,15 @@ import { logger } from '../utils/logger.js';
  */
 export async function checkBloodhoundAvailable(options = {}) {
   const url = options.url || 'http://127.0.0.1:8080/api/v2/health';
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 2000);
   try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 2000);
     const resp = await fetch(url, { signal: controller.signal });
-    clearTimeout(timeout);
     return { reachable: resp.ok, endpoint: url, status: resp.status };
   } catch (err) {
     return { reachable: false, endpoint: url, error: err.message };
+  } finally {
+    clearTimeout(timeout);
   }
 }
 
@@ -35,6 +36,24 @@ export async function checkBloodhoundAvailable(options = {}) {
  * @param {string|Object} fileOrData
  * @returns {Object} Extracted Active Directory graph summary
  */
+const emptyBloodhoundSummary = () => ({
+  type: 'unknown',
+  count: 0,
+  items: [],
+  users: [],
+  computers: [],
+  groups: [],
+  attackPathAlerts: [],
+  statistics: {
+    totalUsers: 0,
+    privilegedUsers: 0,
+    asRepRoastable: 0,
+    totalComputers: 0,
+    unconstrainedComputers: 0,
+    totalGroups: 0
+  }
+});
+
 export function parseBloodhoundData(fileOrData) {
   let data = fileOrData;
   if (typeof fileOrData === 'string') {
@@ -44,19 +63,19 @@ export function parseBloodhoundData(fileOrData) {
         data = JSON.parse(raw);
       } catch (err) {
         logger.error('BLOODHOUND', `Failed to parse file at ${fileOrData}: ${err.message}`);
-        return { count: 0, items: [], type: 'unknown' };
+        return emptyBloodhoundSummary();
       }
     } else {
       try {
         data = JSON.parse(fileOrData);
       } catch {
-        return { count: 0, items: [], type: 'unknown' };
+        return emptyBloodhoundSummary();
       }
     }
   }
 
   if (!data || typeof data !== 'object') {
-    return { count: 0, items: [], type: 'unknown' };
+    return emptyBloodhoundSummary();
   }
 
   // BloodHound JSONs typically have: { data: [...], meta: { type: "users", ... } }
@@ -74,8 +93,17 @@ export function parseBloodhoundData(fileOrData) {
     const name = props.name || props.samaccountname || item.name || 'UNKNOWN';
     const domain = props.domain || 'UNKNOWN';
 
+    // Group node (evaluate before User so group objects with admincount are never misclassified as users)
+    if (dataType === 'groups' || Array.isArray(item.Members)) {
+      groups.push({
+        name,
+        domain,
+        adminCount: Boolean(props.admincount),
+        membersCount: (item.Members || []).length
+      });
+    }
     // User node
-    if (props.dontreqpreauth !== undefined || props.pwdneverexpires !== undefined || props.admincount !== undefined) {
+    else if (dataType === 'users' || props.dontreqpreauth !== undefined || props.pwdneverexpires !== undefined || (props.admincount !== undefined && props.operatingsystem === undefined)) {
       const isAsRepRoastable = Boolean(props.dontreqpreauth);
       const isUnconstrained = Boolean(props.unconstraineddelegation);
       const isAdminCount = Boolean(props.admincount);
@@ -130,11 +158,12 @@ export function parseBloodhoundData(fileOrData) {
         });
       }
     }
-    // Group node
+    // Group fallback by name
     else if (props.admincount !== undefined || name.toUpperCase().includes('ADMIN')) {
       groups.push({
         name,
         domain,
+        adminCount: Boolean(props.admincount),
         membersCount: (item.Members || []).length
       });
     }
@@ -235,9 +264,9 @@ export async function ingestBloodhoundData(fileOrData, options = {}) {
     parsed,
     correlation,
     stats: {
-      users: parsed.statistics.totalUsers,
-      computers: parsed.statistics.totalComputers,
-      attackPathAlerts: parsed.attackPathAlerts.length,
+      users: parsed.statistics?.totalUsers ?? 0,
+      computers: parsed.statistics?.totalComputers ?? 0,
+      attackPathAlerts: (parsed.attackPathAlerts || []).length,
       tier0Compromises: correlation.tier0CompromisedCount
     }
   };

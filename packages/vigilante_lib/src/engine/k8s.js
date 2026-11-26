@@ -1,4 +1,5 @@
 import fsSync from 'node:fs';
+import crypto from 'node:crypto';
 import { execa } from 'execa';
 import { logger } from '../utils/logger.js';
 import { isValidDnsLabel } from './config.js';
@@ -200,4 +201,112 @@ export async function getClusterContextArgs(clusterName = 'axonwall-k3s', provid
   } catch {
     return [];
   }
+}
+
+/**
+ * Resolve helm context arguments dynamically for k3s and k3d
+ * @param {string} [clusterName='axonwall-k3s']
+ * @param {string} [provider=null]
+ * @returns {Promise<string[]>}
+ */
+export async function getHelmContextArgs(clusterName = 'axonwall-k3s', provider = null) {
+  const ctxArgs = await getClusterContextArgs(clusterName, provider);
+  if (ctxArgs.length === 2 && ctxArgs[0] === '--context') {
+    return ['--kube-context', ctxArgs[1]];
+  }
+  return [];
+}
+
+/**
+ * Generate a URL-safe high-entropy secret string for Kubernetes workloads.
+ */
+export function generateStrongSecret({ requireComplex = false } = {}) {
+  const token = crypto.randomBytes(24).toString('base64url');
+  return requireComplex ? `Ax9!${token}` : token;
+}
+
+/**
+ * Ensure a Kubernetes Secret exists in the target namespace with the given keys,
+ * reusing any already-populated secret values on upgrades so DB/app credentials
+ * remain stable without shipping static passwords in repository manifests.
+ *
+ * @param {Object} params
+ * @param {string} params.namespace
+ * @param {string} params.secretName
+ * @param {string[]|Record<string, string|Function>} params.keys
+ * @param {string} [params.clusterName]
+ * @param {string} [params.clusterProvider]
+ * @returns {Promise<Record<string, string>>}
+ */
+export async function ensureGeneratedK8sSecret({
+  namespace = 'default',
+  secretName,
+  keys = [],
+  clusterName = null,
+  clusterProvider = null
+}) {
+  if (!secretName || !isValidDnsLabel(secretName)) {
+    throw new Error(`Invalid Kubernetes secret name '${secretName}'`);
+  }
+  if (namespace && namespace !== 'default' && !isValidDnsLabel(namespace)) {
+    throw new Error(`Invalid Kubernetes namespace '${namespace}'`);
+  }
+
+  const kubeEnv = getKubeExecutionEnv();
+  const ctxArgs = clusterName ? await getClusterContextArgs(clusterName, clusterProvider) : [];
+  const existingData = {};
+
+  try {
+    const { stdout } = await execa(
+      'kubectl',
+      [...ctxArgs, 'get', 'secret', secretName, '-n', namespace, '-o', 'json'],
+      { env: kubeEnv }
+    );
+    const parsed = JSON.parse(stdout || '{}');
+    for (const [k, b64] of Object.entries(parsed?.data || {})) {
+      if (typeof b64 === 'string') {
+        existingData[k] = Buffer.from(b64, 'base64').toString('utf8');
+      }
+    }
+  } catch {
+    // Secret does not exist yet
+  }
+
+  const keyEntries = Array.isArray(keys) ? keys.map(k => [k, null]) : Object.entries(keys || {});
+  const resolved = { ...existingData };
+  let needsWrite = Object.keys(existingData).length === 0;
+
+  for (const [key, valueOrFn] of keyEntries) {
+    if (resolved[key]) continue;
+    needsWrite = true;
+    resolved[key] = typeof valueOrFn === 'function'
+      ? valueOrFn(resolved)
+      : (typeof valueOrFn === 'string' && valueOrFn.length > 0 ? valueOrFn : generateStrongSecret());
+  }
+
+  if (needsWrite) {
+    const manifest = {
+      apiVersion: 'v1',
+      kind: 'Secret',
+      metadata: {
+        name: secretName,
+        namespace,
+        labels: {
+          'app.kubernetes.io/managed-by': 'vigilante'
+        }
+      },
+      type: 'Opaque',
+      stringData: resolved
+    };
+    await execa(
+      'kubectl',
+      [...ctxArgs, 'apply', '-f', '-'],
+      {
+        input: JSON.stringify(manifest),
+        env: kubeEnv
+      }
+    );
+  }
+
+  return resolved;
 }

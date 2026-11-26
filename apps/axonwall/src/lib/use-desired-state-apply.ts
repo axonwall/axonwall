@@ -32,8 +32,12 @@ export type ApplyDesiredStateResult = {
  * since it was loaded…" error; callers surface it through their usual
  * error channel and must reload before retrying.
  */
-export function useDesiredStateApply() {
+export function useDesiredStateApply(options?: {
+  onConfigChanged?: () => void | Promise<void>;
+}) {
   const fingerprintRef = useRef<string | null>(null);
+  const onConfigChangedRef = useRef(options?.onConfigChanged);
+  onConfigChangedRef.current = options?.onConfigChanged;
 
   const refreshFingerprint = useCallback(async () => {
     try {
@@ -46,6 +50,15 @@ export function useDesiredStateApply() {
 
   useEffect(() => {
     void refreshFingerprint();
+    if (typeof window === 'undefined') return;
+    const handleConfigChanged = () => {
+      void refreshFingerprint();
+      void onConfigChangedRef.current?.();
+    };
+    window.addEventListener('axonwall:config-changed', handleConfigChanged);
+    return () => {
+      window.removeEventListener('axonwall:config-changed', handleConfigChanged);
+    };
   }, [refreshFingerprint]);
 
   const getFingerprint = useCallback(() => fingerprintRef.current, []);

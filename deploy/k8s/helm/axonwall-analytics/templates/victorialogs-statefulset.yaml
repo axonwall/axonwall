@@ -28,12 +28,13 @@ spec:
             - "-retentionPeriod={{ .Values.victorialogs.retentionPeriod }}"
             - "-storageDataPath=/vl-data"
             - "-httpListenAddr=:9428"
+            - "-http.pathPrefix=/vl"
           ports:
             - name: http
               containerPort: 9428
           readinessProbe:
             httpGet:
-              path: /health
+              path: /vl/health
               port: http
             initialDelaySeconds: 5
             periodSeconds: 10
@@ -42,6 +43,12 @@ spec:
           volumeMounts:
             - name: vl-data
               mountPath: /vl-data
+      {{- if not .Values.victorialogs.persistence.enabled }}
+      volumes:
+        - name: vl-data
+          emptyDir: {}
+      {{- end }}
+  {{- if .Values.victorialogs.persistence.enabled }}
   volumeClaimTemplates:
     - metadata:
         name: vl-data
@@ -53,4 +60,5 @@ spec:
         resources:
           requests:
             storage: {{ .Values.victorialogs.persistence.size | quote }}
+  {{- end }}
 {{- end }}

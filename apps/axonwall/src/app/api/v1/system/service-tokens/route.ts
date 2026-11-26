@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSession } from '@/server/auth';
-import { assertActionPermitted } from '@/server/auth-guard';
+import { assertActionPermitted, assertInteractiveSession } from '@/server/auth-guard';
 import { createServiceToken, listServiceTokens, type ServiceTokenRole } from '@/server/service-tokens';
 
 function errStatus(err: unknown): number {
@@ -13,6 +13,7 @@ function errStatus(err: unknown): number {
 export async function GET() {
   try {
     const session = await getSession();
+    assertInteractiveSession(session);
     assertActionPermitted(session, 'admin');
     return NextResponse.json({ status: 'ok', tokens: listServiceTokens() });
   } catch (err: unknown) {
@@ -24,18 +25,22 @@ export async function GET() {
 export async function POST(req: NextRequest) {
   try {
     const session = await getSession();
+    assertInteractiveSession(session);
     assertActionPermitted(session, 'admin');
-    const body = (await req.json().catch(() => ({}))) as {
+    const body = (await req.json().catch(() => null)) as {
       name?: string;
       role?: ServiceTokenRole;
       scopes?: string[];
       expiresAt?: string;
-    };
+    } | null;
+    if (!body || typeof body !== 'object' || Array.isArray(body)) {
+      return NextResponse.json({ status: 'error', error: 'Invalid JSON request body' }, { status: 400 });
+    }
     const created = createServiceToken({
-      name: String(body?.name || ''),
-      role: body?.role,
-      scopes: Array.isArray(body?.scopes) ? body.scopes : undefined,
-      expiresAt: body?.expiresAt,
+      name: String(body.name || ''),
+      role: body.role,
+      scopes: Array.isArray(body.scopes) ? body.scopes : undefined,
+      expiresAt: body.expiresAt,
     });
     return NextResponse.json(
       {

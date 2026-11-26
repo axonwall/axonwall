@@ -247,12 +247,24 @@ static __always_inline void parse_tcp_options(struct __sk_buff *skb, __u32 opt_o
 	__u32 load_len = opt_len;
 	if (load_len > sizeof(optbuf))
 		load_len = sizeof(optbuf);
-	/* Always load 1..40 bytes via masked constant-bounded helper call */
+	/* Always load 1..40 bytes via verifier-friendly constant-bounded helper calls */
 	if (load_len >= 40) {
 		if (bpf_skb_load_bytes(skb, opt_off, optbuf, 40) != 0)
 			return;
+	} else if (load_len >= 32) {
+		if (bpf_skb_load_bytes(skb, opt_off, optbuf, 32) != 0)
+			return;
+		__u32 rem = load_len & 0x07;
+		asm volatile("" : "+r"(rem));
+		rem &= 0x07;
+		if (rem > 0) {
+			if (bpf_skb_load_bytes(skb, opt_off + 32, optbuf + 32, rem) != 0)
+				return;
+		}
 	} else {
 		__u32 bounded = load_len & 0x1F;
+		asm volatile("" : "+r"(bounded));
+		bounded &= 0x1F;
 		if (bounded == 0)
 			return;
 		if (bpf_skb_load_bytes(skb, opt_off, optbuf, bounded) != 0)
@@ -495,7 +507,7 @@ static __always_inline int process_tc_packet(struct __sk_buff *skb, __u8 directi
 
 	ev->ts_ns = now_ns;
 	ev->socket_cookie = fval->socket_cookie;
-	ev->cgroup_id = bpf_get_current_cgroup_id();
+	ev->cgroup_id = bpf_skb_cgroup_id(skb);
 	ev->byte_count = fval->byte_count;
 	ev->ifindex = skb->ifindex;
 	ev->pid = 0;

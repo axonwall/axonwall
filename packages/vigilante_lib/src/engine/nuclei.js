@@ -13,6 +13,7 @@ import {
 import { autoSignIfConfigured } from './gpg.js';
 import { saveEvidenceFile } from './evidence.js';
 import { calculateNistIncidentScore, generateNistIncidentRecord } from './nist.js';
+import { assertSafeOutboundTarget } from './ssrf.js';
 import { logger } from '../utils/logger.js';
 
 function assertNucleiTarget(target) {
@@ -87,7 +88,7 @@ export const NUCLEI_PROFILES = [
     description: 'Detect exposed panels, cloud credentials, debug endpoints, and configuration leaks',
     tags: ['misconfig', 'exposure', 'panel'],
     severities: ['critical', 'high', 'medium', 'low'],
-    buildArgs: (target) => buildValidatedNucleiArgs(target, ['-tags', 'misconfig,exposure,panel'])
+    buildArgs: (target, opts = {}) => buildValidatedNucleiArgs(target, ['-tags', 'misconfig,exposure,panel'], opts)
   },
   {
     id: 'default-logins',
@@ -95,7 +96,7 @@ export const NUCLEI_PROFILES = [
     description: 'Audit services for default administrator passwords and unauthenticated portals',
     tags: ['default-login'],
     severities: ['critical', 'high', 'medium'],
-    buildArgs: (target) => buildValidatedNucleiArgs(target, ['-tags', 'default-login'])
+    buildArgs: (target, opts = {}) => buildValidatedNucleiArgs(target, ['-tags', 'default-login'], opts)
   },
   {
     id: 'ssl',
@@ -103,7 +104,7 @@ export const NUCLEI_PROFILES = [
     description: 'Analyze SSL/TLS certificate configurations, cipher suites, and expiry',
     tags: ['ssl', 'tls'],
     severities: ['medium', 'low', 'info'],
-    buildArgs: (target) => buildValidatedNucleiArgs(target, ['-tags', 'ssl,tls'])
+    buildArgs: (target, opts = {}) => buildValidatedNucleiArgs(target, ['-tags', 'ssl,tls'], opts)
   }
 ];
 
@@ -179,6 +180,13 @@ export function parseNucleiOutput(rawOutput) {
  */
 export async function runNucleiScan(target, profileId = 'cves', opts = {}) {
   const cleanTarget = assertNucleiTarget(target);
+  const { hostname: safeHost } = await assertSafeOutboundTarget(cleanTarget, {
+    label: 'nuclei target',
+    allowBareHost: true,
+    allowPrivate: opts.allowPrivate,
+    allowLoopback: opts.allowLoopback,
+    allowMetadata: false
+  });
   await ensureVigilanteConfig();
   const nucleiDir = getVigilanteNucleiDir();
   const profile = NUCLEI_PROFILES.find((p) => p.id === profileId) || NUCLEI_PROFILES[0];
@@ -265,19 +273,21 @@ export async function runNucleiScan(target, profileId = 'cves', opts = {}) {
     try {
       const highestSeverity = stats.critical > 0 ? 'CRITICAL' : 'HIGH';
       const topFinding = findings.find((f) => f.severity === 'critical') || findings.find((f) => f.severity === 'high');
-      const cleanHost = target.replace(/^https?:\/\//, '').split(/[:/]/)[0] || '127.0.0.1';
+      const cleanHost = safeHost || '127.0.0.1';
 
       const incident = generateNistIncidentRecord({
         incidentId: `NIST-INC-NUCLEI-${Date.now().toString(36).toUpperCase()}`,
-        networkCidr: '0.0.0.0/0',
-        hostIp: cleanHost,
-        primaryVector: 'Web Application / External Attack Surface',
+        network: '0.0.0.0_0',
+        host: cleanHost,
+        attackVector: 'WEB_EXPLOIT',
         phase: 'containment_eradication_recovery',
-        findings: [
+        rootCause: `Active scanning against ${cleanTarget} detected ${stats.critical} critical and ${stats.high} high severity findings.`,
+        artifacts: [
           {
+            filename: `${scanId}.json`,
             title: `Nuclei Vulnerability Detected: ${topFinding ? topFinding.name : 'High Risk Exploit'}`,
             severity: highestSeverity,
-            description: `Active scanning against ${target} detected ${stats.critical} critical and ${stats.high} high severity findings.`
+            description: `Active scanning against ${cleanTarget} detected ${stats.critical} critical and ${stats.high} high severity findings.`
           }
         ]
       });
@@ -291,7 +301,7 @@ export async function runNucleiScan(target, profileId = 'cves', opts = {}) {
 
   // Also save as formal evidence artifact
   try {
-    const cleanHost = target.replace(/^https?:\/\//, '').split(/[:/]/)[0] || 'target';
+    const cleanHost = safeHost || 'target';
     await saveEvidenceFile('scans', cleanHost, `${scanId}.json`, record);
   } catch (err) {
     logger.warn('NUCLEI', `Could not save evidence file: ${err.message}`);

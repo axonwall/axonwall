@@ -1,4 +1,4 @@
-import { NextRequest, NextResponse } from 'next/server';
+import { NextResponse } from 'next/server';
 import { getLibreNmsTopologyAction } from '@/server/agent';
 
 function errStatus(err: unknown): number {
@@ -8,10 +8,9 @@ function errStatus(err: unknown): number {
   return 500;
 }
 
-export async function GET(req: NextRequest) {
+export async function GET() {
   try {
-    const endpoint = req.nextUrl.searchParams.get('endpoint') || undefined;
-    const data = await getLibreNmsTopologyAction(endpoint);
+    const data = await getLibreNmsTopologyAction();
     return NextResponse.json({ status: 'ok', data });
   } catch (err: unknown) {
     const msg = (err as { message?: string })?.message || 'Internal server error';

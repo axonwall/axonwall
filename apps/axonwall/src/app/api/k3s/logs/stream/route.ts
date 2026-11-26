@@ -4,22 +4,21 @@ import http from 'node:http';
 import { clearCachedAgentToken, getAgentToken } from '@/server/agent-client';
 import { getAgentApiSocketPath } from '@/server/dev-paths';
 import { getSession } from '@/server/auth';
-import { isConsoleUser, isPasswordChangeEnforced } from '@/server/auth-guard';
+import { assertActionPermitted } from '@/server/auth-guard';
+import { checkPluginApiGuard } from '@/server/plugin-guard';
 
 export const dynamic = 'force-dynamic';
 
 export async function GET(req: NextRequest) {
-  const session = await getSession();
-  const mustChangePassword = isPasswordChangeEnforced(session);
-  if (!session || mustChangePassword) {
-    return new Response(
-      mustChangePassword ? 'Forbidden: Password change required' : 'Unauthorized',
-      { status: mustChangePassword ? 403 : 401 }
-    );
+  try {
+    const session = await getSession();
+    assertActionPermitted(session);
+  } catch (err: unknown) {
+    const msg = (err as { message?: string })?.message || 'Unauthorized';
+    return new Response(msg, { status: msg.includes('Unauthorized') ? 401 : 403 });
   }
-  if (!isConsoleUser(session)) {
-    return new Response('Forbidden: Console role required', { status: 403 });
-  }
+  const guard = await checkPluginApiGuard('core-k3s');
+  if (guard) return guard;
 
   const { searchParams } = new URL(req.url);
   const qs = new URLSearchParams();
@@ -109,6 +108,11 @@ export async function GET(req: NextRequest) {
               let errBody = '';
               res.on('data', (c) => {
                 errBody += c.toString();
+              });
+              res.on('error', (err) => {
+                sendDaemonError(
+                  err?.message || `K3s log stream returned HTTP ${res.statusCode || 500}`
+                );
               });
               res.on('end', () => {
                 sendDaemonError(

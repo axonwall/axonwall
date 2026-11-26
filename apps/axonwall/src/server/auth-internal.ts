@@ -1,3 +1,4 @@
+import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 
@@ -48,17 +49,34 @@ export function writeAuthFileSafe(filePath: string, content: string, mode = 0o60
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true, mode: 0o775 });
   }
+  const base = path.basename(filePath);
+  const tmpPath = path.join(dir, `.${base}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`);
+  let fd: number | null = null;
   try {
-    fs.writeFileSync(filePath, content, { mode });
-  } catch {
-    if (fs.existsSync(filePath)) {
-      fs.unlinkSync(filePath);
+    fd = fs.openSync(tmpPath, 'wx', mode);
+    fs.writeFileSync(fd, content, 'utf8');
+    try {
+      fs.fsyncSync(fd);
+    } catch {}
+    fs.closeSync(fd);
+    fd = null;
+    try {
+      fs.chmodSync(tmpPath, mode);
+    } catch {}
+    fs.renameSync(tmpPath, filePath);
+  } catch (err) {
+    if (fd !== null) {
+      try {
+        fs.closeSync(fd);
+      } catch {}
     }
-    fs.writeFileSync(filePath, content, { mode });
+    try {
+      if (fs.existsSync(tmpPath)) {
+        fs.unlinkSync(tmpPath);
+      }
+    } catch {}
+    throw err;
   }
-  try {
-    fs.chmodSync(filePath, mode);
-  } catch {}
 }
 
 export function readMfaEnv(): Map<string, string> {
@@ -147,10 +165,14 @@ function pruneLoginFailures(now: number) {
       loginFailures.delete(k);
     }
   }
-  while (loginFailures.size >= LOGIN_FAILURE_MAX_ENTRIES) {
-    const oldestKey = loginFailures.keys().next().value;
-    if (oldestKey === undefined) break;
-    loginFailures.delete(oldestKey);
+  if (loginFailures.size >= LOGIN_FAILURE_MAX_ENTRIES) {
+    // Never evict actively locked accounts under map pressure; only evict unlocked entries.
+    for (const [k, rec] of loginFailures) {
+      if (loginFailures.size < LOGIN_FAILURE_MAX_ENTRIES) break;
+      if (rec.lockedUntil <= now) {
+        loginFailures.delete(k);
+      }
+    }
   }
 }
 
@@ -159,25 +181,34 @@ export async function performAuthentication(
   password: string,
   totpCode?: string
 ): Promise<AuthResult> {
-  const key = (username || '').toLowerCase();
+  if (typeof username !== 'string' || typeof password !== 'string') {
+    return { success: false, error: 'Username and password are required' };
+  }
+  const key = username.toLowerCase();
   const now = Date.now();
-  const record = loginFailures.get(key);
-  if (record && record.lockedUntil > now) {
+  const initialRecord = loginFailures.get(key);
+  if (initialRecord && initialRecord.lockedUntil > now) {
     return { success: false, error: 'Too many failed sign-in attempts. Try again in a few minutes.' };
   }
   const result = await performAuthenticationInner(username, password, totpCode);
+  const postNow = Date.now();
+  const latestRecord = loginFailures.get(key);
+  if (latestRecord && latestRecord.lockedUntil > postNow) {
+    // Another concurrent attempt triggered lockout while performAuthenticationInner was awaiting.
+    return { success: false, error: 'Too many failed sign-in attempts. Try again in a few minutes.' };
+  }
   if (result.success) {
     loginFailures.delete(key);
   } else {
-    // W-M4: once a prior lockout expires (lockedUntil > 0 && lockedUntil <= now),
+    // W-M4: once a prior lockout expires (lockedUntil > 0 && lockedUntil <= postNow),
     // reset the failure counter instead of immediately re-locking on the next typo.
-    const activeUnexpiredCount = record && record.lockedUntil === 0 ? record.count : 0;
+    const activeUnexpiredCount = latestRecord && latestRecord.lockedUntil === 0 ? latestRecord.count : 0;
     const count = activeUnexpiredCount + 1;
-    pruneLoginFailures(now);
+    pruneLoginFailures(postNow);
     loginFailures.delete(key);
     loginFailures.set(key, {
       count,
-      lockedUntil: count >= LOGIN_MAX_FAILURES ? now + LOGIN_LOCKOUT_MS : 0,
+      lockedUntil: count >= LOGIN_MAX_FAILURES ? postNow + LOGIN_LOCKOUT_MS : 0,
     });
   }
   return result;

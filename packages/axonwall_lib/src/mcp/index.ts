@@ -642,7 +642,8 @@ export function cidrOverlaps(cidrA: string, cidrB: string): boolean {
 }
 
 export function isIpInCidr(ip: string, cidr: string): boolean {
-  const cleanIp = ip.replace(/^::ffff:/i, '').trim();
+  const parsed = parseIpOrCidr(ip);
+  const cleanIp = parsed ? parsed.address : ip.replace(/^::ffff:/i, '').trim();
   return cidrOverlaps(cleanIp, cidr);
 }
 
@@ -755,7 +756,8 @@ export function validateMcpTarget(
 
   // 5. Check MCP client's own remote IP (self-lockout protection)
   if (ctx.callerIp) {
-    const cleanCaller = ctx.callerIp.replace(/^::ffff:/i, '').trim();
+    const parsedCaller = parseIpOrCidr(ctx.callerIp);
+    const cleanCaller = parsedCaller ? parsedCaller.address : ctx.callerIp.replace(/^::ffff:/i, '').trim();
     if (cleanCaller && cleanCaller !== '127.0.0.1' && cleanCaller !== '::1') {
       if (cidrOverlaps(parsed.normalizedCidr, cleanCaller)) {
         return {

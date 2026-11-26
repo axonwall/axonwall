@@ -1,9 +1,10 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import {
   Activity,
+  AlertTriangle,
   Check,
   CheckCircle2,
   Copy,
@@ -45,6 +46,8 @@ import {
   type NetBoxSyncResultSnapshot,
 } from '@/server/agent';
 import { useDesiredStateApply } from '@/lib/use-desired-state-apply';
+import { safeHttpHref } from '@/lib/safe-href';
+import { parseNonNegativeIntInput } from '@/lib/state-preservation';
 
 const SYNC_SCOPE_FLAGS: Array<{
   key: keyof NetBoxConfig['sync'];
@@ -143,7 +146,8 @@ export default function NetBoxStudioPage() {
     void loadAll(false);
   }, [loadAll]);
 
-  const bundle = useMemo(() => {
+  const lastValidBundleRef = useRef<ReturnType<typeof compileNetBoxBundle> | null>(null);
+  const { bundle, validationError } = useMemo(() => {
     const previewState: Partial<DesiredState> = {
       ...(state ?? {}),
       netbox: config,
@@ -152,7 +156,15 @@ export default function NetBoxStudioPage() {
         { id: 'netbox', enabled: config.enabled },
       ],
     };
-    return compileNetBoxBundle(previewState);
+    try {
+      const compiled = compileNetBoxBundle(previewState);
+      lastValidBundleRef.current = compiled;
+      return { bundle: compiled, validationError: null as string | null };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Invalid NetBox configuration';
+      const fallback = lastValidBundleRef.current ?? compileNetBoxBundle(state ?? {});
+      return { bundle: fallback, validationError: msg };
+    }
   }, [state, config]);
 
   const copyText = (key: string, val: string) => {
@@ -164,11 +176,24 @@ export default function NetBoxStudioPage() {
 
   const handleSave = async (overrideEnabled?: boolean) => {
     if (!state) return;
+    const targetEnabled = overrideEnabled !== undefined ? overrideEnabled : config.enabled;
+    const candidateConfig: NetBoxConfig = {
+      ...config,
+      enabled: targetEnabled,
+      externalUrl: config.externalUrl?.trim() ? config.externalUrl.trim() : undefined,
+    };
+    const parsedCfg = NetBoxConfigSchema.safeParse(candidateConfig);
+    if (!parsedCfg.success) {
+      setBanner({
+        type: 'error',
+        text: `Invalid NetBox settings: ${parsedCfg.error.issues.map((i) => `${i.path.join('.') || 'netbox'}: ${i.message}`).join('; ')}`,
+      });
+      return;
+    }
     setSaving(true);
     setBanner(null);
     try {
-      const targetEnabled = overrideEnabled !== undefined ? overrideEnabled : config.enabled;
-      const nextConfig: NetBoxConfig = { ...config, enabled: targetEnabled };
+      const nextConfig: NetBoxConfig = parsedCfg.data;
       let nextState = structuredClone(state);
       nextState.netbox = nextConfig;
       if (targetEnabled) {
@@ -241,8 +266,10 @@ export default function NetBoxStudioPage() {
     if (snap) setCreds(snap);
   };
 
-  const safeHref =
-    /^https?:\/\//i.test(bundle.endpointUrl) ? bundle.endpointUrl : `https://${bundle.domain}`;
+  const safeHref = safeHttpHref(
+    bundle.endpointUrl,
+    safeHttpHref(`https://${bundle.domain}`, 'https://netbox.axonwall.local')
+  );
 
   return (
     <div className="p-6 lg:p-8 max-w-7xl mx-auto space-y-6">
@@ -373,6 +400,13 @@ export default function NetBoxStudioPage() {
           >
             Dismiss
           </button>
+        </div>
+      )}
+
+      {validationError && (
+        <div className="p-3 rounded-xl bg-amber-950/30 border border-amber-500/30 text-xs text-amber-200 flex items-center gap-2">
+          <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
+          <span>Draft contains incomplete/invalid values (preview showing last valid config): {validationError}</span>
         </div>
       )}
 
@@ -692,9 +726,12 @@ export default function NetBoxStudioPage() {
                   type="number"
                   min={1}
                   max={2000}
-                  value={config.postgresStorageGb}
+                  value={config.postgresStorageGb || ''}
                   onChange={(e) =>
-                    setConfig((c) => ({ ...c, postgresStorageGb: Number(e.target.value) || 20 }))
+                    setConfig((c) => ({
+                      ...c,
+                      postgresStorageGb: parseNonNegativeIntInput(e.target.value, c.postgresStorageGb),
+                    }))
                   }
                   className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-800 text-white font-mono tabular-nums"
                 />
@@ -705,9 +742,12 @@ export default function NetBoxStudioPage() {
                   type="number"
                   min={1}
                   max={2000}
-                  value={config.mediaStorageGb}
+                  value={config.mediaStorageGb || ''}
                   onChange={(e) =>
-                    setConfig((c) => ({ ...c, mediaStorageGb: Number(e.target.value) || 10 }))
+                    setConfig((c) => ({
+                      ...c,
+                      mediaStorageGb: parseNonNegativeIntInput(e.target.value, c.mediaStorageGb),
+                    }))
                   }
                   className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-800 text-white font-mono tabular-nums"
                 />
@@ -720,8 +760,13 @@ export default function NetBoxStudioPage() {
                     min={1}
                     max={5}
                     aria-label="Web replicas"
-                    value={config.replicas}
-                    onChange={(e) => setConfig((c) => ({ ...c, replicas: Number(e.target.value) || 1 }))}
+                    value={config.replicas || ''}
+                    onChange={(e) =>
+                      setConfig((c) => ({
+                        ...c,
+                        replicas: parseNonNegativeIntInput(e.target.value, c.replicas),
+                      }))
+                    }
                     className="w-1/2 px-3 py-2 rounded-lg bg-slate-950 border border-slate-800 text-white font-mono tabular-nums"
                   />
                   <input
@@ -729,9 +774,12 @@ export default function NetBoxStudioPage() {
                     min={1}
                     max={5}
                     aria-label="Worker replicas"
-                    value={config.workerReplicas}
+                    value={config.workerReplicas || ''}
                     onChange={(e) =>
-                      setConfig((c) => ({ ...c, workerReplicas: Number(e.target.value) || 1 }))
+                      setConfig((c) => ({
+                        ...c,
+                        workerReplicas: parseNonNegativeIntInput(e.target.value, c.workerReplicas),
+                      }))
                     }
                     className="w-1/2 px-3 py-2 rounded-lg bg-slate-950 border border-slate-800 text-white font-mono tabular-nums"
                   />

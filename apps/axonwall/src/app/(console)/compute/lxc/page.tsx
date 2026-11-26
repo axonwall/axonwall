@@ -33,7 +33,6 @@ export default function LxcContainersPage() {
   // C-M8: the save/delete actions take the fingerprint this page loaded
   // with, so a concurrent save in another tab cannot be silently
   // reverted by this page's apply.
-  const { getFingerprint } = useDesiredStateApply();
   const [containers, setContainers] = useState<ContainerStatusItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState<number | null>(null);
@@ -58,7 +57,7 @@ export default function LxcContainersPage() {
   const [bpfTokenPreset, setBpfTokenPreset] = useState<'disabled' | 'network-dataplane' | 'socket-observability' | 'cgroup-microsegmentation'>('disabled');
   const [bridge, setBridge] = useState('br0');
 
-  const loadData = async () => {
+  const loadData = React.useCallback(async () => {
     try {
       setLoading(true);
       const [ctList, virtConf] = await Promise.all([
@@ -80,13 +79,19 @@ export default function LxcContainersPage() {
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
+
+  const { getFingerprint, refreshFingerprint } = useDesiredStateApply({
+    onConfigChanged: () => {
+      void loadData();
+    },
+  });
 
   useEffect(() => {
-    loadData();
-    const interval = setInterval(loadData, 5000);
+    void loadData();
+    const interval = setInterval(() => void loadData(), 5000);
     return () => clearInterval(interval);
-  }, []);
+  }, [loadData]);
 
   const handlePower = async (targetCtid: number, action: 'start' | 'stop', force = false) => {
     setActionLoading(targetCtid);
@@ -113,6 +118,10 @@ export default function LxcContainersPage() {
       const res = await deleteContainerAction(targetCtid, fingerprint ? { expectedFingerprint: fingerprint } : undefined);
       setStatusBanner({ type: res.success ? 'success' : 'error', message: res.message });
       if (res.success) {
+        await refreshFingerprint();
+        if (typeof window !== 'undefined') {
+          window.dispatchEvent(new Event('axonwall:status-refresh'));
+        }
         await loadData();
       }
     } catch (err: any) {
@@ -171,6 +180,10 @@ export default function LxcContainersPage() {
       setStatusBanner({ type: 'success', message: res.message });
       setShowCreateModal(false);
       setHostname('');
+      await refreshFingerprint();
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new Event('axonwall:status-refresh'));
+      }
       await loadData();
     } catch (err: any) {
       setStatusBanner({ type: 'error', message: err?.message || 'Failed to create container' });

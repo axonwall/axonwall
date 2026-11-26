@@ -56,7 +56,7 @@ func TestNetRollbackHelperProcess(t *testing.T) {
 			fmt.Fprintln(os.Stderr, "fake nft error: rollback apply failure")
 			os.Exit(1)
 		}
-		if len(args) >= 2 && args[0] == "list" && args[1] == "ruleset" {
+		if len(args) >= 2 && args[0] == "list" && (args[1] == "ruleset" || (len(args) >= 4 && args[1] == "table" && args[2] == "inet" && args[3] == "axonwall")) {
 			fmt.Print(batch4NftScript)
 		}
 		os.Exit(0)
@@ -348,6 +348,7 @@ type netRollbackHarness struct {
 func setupNetRollbackHarness(t *testing.T, initial fakeKernelState) *netRollbackHarness {
 	t.Helper()
 	root := t.TempDir()
+	allowTestBundlePrefix(t, root)
 	etcDir := filepath.Join(root, "etc")
 	persistEtcDir := filepath.Join(root, "persist-etc")
 	stateDir := filepath.Join(root, "var")

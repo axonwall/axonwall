@@ -6,25 +6,52 @@
 ACTION=""
 UNITS=""
 PROP_FILTER=""
+PROP_VALUE=0
 
-for arg in "$@"; do
-  case "$arg" in
-    --no-block|--no-pager|-q|--quiet|--system)
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --no-block|--no-pager|-q|--quiet|--system|--full|-l)
+      shift
+      ;;
+    -p|--property)
+      if [ $# -lt 2 ]; then
+        echo "systemctl: option '$1' requires an argument" >&2
+        exit 1
+      fi
+      if [ -n "$PROP_FILTER" ]; then
+        PROP_FILTER="${PROP_FILTER},$2"
+      else
+        PROP_FILTER="$2"
+      fi
+      shift 2
       ;;
     --property=*)
-      PROP_FILTER="${arg#--property=}"
-      ;;
-    start|stop|restart|try-restart|try-reload-or-restart|reload|status|enable|disable|daemon-reload|reboot|poweroff|show|is-active)
-      if [ -z "$ACTION" ]; then
-        ACTION="$arg"
+      _pval="${1#--property=}"
+      if [ -n "$PROP_FILTER" ]; then
+        PROP_FILTER="${PROP_FILTER},${_pval}"
       else
-        UNITS="$UNITS $arg"
+        PROP_FILTER="$_pval"
       fi
+      shift
+      ;;
+    --value)
+      PROP_VALUE=1
+      shift
+      ;;
+    start|stop|restart|try-restart|try-reload-or-restart|reload|status|enable|disable|is-enabled|daemon-reload|reboot|poweroff|show|is-active)
+      if [ -z "$ACTION" ]; then
+        ACTION="$1"
+      else
+        UNITS="$UNITS $1"
+      fi
+      shift
       ;;
     -*)
+      shift
       ;;
     *)
-      UNITS="$UNITS $arg"
+      UNITS="$UNITS $1"
+      shift
       ;;
   esac
 done
@@ -82,11 +109,23 @@ case "$ACTION" in
     rc=0
     for u in $UNITS; do
       s="$(normalize_svc "$u")"
-      if [ -x "/etc/init.d/$s" ]; then
+      if [ -e "/run/openrc/started/$s" ] && [ -x "/etc/init.d/$s" ]; then
         rc-service "$s" restart || rc=$?
       fi
     done
     exit $rc
+    ;;
+  is-enabled)
+    for u in $UNITS; do
+      s="$(normalize_svc "$u")"
+      if rc-update show default 2>/dev/null | grep -qw "$s"; then
+        echo "enabled"
+        exit 0
+      else
+        echo "disabled"
+        exit 1
+      fi
+    done
     ;;
   is-active)
     for u in $UNITS; do
@@ -101,6 +140,21 @@ case "$ACTION" in
     done
     ;;
   show)
+    emit_prop() {
+      _k="$1"
+      _v="$2"
+      if [ -n "$PROP_FILTER" ]; then
+        case ",${PROP_FILTER}," in
+          *",${_k},"*) ;;
+          *) return 0 ;;
+        esac
+      fi
+      if [ "$PROP_VALUE" = "1" ]; then
+        echo "$_v"
+      else
+        echo "${_k}=${_v}"
+      fi
+    }
     for u in $UNITS; do
       s="$(normalize_svc "$u")"
       if [ ! -x "/etc/init.d/$s" ]; then
@@ -133,10 +187,10 @@ case "$ACTION" in
           MEM=$((RSS_KB * 1024))
         fi
       fi
-      echo "ActiveState=$ACTIVE"
-      echo "SubState=$SUB"
-      echo "MainPID=$PID"
-      echo "MemoryCurrent=$MEM"
+      emit_prop "ActiveState" "$ACTIVE"
+      emit_prop "SubState" "$SUB"
+      emit_prop "MainPID" "$PID"
+      emit_prop "MemoryCurrent" "$MEM"
     done
     exit 0
     ;;

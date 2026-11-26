@@ -408,24 +408,19 @@ export async function getClusterInfo(clusterName = 'vigilante-dev', provider = n
 
   if (isK3s) {
     const k3sClusters = await listK3sClusters();
-    const cluster = k3sClusters.find(c => c.name === clusterName || c.name === 'k3s-default') || {
-      serversRunning: 1,
-      serversCount: 1,
-      agentsRunning: 0,
-      agentsCount: 0
-    };
 
     let nodes = [];
     let kubectlConnected = false;
 
     try {
+      const kubeEnv = getKubeExecutionEnv();
       const ctxArgs = targetContext ? ['--context', targetContext] : [];
       const { stdout } = await execa('kubectl', [
         'get', 'nodes',
         ...ctxArgs,
         '--request-timeout=3s',
         '-o', 'json'
-      ]);
+      ], { env: kubeEnv });
       const parsed = JSON.parse(stdout);
       nodes = parsed.items?.map(node => ({
         name: node.metadata.name,
@@ -440,8 +435,17 @@ export async function getClusterInfo(clusterName = 'vigilante-dev', provider = n
       kubectlConnected = false;
     }
 
+    const matchedCluster = k3sClusters.find(c => c.name === clusterName || c.name === 'k3s-default');
+    const exists = Boolean(matchedCluster || k3sClusters.length > 0 || kubectlConnected);
+    const cluster = matchedCluster || {
+      serversRunning: kubectlConnected ? 1 : 0,
+      serversCount: kubectlConnected ? 1 : 0,
+      agentsRunning: 0,
+      agentsCount: 0
+    };
+
     return {
-      exists: true,
+      exists,
       provider: 'k3s',
       clusterName,
       serversRunning: cluster.serversRunning,
@@ -475,13 +479,14 @@ export async function getClusterInfo(clusterName = 'vigilante-dev', provider = n
 
   if (cluster.serversRunning > 0) {
     try {
-      const ctxArgs = targetContext ? ['--context', targetContext] : ['--context', `k3d-${clusterName}`];
+      const kubeEnv = getKubeExecutionEnv();
+      const ctxArgs = targetContext ? ['--context', targetContext] : await getClusterContextArgs(clusterName, 'k3d');
       const { stdout } = await execa('kubectl', [
         'get', 'nodes',
         ...ctxArgs,
         '--request-timeout=3s',
         '-o', 'json'
-      ]);
+      ], { env: kubeEnv });
       const parsed = JSON.parse(stdout);
       nodes = parsed.items?.map(node => ({
         name: node.metadata.name,

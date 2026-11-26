@@ -1,3 +1,4 @@
+{{- $secretName := .Values.existingSecret | default (printf "%s-secrets" (include "bloodhound.fullname" .)) -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -25,7 +26,10 @@ spec:
           image: "{{ .Values.neo4j.image.repository }}:{{ .Values.neo4j.image.tag }}"
           env:
             - name: NEO4J_AUTH
-              value: "neo4j/{{ .Values.neo4j.password }}"
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretName }}
+                  key: NEO4J_AUTH
           ports:
             - name: bolt
               containerPort: 7687

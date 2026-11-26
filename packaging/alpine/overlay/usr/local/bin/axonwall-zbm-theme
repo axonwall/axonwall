@@ -14,6 +14,7 @@ COLOR_RED="\033[38;2;244;63;94m"
 
 ZBM_CONFIG="/etc/zfsbootmenu/config.yaml"
 ZBM_SPLASH="/etc/zfsbootmenu/splash.bmp"
+ZBM_FONT_FILE="/etc/zfsbootmenu/font"
 ZBM_HOOK_DIR="/etc/zfsbootmenu/hooks"
 ZBM_THEME_HOOK="${ZBM_HOOK_DIR}/early-setup.d/90-axonwall-theme.sh"
 ZBM_THEME_HOOK_LEGACY="${ZBM_HOOK_DIR}/early-setup.d/15-axonwall-theme.sh"
@@ -97,6 +98,31 @@ cmd_status() {
   echo ""
 }
 
+resolve_selected_font() {
+  local explicit="${1:-}"
+  if [ -n "$explicit" ]; then
+    printf '%s\n' "$explicit"
+    return 0
+  fi
+  if [ -f "$ZBM_FONT_FILE" ]; then
+    local saved
+    saved="$(head -n1 "$ZBM_FONT_FILE" 2>/dev/null | tr -d '\r\n ' || true)"
+    if [ -n "$saved" ]; then
+      printf '%s\n' "$saved"
+      return 0
+    fi
+  fi
+  if [ -f "$ZBM_CONFIG" ]; then
+    local from_cfg
+    from_cfg="$(grep -oE 'rd\.vconsole\.font=[^[:space:]"'\'']+' "$ZBM_CONFIG" 2>/dev/null | head -n1 | cut -d= -f2 || true)"
+    if [ -n "$from_cfg" ]; then
+      printf '%s\n' "$from_cfg"
+      return 0
+    fi
+  fi
+  printf 'auto\n'
+}
+
 cmd_set_font() {
   local font="${1:-}"
   if [ -z "$font" ]; then
@@ -107,10 +133,14 @@ cmd_set_font() {
   show_banner
   printf "[+] Updating target console font to: %s\n" "$font"
 
-  if [ -f "$ZBM_CONFIG" ]; then
-    if [ "$font" = "default" ] || [ "$font" = "auto" ]; then
-      sed -i -E 's/[[:space:]]*rd\.vconsole\.font=[^ "]+//g' "$ZBM_CONFIG"
-    else
+  mkdir -p /etc/zfsbootmenu
+  if [ "$font" = "default" ] || [ "$font" = "auto" ]; then
+    rm -f "$ZBM_FONT_FILE" 2>/dev/null || true
+    [ -f "$ZBM_CONFIG" ] && sed -i -E 's/[[:space:]]*rd\.vconsole\.font=[^ "]+//g' "$ZBM_CONFIG"
+  else
+    printf '%s\n' "$font" > "$ZBM_FONT_FILE"
+    chmod 0644 "$ZBM_FONT_FILE" 2>/dev/null || true
+    if [ -f "$ZBM_CONFIG" ]; then
       if grep -q "rd\.vconsole\.font=" "$ZBM_CONFIG"; then
         sed -i -E "s|rd\.vconsole\.font=[^ \"']+|rd.vconsole.font=${font}|g" "$ZBM_CONFIG"
       else
@@ -237,7 +267,8 @@ HOOK_EOF
 }
 
 cmd_apply() {
-  local font_arg="${1:-auto}"
+  local font_arg
+  font_arg="$(resolve_selected_font "${1:-}")"
   show_banner
   printf "[+] Synchronizing ZFSBootMenu UKI, initramfs hooks, and Syslinux config...\n"
 
@@ -297,6 +328,7 @@ cmd_apply() {
   fi
 
   cat << ZBM_SYSLINUX_EOF > "$ESP_SYSLINUX"
+SERIAL 0 9600
 DEFAULT zbm
 PROMPT 0
 TIMEOUT 5
@@ -334,6 +366,8 @@ cmd_zbm_kcl() {
         shift
         [ $# -gt 0 ] && remove_args+=("$1")
         ;;
+      --preserve-cmdline)
+        ;;
       -*)
         ;;
       *)
@@ -359,10 +393,12 @@ cmd_zbm_kcl() {
   local a
   for a in "${remove_args[@]}"; do
     local key="${a%%=*}"
-    cur_kcl=$(echo "$cur_kcl" | sed -E "s/(^|[[:space:]])${key}(=[^[:space:]]*)?//g")
+    local esc_key
+    esc_key="$(printf '%s' "$key" | sed -e 's/[.[\\^$*+?(){}|/]/\\&/g')"
+    cur_kcl=$(printf '%s' "$cur_kcl" | sed -E "s/(^|[[:space:]])${esc_key}(=[^[:space:]]*)?([[:space:]]|$)/ /g; s/  +/ /g; s/^ //; s/ $//")
   done
   for a in "${append_args[@]}"; do
-    cur_kcl="${cur_kcl} ${a}"
+    cur_kcl="${cur_kcl:+${cur_kcl} }${a}"
   done
 
   # E-L4 (round-3): preserve the previous known-good UKI BEFORE
@@ -371,7 +407,7 @@ cmd_zbm_kcl() {
   if [ -f "$target_efi" ] && [ "$target_efi" = "$ESP_UKI" ]; then
     cp -f "$ESP_UKI" "${ESP_ZBM_DIR}/VMLINUZ-BACKUP.EFI" 2>/dev/null || true
   fi
-  python3 /usr/lib/axonwall/theme-zbm-uki.py "$target_efi" -o "$target_efi" -s "$ZBM_SPLASH" -c "$cur_kcl"
+  python3 /usr/lib/axonwall/theme-zbm-uki.py "$target_efi" -o "$target_efi" -s "$ZBM_SPLASH" --preserve-cmdline -c "$cur_kcl"
   if [ "$target_efi" = "$ESP_UKI" ]; then
     cp -f "$ESP_UKI" "${ESP_MOUNT}/EFI/BOOT/BOOTX64.EFI" 2>/dev/null || true
     sync_secondary_esps

@@ -48,6 +48,10 @@ load_env_file() {
 
 
 start_pre() {
+    if grep -qE '(^|[[:space:]])(axonwall_install=1|axonwall\.install=1|axonwall\.unattended=1)($|[[:space:]])' /proc/cmdline 2>/dev/null; then
+        eerror "Installer mode active; skipping axonwall-ui startup"
+        return 1
+    fi
     checkpath -d -m 0770 -o axonwall:axonwall-api /var/log/axonwall
     load_env_file /etc/axonwall/axonwall.env
     load_env_file /etc/axonwall/admin.env

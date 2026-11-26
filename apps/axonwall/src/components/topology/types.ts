@@ -46,7 +46,9 @@ export interface StagedPeerEdit {
   peerId: string;
   name: string;
   summary: string;
-  state: unknown;
+  hostname?: string;
+  patch?: Record<string, unknown>;
+  state?: unknown;
 }
 
 export const HEALTH_TONE_CLASSES: Record<

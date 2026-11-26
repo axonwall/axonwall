@@ -11,16 +11,31 @@ import { logger } from '../utils/logger.js';
  * @param {Array<Object>} rawEvents List of events with { pid, ppid, comm, exe, args, containerId, podName }
  * @returns {Object} Tree structure with root processes and child nodes
  */
+function processScopeKey(ev) {
+  const host = ev.host || ev.nodeName || '';
+  const pod = ev.podName || ev.pod || 'default-workload';
+  const cid = ev.containerId || 'c-init';
+  return `${host}::${pod}::${cid}`;
+}
+
 export function buildProcessLineageTree(rawEvents = []) {
   const nodes = new Map();
 
-  // Create node lookup
+  // Create node lookup scoped by (host, pod, container, pid) so identical local PIDs
+  // from distinct containers/pods never overwrite each other.
   for (const ev of rawEvents) {
-    const pid = ev.pid || 1;
-    const ppid = ev.ppid || 0;
+    const pid = ev.pid ?? 1;
+    const ppid = ev.ppid ?? 0;
+    const scope = processScopeKey(ev);
+    const hasExplicitWorkloadScope = Boolean(ev.podName || ev.pod || ev.containerId);
+    const key = `${scope}::${pid}`;
 
-    if (!nodes.has(pid)) {
-      nodes.set(pid, {
+    if (!nodes.has(key)) {
+      nodes.set(key, {
+        key,
+        scope,
+        hasExplicitWorkloadScope,
+        parentKey: `${scope}::${ppid}`,
         pid,
         ppid,
         comm: ev.comm || ev.exe || 'unknown',
@@ -29,27 +44,41 @@ export function buildProcessLineageTree(rawEvents = []) {
         user: ev.user || 'root',
         podName: ev.podName || ev.pod || 'default-workload',
         containerId: ev.containerId || 'c-init',
+        host: ev.host || ev.nodeName || null,
         timestamp: ev.timestamp || new Date().toISOString(),
         children: [],
         anomalies: []
       });
     } else {
       // Enrich existing node
-      const node = nodes.get(pid);
+      const node = nodes.get(key);
       if (ev.args && ev.args.length > 0) node.args = ev.args;
       if (ev.comm) node.comm = ev.comm;
       if (ev.exe) node.exe = ev.exe;
     }
   }
 
-  // Link children to parents
+  // Link children to parents within the same container/pod scope (only falling back
+  // to an unscoped host daemon node if the child's pod has no matching parent pid).
+  const resolveParent = (node) => {
+    const sameScopeParent = nodes.get(`${node.scope}::${node.ppid}`);
+    if (sameScopeParent) return sameScopeParent;
+    if (node.hasExplicitWorkloadScope) {
+      const hostPrefix = `${node.host || ''}::default-workload::c-init::${node.ppid}`;
+      const hostParent = nodes.get(hostPrefix);
+      if (hostParent && !hostParent.hasExplicitWorkloadScope) return hostParent;
+    }
+    return null;
+  };
+
   const rootNodes = [];
   for (const node of nodes.values()) {
-    if (node.ppid === 0 || !nodes.has(node.ppid) || node.ppid === node.pid) {
+    const parent = node.ppid === 0 || node.ppid === node.pid ? null : resolveParent(node);
+    if (!parent) {
       rootNodes.push(node);
     } else {
-      const parent = nodes.get(node.ppid);
-      if (parent && !parent.children.some(c => c.pid === node.pid)) {
+      node.parentKey = parent.key;
+      if (!parent.children.some(c => c.key === node.key)) {
         parent.children.push(node);
       }
     }
@@ -59,7 +88,8 @@ export function buildProcessLineageTree(rawEvents = []) {
     totalProcesses: nodes.size,
     rootCount: rootNodes.length,
     roots: rootNodes,
-    nodeMap: nodes
+    nodeMap: nodes,
+    resolveParent
   };
 }
 
@@ -77,7 +107,9 @@ export function detectAnomalousProcessLineage(lineageTree) {
   const LOLBINS = ['curl', 'wget', 'nc', 'ncat', 'netcat', 'socat', 'whoami', 'id', 'uname'];
 
   for (const node of nodes) {
-    const parent = lineageTree.nodeMap.get(node.ppid);
+    const parent = typeof lineageTree.resolveParent === 'function'
+      ? lineageTree.resolveParent(node)
+      : (lineageTree.nodeMap.get(node.parentKey) || lineageTree.nodeMap.get(node.ppid));
     const parentComm = parent ? pathBasename(parent.comm).toLowerCase() : '';
     const nodeComm = pathBasename(node.comm).toLowerCase();
     const argsStr = Array.isArray(node.args) ? node.args.join(' ') : String(node.args || '');

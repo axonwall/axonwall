@@ -62,8 +62,8 @@ jobs:
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=${{ matrix.component }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.component }}
 
   helm-charts:
     name: Package & Push Helm Charts (OCI)
@@ -78,19 +78,26 @@ jobs:
       - name: Install Helm
         uses: azure/setup-helm@v4
 
-      - name: Lint and template axonwall-analytics Helm chart
+      - name: Lint and template Axonwall Helm charts
         run: |
+          helm lint deploy/k8s/helm/axonwall
+          helm template test-axonwall deploy/k8s/helm/axonwall >/dev/null
           helm lint deploy/k8s/helm/axonwall-analytics
           helm template test-homelab deploy/k8s/helm/axonwall-analytics -f deploy/k8s/helm/axonwall-analytics/values-homelab.yaml >/dev/null
           helm template test-standard deploy/k8s/helm/axonwall-analytics -f deploy/k8s/helm/axonwall-analytics/values-standard.yaml >/dev/null
           helm template test-enterprise deploy/k8s/helm/axonwall-analytics -f deploy/k8s/helm/axonwall-analytics/values-enterprise.yaml >/dev/null
 
-      - name: Login and push Helm chart to GHCR OCI
+      - name: Login and push Helm charts to GHCR OCI
         if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
         env:
           HELM_REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO_OWNER: ${{ github.repository_owner }}
         run: |
+          OWNER_LOWER="${REPO_OWNER,,}"
           echo "${HELM_REGISTRY_TOKEN}" | helm registry login ghcr.io --username "${{ github.actor }}" --password-stdin
           mkdir -p /tmp/helm-dist
+          helm package deploy/k8s/helm/axonwall --destination /tmp/helm-dist
           helm package deploy/k8s/helm/axonwall-analytics --destination /tmp/helm-dist
-          helm push /tmp/helm-dist/axonwall-analytics-*.tgz "oci://ghcr.io/${{ github.repository_owner }}/charts"
+          for pkg in /tmp/helm-dist/*.tgz; do
+            helm push "$pkg" "oci://ghcr.io/${OWNER_LOWER}/charts"
+          done

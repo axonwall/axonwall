@@ -13,23 +13,28 @@ data:
     {
       "enabled": true,
       "mode": "collector",
-      "listeners": [
-        { "id": "k3s-netflow-udp", "name": "NetFlow/IPFIX UDP", "protocol": "auto", "transport": "udp", "bind": "0.0.0.0", "port": {{ .Values.collector.ports.netflowUdp }}, "enabled": true },
-        { "id": "k3s-ipfix-udp", "name": "IPFIX Standard UDP", "protocol": "ipfix", "transport": "udp", "bind": "0.0.0.0", "port": {{ .Values.collector.ports.ipfixUdp }}, "enabled": true },
-        { "id": "k3s-ipfix-tcp", "name": "IPFIX Persistent TCP", "protocol": "ipfix", "transport": "tcp", "bind": "0.0.0.0", "port": {{ .Values.collector.ports.ipfixTls }}, "enabled": true },
-        { "id": "k3s-sflow-udp", "name": "sFlow v5 UDP", "protocol": "sflow5", "transport": "udp", "bind": "0.0.0.0", "port": {{ .Values.collector.ports.sflowUdp }}, "enabled": true }
-      ],
-      "selfExport": { "enabled": false, "targets": [] },
-      "storage": {
-        "mode": "{{ if .Values.clickhouse.enabled }}clickhouse{{ else }}local{{ end }}",
-        "retentionDays": {{ .Values.clickhouse.retention.rawDays }},
-        "rollupDays": {{ .Values.clickhouse.retention.rollupDays }},
-        "clickhouse": {
-          "enabled": {{ .Values.clickhouse.enabled }},
-          "url": "http://{{ $fullname }}-clickhouse:8123",
-          "database": {{ .Values.clickhouse.database | quote }},
-          "table": "netflow_flows",
-          "username": {{ .Values.clickhouse.username | quote }}
+      "nodeId": "{{ $fullname }}-collector",
+      "config": {
+        "enabled": true,
+        "mode": "collector",
+        "listeners": [
+          { "id": "k3s-netflow-udp", "name": "NetFlow/IPFIX UDP", "protocol": "auto", "transport": "udp", "bindAddress": "0.0.0.0", "port": {{ .Values.collector.ports.netflowUdp }}, "enabled": true },
+          { "id": "k3s-ipfix-udp", "name": "IPFIX Standard UDP", "protocol": "ipfix", "transport": "udp", "bindAddress": "0.0.0.0", "port": {{ .Values.collector.ports.ipfixUdp }}, "enabled": true },
+          { "id": "k3s-ipfix-tcp", "name": "IPFIX Persistent TCP", "protocol": "ipfix", "transport": "tcp", "bindAddress": "0.0.0.0", "port": {{ .Values.collector.ports.ipfixTls }}, "enabled": true },
+          { "id": "k3s-sflow-udp", "name": "sFlow v5 UDP", "protocol": "sflow5", "transport": "udp", "bindAddress": "0.0.0.0", "port": {{ .Values.collector.ports.sflowUdp }}, "enabled": true }
+        ],
+        "selfExport": { "enabled": false, "targets": [] },
+        "storage": {
+          "mode": "{{ if .Values.clickhouse.enabled }}clickhouse{{ else }}local{{ end }}",
+          "retentionHours": {{ mul (int .Values.clickhouse.retention.rawDays) 24 }},
+          "clickhouse": {
+            "enabled": {{ .Values.clickhouse.enabled }},
+            "url": "http://{{ $fullname }}-clickhouse:8123",
+            "database": {{ .Values.clickhouse.database | quote }},
+            "table": "netflow_flows",
+            "username": {{ .Values.clickhouse.username | quote }},
+            "ttlDays": {{ .Values.clickhouse.retention.rollupDays }}
+          }
         }
       }
     }
@@ -38,16 +43,17 @@ data:
       "enabled": true,
       "victoriaMetrics": {
         "enabled": {{ .Values.victoriametrics.enabled }},
-        "url": "http://{{ $fullname }}-vm:8428"
+        "url": "http://{{ $fullname }}-vm:8428/vm"
       },
       "victoriaLogs": {
         "enabled": {{ .Values.victorialogs.enabled }},
-        "url": "http://{{ $fullname }}-vl:9428"
+        "url": "http://{{ $fullname }}-vl:9428/vl"
       },
       "offload": {
         "enabled": false
       }
     }
+{{- if .Values.collector.persistence.enabled }}
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -64,6 +70,7 @@ spec:
   resources:
     requests:
       storage: {{ .Values.collector.persistence.stateSize | quote }}
+{{- end }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -75,6 +82,8 @@ metadata:
     app.kubernetes.io/component: collector
 spec:
   replicas: {{ .Values.collector.replicas }}
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app.kubernetes.io/instance: {{ .Release.Name }}
@@ -84,6 +93,8 @@ spec:
       labels:
         {{- include "axonwall-analytics.labels" . | nindent 8 }}
         app.kubernetes.io/component: collector
+      annotations:
+        checksum/secret: {{ include (print $.Template.BasePath "/secrets.yaml") . | sha256sum }}
     spec:
       securityContext:
         runAsNonRoot: true
@@ -91,6 +102,38 @@ spec:
         runAsGroup: 1001
         fsGroup: 1001
         fsGroupChangePolicy: OnRootMismatch
+      initContainers:
+        - name: render-collector-config
+          image: "{{ .Values.controller.image.repository }}:{{ .Values.controller.image.tag }}"
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          env:
+            - name: CLICKHOUSE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "axonwall-analytics.secretName" . }}
+                  key: clickhouse-password
+          command:
+            - node
+            - -e
+            - |
+              const fs = require('fs');
+              const nf = JSON.parse(fs.readFileSync('/etc/axonwall/templates/netflow_config.json', 'utf8'));
+              nf.config = nf.config || {};
+              nf.config.storage = nf.config.storage || {};
+              nf.config.storage.clickhouse = nf.config.storage.clickhouse || {};
+              nf.config.storage.clickhouse.password = process.env.CLICKHOUSE_PASSWORD || '';
+              fs.writeFileSync('/etc/axonwall/managed/netflow_config.json', JSON.stringify(nf, null, 2) + '\n', { mode: 0o600 });
+              fs.copyFileSync('/etc/axonwall/templates/observability_config.json', '/etc/axonwall/managed/observability_config.json');
+          volumeMounts:
+            - name: collector-config-templates
+              mountPath: /etc/axonwall/templates
+              readOnly: true
+            - name: collector-config-managed
+              mountPath: /etc/axonwall/managed
       containers:
         - name: axonwalld
           image: "{{ .Values.collector.axonwalld.image.repository }}:{{ .Values.collector.axonwalld.image.tag }}"
@@ -144,7 +187,7 @@ spec:
               mountPath: /run/axonwall
             - name: collector-state
               mountPath: /var/lib/axonwall
-            - name: collector-config
+            - name: collector-config-managed
               mountPath: /etc/axonwall/managed
               readOnly: true
         {{- if .Values.collector.ui.enabled }}
@@ -168,6 +211,26 @@ spec:
                 secretKeyRef:
                   name: {{ include "axonwall-analytics.secretName" . }}
                   key: jwt-secret
+            - name: AXONWALL_ZTP_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "axonwall-analytics.secretName" . }}
+                  key: ztp-token
+            - name: AXONWALL_OBSERVABILITY_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "axonwall-analytics.secretName" . }}
+                  key: observability-ingest-token
+            - name: LOCAL_ADMIN_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "axonwall-analytics.secretName" . }}
+                  key: local-admin-user
+            - name: LOCAL_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "axonwall-analytics.secretName" . }}
+                  key: local-admin-password
             - name: AGENT_SOCKET
               value: "/run/axonwall/agent.sock"
             - name: AGENT_API_SOCKET
@@ -188,12 +251,12 @@ spec:
                   name: {{ include "axonwall-analytics.secretName" . }}
                   key: clickhouse-password
             - name: VICTORIAMETRICS_URL
-              value: "http://{{ $fullname }}-vm:8428"
+              value: "http://{{ $fullname }}-vm:8428/vm"
             - name: VICTORIALOGS_URL
-              value: "http://{{ $fullname }}-vl:9428"
+              value: "http://{{ $fullname }}-vl:9428/vl"
             {{- if .Values.controller.enabled }}
             - name: CONTROLLER_URL
-              value: "http://127.0.0.1:{{ .Values.controller.port }}"
+              value: "https://127.0.0.1:{{ .Values.controller.port }}"
             {{- end }}
           ports:
             - name: ui
@@ -206,7 +269,7 @@ spec:
               mountPath: /run/axonwall
             - name: collector-state
               mountPath: /var/lib/axonwall
-            - name: collector-config
+            - name: collector-config-managed
               mountPath: /etc/axonwall/managed
               readOnly: true
         {{- end }}
@@ -223,12 +286,24 @@ spec:
               value: "production"
             - name: CONTROLLER_PORT
               value: {{ .Values.controller.port | quote }}
+            - name: AXONWALL_FLEET_ENABLED
+              value: "1"
             - name: AXONWALL_AGENT_API_SOCK
               value: "/run/axonwall/agent-api.sock"
             - name: AXONWALL_VM_IMPORT_URL
-              value: "http://{{ $fullname }}-vm:8428/api/v1/import/prometheus"
+              value: "http://{{ $fullname }}-vm:8428/vm/api/v1/import/prometheus"
             - name: AXONWALL_VL_INSERT_URL
-              value: "http://{{ $fullname }}-vl:9428/insert/jsonline"
+              value: "http://{{ $fullname }}-vl:9428/vl/insert/jsonline"
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "axonwall-analytics.secretName" . }}
+                  key: jwt-secret
+            - name: AXONWALL_ZTP_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "axonwall-analytics.secretName" . }}
+                  key: ztp-token
             - name: AXONWALL_AGENT_TOKEN
               valueFrom:
                 secretKeyRef:
@@ -255,9 +330,15 @@ spec:
         - name: runtime-sock
           emptyDir: {}
         - name: collector-state
+          {{- if .Values.collector.persistence.enabled }}
           persistentVolumeClaim:
             claimName: {{ $fullname }}-collector-state
-        - name: collector-config
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        - name: collector-config-templates
           configMap:
             name: {{ $fullname }}-collector-config
+        - name: collector-config-managed
+          emptyDir: {}
 {{- end }}

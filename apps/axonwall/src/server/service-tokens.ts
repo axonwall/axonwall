@@ -24,6 +24,13 @@ export type PublicServiceTokenRecord = Omit<ServiceTokenRecord, 'secretHash'>;
 const TOKEN_RE = /^axw_svc_([a-f0-9]{12})_([a-f0-9]{48})$/;
 const VALID_ROLES = new Set<ServiceTokenRole>(['admin', 'operator', 'readonly']);
 const LAST_USED_TOUCH_INTERVAL_MS = 60_000;
+const LOCK_STALE_MS = 30_000;
+const LOCK_TIMEOUT_MS = 5_000;
+const SLEEP_BUF = new Int32Array(new SharedArrayBuffer(4));
+
+function sleepSyncMs(ms: number): void {
+  Atomics.wait(SLEEP_BUF, 0, 0, ms);
+}
 
 function getServiceTokenPaths(): string[] {
   return Array.from(
@@ -34,42 +41,124 @@ function getServiceTokenPaths(): string[] {
   );
 }
 
-function readTokenRecords(): ServiceTokenRecord[] {
+function withServiceTokenLock<T>(fn: () => T): T {
+  const primary = getServiceTokenPaths()[0]!;
+  const lockPath = `${primary}.lock`;
+  const dir = path.dirname(lockPath);
+  fs.mkdirSync(dir, { recursive: true, mode: 0o750 });
+
+  const deadline = Date.now() + LOCK_TIMEOUT_MS;
+  let fd: number | null = null;
+  while (fd === null) {
+    try {
+      fd = fs.openSync(lockPath, 'wx', 0o600);
+    } catch (err: any) {
+      if (err?.code !== 'EEXIST') throw err;
+      try {
+        const st = fs.statSync(lockPath);
+        if (Date.now() - st.mtimeMs > LOCK_STALE_MS) {
+          fs.unlinkSync(lockPath);
+          continue;
+        }
+      } catch {}
+      if (Date.now() >= deadline) {
+        throw new Error('Timed out acquiring service token store lock');
+      }
+      sleepSyncMs(10);
+    }
+  }
+
+  try {
+    fs.writeSync(fd, `${process.pid}\n`);
+    return fn();
+  } finally {
+    try {
+      fs.closeSync(fd);
+    } catch {}
+    try {
+      fs.unlinkSync(lockPath);
+    } catch {}
+  }
+}
+
+function isValidTokenRecord(item: unknown): item is ServiceTokenRecord {
+  if (!item || typeof item !== 'object') return false;
+  const rec = item as Record<string, unknown>;
+  return (
+    typeof rec.id === 'string' &&
+    typeof rec.name === 'string' &&
+    typeof rec.role === 'string' &&
+    VALID_ROLES.has(rec.role as ServiceTokenRole) &&
+    Array.isArray(rec.scopes) &&
+    typeof rec.secretHash === 'string'
+  );
+}
+
+function pickLaterIso(a?: string, b?: string): string | undefined {
+  if (!a) return b;
+  if (!b) return a;
+  const ta = Date.parse(a);
+  const tb = Date.parse(b);
+  if (Number.isNaN(ta)) return b;
+  if (Number.isNaN(tb)) return a;
+  return tb > ta ? b : a;
+}
+
+function readTokenRecords(options?: { failOnCorrupt?: boolean }): ServiceTokenRecord[] {
+  const merged = new Map<string, ServiceTokenRecord>();
+  let readableMirrorCount = 0;
+  let corruptError: Error | null = null;
+
   for (const filePath of getServiceTokenPaths()) {
     try {
       if (!fs.existsSync(filePath)) continue;
       const raw = fs.readFileSync(filePath, 'utf-8');
       const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed)) {
-        return parsed.filter(
-          (item): item is ServiceTokenRecord =>
-            Boolean(item) &&
-            typeof item.id === 'string' &&
-            typeof item.name === 'string' &&
-            typeof item.role === 'string' &&
-            Array.isArray(item.scopes) &&
-            typeof item.secretHash === 'string'
-        );
+      if (!Array.isArray(parsed)) {
+        corruptError = corruptError ?? new Error(`Invalid service token store format at ${filePath}`);
+        continue;
       }
-    } catch {
-      // Ignore corrupt/unreadable candidate path and try fallback
+      readableMirrorCount += 1;
+      for (const item of parsed) {
+        if (!isValidTokenRecord(item)) continue;
+        const existing = merged.get(item.id);
+        if (!existing) {
+          merged.set(item.id, { ...item });
+          continue;
+        }
+        // Mirror reconciliation: any revocation across mirrors always wins,
+        // and the most recent lastUsedAt timestamp is preserved.
+        const revokedAt = existing.revokedAt || item.revokedAt;
+        const lastUsedAt = pickLaterIso(existing.lastUsedAt, item.lastUsedAt);
+        merged.set(item.id, {
+          ...existing,
+          ...(revokedAt ? { revokedAt } : {}),
+          ...(lastUsedAt ? { lastUsedAt } : {}),
+        });
+      }
+    } catch (err: any) {
+      corruptError = corruptError ?? (err instanceof Error ? err : new Error('Failed to read service token store'));
     }
   }
-  return [];
+
+  if (options?.failOnCorrupt && corruptError && readableMirrorCount === 0) {
+    throw corruptError;
+  }
+
+  return Array.from(merged.values());
 }
 
 function writeTokenRecords(records: ServiceTokenRecord[]): void {
   const payload = `${JSON.stringify(records, null, 2)}\n`;
-  for (const filePath of getServiceTokenPaths()) {
-    try {
-      writeAuthFileSafe(filePath, payload, 0o600);
-    } catch {
-      // Best-effort sync to mirror path; primary path write throws below if none exist
-    }
-  }
   const paths = getServiceTokenPaths();
-  if (!paths.some((p) => fs.existsSync(p))) {
-    writeAuthFileSafe(paths[paths.length - 1], payload, 0o600);
+  // Fail-closed primary write: never silently report success if the primary store cannot be updated.
+  writeAuthFileSafe(paths[0]!, payload, 0o600);
+  for (const mirrorPath of paths.slice(1)) {
+    try {
+      writeAuthFileSafe(mirrorPath, payload, 0o600);
+    } catch {
+      // Secondary mirror sync is best-effort once primary atomic write succeeded.
+    }
   }
 }
 
@@ -112,7 +201,15 @@ export function createServiceToken(input: {
   if (!name || name.length > 128) {
     throw new Error('Service token name must be 1-128 characters.');
   }
-  const role: ServiceTokenRole = input.role && VALID_ROLES.has(input.role) ? input.role : 'operator';
+  let role: ServiceTokenRole = 'readonly';
+  if (input.role !== undefined) {
+    if (typeof input.role !== 'string' || !VALID_ROLES.has(input.role as ServiceTokenRole)) {
+      throw new Error(
+        `Invalid service token role '${String(input.role)}': expected admin, operator, or readonly.`
+      );
+    }
+    role = input.role as ServiceTokenRole;
+  }
   const scopes = Array.from(
     new Set(
       (input.scopes || ['observability:ingest'])
@@ -145,9 +242,11 @@ export function createServiceToken(input: {
     ...(expiresAt ? { expiresAt } : {}),
   };
 
-  const existing = readTokenRecords();
-  existing.push(record);
-  writeTokenRecords(existing);
+  withServiceTokenLock(() => {
+    const existing = readTokenRecords({ failOnCorrupt: true });
+    existing.push(record);
+    writeTokenRecords(existing);
+  });
 
   return {
     record: toPublicRecord(record),
@@ -158,17 +257,19 @@ export function createServiceToken(input: {
 export function revokeServiceToken(id: string): boolean {
   const target = String(id || '').trim();
   if (!target) return false;
-  const records = readTokenRecords();
-  const idx = records.findIndex((r) => r.id === target);
-  if (idx < 0) return false;
-  if (!records[idx].revokedAt) {
-    records[idx] = {
-      ...records[idx],
-      revokedAt: new Date().toISOString(),
-    };
-    writeTokenRecords(records);
-  }
-  return true;
+  return withServiceTokenLock(() => {
+    const records = readTokenRecords({ failOnCorrupt: true });
+    const idx = records.findIndex((r) => r.id === target);
+    if (idx < 0) return false;
+    if (!records[idx].revokedAt) {
+      records[idx] = {
+        ...records[idx],
+        revokedAt: new Date().toISOString(),
+      };
+      writeTokenRecords(records);
+    }
+    return true;
+  });
 }
 
 export function verifyServiceToken(rawToken: string): PublicServiceTokenRecord | null {
@@ -200,16 +301,23 @@ export function verifyServiceToken(rawToken: string): PublicServiceTokenRecord |
   const nowMs = Date.now();
   const lastUsedMs = rec.lastUsedAt ? Date.parse(rec.lastUsedAt) : 0;
   if (!lastUsedMs || Number.isNaN(lastUsedMs) || nowMs - lastUsedMs >= LAST_USED_TOUCH_INTERVAL_MS) {
-    records[idx] = {
-      ...rec,
-      lastUsedAt: new Date(nowMs).toISOString(),
-    };
     try {
-      writeTokenRecords(records);
+      return withServiceTokenLock(() => {
+        const latest = readTokenRecords({ failOnCorrupt: true });
+        const latestIdx = latest.findIndex((r) => r.id === id);
+        if (latestIdx < 0 || latest[latestIdx]!.revokedAt) {
+          return null;
+        }
+        latest[latestIdx] = {
+          ...latest[latestIdx]!,
+          lastUsedAt: new Date(nowMs).toISOString(),
+        };
+        writeTokenRecords(latest);
+        return toPublicRecord(latest[latestIdx]!);
+      });
     } catch {
       // Non-fatal if read-only fs during verification
     }
-    return toPublicRecord(records[idx]);
   }
 
   return toPublicRecord(rec);

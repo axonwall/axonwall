@@ -1,7 +1,7 @@
 import crypto from 'crypto';
 import { DesiredStateSchema, type DesiredState } from '@axonwall/lib/schemas';
 import { getSession } from './auth';
-import { isPasswordChangeEnforced } from './auth-guard';
+import { assertActionPermitted, assertInteractiveSession } from './auth-guard';
 
 const BACKUP_MAGIC = Buffer.from('AXB1'); // Axonwall Encrypted Backup Version 1 (PBKDF2 100k)
 const BACKUP_MAGIC_V2 = Buffer.from('AXB2'); // Version 2 (PBKDF2 600k, current OWASP guidance)
@@ -26,9 +26,8 @@ export async function createEncryptedBackup(
   passphrase: string
 ): Promise<{ id: string; buffer: Buffer; metadata: BackupMetadata }> {
   const session = await getSession();
-  if (!session || isPasswordChangeEnforced(session) || !session.roles.includes('admin')) {
-    throw new Error('Unauthorized: Admin privileges required for configuration backups (password change required if pending)');
-  }
+  assertInteractiveSession(session);
+  assertActionPermitted(session, 'admin');
 
   if (!passphrase || passphrase.length < 8) {
     throw new Error('Passphrase must be at least 8 characters long for AES-256-GCM encryption');
@@ -72,9 +71,8 @@ export async function restoreEncryptedBackup(
   passphrase: string
 ): Promise<{ metadata: BackupMetadata; state: DesiredState }> {
   const session = await getSession();
-  if (!session || isPasswordChangeEnforced(session) || !session.roles.includes('admin')) {
-    throw new Error('Unauthorized: Admin privileges required to restore configuration (password change required if pending)');
-  }
+  assertInteractiveSession(session);
+  assertActionPermitted(session, 'admin');
 
   if (buffer.length < 48) {
     throw new Error('Invalid backup file: file truncated or too small');

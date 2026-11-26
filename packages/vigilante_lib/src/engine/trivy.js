@@ -196,7 +196,13 @@ export async function runTrivyAudit(target, profileId = 'image', opts = {}) {
       parsedData = parseTrivyOutput(rawOutput);
     }
   } else if (tool.runner === 'docker') {
-    const args = ['run', '--rm', '-v', '/var/run/docker.sock:/var/run/docker.sock', 'aquasec/trivy:latest', ...profile.buildArgs(target, opts)];
+    let args;
+    if (profile.id === 'secrets') {
+      const absTarget = path.resolve(target || '.');
+      args = ['run', '--rm', '-v', `${absTarget}:/scan:ro`, 'aquasec/trivy:latest', ...profile.buildArgs('/scan', opts)];
+    } else {
+      args = ['run', '--rm', '-v', '/var/run/docker.sock:/var/run/docker.sock', 'aquasec/trivy:latest', ...profile.buildArgs(target, opts)];
+    }
     try {
       const res = await execa('docker', args);
       rawOutput = res.stdout;
@@ -206,7 +212,7 @@ export async function runTrivyAudit(target, profileId = 'image', opts = {}) {
       parsedData = parseTrivyOutput(rawOutput);
     }
   } else {
-    // Synthetic fallback
+    // Synthetic fallback when Trivy CLI and Docker image are unavailable
     parsedData = {
       vulnerabilities: [],
       misconfigurations: [],
@@ -221,6 +227,8 @@ export async function runTrivyAudit(target, profileId = 'image', opts = {}) {
     target,
     profile: profile.id,
     timestamp,
+    synthetic: tool.runner === 'none',
+    runner: tool.runner,
     ...parsedData,
     rawOutput
   };
@@ -237,12 +245,14 @@ export async function runTrivyAudit(target, profileId = 'image', opts = {}) {
       const cleanTarget = target.replace(/[^a-zA-Z0-9_.-]/g, '_');
       const incident = generateNistIncidentRecord({
         incidentId: `NIST-INC-TRIVY-${Date.now().toString(36).toUpperCase()}`,
-        networkCidr: '0.0.0.0/0',
-        hostIp: cleanTarget,
-        primaryVector: 'Supply Chain / Container Vulnerability',
+        network: '0.0.0.0_0',
+        host: cleanTarget,
+        attackVector: 'EXPLOITATION',
         phase: 'containment_eradication_recovery',
-        findings: [
+        rootCause: `Trivy audit uncovered ${parsedData.summary.critical} CRITICAL vulnerabilities in ${target}.`,
+        artifacts: [
           {
+            filename: `${scanId}.json`,
             title: `Trivy Audit Critical Alert for ${target}`,
             severity: 'CRITICAL',
             description: `Trivy audit uncovered ${parsedData.summary.critical} CRITICAL vulnerabilities in ${target}.`

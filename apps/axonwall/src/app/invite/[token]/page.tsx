@@ -19,6 +19,7 @@ import {
   Terminal,
 } from 'lucide-react';
 import { Logo } from '@/components/Logo';
+import { isAbsoluteHttpHref, safeAppHref } from '@/lib/safe-href';
 
 interface InvitePreview {
   status: 'valid' | 'expired' | 'used' | 'revoked' | 'invalid';
@@ -30,6 +31,9 @@ interface InvitePreview {
   requiresPin?: boolean;
   magicDnsDomain?: string;
   minPasswordLength?: number;
+  portalUrl?: string;
+  loginUrl?: string;
+  portalLoginUrl?: string;
 }
 
 interface RedeemedData {
@@ -37,6 +41,7 @@ interface RedeemedData {
   serverUrl: string;
   magicDnsDomain: string;
   redirectTo: string;
+  portalUrl?: string;
   quickConnectCommand: string;
   starterKey: {
     id: string | number;
@@ -195,6 +200,7 @@ export default function InviteRedeemPage() {
         serverUrl: json.serverUrl || '',
         magicDnsDomain: json.magicDnsDomain || preview?.magicDnsDomain || '',
         redirectTo: json.redirectTo || '/vpn',
+        portalUrl: json.portalUrl || preview?.portalUrl || '',
         quickConnectCommand: json.quickConnectCommand || '',
         starterKey: json.starterKey || null,
       });
@@ -385,13 +391,27 @@ export default function InviteRedeemPage() {
             </div>
 
             <div className="pt-1 space-y-1.5">
-              <Link
-                href={redeemedData.redirectTo || '/vpn'}
-                className="w-full bg-slate-800 hover:bg-slate-700 text-white border border-slate-700 font-medium py-2.5 rounded-lg text-xs flex items-center justify-center gap-2 transition"
-              >
-                <ExternalLink className="w-3.5 h-3.5 text-emerald-400" />
-                <span>Open Self-Service VPN Portal (/vpn)</span>
-              </Link>
+              {(() => {
+                const rawTarget = isAbsoluteHttpHref(redeemedData.redirectTo)
+                  ? redeemedData.redirectTo
+                  : redeemedData.portalUrl
+                    ? `${redeemedData.portalUrl.replace(/\/+$/, '')}${redeemedData.redirectTo?.startsWith('/') ? redeemedData.redirectTo : '/vpn'}`
+                    : redeemedData.redirectTo || '/vpn';
+                const portalHref = safeAppHref(rawTarget, '/vpn');
+                const cls =
+                  'w-full bg-slate-800 hover:bg-slate-700 text-white border border-slate-700 font-medium py-2.5 rounded-lg text-xs flex items-center justify-center gap-2 transition';
+                return isAbsoluteHttpHref(portalHref) ? (
+                  <a href={portalHref} className={cls}>
+                    <ExternalLink className="w-3.5 h-3.5 text-emerald-400" />
+                    <span>Open Self-Service VPN Portal (/vpn)</span>
+                  </a>
+                ) : (
+                  <Link href={portalHref} className={cls}>
+                    <ExternalLink className="w-3.5 h-3.5 text-emerald-400" />
+                    <span>Open Self-Service VPN Portal (/vpn)</span>
+                  </Link>
+                );
+              })()}
               <p className="text-[11px] text-slate-500 text-center">
                 Available once connected to the Tailnet or LAN (blocked on public WAN for security)
               </p>
@@ -418,13 +438,26 @@ export default function InviteRedeemPage() {
                   : 'Please ask your network administrator to generate a fresh Mesh VPN invite link.'}
               </p>
             </div>
-            <Link
-              href="/login"
-              className="w-full bg-slate-800 hover:bg-slate-700 text-white font-medium py-2.5 rounded-lg text-sm flex items-center justify-center gap-2 transition"
-            >
-              <Key className="w-4 h-4" />
-              <span>Go to Sign In</span>
-            </Link>
+            {(() => {
+              const rawLoginTarget =
+                preview?.loginUrl ||
+                preview?.portalLoginUrl ||
+                (preview?.portalUrl ? `${preview.portalUrl.replace(/\/+$/, '')}/login` : '/login');
+              const loginHref = safeAppHref(rawLoginTarget, '/login');
+              const cls =
+                'w-full bg-slate-800 hover:bg-slate-700 text-white font-medium py-2.5 rounded-lg text-sm flex items-center justify-center gap-2 transition';
+              return isAbsoluteHttpHref(loginHref) ? (
+                <a href={loginHref} className={cls}>
+                  <Key className="w-4 h-4" />
+                  <span>Go to Sign In</span>
+                </a>
+              ) : (
+                <Link href={loginHref} className={cls}>
+                  <Key className="w-4 h-4" />
+                  <span>Go to Sign In</span>
+                </Link>
+              );
+            })()}
           </div>
         ) : (
           <form onSubmit={handleSubmit} className="space-y-5">

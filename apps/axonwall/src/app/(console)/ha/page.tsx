@@ -22,6 +22,10 @@ import {
 } from 'lucide-react';
 import { getCurrentDesiredState, getHASyncTrustStatus, getSystemServicesStatus, type HASyncTrustStatus, type SystemServiceInfo } from '@/server/agent';
 import { useDesiredStateApply } from '@/lib/use-desired-state-apply';
+import {
+  mergeHaConntrackSync,
+  mergeHaVrrpFirstInstance,
+} from '@/lib/state-preservation';
 
 function HighAvailabilityPageContent() {
   const { applyState } = useDesiredStateApply();
@@ -233,15 +237,11 @@ function HighAvailabilityPageContent() {
         existingVrrp.length > 0
           ? existingVrrp.map((v, idx) =>
               idx === 0
-                ? {
-                    ...v,
+                ? mergeHaVrrpFirstInstance(v, {
                     vrid,
                     authPassword: syncPassword,
-                    // C-A6: apply an edited, CIDR-valid VIP to the first
-                    // instance instead of carrying the old one over
-                    // untouched; an empty or unchanged value keeps it.
-                    virtualIps: isValidCidr(virtualIp) ? [virtualIp.trim()] : v.virtualIps,
-                  }
+                    primaryVip: isValidCidr(virtualIp) ? virtualIp.trim() : undefined,
+                  })
                 : v
             )
           : enabled
@@ -268,13 +268,11 @@ function HighAvailabilityPageContent() {
           peerIp,
           peerPort: state.ha?.peerPort ?? 2966,
           vrrpInstances,
-          conntrackSync: {
+          conntrackSync: mergeHaConntrackSync(state.ha?.conntrackSync, {
             enabled,
-            interface: syncInterface || state.ha?.conntrackSync?.interface || 'eth0',
-            protocol: state.ha?.conntrackSync?.protocol ?? 'unicast',
-            peerAddress: peerIp || state.ha?.conntrackSync?.peerAddress,
-            port: state.ha?.conntrackSync?.port ?? 3780,
-          },
+            syncInterface,
+            peerIp,
+          }),
           syncSections: state.ha?.syncSections ?? {
             interfaces: false,
             firewall: true,

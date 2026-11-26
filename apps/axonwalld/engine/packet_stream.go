@@ -95,22 +95,24 @@ func (m *PacketStreamManager) HandleStreamSSE(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	var bpfArgs []string
+	var bpfClauses []string
 	if filter.SrcIP != "" {
-		bpfArgs = append(bpfArgs, "src", filter.SrcIP)
+		bpfClauses = append(bpfClauses, fmt.Sprintf("src host %s", filter.SrcIP))
 	}
 	if filter.DstIP != "" {
-		bpfArgs = append(bpfArgs, "dst", filter.DstIP)
+		bpfClauses = append(bpfClauses, fmt.Sprintf("dst host %s", filter.DstIP))
 	}
 	if filter.Port != "" {
-		bpfArgs = append(bpfArgs, "port", filter.Port)
+		bpfClauses = append(bpfClauses, fmt.Sprintf("port %s", filter.Port))
 	}
 	if filter.Protocol != "" && strings.ToLower(filter.Protocol) != "any" {
-		bpfArgs = append(bpfArgs, strings.ToLower(filter.Protocol))
+		bpfClauses = append(bpfClauses, strings.ToLower(filter.Protocol))
 	}
 
 	args := []string{"-l", "-nn", "-tt", "-i", filter.Interface}
-	args = append(args, bpfArgs...)
+	if len(bpfClauses) > 0 {
+		args = append(args, strings.Join(bpfClauses, " and "))
+	}
 
 	cmd := exec.CommandContext(ctx, tcpdumpPath, args...)
 	stdout, pipeErr := cmd.StdoutPipe()
@@ -126,11 +128,14 @@ func (m *PacketStreamManager) HandleStreamSSE(w http.ResponseWriter, r *http.Req
 		http.Error(w, fmt.Sprintf("packet capture failed to start: %v", err), http.StatusInternalServerError)
 		return
 	}
+	waited := false
 	defer func() {
-		if cmd.Process != nil {
-			_ = cmd.Process.Kill()
+		if !waited {
+			if cmd.Process != nil {
+				_ = cmd.Process.Kill()
+			}
+			_ = cmd.Wait()
 		}
-		_ = cmd.Wait()
 	}()
 
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -196,6 +201,7 @@ func (m *PacketStreamManager) HandleStreamSSE(w http.ResponseWriter, r *http.Req
 	// silently and looked exactly like a live, idle interface. Surface
 	// the failure as an SSE error event instead. A client disconnect
 	// (ctx done) is not an error.
+	waited = true
 	waitErr := cmd.Wait()
 	if ctx.Err() == nil {
 		errMsg := ""

@@ -3,9 +3,11 @@ hostname: openvas.vigilante.local
 domain: vigilante.local
 tlsSecretName: openvas-tls
 
+existingSecret: ""
+
 admin:
   username: admin
-  password: admin
+  password: ""
 
 initFeeds: true
 

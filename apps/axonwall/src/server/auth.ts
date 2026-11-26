@@ -52,6 +52,11 @@ export async function getSession(): Promise<UserSession | null> {
     const rec = verifyServiceToken(token);
     if (!rec) return null;
     const roleDef = DEFAULT_ROLES[rec.role];
+    const scopes = Array.isArray(rec.scopes) ? rec.scopes : [];
+    const rolePrivileges = roleDef ? Array.from(roleDef.privileges) : [];
+    const privileges = scopes.includes('*')
+      ? rolePrivileges
+      : rolePrivileges.filter((p) => p !== '*');
     const exp = rec.expiresAt
       ? Math.floor(Date.parse(rec.expiresAt) / 1000)
       : Math.floor(Date.now() / 1000) + 3600;
@@ -60,10 +65,10 @@ export async function getSession(): Promise<UserSession | null> {
       username: `svc:${rec.name}`,
       source: 'service_token',
       roles: [rec.role],
-      privileges: roleDef ? roleDef.privileges : [],
+      privileges,
       exp,
       tokenId: rec.id,
-      scopes: rec.scopes,
+      scopes,
     };
   }
 
@@ -116,7 +121,7 @@ export async function logoutAction() {
   const token = cookieStore.get(SESSION_COOKIE)?.value;
   if (token) {
     const session = await verifyToken(token, getJwtSecret());
-    if (session?.jti) revokeTokenJti(session.jti);
+    if (session?.jti) revokeTokenJti(session.jti, session.exp);
   }
   cookieStore.delete(SESSION_COOKIE);
   redirect('/login');

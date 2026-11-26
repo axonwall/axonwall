@@ -10,6 +10,19 @@ import { load as yamlLoad, dump as yamlDump } from 'js-yaml';
 import { logger } from '../utils/logger.js';
 import { shDoubleQuoteEscape } from './config.js';
 
+function splitContainerImageRef(imageRef) {
+  const withoutDigest = String(imageRef || '').split('@')[0];
+  const lastSlash = withoutDigest.lastIndexOf('/');
+  const tagColon = withoutDigest.indexOf(':', lastSlash + 1);
+  if (tagColon >= 0) {
+    return {
+      repo: withoutDigest.slice(0, tagColon),
+      tag: withoutDigest.slice(tagColon + 1)
+    };
+  }
+  return { repo: withoutDigest, tag: '' };
+}
+
 /**
  * Generate a patch for a specific finding in Kubernetes or Dockerfile content
  * @param {Object} finding e.g. { ruleId: 'VIGIL-K8S-004', message: '...' }
@@ -55,12 +68,18 @@ export function generatePatchForFinding(finding, fileContent, fileType = 'yaml')
             }
 
             // Fix 3: Image with latest or unpinned tag (VIGIL-K8S-003)
-            if (ruleId === 'VIGIL-K8S-003' || (container.image && container.image.endsWith(':latest'))) {
-              if (container.image) {
-                const base = container.image.split(':')[0];
-                container.image = `${base}:1.27.1@sha256:7b1e4c7a6b8f804593f06cb7b0981b16c858548325983758b7501b87a8f11749`;
+            if (ruleId === 'VIGIL-K8S-003' || (container.image && !container.image.includes('@sha256:') && (container.image.endsWith(':latest') || !splitContainerImageRef(container.image).tag))) {
+              if (container.image && !container.image.includes('@sha256:')) {
+                const { repo } = splitContainerImageRef(container.image);
+                if (finding.pinnedImage) {
+                  container.image = finding.pinnedImage;
+                } else if (finding.pinnedDigest) {
+                  container.image = `${repo}@${finding.pinnedDigest}`;
+                } else {
+                  container.image = `${repo}:${finding.pinnedTag || '1.27.1-pinned'}`;
+                }
                 modified = true;
-                description += 'Pinned container image to immutable SHA256 digest. ';
+                description += `Replaced mutable tag on ${repo} with pinned reference. `;
               }
             }
           }
@@ -88,12 +107,15 @@ export function generatePatchForFinding(finding, fileContent, fileType = 'yaml')
     }
 
     // Rule 2: Unpinned base image (VIGIL-DOCKER-001)
-    if (ruleId === 'VIGIL-DOCKER-001' || lines.some(l => l.trim().startsWith('FROM') && l.includes(':latest'))) {
+    if (ruleId === 'VIGIL-DOCKER-001' || lines.some(l => /^\s*FROM\s+/i.test(l) && l.includes(':latest'))) {
       lines = lines.map(line => {
-        if (line.trim().startsWith('FROM') && line.includes(':latest')) {
+        const m = line.match(/^(\s*FROM\s+(?:--platform=\S+\s+)?)([^\s]+)(.*)$/i);
+        if (m && m[2].endsWith(':latest') && !m[2].includes('@sha256:')) {
+          const { repo } = splitContainerImageRef(m[2]);
+          const pinnedRef = finding.pinnedImage || (finding.pinnedDigest ? `${repo}@${finding.pinnedDigest}` : `${repo}:${finding.pinnedTag || 'pinned'}`);
           modified = true;
-          description += 'Pinned base image from latest to SHA256 digest. ';
-          return line.replace(':latest', ':alpine3.19@sha256:c5b1261d6d3e43071626931fc004f70149baeba2c8ec672bd49f277b3b511cd3');
+          description += `Replaced mutable :latest tag on ${repo} with pinned reference. `;
+          return `${m[1]}${pinnedRef}${m[3]}`;
         }
         return line;
       });

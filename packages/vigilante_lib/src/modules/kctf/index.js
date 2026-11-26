@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import fs from 'node:fs/promises';
 import { BaseModule } from '../base.js';
 import { applyK8sTlsSecret } from '../../engine/certs.js';
-import { ensureNamespace } from '../../engine/k8s.js';
+import { ensureNamespace, getClusterContextArgs, getKubeExecutionEnv } from '../../engine/k8s.js';
 import { resolveChartValuesArgs, renderTemplate } from '../../engine/helm.js';
 import { logger } from '../../utils/logger.js';
 
@@ -62,12 +62,15 @@ export class KCTFModule extends BaseModule {
       });
     }
 
+    const kubeEnv = getKubeExecutionEnv();
+    const ctxArgs = await getClusterContextArgs(clusterName);
+
     // 3. Apply challenges.kctf.dev CustomResourceDefinition
     const crdPath = path.join(__dirname, 'manifests', '00-crd-challenges.yaml');
     try {
       await fs.access(crdPath);
       if (onLog) onLog('[kctf] Applying kctf.dev/v1 Challenge CustomResourceDefinition (CRD)...');
-      await execa('kubectl', ['apply', '-f', crdPath, '--context', `k3d-${clusterName}`]);
+      await execa('kubectl', ['apply', '-f', crdPath, ...ctxArgs], { env: kubeEnv });
     } catch (err) {
       if (onLog) onLog(`[kctf] Warning: Could not apply CRD: ${err.message}`);
     }
@@ -78,8 +81,9 @@ export class KCTFModule extends BaseModule {
       const rawRbac = await fs.readFile(rbacPath, 'utf8');
       const renderedRbac = rawRbac.replace(/namespace: kctf/g, `namespace: ${targetNamespace}`);
       if (onLog) onLog(`[kctf] Applying Controller RBAC in namespace '${targetNamespace}'...`);
-      await execa('kubectl', ['apply', '--context', `k3d-${clusterName}`, '-f', '-'], {
-        input: renderedRbac
+      await execa('kubectl', ['apply', ...ctxArgs, '-f', '-'], {
+        input: renderedRbac,
+        env: kubeEnv
       });
     } catch (err) {
       if (onLog) onLog(`[kctf] Warning: Could not apply RBAC: ${err.message}`);
@@ -97,8 +101,9 @@ export class KCTFModule extends BaseModule {
       }).replace(/namespace: kctf/g, `namespace: ${targetNamespace}`);
 
       if (onLog) onLog(`[kctf] Deploying kCTF Challenge Explorer & Web Portal (Ingress: https://${ingressHost})...`);
-      await execa('kubectl', ['apply', '--context', `k3d-${clusterName}`, '-n', targetNamespace, '-f', '-'], {
-        input: renderedPortal
+      await execa('kubectl', ['apply', ...ctxArgs, '-n', targetNamespace, '-f', '-'], {
+        input: renderedPortal,
+        env: kubeEnv
       });
     } catch (err) {
       if (onLog) onLog(`[kctf] Warning: Could not deploy portal: ${err.message}`);
@@ -110,8 +115,9 @@ export class KCTFModule extends BaseModule {
       const rawChallenges = await fs.readFile(challengesPath, 'utf8');
       const renderedChallenges = rawChallenges.replace(/namespace: kctf/g, `namespace: ${targetNamespace}`);
       if (onLog) onLog(`[kctf] Deploying built-in starter CTF challenges (web-flag-leak, pwn-nsjail-echo)...`);
-      await execa('kubectl', ['apply', '--context', `k3d-${clusterName}`, '-n', targetNamespace, '-f', '-'], {
-        input: renderedChallenges
+      await execa('kubectl', ['apply', ...ctxArgs, '-n', targetNamespace, '-f', '-'], {
+        input: renderedChallenges,
+        env: kubeEnv
       });
     } catch (err) {
       if (onLog) onLog(`[kctf] Note: Starter challenges skipped or already present: ${err.message}`);
@@ -127,6 +133,8 @@ export class KCTFModule extends BaseModule {
    */
   async uninstall({ clusterName = 'vigilante-dev', namespace = null, onLog = null, deleteNamespace = false } = {}) {
     const targetNamespace = namespace || this.namespace;
+    const kubeEnv = getKubeExecutionEnv();
+    const ctxArgs = await getClusterContextArgs(clusterName);
 
     if (onLog) onLog(`[kctf] Uninstalling kCTF Platform from namespace '${targetNamespace}'...`);
 
@@ -138,7 +146,7 @@ export class KCTFModule extends BaseModule {
 
     for (const mPath of manifests) {
       try {
-        await execa('kubectl', ['delete', '-f', mPath, '-n', targetNamespace, '--context', `k3d-${clusterName}`, '--ignore-not-found=true']);
+        await execa('kubectl', ['delete', '-f', mPath, '-n', targetNamespace, ...ctxArgs, '--ignore-not-found=true'], { env: kubeEnv });
       } catch {
         // Ignore deletion errors
       }
@@ -147,7 +155,7 @@ export class KCTFModule extends BaseModule {
     if (deleteNamespace && targetNamespace !== 'default' && targetNamespace !== 'kube-system') {
       if (onLog) onLog(`[kctf] Deleting namespace '${targetNamespace}'...`);
       try {
-        await execa('kubectl', ['delete', 'namespace', targetNamespace, '--timeout=60s', '--context', `k3d-${clusterName}`]);
+        await execa('kubectl', ['delete', 'namespace', targetNamespace, '--timeout=60s', ...ctxArgs], { env: kubeEnv });
       } catch {
         // Ignore
       }
@@ -161,13 +169,15 @@ export class KCTFModule extends BaseModule {
     const targetNamespace = namespace || this.namespace;
 
     try {
+      const kubeEnv = getKubeExecutionEnv();
+      const ctxArgs = await getClusterContextArgs(clusterName);
       const { stdout: podsJson } = await execa('kubectl', [
         'get', 'pods',
         '-n', targetNamespace,
-        '--context', `k3d-${clusterName}`,
+        ...ctxArgs,
         '--request-timeout=3s',
         '-o', 'json'
-      ]);
+      ], { env: kubeEnv });
 
       const parsed = JSON.parse(podsJson);
       const pods = (parsed.items || []).map(p => ({
@@ -184,10 +194,10 @@ export class KCTFModule extends BaseModule {
         const { stdout: chalJson } = await execa('kubectl', [
           'get', 'challenges.kctf.dev',
           '-n', targetNamespace,
-          '--context', `k3d-${clusterName}`,
+          ...ctxArgs,
           '--request-timeout=3s',
           '-o', 'json'
-        ]);
+        ], { env: kubeEnv });
         const parsedChals = JSON.parse(chalJson);
         challenges = (parsedChals.items || []).map(c => ({
           name: c.metadata.name,
@@ -264,12 +274,14 @@ export class KCTFModule extends BaseModule {
   async listChallenges({ clusterName = 'vigilante-dev', namespace = null } = {}) {
     const targetNamespace = namespace || this.namespace;
     try {
+      const kubeEnv = getKubeExecutionEnv();
+      const ctxArgs = await getClusterContextArgs(clusterName);
       const { stdout } = await execa('kubectl', [
         'get', 'challenges.kctf.dev',
         '-n', targetNamespace,
-        '--context', `k3d-${clusterName}`,
+        ...ctxArgs,
         '-o', 'json'
-      ]);
+      ], { env: kubeEnv });
       const data = JSON.parse(stdout);
       return (data.items || []).map(item => ({
         name: item.metadata.name,

@@ -1,9 +1,8 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Database, FileBarChart, Globe, Play, Plus, Radio, Share2, Shield, Trash2 } from 'lucide-react';
 import {
-  NetFlowConfigSchema,
   NetFlowListenerProtocolSchema,
   type DesiredState,
   type NetFlowListener,
@@ -11,6 +10,7 @@ import {
   type NetFlowSelfExportTarget,
 } from '@axonwall/lib/schemas';
 import { injectNetFlowTestBurstAction, triggerNetFlowGeoIPUpdateAction } from '@/server/agent';
+import { parseCsvTokens, resolveNetFlowDraftConfig } from '@/lib/state-preservation';
 
 interface PipelineConfigTabProps {
   draftState: DesiredState | null;
@@ -52,7 +52,18 @@ export function PipelineConfigTab({
   const [repExporters, setRepExporters] = useState('');
   const [repRate, setRepRate] = useState('0');
 
-  const cfg = NetFlowConfigSchema.parse(draftState?.netflow ?? {});
+  const cfg = resolveNetFlowDraftConfig(draftState?.netflow);
+  const [internalCidrsText, setInternalCidrsText] = useState(() => cfg.enrichment.internalCidrs.join(', '));
+  const internalCidrsTextRef = useRef(internalCidrsText);
+  internalCidrsTextRef.current = internalCidrsText;
+
+  useEffect(() => {
+    const externalCsv = cfg.enrichment.internalCidrs.join(',');
+    const localCsv = parseCsvTokens(internalCidrsTextRef.current).join(',');
+    if (externalCsv !== localCsv) {
+      setInternalCidrsText(cfg.enrichment.internalCidrs.join(', '));
+    }
+  }, [cfg.enrichment.internalCidrs]);
 
   const handleTestBurst = async () => {
     setInjecting(true);
@@ -86,7 +97,7 @@ export function PipelineConfigTab({
             value={cfg.mode ?? 'both'}
             onChange={(e) =>
               onUpdateDraft((prev) => {
-                const cur = NetFlowConfigSchema.parse(prev.netflow ?? {});
+                const cur = resolveNetFlowDraftConfig(prev.netflow);
                 return {
                   ...prev,
                   netflow: { ...cur, mode: e.target.value as 'collector' | 'exporter' | 'both' },
@@ -107,7 +118,7 @@ export function PipelineConfigTab({
             value={cfg.nodeId || ''}
             onChange={(e) =>
               onUpdateDraft((prev) => {
-                const cur = NetFlowConfigSchema.parse(prev.netflow ?? {});
+                const cur = resolveNetFlowDraftConfig(prev.netflow);
                 return {
                   ...prev,
                   netflow: { ...cur, nodeId: e.target.value.trim() || undefined },
@@ -176,7 +187,7 @@ export function PipelineConfigTab({
                   checked={l.enabled}
                   onChange={(e) =>
                     onUpdateDraft((prev) => {
-                      const cur = NetFlowConfigSchema.parse(prev.netflow ?? {});
+                      const cur = resolveNetFlowDraftConfig(prev.netflow);
                       return {
                         ...prev,
                         netflow: {
@@ -194,7 +205,7 @@ export function PipelineConfigTab({
                   type="button"
                   onClick={() =>
                     onUpdateDraft((prev) => {
-                      const cur = NetFlowConfigSchema.parse(prev.netflow ?? {});
+                      const cur = resolveNetFlowDraftConfig(prev.netflow);
                       return {
                         ...prev,
                         netflow: {
@@ -289,7 +300,7 @@ export function PipelineConfigTab({
                   : {}),
               };
               onUpdateDraft((prev) => {
-                const cur = NetFlowConfigSchema.parse(prev.netflow ?? {});
+                const cur = resolveNetFlowDraftConfig(prev.netflow);
                 return { ...prev, netflow: { ...cur, listeners: [...cur.listeners, newL] } };
               });
               setLName('');
@@ -314,7 +325,7 @@ export function PipelineConfigTab({
                 checked={cfg.selfExport.enabled}
                 onChange={(e) =>
                   onUpdateDraft((prev) => {
-                    const cur = NetFlowConfigSchema.parse(prev.netflow ?? {});
+                    const cur = resolveNetFlowDraftConfig(prev.netflow);
                     return {
                       ...prev,
                       netflow: { ...cur, selfExport: { ...cur.selfExport, enabled: e.target.checked } },
@@ -345,7 +356,7 @@ export function PipelineConfigTab({
                   type="button"
                   onClick={() =>
                     onUpdateDraft((prev) => {
-                      const cur = NetFlowConfigSchema.parse(prev.netflow ?? {});
+                      const cur = resolveNetFlowDraftConfig(prev.netflow);
                       return {
                         ...prev,
                         netflow: {
@@ -457,7 +468,7 @@ export function PipelineConfigTab({
                       : {}),
                   };
                   onUpdateDraft((prev) => {
-                    const cur = NetFlowConfigSchema.parse(prev.netflow ?? {});
+                    const cur = resolveNetFlowDraftConfig(prev.netflow);
                     return {
                       ...prev,
                       netflow: {
@@ -492,7 +503,7 @@ export function PipelineConfigTab({
                 checked={cfg.replicator.enabled}
                 onChange={(e) =>
                   onUpdateDraft((prev) => {
-                    const cur = NetFlowConfigSchema.parse(prev.netflow ?? {});
+                    const cur = resolveNetFlowDraftConfig(prev.netflow);
                     return {
                       ...prev,
                       netflow: { ...cur, replicator: { ...cur.replicator, enabled: e.target.checked } },
@@ -515,7 +526,7 @@ export function PipelineConfigTab({
                   type="button"
                   onClick={() =>
                     onUpdateDraft((prev) => {
-                      const cur = NetFlowConfigSchema.parse(prev.netflow ?? {});
+                      const cur = resolveNetFlowDraftConfig(prev.netflow);
                       return {
                         ...prev,
                         netflow: {
@@ -584,7 +595,7 @@ export function PipelineConfigTab({
                     rateLimitPps: Number(repRate) || 0,
                   };
                   onUpdateDraft((prev) => {
-                    const cur = NetFlowConfigSchema.parse(prev.netflow ?? {});
+                    const cur = resolveNetFlowDraftConfig(prev.netflow);
                     return {
                       ...prev,
                       netflow: {
@@ -621,7 +632,7 @@ export function PipelineConfigTab({
                 value={cfg.storage.mode}
                 onChange={(e) =>
                   onUpdateDraft((prev) => {
-                    const cur = NetFlowConfigSchema.parse(prev.netflow ?? {});
+                    const cur = resolveNetFlowDraftConfig(prev.netflow);
                     return {
                       ...prev,
                       netflow: { ...cur, storage: { ...cur.storage, mode: e.target.value as typeof cfg.storage.mode } },
@@ -641,7 +652,7 @@ export function PipelineConfigTab({
                 value={cfg.storage.compression}
                 onChange={(e) =>
                   onUpdateDraft((prev) => {
-                    const cur = NetFlowConfigSchema.parse(prev.netflow ?? {});
+                    const cur = resolveNetFlowDraftConfig(prev.netflow);
                     return {
                       ...prev,
                       netflow: {
@@ -663,16 +674,19 @@ export function PipelineConfigTab({
               <input
                 type="number"
                 min={1}
-                value={cfg.storage.retentionHours}
-                onChange={(e) =>
+                value={cfg.storage.retentionHours || ''}
+                onChange={(e) => {
+                  const v = e.target.value.trim();
+                  const n = v === '' ? 0 : Number(v);
+                  if (Number.isNaN(n)) return;
                   onUpdateDraft((prev) => {
-                    const cur = NetFlowConfigSchema.parse(prev.netflow ?? {});
+                    const cur = resolveNetFlowDraftConfig(prev.netflow);
                     return {
                       ...prev,
-                      netflow: { ...cur, storage: { ...cur.storage, retentionHours: Number(e.target.value) || 168 } },
+                      netflow: { ...cur, storage: { ...cur.storage, retentionHours: Math.max(0, Math.trunc(n)) } },
                     };
-                  })
-                }
+                  });
+                }}
                 className="w-full px-2.5 py-1.5 rounded bg-slate-950 border border-slate-700 text-white font-mono"
               />
             </label>
@@ -681,16 +695,19 @@ export function PipelineConfigTab({
               <input
                 type="number"
                 min={64}
-                value={cfg.storage.maxDiskMB}
-                onChange={(e) =>
+                value={cfg.storage.maxDiskMB || ''}
+                onChange={(e) => {
+                  const v = e.target.value.trim();
+                  const n = v === '' ? 0 : Number(v);
+                  if (Number.isNaN(n)) return;
                   onUpdateDraft((prev) => {
-                    const cur = NetFlowConfigSchema.parse(prev.netflow ?? {});
+                    const cur = resolveNetFlowDraftConfig(prev.netflow);
                     return {
                       ...prev,
-                      netflow: { ...cur, storage: { ...cur.storage, maxDiskMB: Number(e.target.value) || 4096 } },
+                      netflow: { ...cur, storage: { ...cur.storage, maxDiskMB: Math.max(0, Math.trunc(n)) } },
                     };
-                  })
-                }
+                  });
+                }}
                 className="w-full px-2.5 py-1.5 rounded bg-slate-950 border border-slate-700 text-white font-mono"
               />
             </label>
@@ -702,7 +719,7 @@ export function PipelineConfigTab({
                 checked={cfg.storage.clickhouse.enabled}
                 onChange={(e) =>
                   onUpdateDraft((prev) => {
-                    const cur = NetFlowConfigSchema.parse(prev.netflow ?? {});
+                    const cur = resolveNetFlowDraftConfig(prev.netflow);
                     return {
                       ...prev,
                       netflow: {
@@ -723,7 +740,7 @@ export function PipelineConfigTab({
                   value={cfg.storage.clickhouse.url}
                   onChange={(e) =>
                     onUpdateDraft((prev) => {
-                      const cur = NetFlowConfigSchema.parse(prev.netflow ?? {});
+                      const cur = resolveNetFlowDraftConfig(prev.netflow);
                       return {
                         ...prev,
                         netflow: {
@@ -741,7 +758,7 @@ export function PipelineConfigTab({
                   value={cfg.storage.clickhouse.password || ''}
                   onChange={(e) =>
                     onUpdateDraft((prev) => {
-                      const cur = NetFlowConfigSchema.parse(prev.netflow ?? {});
+                      const cur = resolveNetFlowDraftConfig(prev.netflow);
                       return {
                         ...prev,
                         netflow: {
@@ -789,7 +806,7 @@ export function PipelineConfigTab({
                   checked={Boolean(cfg.enrichment[field])}
                   onChange={(e) =>
                     onUpdateDraft((prev) => {
-                      const cur = NetFlowConfigSchema.parse(prev.netflow ?? {});
+                      const cur = resolveNetFlowDraftConfig(prev.netflow);
                       return {
                         ...prev,
                         netflow: { ...cur, enrichment: { ...cur.enrichment, [field]: e.target.checked } },
@@ -808,7 +825,7 @@ export function PipelineConfigTab({
               checked={cfg.topologyOverlay.enabled}
               onChange={(e) =>
                 onUpdateDraft((prev) => {
-                  const cur = NetFlowConfigSchema.parse(prev.netflow ?? {});
+                  const cur = resolveNetFlowDraftConfig(prev.netflow);
                   return {
                     ...prev,
                     netflow: { ...cur, topologyOverlay: { ...cur.topologyOverlay, enabled: e.target.checked } },
@@ -823,25 +840,28 @@ export function PipelineConfigTab({
             <span className="text-slate-400 block mb-1">Internal CIDRs (Direction Classifier)</span>
             <input
               type="text"
-              value={cfg.enrichment.internalCidrs.join(', ')}
-              onChange={(e) =>
+              value={internalCidrsText}
+              onChange={(e) => {
+                const nextText = e.target.value;
+                setInternalCidrsText(nextText);
+                internalCidrsTextRef.current = nextText;
                 onUpdateDraft((prev) => {
-                  const cur = NetFlowConfigSchema.parse(prev.netflow ?? {});
+                  const cur = resolveNetFlowDraftConfig(prev.netflow);
                   return {
                     ...prev,
                     netflow: {
                       ...cur,
                       enrichment: {
                         ...cur.enrichment,
-                        internalCidrs: e.target.value
-                          .split(',')
-                          .map((s) => s.trim())
-                          .filter(Boolean),
+                        internalCidrs: parseCsvTokens(nextText),
                       },
                     },
                   };
-                })
-              }
+                });
+              }}
+              onBlur={() => {
+                setInternalCidrsText(parseCsvTokens(internalCidrsTextRef.current).join(', '));
+              }}
               className="w-full px-2.5 py-1.5 rounded bg-slate-950 border border-slate-700 text-white font-mono"
             />
           </label>
@@ -874,7 +894,7 @@ export function PipelineConfigTab({
                 checked={cfg.enrichment.geoipAutoUpdate}
                 onChange={(e) =>
                   onUpdateDraft((prev) => {
-                    const cur = NetFlowConfigSchema.parse(prev.netflow ?? {});
+                    const cur = resolveNetFlowDraftConfig(prev.netflow);
                     return {
                       ...prev,
                       netflow: { ...cur, enrichment: { ...cur.enrichment, geoipAutoUpdate: e.target.checked } },
@@ -891,7 +911,7 @@ export function PipelineConfigTab({
                 value={cfg.enrichment.geoipCityDownloadUrl}
                 onChange={(e) =>
                   onUpdateDraft((prev) => {
-                    const cur = NetFlowConfigSchema.parse(prev.netflow ?? {});
+                    const cur = resolveNetFlowDraftConfig(prev.netflow);
                     return {
                       ...prev,
                       netflow: { ...cur, enrichment: { ...cur.enrichment, geoipCityDownloadUrl: e.target.value } },
@@ -906,7 +926,7 @@ export function PipelineConfigTab({
                 value={cfg.enrichment.geoipAsnDownloadUrl}
                 onChange={(e) =>
                   onUpdateDraft((prev) => {
-                    const cur = NetFlowConfigSchema.parse(prev.netflow ?? {});
+                    const cur = resolveNetFlowDraftConfig(prev.netflow);
                     return {
                       ...prev,
                       netflow: { ...cur, enrichment: { ...cur.enrichment, geoipAsnDownloadUrl: e.target.value } },
@@ -934,7 +954,7 @@ export function PipelineConfigTab({
               checked={cfg.reporting.enabled}
               onChange={(e) =>
                 onUpdateDraft((prev) => {
-                  const cur = NetFlowConfigSchema.parse(prev.netflow ?? {});
+                  const cur = resolveNetFlowDraftConfig(prev.netflow);
                   return {
                     ...prev,
                     netflow: { ...cur, reporting: { ...cur.reporting, enabled: e.target.checked } },
@@ -953,16 +973,19 @@ export function PipelineConfigTab({
               type="number"
               min={1}
               max={720}
-              value={cfg.reporting.intervalHours}
-              onChange={(e) =>
+              value={cfg.reporting.intervalHours || ''}
+              onChange={(e) => {
+                const v = e.target.value.trim();
+                const n = v === '' ? 0 : Number(v);
+                if (Number.isNaN(n)) return;
                 onUpdateDraft((prev) => {
-                  const cur = NetFlowConfigSchema.parse(prev.netflow ?? {});
+                  const cur = resolveNetFlowDraftConfig(prev.netflow);
                   return {
                     ...prev,
-                    netflow: { ...cur, reporting: { ...cur.reporting, intervalHours: Number(e.target.value) || 24 } },
+                    netflow: { ...cur, reporting: { ...cur.reporting, intervalHours: Math.max(0, Math.trunc(n)) } },
                   };
-                })
-              }
+                });
+              }}
               className="w-full px-2 py-1.5 rounded bg-slate-950 border border-slate-700 text-white font-mono"
             />
           </label>
@@ -972,16 +995,19 @@ export function PipelineConfigTab({
               type="number"
               min={1}
               max={90}
-              value={cfg.reporting.rangeDays}
-              onChange={(e) =>
+              value={cfg.reporting.rangeDays || ''}
+              onChange={(e) => {
+                const v = e.target.value.trim();
+                const n = v === '' ? 0 : Number(v);
+                if (Number.isNaN(n)) return;
                 onUpdateDraft((prev) => {
-                  const cur = NetFlowConfigSchema.parse(prev.netflow ?? {});
+                  const cur = resolveNetFlowDraftConfig(prev.netflow);
                   return {
                     ...prev,
-                    netflow: { ...cur, reporting: { ...cur.reporting, rangeDays: Number(e.target.value) || 7 } },
+                    netflow: { ...cur, reporting: { ...cur.reporting, rangeDays: Math.max(0, Math.trunc(n)) } },
                   };
-                })
-              }
+                });
+              }}
               className="w-full px-2 py-1.5 rounded bg-slate-950 border border-slate-700 text-white font-mono"
             />
           </label>
@@ -991,7 +1017,7 @@ export function PipelineConfigTab({
               value={cfg.reporting.groupBy}
               onChange={(e) =>
                 onUpdateDraft((prev) => {
-                  const cur = NetFlowConfigSchema.parse(prev.netflow ?? {});
+                  const cur = resolveNetFlowDraftConfig(prev.netflow);
                   return {
                     ...prev,
                     netflow: { ...cur, reporting: { ...cur.reporting, groupBy: e.target.value as typeof cfg.reporting.groupBy } },
@@ -1012,7 +1038,7 @@ export function PipelineConfigTab({
               value={cfg.reporting.format}
               onChange={(e) =>
                 onUpdateDraft((prev) => {
-                  const cur = NetFlowConfigSchema.parse(prev.netflow ?? {});
+                  const cur = resolveNetFlowDraftConfig(prev.netflow);
                   return {
                     ...prev,
                     netflow: { ...cur, reporting: { ...cur.reporting, format: e.target.value as typeof cfg.reporting.format } },
@@ -1033,7 +1059,7 @@ export function PipelineConfigTab({
               value={cfg.reporting.webhookUrl}
               onChange={(e) =>
                 onUpdateDraft((prev) => {
-                  const cur = NetFlowConfigSchema.parse(prev.netflow ?? {});
+                  const cur = resolveNetFlowDraftConfig(prev.netflow);
                   return {
                     ...prev,
                     netflow: { ...cur, reporting: { ...cur.reporting, webhookUrl: e.target.value } },

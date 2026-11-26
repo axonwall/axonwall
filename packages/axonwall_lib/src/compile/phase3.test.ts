@@ -22,11 +22,11 @@ describe('Phase 3: Suricata IDS/IPS Compiler & EVE JSON Parser', () => {
 
     expect(res.suricataYaml).toContain('suricata-version: "7.0"');
     expect(res.suricataYaml).toContain('HOME_NET: "[192.168.100.0/24]"');
-    expect(res.suricataYaml).toContain('mode: accept');
+    expect(res.suricataYaml).toContain('mode: repeat');
     expect(res.suricataYaml).toContain('fail-open: yes');
     expect(res.suricataYaml).toContain('bypass: yes');
 
-    expect(res.nftRules).toContain('iifname "wan" queue num 0-3 bypass comment "suricata-ips-inbound"');
+    expect(res.nftRules).toContain('meta mark & 0x1 == 0 iifname "wan" queue num 0-3 bypass comment "suricata-ips-inbound"');
   });
 
   it('parses Suricata EVE JSON alert events', () => {

@@ -27,6 +27,7 @@ import {
   type LiveFleetSatellite,
 } from '@/server/fleet';
 import { useDesiredStateApply } from '@/lib/use-desired-state-apply';
+import { mergeSatelliteNodesForPersist } from '@/lib/state-preservation';
 
 interface WifiRadioInfo {
   radio: string;
@@ -79,9 +80,9 @@ function formatUptime(seconds: number): string {
 }
 
 function FleetPageContent() {
-  const { applyState } = useDesiredStateApply();
   const [satellites, setSatellites] = useState<SatelliteNodeView[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [listenPort, setListenPort] = useState(2966);
   const [heartbeatIntervalSec, setHeartbeatIntervalSec] = useState(30);
   const [watchdogTimeoutSec, setWatchdogTimeoutSec] = useState(60);
@@ -224,6 +225,7 @@ function FleetPageContent() {
         });
       }
 
+      setLoadError(null);
       setSatellites(loaded);
       setSelectedSat((prev) => {
         if (prev) {
@@ -232,66 +234,48 @@ function FleetPageContent() {
         }
         return loaded[0] ?? null;
       });
-    } catch {
-      // Keep current state on transient error
+    } catch (err: any) {
+      // Keep current state on transient error, but block writes so stale/empty state cannot wipe fleet.nodes.
+      setLoadError(err?.message || 'Failed to load fleet state.');
     } finally {
       setIsLoading(false);
     }
   }, []);
 
+  const { applyState } = useDesiredStateApply({
+    onConfigChanged: () => {
+      void loadFleetState();
+    },
+  });
+
   useEffect(() => {
     loadFleetState();
   }, [loadFleetState]);
 
-  const persistSatellites = async (nextSatellites: SatelliteNodeView[]) => {
+  const persistSatellites = async (nextSatellites: SatelliteNodeView[]): Promise<boolean> => {
+    if (loadError) {
+      setSaveError('Cannot save fleet changes while fleet state failed to load. Retry loading first.');
+      return false;
+    }
     setIsSaving(true);
     setSaveError(null);
     try {
       const state = await getCurrentDesiredState();
-      await applyState({
+      const mergedNodes = mergeSatelliteNodesForPersist(state.fleet?.nodes, nextSatellites);
+      const applyRes = await applyState({
         ...state,
         fleet: {
-          enabled: true,
+          ...(state.fleet ?? {}),
+          enabled: state.fleet?.enabled ?? true,
           listenPort: state.fleet?.listenPort ?? listenPort,
           defaultHeartbeatIntervalSec: state.fleet?.defaultHeartbeatIntervalSec ?? heartbeatIntervalSec,
           watchdogTimeoutSec: state.fleet?.watchdogTimeoutSec ?? watchdogTimeoutSec,
-          nodes: nextSatellites.map((s) => ({
-            id: s.id,
-            name: s.name,
-            role: s.role,
-            skuProfile: s.skuProfile,
-            fastpathOffload: s.fastpathOffload ?? true,
-            wanInterface: s.wanInterface,
-            lanInterface: s.lanInterface,
-            arch: s.arch,
-            os: s.os,
-            // D16: unknown stays unknown. A node with no reported IP
-            // used to be persisted as 127.0.0.1 and a node with no
-            // tunnel IP as an index-derived 10.99.0.x/24 that could
-            // collide with a real node's tunnel IP. The schema no longer
-            // supplies those invented defaults either.
-            ip: s.ip === '—' ? undefined : s.ip,
-            lastSeen: s.lastSeen === 'Never' ? undefined : s.lastSeen,
-            status: s.status,
-            wireguard: {
-              tunnelIp: s.tunnelIp === '—' ? undefined : s.tunnelIp,
-              connected: s.wgConnected,
-            },
-            wifi: s.wifiRadios,
-            metrics: {
-              cpuUsagePercent: s.cpuPercent,
-              memUsagePercent: s.memPercent,
-              uptimeSeconds: s.uptimeSeconds,
-              activeConns: s.activeConns,
-              offloadedConns: s.offloadedConns,
-              pid1Mode: s.pid1Mode,
-              rxBytesTotal: 0,
-              txBytesTotal: 0,
-            },
-            activePolicyVersion: s.activePolicyVersion,
-          })),
+          nodes: mergedNodes,
         },
       });
+      if (!applyRes.success) {
+        throw new Error(applyRes.message || 'Failed to save fleet changes.');
+      }
       setSatellites(nextSatellites);
       setSelectedSat((prev) => {
         if (prev) {
@@ -299,22 +283,30 @@ function FleetPageContent() {
         }
         return nextSatellites[0] ?? null;
       });
+      return true;
     } catch (err: any) {
       // D16: surface persist failures instead of silently dropping them —
       // the local list is left unchanged so the UI never shows a change
       // as applied when it was not.
       setSaveError(err?.message || 'Failed to save fleet changes.');
+      return false;
     } finally {
       setIsSaving(false);
     }
   };
 
   const handleSyncFleetToYaml = async () => {
+    if (loadError) return;
     setSyncNotice(null);
-    await persistSatellites(satellites);
+    const saved = await persistSatellites(satellites);
+    if (!saved) return;
     const syncRes = await triggerFleetSyncAction().catch(() => null);
+    const syncedCount =
+      (syncRes?.data as { syncedSatellites?: number; syncedCount?: number } | undefined)?.syncedSatellites ??
+      syncRes?.data?.syncedCount ??
+      satellites.length;
     if (syncRes?.reachable && (!syncRes.status || syncRes.status < 400)) {
-      setSyncNotice(`Synced desired state to live controller (${syncRes.data?.syncedCount ?? satellites.length} nodes).`);
+      setSyncNotice(`Synced desired state to live controller (${syncedCount} nodes).`);
     } else if (syncRes && !syncRes.reachable) {
       setSyncNotice('Saved fleet.yaml locally (controller daemon offline — push skipped).');
     } else if (syncRes?.error) {
@@ -380,7 +372,8 @@ function FleetPageContent() {
       activePolicyVersion: 1,
     };
     const nextList = [...satellites, created];
-    await persistSatellites(nextList);
+    const saved = await persistSatellites(nextList);
+    if (!saved) return;
     setSelectedSat(created);
     setNewNodeId('');
     setNewNodeName('');
@@ -388,15 +381,18 @@ function FleetPageContent() {
   };
 
   const handleRemoveNode = async (id: string) => {
+    if (loadError) return;
     const nextList = satellites.filter((s) => s.id !== id);
     await persistSatellites(nextList);
   };
 
   const handlePushPolicy = async (id: string) => {
+    if (loadError) return;
     const nextList = satellites.map((s) =>
       s.id === id ? { ...s, activePolicyVersion: s.activePolicyVersion + 1 } : s
     );
-    await persistSatellites(nextList);
+    const saved = await persistSatellites(nextList);
+    if (!saved) return;
     const syncRes = await triggerFleetSyncAction(id).catch(() => null);
     if (syncRes?.reachable && (!syncRes.status || syncRes.status < 400)) {
       setSyncNotice(`Pushed policy update to ${id}.`);
@@ -406,6 +402,7 @@ function FleetPageContent() {
   };
 
   const handleQuarantine = async (id: string) => {
+    if (loadError) return;
     const nextList = satellites.map((s) =>
       s.id === id ? { ...s, status: 'degraded' as const, wgConnected: false } : s
     );
@@ -506,14 +503,15 @@ function FleetPageContent() {
               setHubZtpToken('');
               setIsZtpModalOpen(true);
             }}
-            className="flex items-center gap-2 px-3.5 py-2 rounded-lg bg-emerald-500 text-slate-950 font-semibold text-sm hover:bg-emerald-400 transition shadow-lg shadow-emerald-500/20 cursor-pointer"
+            disabled={Boolean(loadError) || isLoading}
+            className="flex items-center gap-2 px-3.5 py-2 rounded-lg bg-emerald-500 text-slate-950 font-semibold text-sm hover:bg-emerald-400 transition shadow-lg shadow-emerald-500/20 cursor-pointer disabled:opacity-50"
           >
             <Plus className="w-4 h-4" />
             Enroll Satellite (ZTP)
           </button>
           <button
             onClick={handleSyncFleetToYaml}
-            disabled={isSaving}
+            disabled={isSaving || Boolean(loadError) || isLoading}
             className="flex items-center gap-2 px-3.5 py-2 rounded-lg bg-slate-800 border border-slate-700 text-slate-200 font-medium text-sm hover:bg-slate-700 transition cursor-pointer disabled:opacity-50"
           >
             <RefreshCw className={`w-4 h-4 ${isSaving ? 'animate-spin' : ''}`} />
@@ -521,6 +519,21 @@ function FleetPageContent() {
           </button>
         </div>
       </div>
+
+      {loadError && (
+        <div className="p-4 rounded-xl border text-xs font-medium bg-rose-500/10 border-rose-500/30 text-rose-300 flex items-center justify-between gap-3">
+          <span>
+            Failed to load fleet configuration ({loadError}). Fleet modifications are disabled until state reloads cleanly.
+          </span>
+          <button
+            type="button"
+            onClick={() => void loadFleetState()}
+            className="px-2.5 py-1 rounded bg-rose-500/20 hover:bg-rose-500/30 text-rose-200 border border-rose-500/40 shrink-0 cursor-pointer"
+          >
+            Retry Load
+          </button>
+        </div>
+      )}
 
       {syncNotice && (
         <div className="p-3.5 rounded-xl border text-xs font-medium bg-sky-500/10 border-sky-500/30 text-sky-200 flex items-center justify-between">
@@ -843,22 +856,25 @@ function FleetPageContent() {
                           <div className="flex items-center justify-end gap-1.5" onClick={(e) => e.stopPropagation()}>
                             <button
                               title="Bump policy version (local record only — nothing is pushed to the node)"
+                              disabled={Boolean(loadError) || isSaving}
                               onClick={() => handlePushPolicy(sat.id)}
-                              className="p-1.5 rounded-lg text-slate-400 hover:text-emerald-400 hover:bg-slate-800 transition cursor-pointer"
+                              className="p-1.5 rounded-lg text-slate-400 hover:text-emerald-400 hover:bg-slate-800 transition cursor-pointer disabled:opacity-40"
                             >
                               <RefreshCw className="w-4 h-4" />
                             </button>
                             <button
                               title="Mark degraded (local record only — the WireGuard tunnel stays up)"
+                              disabled={Boolean(loadError) || isSaving}
                               onClick={() => handleQuarantine(sat.id)}
-                              className="p-1.5 rounded-lg text-slate-400 hover:text-amber-400 hover:bg-slate-800 transition cursor-pointer"
+                              className="p-1.5 rounded-lg text-slate-400 hover:text-amber-400 hover:bg-slate-800 transition cursor-pointer disabled:opacity-40"
                             >
                               <ShieldAlert className="w-4 h-4" />
                             </button>
                             <button
                               title="Remove Satellite"
+                              disabled={Boolean(loadError) || isSaving}
                               onClick={() => handleRemoveNode(sat.id)}
-                              className="p-1.5 rounded-lg text-slate-400 hover:text-red-400 hover:bg-slate-800 transition cursor-pointer"
+                              className="p-1.5 rounded-lg text-slate-400 hover:text-red-400 hover:bg-slate-800 transition cursor-pointer disabled:opacity-40"
                             >
                               <Trash2 className="w-4 h-4" />
                             </button>
@@ -905,21 +921,24 @@ function FleetPageContent() {
             <div className="flex items-center gap-2">
               <button
                 title="Bump policy version in the local fleet record only — nothing is pushed to the node"
+                disabled={Boolean(loadError) || isSaving}
                 onClick={() => handlePushPolicy(selectedSat.id)}
-                className="px-3 py-1.5 bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 hover:bg-emerald-500/20 rounded-lg text-xs font-semibold transition cursor-pointer"
+                className="px-3 py-1.5 bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 hover:bg-emerald-500/20 rounded-lg text-xs font-semibold transition cursor-pointer disabled:opacity-40"
               >
                 Bump policy version
               </button>
               <button
                 title="Mark degraded in the local fleet record only — the WireGuard tunnel stays up"
+                disabled={Boolean(loadError) || isSaving}
                 onClick={() => handleQuarantine(selectedSat.id)}
-                className="px-3 py-1.5 bg-amber-500/10 border border-amber-500/20 text-amber-400 hover:bg-amber-500/20 rounded-lg text-xs font-semibold transition cursor-pointer"
+                className="px-3 py-1.5 bg-amber-500/10 border border-amber-500/20 text-amber-400 hover:bg-amber-500/20 rounded-lg text-xs font-semibold transition cursor-pointer disabled:opacity-40"
               >
                 Mark degraded
               </button>
               <button
+                disabled={Boolean(loadError) || isSaving}
                 onClick={() => handleRemoveNode(selectedSat.id)}
-                className="px-3 py-1.5 bg-red-500/10 border border-red-500/20 text-red-400 hover:bg-red-500/20 rounded-lg text-xs font-semibold transition cursor-pointer"
+                className="px-3 py-1.5 bg-red-500/10 border border-red-500/20 text-red-400 hover:bg-red-500/20 rounded-lg text-xs font-semibold transition cursor-pointer disabled:opacity-40"
               >
                 Remove
               </button>
@@ -1219,7 +1238,7 @@ function FleetPageContent() {
               </button>
               <button
                 onClick={handleEnrollNode}
-                disabled={isSaving}
+                disabled={isSaving || Boolean(loadError)}
                 className="px-4 py-2 bg-emerald-500 hover:bg-emerald-400 text-slate-950 text-sm font-semibold rounded-lg cursor-pointer disabled:opacity-50"
               >
                 {isSaving ? 'Registering...' : 'Register Node in Fleet'}

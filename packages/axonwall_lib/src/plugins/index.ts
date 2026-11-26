@@ -1547,54 +1547,12 @@ export const BUILTIN_PLUGINS: PluginManifest[] = [
 ];
 
 export function resolveCapabilities(state?: Partial<DesiredState>): CoreCapabilities {
-  const plugins = state?.plugins ?? [];
-  const fwPlugin = plugins.find((p) => p.id === 'core-firewall');
-  const nasPlugin = plugins.find((p) => p.id === 'core-nas');
-  const k3sPlugin = plugins.find((p) => p.id === 'core-k3s');
-  const virtPlugin = plugins.find((p) => p.id === 'core-virt');
-  const vigilantePlugin = plugins.find((p) => p.id === 'core-vigilante');
-
-  const firewallEnabled =
-    state?.capabilities?.firewallEnabled !== undefined
-      ? state.capabilities.firewallEnabled
-      : fwPlugin !== undefined
-        ? fwPlugin.enabled
-        : true;
-
-  const nasEnabled =
-    state?.capabilities?.nasEnabled !== undefined
-      ? state.capabilities.nasEnabled
-      : nasPlugin !== undefined
-        ? nasPlugin.enabled
-        : Boolean(state?.nas?.enabled);
-
-  const k3sEnabled =
-    state?.capabilities?.k3sEnabled !== undefined
-      ? state.capabilities.k3sEnabled
-      : k3sPlugin !== undefined
-        ? k3sPlugin.enabled
-        : Boolean(state?.k3s?.enabled);
-
-  const virtEnabled =
-    state?.capabilities?.virtEnabled !== undefined
-      ? state.capabilities.virtEnabled
-      : virtPlugin !== undefined
-        ? virtPlugin.enabled
-        : Boolean(state?.virt?.enabled);
-
-  const vigilanteEnabled =
-    state?.capabilities?.vigilanteEnabled !== undefined
-      ? state.capabilities.vigilanteEnabled
-      : vigilantePlugin !== undefined
-        ? vigilantePlugin.enabled
-        : Boolean(state?.vigilante?.enabled);
-
   return {
-    firewallEnabled,
-    nasEnabled,
-    k3sEnabled,
-    virtEnabled,
-    vigilanteEnabled,
+    firewallEnabled: isPluginEnabled('core-firewall', state),
+    nasEnabled: isPluginEnabled('core-nas', state),
+    k3sEnabled: isPluginEnabled('core-k3s', state),
+    virtEnabled: isPluginEnabled('core-virt', state),
+    vigilanteEnabled: isPluginEnabled('core-vigilante', state),
   };
 }
 
@@ -1607,15 +1565,16 @@ export function findPluginById(id: string): PluginManifest | undefined {
 }
 
 const PLUGIN_PRIVILEGE_ALIASES: Record<string, string[]> = {
+  'firewall.rules': ['firewall.rules.write'],
   'network.routing': ['routing.write'],
   'network.interfaces': ['interfaces.write'],
   'vpn.admin': ['vpn.wireguard.write'],
   'vpn.tailscale': ['vpn.wireguard.write'],
-  'system.monitoring': ['system.status.read'],
+  'system.monitoring': ['system.config.write'],
   'system.power': ['system.reboot'],
   'system.hardware': ['system.config.write'],
   'system.certificates': ['system.config.write'],
-  'reporting.flows': ['diagnostics.read', 'system.status.read'],
+  'reporting.flows': ['system.config.write'],
   'services.haproxy': ['system.config.write'],
   'services.freeradius': ['system.config.write'],
   'services.netbox': ['system.config.write'],
@@ -1885,7 +1844,7 @@ export function enablePluginWithDependencies(
         flannelBackend: 'wireguard-native',
         disableTraefik: false,
         autoJoinHaPeer: true,
-        enableUserNamespaces: false,
+        enableUserNamespaces: true,
         bpfTokenProfiles: [],
         openEbs: {
           enabled: true,
@@ -2045,6 +2004,9 @@ export function disablePluginWithDependents(
 
   const disableSingle = (id: string, isAutoDependent = false) => {
     for (const depPlugin of getDependentPlugins(id)) {
+      if (depPlugin.id === 'librenms' && next.librenms?.mode === 'external') {
+        continue;
+      }
       if (
         isPluginEnabled(depPlugin.id, next) ||
         (depPlugin.id === 'vigilant-octo-waffle' && next.vow?.enabled) ||

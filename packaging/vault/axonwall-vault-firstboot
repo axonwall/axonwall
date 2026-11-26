@@ -162,7 +162,9 @@ if [ -n "${VAULT_DATA_DEVICE:-}" ] && [ -b "$VAULT_DATA_DEVICE" ]; then
             log "WARNING: $ENV_FILE to override). Vault data will live on the root filesystem."
         else
             log "creating ZFS pool vaultdata on $VAULT_DATA_DEVICE"
-            zpool create -m "$DATA_DIR" vaultdata "$VAULT_DATA_DEVICE" \
+            _zpool_force=""
+            [ "${VAULT_DATA_DEVICE_FORCE:-0}" = "1" ] && _zpool_force="-f"
+            zpool create ${_zpool_force} -m "$DATA_DIR" vaultdata "$VAULT_DATA_DEVICE" \
                 || die "zpool create failed"
         fi
     fi

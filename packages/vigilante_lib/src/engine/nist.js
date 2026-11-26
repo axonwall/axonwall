@@ -240,30 +240,42 @@ export function classifyAttackVector(telemetry = {}) {
  * @param {Object} options
  * @returns {Object} Structured incident record
  */
-export function generateNistIncidentRecord({
-  incidentId = null,
-  network = '10.0.1.0_24',
-  host = '10.0.1.15',
-  detectedAt = null,
-  attackVector = null,
-  functionalImpact = 'MEDIUM',
-  informationImpact = 'PRIVACY_BREACH',
-  recoverabilityEffort = 'REGULAR',
-  artifacts = [],
-  rootCause = 'Pending forensic investigation',
-  responderGpgKey = null
-} = {}) {
+export function generateNistIncidentRecord(opts = {}) {
+  const {
+    incidentId = null,
+    detectedAt = null,
+    functionalImpact = 'MEDIUM',
+    informationImpact = 'PRIVACY_BREACH',
+    recoverabilityEffort = 'REGULAR',
+    rootCause = 'Pending forensic investigation',
+    responderGpgKey = null,
+    phase = null
+  } = opts;
+  const network = opts.network ?? opts.networkCidr ?? '10.0.1.0_24';
+  const host = opts.host ?? opts.hostIp ?? '10.0.1.15';
+  const rawVector = opts.attackVector ?? opts.primaryVector ?? null;
+  const artifacts = opts.artifacts ?? opts.findings ?? [];
+
   const now = new Date().toISOString();
-  const id = incidentId || `INC-${now.replace(/[-:T]/g, '').slice(0, 14)}-${host.replace(/\./g, '')}`;
+  const id = incidentId || `INC-${now.replace(/[-:T]/g, '').slice(0, 14)}-${String(host).replace(/\./g, '')}`;
   const scoring = calculateNistIncidentScore({ functionalImpact, informationImpact, recoverabilityEffort });
-  const vector = typeof attackVector === 'object' && attackVector ? attackVector : NIST_ATTACK_VECTORS[attackVector] || NIST_ATTACK_VECTORS.OTHER;
+  let vector;
+  if (typeof rawVector === 'object' && rawVector) {
+    vector = rawVector;
+  } else if (typeof rawVector === 'string' && NIST_ATTACK_VECTORS[rawVector]) {
+    vector = NIST_ATTACK_VECTORS[rawVector];
+  } else if (typeof rawVector === 'string') {
+    vector = classifyAttackVector(rawVector, artifacts);
+  } else {
+    vector = NIST_ATTACK_VECTORS.OTHER;
+  }
 
   return {
     standard: 'NIST SP 800-61 Rev. 2 (Computer Security Incident Handling Guide)',
     incidentId: id,
     timestamp: now,
     detectedAt: detectedAt || now,
-    currentPhase: NIST_LIFECYCLE_PHASES.DETECTION_AND_ANALYSIS.id,
+    currentPhase: phase || NIST_LIFECYCLE_PHASES.DETECTION_AND_ANALYSIS.id,
     classification: {
       attackVector: vector,
       signType: scoring.severity === 'CRITICAL' || scoring.severity === 'HIGH' ? 'INDICATOR' : 'PRECURSOR',
@@ -278,13 +290,16 @@ export function generateNistIncidentRecord({
     chainOfCustody: {
       volatilityOrderStandard: 'RFC 3227 / NIST SP 800-86',
       artifactsCount: artifacts.length,
-      artifacts: artifacts.map(a => ({
-        filename: a.filename || a,
-        volatilityRank: ARTIFACT_VOLATILITY_MAP[a.filename || a]?.rank || 5,
-        volatilityLevel: ARTIFACT_VOLATILITY_MAP[a.filename || a]?.volatilityName || 'Disk / Log Artifact',
-        sha256: a.sha256 || 'pending-hash',
-        gpgSigned: !!a.gpgSignature
-      })),
+      artifacts: artifacts.map(a => {
+        const label = (typeof a === 'string' ? a : (a?.filename || a?.title || 'artifact'));
+        return {
+          filename: label,
+          volatilityRank: ARTIFACT_VOLATILITY_MAP[label]?.rank || 5,
+          volatilityLevel: ARTIFACT_VOLATILITY_MAP[label]?.volatilityName || 'Disk / Log Artifact',
+          sha256: a?.sha256 || 'pending-hash',
+          gpgSigned: Boolean(a?.gpgSignature)
+        };
+      }),
       responderGpgKey: responderGpgKey || 'Auto-Signed'
     },
     rootCauseAnalysis: {
@@ -397,13 +412,16 @@ export async function listNistIncidents() {
         const hostStat = await fs.stat(hostPath);
         if (!hostStat.isDirectory()) continue;
 
-        const recordFile = path.join(hostPath, 'nist_incident_record.json');
-        if (fsSync.existsSync(recordFile)) {
-          try {
-            const raw = await fs.readFile(recordFile, 'utf8');
-            incidents.push(JSON.parse(raw));
-          } catch {
-            // Ignore unreadable record
+        const hostEntries = await fs.readdir(hostPath);
+        for (const entry of hostEntries) {
+          if (entry === 'nist_incident_record.json' || (/^(?:NIST-)?INC-.*\.json$/.test(entry) && !entry.endsWith('.sig.json'))) {
+            const recordFile = path.join(hostPath, entry);
+            try {
+              const raw = await fs.readFile(recordFile, 'utf8');
+              incidents.push(JSON.parse(raw));
+            } catch {
+              // Ignore unreadable record
+            }
           }
         }
       }

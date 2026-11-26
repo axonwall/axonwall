@@ -1,5 +1,5 @@
 package ebpf
 
 //go:generate go run github.com/cilium/ebpf/cmd/bpf2go -no-strip -target bpfel -cc clang FlowTracker flow_tracker.c -- -I/usr/include/bpf -I/usr/include/aarch64-linux-gnu -I/usr/include/x86_64-linux-gnu
-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -no-strip -target bpfel -cc clang -type lsm_exe_id -type lsm_event LsmGuard lsm_guard.c -- -I/usr/include/bpf -I/usr/include/aarch64-linux-gnu -I/usr/include/x86_64-linux-gnu
-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -no-strip -target bpfel -cc clang -type harvester_ring_event -type harvester_runtime_cfg -type harvester_counters_val -type harvester_watch_entry ThreatHarvester threat_harvester.c -- -I. -I/usr/include/x86_64-linux-gnu
+//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -no-strip -target bpfel -cc clang -type lsm_exe_id -type lsm_event LsmGuard lsm_guard.c -- -mcpu=v3 -I/usr/include/bpf -I/usr/include/aarch64-linux-gnu -I/usr/include/x86_64-linux-gnu
+//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -no-strip -target amd64,arm64 -cc clang -type harvester_ring_event -type harvester_runtime_cfg -type harvester_counters_val -type harvester_watch_entry ThreatHarvester threat_harvester.c -- -I. -I/usr/include/aarch64-linux-gnu -I/usr/include/x86_64-linux-gnu

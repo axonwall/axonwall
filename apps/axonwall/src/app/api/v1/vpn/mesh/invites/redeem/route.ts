@@ -127,7 +127,12 @@ export async function POST(req: NextRequest) {
         }
 
         let starterKey: { id: string | number; key: string; expiration?: string } | null = null;
-        if (isHeadscaleSocketReady()) {
+        let headscaleError: string | null = null;
+        if (!network.enabled) {
+          headscaleError = 'Mesh VPN (Headscale) is currently disabled by your administrator';
+        } else if (!isHeadscaleSocketReady()) {
+          headscaleError = 'Headscale service is not currently running on this appliance';
+        } else {
           try {
             await ensureUser(inv.username);
             if (inv.createStarterKey) {
@@ -141,10 +146,15 @@ export async function POST(req: NextRequest) {
                 expiration: created.expiration,
               };
             }
-          } catch {}
+          } catch (hsErr: any) {
+            const msg = hsErr?.message || 'Unable to provision Headscale starter key';
+            const err = new Error(`Headscale provisioning failed: ${msg}`);
+            (err as any).statusCode = 502;
+            throw err;
+          }
         }
 
-        return { starterKey };
+        return { starterKey, headscaleError };
       },
       { pin }
     );
@@ -173,11 +183,16 @@ export async function POST(req: NextRequest) {
       maxAge: 8 * 3600,
     });
 
+    const portalBase = network.portalUrl ? network.portalUrl.replace(/\/+$/, '') : '';
+    const redirectTo = portalBase ? `${portalBase}/vpn` : '/vpn';
+
     return NextResponse.json({
       status: 'ok',
-      redirectTo: '/vpn',
+      redirectTo,
+      portalUrl: network.portalUrl,
       username: invite.username,
       starterKey: result.starterKey,
+      headscaleError: result.headscaleError,
       serverUrl: network.serverUrl,
       magicDnsDomain: network.magicDnsDomain,
       quickConnectCommand: buildQuickConnectCommand(network.serverUrl, result.starterKey?.key),

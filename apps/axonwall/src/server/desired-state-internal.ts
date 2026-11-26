@@ -29,6 +29,53 @@ export const ETC_CONFIG_DIR = getEtcConfigDir();
 export const PERSIST_CONFIG_DIR = getPersistConfigDir();
 export const YAML_CONFIG_DIRS = Array.from(new Set([PERSIST_CONFIG_DIR, ETC_CONFIG_DIR]));
 
+function getYamlConfigDirs(): string[] {
+  return Array.from(new Set([getPersistConfigDir(), getEtcConfigDir()]));
+}
+const DESIRED_STATE_LOCK_STALE_MS = 30_000;
+const DESIRED_STATE_LOCK_TIMEOUT_MS = 5_000;
+const DESIRED_STATE_SLEEP_BUF = new Int32Array(new SharedArrayBuffer(4));
+
+function withDesiredStateLock<T>(fn: () => T): T {
+  const statePath = getStateJsonPath();
+  const lockPath = `${statePath}.lock`;
+  const dir = path.dirname(lockPath);
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true, mode: 0o775 });
+  }
+  const deadline = Date.now() + DESIRED_STATE_LOCK_TIMEOUT_MS;
+  let fd: number | null = null;
+  while (fd === null) {
+    try {
+      fd = fs.openSync(lockPath, 'wx', 0o600);
+    } catch (err: any) {
+      if (err?.code !== 'EEXIST') throw err;
+      try {
+        const st = fs.statSync(lockPath);
+        if (Date.now() - st.mtimeMs > DESIRED_STATE_LOCK_STALE_MS) {
+          fs.unlinkSync(lockPath);
+          continue;
+        }
+      } catch {}
+      if (Date.now() >= deadline) {
+        throw new Error('Timed out acquiring desired-state persistence lock');
+      }
+      Atomics.wait(DESIRED_STATE_SLEEP_BUF, 0, 0, 10);
+    }
+  }
+  try {
+    fs.writeSync(fd, `${process.pid}\n`);
+    return fn();
+  } finally {
+    try {
+      fs.closeSync(fd);
+    } catch {}
+    try {
+      fs.unlinkSync(lockPath);
+    } catch {}
+  }
+}
+
 export type OnDiskConfigSnapshotEntry = {
   path: string;
   existed: boolean;
@@ -316,7 +363,7 @@ export function readAllYamlConfigFiles(): {
 } {
   const files: Record<string, string> = {};
 
-  for (const dir of [PERSIST_CONFIG_DIR, ETC_CONFIG_DIR]) {
+  for (const dir of getYamlConfigDirs()) {
     if (!fs.existsSync(dir)) continue;
     for (const filename of AXONWALL_YAML_FILENAMES) {
       const fullPath = path.join(dir, filename);
@@ -354,25 +401,39 @@ export function readAllYamlConfigFiles(): {
 }
 
 export function writeConfigFileSafe(targetPath: string, content: string, mode = 0o660): boolean {
+  const parent = path.dirname(targetPath);
+  const base = path.basename(targetPath);
+  const tmpPath = path.join(parent, `.${base}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`);
+  let fd: number | null = null;
   try {
-    const parent = path.dirname(targetPath);
     if (!fs.existsSync(parent)) {
       fs.mkdirSync(parent, { recursive: true, mode: 0o775 });
     }
+    fd = fs.openSync(tmpPath, 'wx', mode);
+    fs.writeFileSync(fd, content, 'utf8');
     try {
-      fs.writeFileSync(targetPath, content, { mode });
-      return true;
-    } catch {
+      fs.fsyncSync(fd);
+    } catch {}
+    fs.closeSync(fd);
+    fd = null;
+    try {
+      fs.chmodSync(tmpPath, mode);
+    } catch {}
+    fs.renameSync(tmpPath, targetPath);
+    return true;
+  } catch {
+    if (fd !== null) {
       try {
-        if (fs.existsSync(targetPath)) {
-          fs.unlinkSync(targetPath);
-        }
-        fs.writeFileSync(targetPath, content, { mode });
-        return true;
+        fs.closeSync(fd);
       } catch {}
     }
-  } catch {}
-  return false;
+    try {
+      if (fs.existsSync(tmpPath)) {
+        fs.unlinkSync(tmpPath);
+      }
+    } catch {}
+    return false;
+  }
 }
 
 export type LiveKernelIpv4Addr = {
@@ -651,7 +712,7 @@ export function buildNetworkInterfacesFilesContent(state: DesiredState): {
 export function syncNetworkInterfacesFiles(state: DesiredState): { ifacesContent: string; confContent: string } {
   const { ifacesContent, confContent } = buildNetworkInterfacesFilesContent(state);
 
-  for (const dir of YAML_CONFIG_DIRS) {
+  for (const dir of getYamlConfigDirs()) {
     writeConfigFileSafe(path.join(dir, 'interfaces.conf'), confContent, 0o664);
   }
 
@@ -660,7 +721,7 @@ export function syncNetworkInterfacesFiles(state: DesiredState): { ifacesContent
       if (!fs.existsSync('/etc/network')) {
         fs.mkdirSync('/etc/network', { recursive: true });
       }
-      fs.writeFileSync('/etc/network/interfaces', ifacesContent, 'utf8');
+      writeConfigFileSafe('/etc/network/interfaces', ifacesContent, 0o644);
       if (fs.existsSync('/etc/network/interfaces.d/axonwall')) {
         try {
           fs.unlinkSync('/etc/network/interfaces.d/axonwall');
@@ -731,50 +792,77 @@ export function persistDesiredStateToDisk(state: DesiredState): Record<string, s
   const { normalizedState: normalized, yamlDaemonFiles } = prepareDesiredStateBundle(state);
   const daemonFileMap: Record<string, string> = { ...yamlDaemonFiles };
 
-  for (const dir of [PERSIST_CONFIG_DIR, ETC_CONFIG_DIR]) {
-    try {
-      if (!fs.existsSync(dir)) {
-        fs.mkdirSync(dir, { recursive: true, mode: 0o775 });
-      }
-      for (const [daemonPath, content] of Object.entries(yamlDaemonFiles)) {
-        const filename = daemonPath.replace(/^\/etc\/axonwall\//, '');
-        writeConfigFileSafe(path.join(dir, filename), content, 0o660);
-      }
-      const legacyMonolithic = path.join(dir, 'axonwall.yaml');
-      if (fs.existsSync(legacyMonolithic)) {
-        try {
-          fs.unlinkSync(legacyMonolithic);
-        } catch {}
-      }
-    } catch {}
-  }
+  withDesiredStateLock(() => {
+    const failedTargets: string[] = [];
+    let yamlDirsSucceeded = 0;
 
-  const jsonSerialized = JSON.stringify(normalized, null, 2);
-  for (const jsonPath of Array.from(
-    new Set([
-      getStateJsonPath(),
-      path.join(PERSIST_CONFIG_DIR, 'state.json'),
-      path.join(ETC_CONFIG_DIR, 'state.json'),
-    ])
-  )) {
-    writeConfigFileSafe(jsonPath, jsonSerialized, 0o660);
-  }
+    for (const dir of getYamlConfigDirs()) {
+      let dirFailed = false;
+      try {
+        if (!fs.existsSync(dir)) {
+          fs.mkdirSync(dir, { recursive: true, mode: 0o775 });
+        }
+        for (const [daemonPath, content] of Object.entries(yamlDaemonFiles)) {
+          const filename = daemonPath.replace(/^\/etc\/axonwall\//, '');
+          const targetPath = path.join(dir, filename);
+          if (!writeConfigFileSafe(targetPath, content, 0o660)) {
+            dirFailed = true;
+            failedTargets.push(targetPath);
+          }
+        }
+        const legacyMonolithic = path.join(dir, 'axonwall.yaml');
+        if (fs.existsSync(legacyMonolithic)) {
+          try {
+            fs.unlinkSync(legacyMonolithic);
+          } catch {}
+        }
+      } catch {
+        dirFailed = true;
+        failedTargets.push(dir);
+      }
+      if (!dirFailed) {
+        yamlDirsSucceeded += 1;
+      }
+    }
 
-  const { confContent } = syncNetworkInterfacesFiles(normalized);
-  daemonFileMap['/etc/axonwall/interfaces.conf'] = confContent;
+    const jsonSerialized = JSON.stringify(normalized, null, 2);
+    let jsonSucceeded = 0;
+    const jsonPaths = Array.from(
+      new Set([
+        getStateJsonPath(),
+        path.join(getPersistConfigDir(), 'state.json'),
+        path.join(getEtcConfigDir(), 'state.json'),
+      ])
+    );
+    for (const jsonPath of jsonPaths) {
+      if (writeConfigFileSafe(jsonPath, jsonSerialized, 0o660)) {
+        jsonSucceeded += 1;
+      } else {
+        failedTargets.push(jsonPath);
+      }
+    }
 
-  cachedDesiredState = normalized;
-  const { fingerprint } = readAllYamlConfigFiles();
-  lastLoadedFingerprint = fingerprint;
+    if (yamlDirsSucceeded === 0 || jsonSucceeded === 0 || failedTargets.length > 0) {
+      throw new Error(
+        `Failed to atomically persist Axonwall configuration to disk (${failedTargets.join(', ')})`
+      );
+    }
+
+    const { confContent } = syncNetworkInterfacesFiles(normalized);
+    daemonFileMap['/etc/axonwall/interfaces.conf'] = confContent;
+
+    cachedDesiredState = normalized;
+    const { fingerprint } = readAllYamlConfigFiles();
+    lastLoadedFingerprint = fingerprint;
+  });
+
   return daemonFileMap;
 }
 
 function reconcileStateWithInterfacesConf(state: DesiredState): boolean {
   let rawConf = '';
   let activeConfPath = '';
-  for (const confPath of Array.from(
-    new Set([path.join(PERSIST_CONFIG_DIR, 'interfaces.conf'), path.join(ETC_CONFIG_DIR, 'interfaces.conf')])
-  )) {
+  for (const confPath of getYamlConfigDirs().map((dir) => path.join(dir, 'interfaces.conf'))) {
     try {
       if (fs.existsSync(confPath)) {
         const text = fs.readFileSync(confPath, 'utf8');
@@ -796,7 +884,7 @@ function reconcileStateWithInterfacesConf(state: DesiredState): boolean {
     if (activeConfPath && fs.existsSync(activeConfPath) && Array.isArray(state.interfaces) && state.interfaces.length > 0) {
       const confMtimeMs = fs.statSync(activeConfPath).mtimeMs;
       for (const yamlPath of Array.from(
-        new Set([path.join(ETC_CONFIG_DIR, 'interfaces.yaml'), path.join(PERSIST_CONFIG_DIR, 'interfaces.yaml')])
+        new Set([path.join(getEtcConfigDir(), 'interfaces.yaml'), path.join(getPersistConfigDir(), 'interfaces.yaml')])
       )) {
         if (fs.existsSync(yamlPath)) {
           const yamlMtimeMs = fs.statSync(yamlPath).mtimeMs;
@@ -964,7 +1052,7 @@ export async function getDesiredStateInternal(): Promise<DesiredState> {
 
   let hadExistingStateJson = false;
   for (const jsonPath of Array.from(
-    new Set([getStateJsonPath(), path.join(ETC_CONFIG_DIR, 'state.json'), './state.json'])
+    new Set([getStateJsonPath(), path.join(getEtcConfigDir(), 'state.json'), './state.json'])
   )) {
     try {
       if (fs.existsSync(jsonPath)) {
@@ -994,7 +1082,7 @@ export async function getDesiredStateInternal(): Promise<DesiredState> {
 
 export function snapshotDesiredStateOnDisk(): OnDiskConfigSnapshotEntry[] {
   const paths = new Set<string>();
-  for (const dir of YAML_CONFIG_DIRS) {
+  for (const dir of getYamlConfigDirs()) {
     for (const filename of AXONWALL_YAML_FILENAMES) {
       paths.add(path.join(dir, filename));
     }
@@ -1002,8 +1090,8 @@ export function snapshotDesiredStateOnDisk(): OnDiskConfigSnapshotEntry[] {
   }
   for (const jsonPath of [
     getStateJsonPath(),
-    path.join(PERSIST_CONFIG_DIR, 'state.json'),
-    path.join(ETC_CONFIG_DIR, 'state.json'),
+    path.join(getPersistConfigDir(), 'state.json'),
+    path.join(getEtcConfigDir(), 'state.json'),
     ...(isApplianceRuntime() && readHostOSRelease().family === 'debian' ? ['/etc/network/interfaces'] : []),
   ]) {
     paths.add(jsonPath);
@@ -1029,7 +1117,9 @@ export function restoreDesiredStateSnapshot(snapshot: OnDiskConfigSnapshotEntry[
   for (const entry of snapshot) {
     try {
       if (entry.existed && entry.content !== null) {
-        fs.writeFileSync(entry.path, entry.content, 'utf8');
+        if (!writeConfigFileSafe(entry.path, entry.content, 0o660)) {
+          ok = false;
+        }
       } else if (fs.existsSync(entry.path)) {
         fs.unlinkSync(entry.path);
       }

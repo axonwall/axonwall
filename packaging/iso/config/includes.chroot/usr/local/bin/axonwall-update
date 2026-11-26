@@ -11,6 +11,7 @@ FORCE_ROLLING=0
 FORCE_ZBM=0
 FORCE_BTRFS=0
 APT_UPGRADE=0
+ALLOW_UNSIGNED=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -42,9 +43,13 @@ while [ $# -gt 0 ]; do
       APT_UPGRADE=1
       shift
       ;;
+    --allow-unsigned)
+      ALLOW_UNSIGNED=1
+      shift
+      ;;
     --help|-h)
       cat << 'USAGE_EOF'
-Usage: axonwall-update [--slot A|B] [--version <ver>] [--channel <name>] [--rolling] [--zbm|--zfsbootmenu] [--btrfs|--snapper] [--apt|--apt-upgrade]
+Usage: axonwall-update [--slot A|B] [--version <ver>] [--channel <name>] [--rolling] [--zbm|--zfsbootmenu] [--btrfs|--snapper] [--apt|--apt-upgrade] [--allow-unsigned]
   --slot A|B          Target dual-root slot (default B)
   --version <ver>     Release version to stage (required for ZBM updates)
   --channel <name>    Release channel (default stable)
@@ -52,6 +57,7 @@ Usage: axonwall-update [--slot A|B] [--version <ver>] [--channel <name>] [--roll
   --zbm               ZFSBootMenu Boot Environment update
   --btrfs             Btrfs + Snapper pre/post snapshot update
   --apt               Also run an APT upgrade
+  --allow-unsigned    Allow SHA-256 + TLS verification when no release signing key is installed
 USAGE_EOF
       exit 0
       ;;
@@ -59,7 +65,7 @@ USAGE_EOF
       # D-L1: unknown options used to be silently swallowed, so a typo
       # like `--versoin 0.11.68 --slo C` ran a version-less update of
       # the default slot B and exited 0. Fail loudly instead.
-      echo "[-] Error: unknown option '$1'. Valid options: --slot, --version, --channel, --rolling, --zbm, --btrfs, --apt, --help." >&2
+      echo "[-] Error: unknown option '$1'. Valid options: --slot, --version, --channel, --rolling, --zbm, --btrfs, --apt, --allow-unsigned, --help." >&2
       exit 1
       ;;
   esac
@@ -294,7 +300,7 @@ if command -v slapcat >/dev/null 2>&1 && [ -d /var/lib/axonwall/ldap/config/cn=c
   fi
 fi
 
-# Helper: Extract .deb payload to a destination directory on Debian
+# Helper: Extract .deb payload to a destination directory (Debian & Alpine)
 extract_deb() {
   deb_file="$1"
   dest_dir="$2"
@@ -303,12 +309,28 @@ extract_deb() {
     dpkg-deb -x "$deb_file" "$dest_dir" 2>/dev/null && return 0
   fi
 
-  if command -v node >/dev/null 2>&1; then
-    deb_tmp_dir="$(mktemp -d /tmp/axonwall-deb-XXXXXX 2>/dev/null || true)"
-    if [ -z "$deb_tmp_dir" ] || [ ! -d "$deb_tmp_dir" ]; then
-      return 1
+  deb_tmp_dir="$(mktemp -d /tmp/axonwall-deb-XXXXXX 2>/dev/null || true)"
+  if [ -z "$deb_tmp_dir" ] || [ ! -d "$deb_tmp_dir" ]; then
+    return 1
+  fi
+  chmod 0700 "$deb_tmp_dir" 2>/dev/null || true
+
+  data_tar=""
+  # Prefer POSIX/BusyBox ar (Alpine vault & k3s-storage omit Node and dpkg-deb).
+  if command -v ar >/dev/null 2>&1; then
+    _ar_members="$(ar -t "$deb_file" 2>/dev/null || ar t "$deb_file" 2>/dev/null || true)"
+    _ar_member="$(printf '%s\n' "$_ar_members" | grep -E '^data\.tar(\.(gz|xz|zst|bz2))?$' | head -n1 || true)"
+    if [ -n "$_ar_member" ]; then
+      if (ar -p "$deb_file" "$_ar_member" > "${deb_tmp_dir}/${_ar_member}" 2>/dev/null || ar p "$deb_file" "$_ar_member" > "${deb_tmp_dir}/${_ar_member}" 2>/dev/null) && [ -s "${deb_tmp_dir}/${_ar_member}" ]; then
+        chmod 0600 "${deb_tmp_dir}/${_ar_member}" 2>/dev/null || true
+        data_tar="${deb_tmp_dir}/${_ar_member}"
+      else
+        rm -f "${deb_tmp_dir}/${_ar_member}" 2>/dev/null || true
+      fi
     fi
-    chmod 0700 "$deb_tmp_dir" 2>/dev/null || true
+  fi
+
+  if [ -z "$data_tar" ] && command -v node >/dev/null 2>&1; then
     data_tar="$(node -e '
       const fs = require("fs");
       const buf = fs.readFileSync(process.argv[1]);
@@ -327,94 +349,107 @@ extract_deb() {
       }
       process.exit(1);
     ' "$deb_file" "$deb_tmp_dir" 2>/dev/null || true)"
+  fi
 
-    if [ -n "$data_tar" ] && [ -f "$data_tar" ]; then
-      # Tar-slip guard (audit D-S07)
-      if tar -tf "$data_tar" 2>/dev/null | grep -qE '^/|(^|/)\.\.(/|$)'; then
-        echo "[!] Update package contains unsafe paths; refusing to extract." >&2
-        rm -rf "$deb_tmp_dir"
-        return 1
-      fi
-      # Reject hardlinks unconditionally and validate every symlink target
-      # so legitimate in-tree relative links (generate-zbm, zbm-kcl,
-      # kubectl/crictl/ctr -> k3s) extract cleanly on Alpine while
-      # absolute, escaping, or traversed links fail closed.
-      if tar -tvf "$data_tar" 2>/dev/null | grep -qE '^h'; then
-        echo "[!] Update package contains hardlink members; refusing to extract." >&2
-        rm -rf "$deb_tmp_dir"
-        return 1
-      fi
-      if ! tar -tvf "$data_tar" 2>/dev/null | awk '
-        BEGIN { bad = 0; nsym = 0; nmem = 0 }
-        {
-          line = $0
-          ftype = substr(line, 1, 1)
-          if (ftype == "h") { bad = 1; exit 1 }
-          rest = line
-          if (!sub(/^[^ \t]+[ \t]+.*[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9][ \t]+[0-9][0-9]:[0-9][0-9](:[0-9][0-9])?[ \t]+/, "", rest)) {
-            bad = 1; exit 1
+  if [ -n "$data_tar" ] && [ -f "$data_tar" ]; then
+    # Fail closed if tar cannot list the archive (corrupt or unsupported compression)
+    if ! tar -tf "$data_tar" >/dev/null 2>&1; then
+      echo "[!] Update package payload archive is unreadable or corrupt; refusing to extract." >&2
+      rm -rf "$deb_tmp_dir"
+      return 1
+    fi
+    # Tar-slip guard (audit D-S07)
+    if tar -tf "$data_tar" 2>/dev/null | grep -qE '^/|(^|/)\.\.(/|$)'; then
+      echo "[!] Update package contains unsafe paths; refusing to extract." >&2
+      rm -rf "$deb_tmp_dir"
+      return 1
+    fi
+    # Reject hardlinks unconditionally and validate every symlink target
+    # so legitimate in-tree relative links (generate-zbm, zbm-kcl,
+    # kubectl/crictl/ctr -> k3s) extract cleanly on Alpine while
+    # absolute, escaping, or traversed links fail closed.
+    if tar -tvf "$data_tar" 2>/dev/null | grep -qE '^h'; then
+      echo "[!] Update package contains hardlink members; refusing to extract." >&2
+      rm -rf "$deb_tmp_dir"
+      return 1
+    fi
+    if ! tar -tvf "$data_tar" 2>/dev/null | awk '
+      BEGIN { bad = 0; nsym = 0; nmem = 0 }
+      {
+        line = $0
+        ftype = substr(line, 1, 1)
+        if (ftype == "h") { bad = 1; exit 1 }
+        rest = line
+        if (!sub(/^[^ \t]+[ \t]+[^ \t]+[ \t]+([0-9]+,[ \t]*[0-9]+|[0-9]+)[ \t]+[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9][ \t]+[0-9][0-9]:[0-9][0-9](:[0-9][0-9])?[ \t]+/, "", rest)) {
+          bad = 1; exit 1
+        }
+        if (ftype == "l") {
+          idx = index(rest, " -> ")
+          if (idx == 0) { bad = 1; exit 1 }
+          member = substr(rest, 1, idx - 1)
+          target = substr(rest, idx + 4)
+          if (member == "" || target == "" || substr(target, 1, 1) == "/") { bad = 1; exit 1 }
+          sub(/^\.\//, "", member)
+          sub(/\/+$/, "", member)
+          nm = split(member, mp, "/")
+          depth = 0
+          for (i = 1; i < nm; i++) {
+            if (mp[i] == "" || mp[i] == ".") continue
+            if (mp[i] == "..") { bad = 1; exit 1 }
+            depth++
           }
-          if (ftype == "l") {
-            idx = index(rest, " -> ")
-            if (idx == 0) { bad = 1; exit 1 }
-            member = substr(rest, 1, idx - 1)
-            target = substr(rest, idx + 4)
-            if (member == "" || target == "" || substr(target, 1, 1) == "/") { bad = 1; exit 1 }
-            sub(/^\.\//, "", member)
-            sub(/\/+$/, "", member)
-            nm = split(member, mp, "/")
-            depth = 0
-            for (i = 1; i < nm; i++) {
-              if (mp[i] == "" || mp[i] == ".") continue
-              if (mp[i] == "..") { bad = 1; exit 1 }
+          nt = split(target, tp, "/")
+          for (i = 1; i <= nt; i++) {
+            if (tp[i] == "" || tp[i] == ".") continue
+            if (tp[i] == "..") {
+              depth--
+              if (depth < 0) { bad = 1; exit 1 }
+            } else {
               depth++
             }
-            nt = split(target, tp, "/")
-            for (i = 1; i <= nt; i++) {
-              if (tp[i] == "" || tp[i] == ".") continue
-              if (tp[i] == "..") {
-                depth--
-                if (depth < 0) { bad = 1; exit 1 }
-              } else {
-                depth++
-              }
-            }
-            syms[nsym++] = member
-          } else {
-            mpath = rest
-            sub(/^\.\//, "", mpath)
-            sub(/\/+$/, "", mpath)
-            members[nmem++] = mpath
+          }
+          syms[nsym++] = member
+        } else {
+          mpath = rest
+          sub(/^\.\//, "", mpath)
+          sub(/\/+$/, "", mpath)
+          members[nmem++] = mpath
+        }
+      }
+      END {
+        if (bad) exit 1
+        for (s = 0; s < nsym; s++) {
+          prefix = syms[s] "/"
+          plen = length(prefix)
+          for (m = 0; m < nmem; m++) {
+            if (members[m] == syms[s] || substr(members[m], 1, plen) == prefix) exit 1
+          }
+          for (s2 = 0; s2 < nsym; s2++) {
+            if (s2 != s && substr(syms[s2], 1, plen) == prefix) exit 1
           }
         }
-        END {
-          if (bad) exit 1
-          for (s = 0; s < nsym; s++) {
-            prefix = syms[s] "/"
-            plen = length(prefix)
-            for (m = 0; m < nmem; m++) {
-              if (substr(members[m], 1, plen) == prefix) exit 1
-            }
-            for (s2 = 0; s2 < nsym; s2++) {
-              if (s2 != s && substr(syms[s2], 1, plen) == prefix) exit 1
-            }
-          }
-        }
-      '; then
-        echo "[!] Update package contains unsafe symlink members; refusing to extract." >&2
-        rm -rf "$deb_tmp_dir"
-        return 1
-      fi
+      }
+    '; then
+      echo "[!] Update package contains unsafe symlink members; refusing to extract." >&2
+      rm -rf "$deb_tmp_dir"
+      return 1
+    fi
+    if tar --help 2>&1 | grep -q -- '--no-same-owner'; then
       tar --no-same-owner -xf "$data_tar" -C "$dest_dir" 2>/dev/null || {
         rm -rf "$deb_tmp_dir"
         return 1
       }
-      rm -rf "$deb_tmp_dir"
-      return 0
+    else
+      tar -oxf "$data_tar" -C "$dest_dir" 2>/dev/null || {
+        rm -rf "$deb_tmp_dir"
+        return 1
+      }
     fi
     rm -rf "$deb_tmp_dir"
+    return 0
   fi
 
+  rm -rf "$deb_tmp_dir"
   return 1
 }
 
@@ -550,30 +585,38 @@ apply_staged_tree() {
   if [ -d "${pkg_stage}/var/lib/axonwall/core-k3s" ]; then
     _dest_ed="$(tr -d ' \t\r\n' < "${dest_root}/etc/axonwall/edition" 2>/dev/null || tr -d ' \t\r\n' < /etc/axonwall/edition 2>/dev/null || true)"
     if [ ! -f "${dest_root}/etc/axonwall/.vault-edition" ] && [ ! -f "${dest_root}/etc/axonwall/.minimal-edition" ] && [ "$_dest_ed" != "vault" ] && [ "$_dest_ed" != "minimal" ]; then
-      for _kdir in "${dest_root}/var/lib/axonwall" "/var/lib/axonwall"; do
-        [ -n "$_kdir" ] || continue
-        mkdir -p "$_kdir" 2>/dev/null || { _apply_failed=1; continue; }
+      # Never mutate live /var/lib/axonwall/core-k3s when staging an offline ZBM BE or A/B slot;
+      # store it under usr/lib/axonwall inside dest_root instead so rollbacks/failures leave the
+      # running node untouched and do not write 70MB+ behind a persistent /var/lib/axonwall mount.
+      if [ -n "${dest_root}" ] && [ "${dest_root}" != "/" ]; then
+        _kdir="${dest_root}/usr/lib/axonwall"
+      else
+        _kdir="/var/lib/axonwall"
+      fi
+      mkdir -p "$_kdir" 2>/dev/null || _apply_failed=1
+      if [ -d "$_kdir" ]; then
         _ktmp="${_kdir}/.core-k3s.staging.$$"
         _kold="${_kdir}/.core-k3s.old.$$"
         _ktgt="${_kdir}/core-k3s"
         rm -rf "$_ktmp" "$_kold" 2>/dev/null || true
         if cp -a "${pkg_stage}/var/lib/axonwall/core-k3s" "$_ktmp" 2>/dev/null; then
           if [ -e "$_ktgt" ]; then
-            mv "$_ktgt" "$_kold" 2>/dev/null || { rm -rf "$_ktmp"; _apply_failed=1; continue; }
+            mv "$_ktgt" "$_kold" 2>/dev/null || { rm -rf "$_ktmp"; _apply_failed=1; }
           fi
-          if mv "$_ktmp" "$_ktgt" 2>/dev/null; then
-            rm -rf "$_kold" 2>/dev/null || true
-          else
-            [ -e "$_kold" ] && mv "$_kold" "$_ktgt" 2>/dev/null || true
-            rm -rf "$_ktmp" 2>/dev/null || true
-            _apply_failed=1
+          if [ ! -e "$_ktgt" ]; then
+            if mv "$_ktmp" "$_ktgt" 2>/dev/null; then
+              rm -rf "$_kold" 2>/dev/null || true
+            else
+              [ -e "$_kold" ] && mv "$_kold" "$_ktgt" 2>/dev/null || true
+              rm -rf "$_ktmp" 2>/dev/null || true
+              _apply_failed=1
+            fi
           fi
         else
           rm -rf "$_ktmp" 2>/dev/null || true
           _apply_failed=1
         fi
-        [ "${dest_root}" = "" ] && break
-      done
+      fi
     fi
   fi
 
@@ -583,6 +626,61 @@ apply_staged_tree() {
     return 1
   fi
   return 0
+}
+
+reload_edition_services() {
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl daemon-reload 2>/dev/null || true
+    _units=""
+    case "$EDITION" in
+      vault)
+        _units="seaweedfs.service"
+        ;;
+      k3s-storage)
+        for _ku in k3s.service k3s-agent.service; do
+          if systemctl is-active --quiet "$_ku" 2>/dev/null || systemctl is-enabled --quiet "$_ku" 2>/dev/null; then
+            _units="${_units} ${_ku}"
+          fi
+        done
+        _units="${_units# }"
+        ;;
+      minimal)
+        _units="axonwalld.service axonwall-controller.service axonwall-ui.service"
+        ;;
+      axonwall|*)
+        _units="axonwalld.service axonwall-controller.service axonwall-ui.service"
+        if systemctl is-active --quiet headscale.service 2>/dev/null || systemctl is-enabled --quiet headscale.service 2>/dev/null; then
+          _units="${_units} headscale.service"
+        fi
+        ;;
+    esac
+    if [ -n "$_units" ]; then
+      echo "[+] Scheduling asynchronous reload of Axonwall services (${_units})..."
+      nohup sh -c "sleep 3 && systemctl try-restart ${_units}" >/dev/null 2>&1 &
+    fi
+  elif command -v rc-service >/dev/null 2>&1; then
+    _rc_units=""
+    case "$EDITION" in
+      vault)
+        _rc_units="seaweedfs"
+        ;;
+      k3s-storage)
+        for _ku in k3s k3s-agent; do
+          if rc-service "$_ku" status >/dev/null 2>&1; then
+            _rc_units="${_rc_units} ${_ku}"
+          fi
+        done
+        _rc_units="${_rc_units# }"
+        ;;
+      minimal|axonwall|*)
+        _rc_units="axonwalld axonwall-controller axonwall-ui"
+        ;;
+    esac
+    if [ -n "$_rc_units" ]; then
+      echo "[+] Scheduling asynchronous reload of OpenRC services (${_rc_units})..."
+      nohup sh -c "sleep 3 && for _s in ${_rc_units}; do rc-service \"\$_s\" status >/dev/null 2>&1 && rc-service \"\$_s\" restart; done" >/dev/null 2>&1 &
+    fi
+  fi
 }
 
 # Helper: Resolve partition block device by label
@@ -759,12 +857,12 @@ if [ -n "$CLEAN_VER" ] && command -v curl >/dev/null 2>&1; then
         # below skips them, so an empty keyring dir is safe.)
         _sig_ok=0
         _have_key=0
-        for _pubkey in "$RELEASE_PUBKEY" /etc/axonwall/release-signing.d/*.pub; do
+        for _pubkey in "$RELEASE_PUBKEY" /etc/axonwall/release-signing.d/*.pub /usr/share/axonwall/release-signing.pub /usr/share/axonwall/release-signing.d/*.pub; do
           [ -s "$_pubkey" ] && _have_key=1 && break
         done
         if [ "$_have_key" = "1" ]; then
           if curl -fsSL --connect-timeout 10 --max-time 30 -o "${CANDIDATE_DEB}.sha256.sig" "${SIG_URL}" 2>/dev/null; then
-            for _pubkey in "$RELEASE_PUBKEY" /etc/axonwall/release-signing.d/*.pub; do
+            for _pubkey in "$RELEASE_PUBKEY" /etc/axonwall/release-signing.d/*.pub /usr/share/axonwall/release-signing.pub /usr/share/axonwall/release-signing.d/*.pub; do
               [ -s "$_pubkey" ] || continue
               if openssl dgst -sha256 -verify "$_pubkey" -signature "${CANDIDATE_DEB}.sha256.sig" "${CANDIDATE_DEB}.sha256" >/dev/null 2>&1; then
                 _sig_ok=1
@@ -779,10 +877,14 @@ if [ -n "$CLEAN_VER" ] && command -v curl >/dev/null 2>&1; then
             echo "[-] ERROR: release signature verification failed for ${DEB_URL}; discarding download."
             rm -f "${CANDIDATE_DEB}" "${CANDIDATE_DEB}.sha256" "${CANDIDATE_DEB}.sha256.sig"
           fi
-        else
-          echo "[!] Warning: no release signing key at ${RELEASE_PUBKEY}; relying on SHA-256 + TLS only."
+        elif [ "$ALLOW_UNSIGNED" = "1" ]; then
+          echo "[!] Warning: no release signing key installed (--allow-unsigned given); relying on SHA-256 + TLS only."
           echo "[+] Verified SHA-256 integrity hash: ${ACTUAL_HASH}"
           DEB_TMP="${CANDIDATE_DEB}"
+        else
+          echo "[-] ERROR: no release signing key found (checked ${RELEASE_PUBKEY}, /etc/axonwall/release-signing.d/*.pub, /usr/share/axonwall/release-signing.pub, /usr/share/axonwall/release-signing.d/*.pub); refusing unsigned update (pass --allow-unsigned to override)." >&2
+          rm -f "${CANDIDATE_DEB}" "${CANDIDATE_DEB}.sha256" "${CANDIDATE_DEB}.sha256.sig"
+          exit 1
         fi
       fi
     fi
@@ -842,7 +944,8 @@ if [ "$ZBM_MODE" = "1" ]; then
 
   TARGET_BE="axonwall-${CLEAN_VER}"
   TARGET_BE_DS="${PARENT_DS}/${TARGET_BE}"
-  PRE_SNAP="${CURRENT_BE_DS}@pre-update-v${CLEAN_VER}"
+  _snap_ts="$(date -u +%Y%m%d%H%M%S)"
+  PRE_SNAP="${CURRENT_BE_DS}@pre-update-v${CLEAN_VER}-${_snap_ts}"
 
   echo "[+] Active Boot Environment : ${CURRENT_BE_DS} (${CURRENT_BE})"
   echo "[+] Target Boot Environment : ${TARGET_BE_DS} (${TARGET_BE})"
@@ -863,11 +966,72 @@ if [ "$ZBM_MODE" = "1" ]; then
   fi
 
   if command -v zfs >/dev/null 2>&1; then
+    _stopped_k3s_sysd=""
+    _stopped_k3s_rc=""
+    ZBM_STAGE_MNT="/tmp/axonwall-zbm-stage-${CLEAN_VER}"
+    PKG_STAGE=""
+    TARGET_BE_TMP="${TARGET_BE}.tmp"
+    TARGET_BE_TMP_DS="${PARENT_DS}/${TARGET_BE_TMP}"
+
+    restart_quiesced_k3s() {
+      if [ -n "$_stopped_k3s_sysd" ]; then
+        for _u in $_stopped_k3s_sysd; do
+          echo "[+] Restarting quiesced systemd unit: ${_u}..."
+          systemctl start "$_u" 2>/dev/null || echo "[!] WARNING: failed to restart ${_u}" >&2
+        done
+        _stopped_k3s_sysd=""
+      fi
+      if [ -n "$_stopped_k3s_rc" ]; then
+        for _u in $_stopped_k3s_rc; do
+          echo "[+] Restarting quiesced OpenRC service: ${_u}..."
+          rc-service "$_u" start 2>/dev/null || echo "[!] WARNING: failed to restart ${_u}" >&2
+        done
+        _stopped_k3s_rc=""
+      fi
+    }
+
+    zbm_cleanup_fail() {
+      if [ -n "${ZBM_STAGE_MNT:-}" ] && [ -d "${ZBM_STAGE_MNT}" ]; then
+        umount "${ZBM_STAGE_MNT}" 2>/dev/null || umount -l "${ZBM_STAGE_MNT}" 2>/dev/null || true
+        rmdir "${ZBM_STAGE_MNT}" 2>/dev/null || true
+      fi
+      [ -n "${PKG_STAGE:-}" ] && rm -rf "${PKG_STAGE}" 2>/dev/null || true
+      if [ -n "${TARGET_BE_TMP_DS:-}" ] && zfs list -H -o name "$TARGET_BE_TMP_DS" >/dev/null 2>&1; then
+        zfs destroy -r "$TARGET_BE_TMP_DS" 2>/dev/null || true
+      fi
+      restart_quiesced_k3s
+    }
+
+    # Quiesce K3s (etcd / SQLite WAL on zroot/ROOT/*) before snapshot/clone
+    if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
+      for _ku in k3s.service k3s-agent.service; do
+        if systemctl is-active --quiet "$_ku" 2>/dev/null; then
+          echo "[+] Quiescing ${_ku} before ZFS snapshot..."
+          if systemctl stop "$_ku" 2>/dev/null; then
+            _stopped_k3s_sysd="${_stopped_k3s_sysd} ${_ku}"
+          fi
+        fi
+      done
+    elif command -v rc-service >/dev/null 2>&1; then
+      for _ku in k3s k3s-agent; do
+        if rc-service "$_ku" status >/dev/null 2>&1; then
+          echo "[+] Quiescing OpenRC ${_ku} before ZFS snapshot..."
+          if rc-service "$_ku" stop 2>/dev/null; then
+            _stopped_k3s_rc="${_stopped_k3s_rc} ${_ku}"
+          fi
+        fi
+      done
+    fi
+
     if zfs list -H -o name -t snapshot "$PRE_SNAP" >/dev/null 2>&1; then
       echo "[+] Snapshot ${PRE_SNAP} already exists, reusing."
     else
       echo "[+] Creating pre-update snapshot: ${PRE_SNAP}..."
-      zfs snapshot "$PRE_SNAP"
+      if ! zfs snapshot "$PRE_SNAP"; then
+        echo "[-] ERROR: Failed to create pre-update snapshot ${PRE_SNAP}." >&2
+        zbm_cleanup_fail
+        exit 1
+      fi
     fi
 
     # E2-13: clone to a temporary BE name FIRST and only destroy the
@@ -877,23 +1041,23 @@ if [ "$ZBM_MODE" = "1" ]; then
     # under `set -e` with the target gone and fallback_be dangling.
     # A stale tmp dataset can only come from an earlier interrupted
     # run — it is never armed or referenced — so remove it first.
-    TARGET_BE_TMP="${TARGET_BE}.tmp"
-    TARGET_BE_TMP_DS="${PARENT_DS}/${TARGET_BE_TMP}"
     if zfs list -H -o name "$TARGET_BE_TMP_DS" >/dev/null 2>&1; then
       echo "[!] Removing stale temporary Boot Environment ${TARGET_BE_TMP_DS} from an earlier interrupted update..."
       zfs destroy -r "$TARGET_BE_TMP_DS" 2>/dev/null || true
     fi
 
     echo "[+] Cloning ${PRE_SNAP} -> ${TARGET_BE_TMP_DS}..."
-    zfs clone -o canmount=noauto -o mountpoint=/ "$PRE_SNAP" "$TARGET_BE_TMP_DS"
+    if ! zfs clone -o canmount=noauto -o mountpoint=/ "$PRE_SNAP" "$TARGET_BE_TMP_DS"; then
+      echo "[-] ERROR: Failed to clone ${PRE_SNAP} -> ${TARGET_BE_TMP_DS}." >&2
+      zbm_cleanup_fail
+      exit 1
+    fi
 
-    ZBM_STAGE_MNT="/tmp/axonwall-zbm-stage-${CLEAN_VER}"
     rm -rf "${ZBM_STAGE_MNT}"
     mkdir -p "${ZBM_STAGE_MNT}"
     if ! mount -t zfs -o zfsutil "$TARGET_BE_TMP_DS" "${ZBM_STAGE_MNT}"; then
       echo "[-] ERROR: Failed to mount ${TARGET_BE_TMP_DS} at ${ZBM_STAGE_MNT} (mount -t zfs -o zfsutil failed); the Boot Environment is NOT armed." >&2
-      rmdir "${ZBM_STAGE_MNT}" 2>/dev/null || true
-      zfs destroy -r "$TARGET_BE_TMP_DS" 2>/dev/null || true
+      zbm_cleanup_fail
       exit 1
     fi
 
@@ -904,21 +1068,16 @@ if [ "$ZBM_MODE" = "1" ]; then
       mkdir -p "${PKG_STAGE}"
       if ! extract_deb "${DEB_TMP}" "${PKG_STAGE}"; then
         echo "[-] ERROR: Failed to extract firmware archive ${DEB_TMP}." >&2
-        rm -rf "${PKG_STAGE}"
-        umount -l "${ZBM_STAGE_MNT}" 2>/dev/null || true
-        rmdir "${ZBM_STAGE_MNT}" 2>/dev/null || true
-        zfs destroy -r "$TARGET_BE_TMP_DS" 2>/dev/null || true
+        zbm_cleanup_fail
         exit 1
       fi
       if ! apply_staged_tree "${PKG_STAGE}" "${ZBM_STAGE_MNT}"; then
         echo "[-] ERROR: Failed to apply firmware payload into ${TARGET_BE_DS} (staged copy failed); the Boot Environment is NOT armed." >&2
-        rm -rf "${PKG_STAGE}"
-        umount "${ZBM_STAGE_MNT}" 2>/dev/null || umount -l "${ZBM_STAGE_MNT}" 2>/dev/null || true
-        rmdir "${ZBM_STAGE_MNT}" 2>/dev/null || true
-        zfs destroy -r "$TARGET_BE_TMP_DS" 2>/dev/null || true
+        zbm_cleanup_fail
         exit 1
       fi
       rm -rf "${PKG_STAGE}"
+      PKG_STAGE=""
       if [ -d "${ZBM_STAGE_MNT}/etc/axonwall" ] && [ -d /var/lib/axonwall/etc-axonwall ]; then
         sync_static_etc_axonwall "${ZBM_STAGE_MNT}/etc/axonwall" /var/lib/axonwall/etc-axonwall
       fi
@@ -953,9 +1112,7 @@ if [ "$ZBM_MODE" = "1" ]; then
       fi
       if [ "$ZBM_SYNC_OK" != "1" ]; then
         echo "[-] ERROR: Failed to sync /opt/axonwall into ${TARGET_BE_DS} (local sync failed); the Boot Environment is NOT armed." >&2
-        umount -l "${ZBM_STAGE_MNT}" 2>/dev/null || true
-        rmdir "${ZBM_STAGE_MNT}" 2>/dev/null || true
-        zfs destroy -r "$TARGET_BE_TMP_DS" 2>/dev/null || true
+        zbm_cleanup_fail
         exit 1
       fi
     fi
@@ -983,7 +1140,7 @@ if [ "$ZBM_MODE" = "1" ]; then
         ln -sf "$(basename "$LATEST_KERN")" "${ZBM_STAGE_MNT}/boot/vmlinuz" 2>/dev/null || true
         ln -sf "boot/$(basename "$LATEST_KERN")" "${ZBM_STAGE_MNT}/vmlinuz" 2>/dev/null || true
       fi
-      LATEST_INITRD="$(ls -1t "${ZBM_STAGE_MNT}/boot/initrd.img-"* 2>/dev/null | head -n1 || true)"
+      LATEST_INITRD="$(ls -1t "${ZBM_STAGE_MNT}/boot/initrd.img-"* "${ZBM_STAGE_MNT}/boot/initramfs-"* 2>/dev/null | grep -vE '\.(bak|old)$' | head -n1 || true)"
       if [ -n "$LATEST_INITRD" ]; then
         ln -sf "$(basename "$LATEST_INITRD")" "${ZBM_STAGE_MNT}/boot/initrd.img" 2>/dev/null || true
         ln -sf "boot/$(basename "$LATEST_INITRD")" "${ZBM_STAGE_MNT}/initrd.img" 2>/dev/null || true
@@ -992,29 +1149,43 @@ if [ "$ZBM_MODE" = "1" ]; then
 
     if ! umount "${ZBM_STAGE_MNT}"; then
       echo "[-] ERROR: Failed to cleanly unmount ${ZBM_STAGE_MNT}; refusing to rename staged Boot Environment." >&2
-      # R4-E-L1: the strict unmount correctly refuses to arm the BE,
-      # but must not leave the staged temp BE mounted: the next run
-      # destroys the stale tmp dataset first, which fails while it is
-      # still mounted, and the update then fails until an operator
-      # cleans up by hand. Best-effort cleanup (lazy unmount, rmdir,
-      # destroy the temp BE — mirroring the extract/apply failure
-      # paths just above) so the next update starts clean. The
-      # original error still fails the update; the BE is still not
-      # armed. The `zfs destroy` of a still-mounted dataset is
-      # best-effort and silent (mirroring the neighbouring paths);
-      # its failure must not mask the original error.
-      umount -l "${ZBM_STAGE_MNT}" 2>/dev/null || true
-      rmdir "${ZBM_STAGE_MNT}" 2>/dev/null || true
-      zfs destroy -r "$TARGET_BE_TMP_DS" 2>/dev/null || true
+      zbm_cleanup_fail
       exit 1
     fi
     rmdir "${ZBM_STAGE_MNT}" 2>/dev/null || true
+    ZBM_STAGE_MNT=""
 
     if zfs list -H -o name "$TARGET_BE_DS" >/dev/null 2>&1; then
       echo "[!] Target Boot Environment ${TARGET_BE_DS} already exists. Replacing it with the new clone..."
-      zfs destroy -r "$TARGET_BE_DS" 2>/dev/null || true
+      _prom_iter=0
+      while [ "$_prom_iter" -lt 16 ]; do
+        _dep_clones="$(zfs list -H -o name,origin -t filesystem -r "${POOL_NAME}" 2>/dev/null | awk -v p="${TARGET_BE_DS}@" 'index($2, p) == 1 {print $1}' || true)"
+        [ -n "$_dep_clones" ] || break
+        _promote_ds=""
+        if printf '%s\n' "$_dep_clones" | grep -qxF "$CURRENT_BE_DS"; then
+          _promote_ds="$CURRENT_BE_DS"
+        else
+          _promote_ds="$(printf '%s\n' "$_dep_clones" | tail -n1)"
+        fi
+        echo "[+] Promoting dependent clone ${_promote_ds} before replacing ${TARGET_BE_DS}..."
+        if ! zfs promote "$_promote_ds"; then
+          echo "[-] ERROR: Failed to promote dependent clone ${_promote_ds} before replacing ${TARGET_BE_DS}." >&2
+          zbm_cleanup_fail
+          exit 1
+        fi
+        _prom_iter=$((_prom_iter + 1))
+      done
+      if ! zfs destroy -r "$TARGET_BE_DS"; then
+        echo "[-] ERROR: Failed to destroy existing Boot Environment ${TARGET_BE_DS}; discarding staged clone." >&2
+        zbm_cleanup_fail
+        exit 1
+      fi
     fi
-    zfs rename "$TARGET_BE_TMP_DS" "$TARGET_BE_DS"
+    if ! zfs rename "$TARGET_BE_TMP_DS" "$TARGET_BE_DS"; then
+      echo "[-] ERROR: Failed to rename ${TARGET_BE_TMP_DS} -> ${TARGET_BE_DS}." >&2
+      zbm_cleanup_fail
+      exit 1
+    fi
 
     echo "[+] Arming ZFSBootMenu bootfs and autonomous watchdog..."
     # E2: every arming step is checked. On any failure, restore the
@@ -1054,8 +1225,11 @@ if [ "$ZBM_MODE" = "1" ]; then
           zfs inherit "$_rb_prop" "${PARENT_DS}" 2>/dev/null || true
         fi
       done
+      restart_quiesced_k3s
       exit 1
     fi
+
+    restart_quiesced_k3s
 
     printf '%s' "$SV_JSON" > /etc/axonwall/slot_versions.json 2>/dev/null || true
     printf '%s' "$SV_JSON" > /var/lib/axonwall/slot_versions.json 2>/dev/null || true
@@ -1442,12 +1616,16 @@ elif [ "$BTRFS_MODE" = "1" ]; then
     fi
     ensure_cli_symlinks "/"
     rm -rf "${PKG_STAGE}"
+  fi
 
-    if command -v systemctl >/dev/null 2>&1 && [ ! -f /etc/axonwall/.vault-edition ] && [ ! -f /etc/axonwall/.k3s-edition ]; then
-      systemctl daemon-reload 2>/dev/null || true
-      echo "[+] Scheduling asynchronous reload of Axonwall services..."
-      nohup sh -c 'sleep 3 && systemctl try-restart axonwalld.service axonwall-controller.service axonwall-ui.service' >/dev/null 2>&1 &
-    fi
+  if [ -n "$CLEAN_VER" ]; then
+    echo "$CLEAN_VER" > /etc/axonwall/version 2>/dev/null || true
+    echo "btrfs" > /etc/axonwall/install-mode 2>/dev/null || true
+    echo "btrfs" > /var/lib/axonwall/install-mode 2>/dev/null || true
+    SV_TIMESTAMP="$(date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || echo "")"
+    SV_JSON="$(printf '{\n  "slotA": "%s",\n  "slotB": "Snapper #%s",\n  "updatedAt": "%s"\n}\n' "$CLEAN_VER" "$PRE_SNAP_ID" "$SV_TIMESTAMP")"
+    printf '%s' "$SV_JSON" > /etc/axonwall/slot_versions.json 2>/dev/null || true
+    printf '%s' "$SV_JSON" > /var/lib/axonwall/slot_versions.json 2>/dev/null || true
   fi
 
   POST_SNAP_ID=""
@@ -1461,14 +1639,8 @@ elif [ "$BTRFS_MODE" = "1" ]; then
     /usr/local/bin/axonwall-btrfs-grub sync 2>/dev/null || true
   fi
 
-  if [ -n "$CLEAN_VER" ]; then
-    echo "$CLEAN_VER" > /etc/axonwall/version 2>/dev/null || true
-    echo "btrfs" > /etc/axonwall/install-mode 2>/dev/null || true
-    echo "btrfs" > /var/lib/axonwall/install-mode 2>/dev/null || true
-    SV_TIMESTAMP="$(date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || echo "")"
-    SV_JSON="$(printf '{\n  "slotA": "%s",\n  "slotB": "Snapper #%s",\n  "updatedAt": "%s"\n}\n' "$CLEAN_VER" "$PRE_SNAP_ID" "$SV_TIMESTAMP")"
-    printf '%s' "$SV_JSON" > /etc/axonwall/slot_versions.json 2>/dev/null || true
-    printf '%s' "$SV_JSON" > /var/lib/axonwall/slot_versions.json 2>/dev/null || true
+  if [ -n "$DEB_TMP" ] && [ -f "$DEB_TMP" ]; then
+    reload_edition_services
   fi
   echo "[✓] Btrfs + Snapper update complete (pre=#${PRE_SNAP_ID}, post=#${POST_SNAP_ID:-n/a}); GRUB snapshot menu refreshed."
 elif [ "$ROLLING_MODE" != "1" ] && ( [ -e "/dev/disk/by-label/axon_root_a" ] || [ -e "/dev/disk/by-label/axon_root_b" ] || grep -qs -E 'slot=[AB]' /proc/cmdline ); then
@@ -1519,11 +1691,7 @@ else
     rm -rf "${PKG_STAGE}"
 
     # Schedule asynchronous service restart after HTTP response finishes so we do not kill axonwall-ui mid-request
-    if command -v systemctl >/dev/null 2>&1 && [ ! -f /etc/axonwall/.vault-edition ] && [ ! -f /etc/axonwall/.k3s-edition ]; then
-      systemctl daemon-reload 2>/dev/null || true
-      echo "[+] Scheduling asynchronous reload of Axonwall services..."
-      nohup sh -c 'sleep 3 && systemctl try-restart axonwalld.service axonwall-controller.service axonwall-ui.service' >/dev/null 2>&1 &
-    fi
+    reload_edition_services
   fi
 
   # E2-1: the version file is written only after a successful apply.

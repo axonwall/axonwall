@@ -339,7 +339,7 @@ static __always_inline bool current_exe_has_flag(__u8 flag, struct exe_id *id)
     return allowed && ((*allowed & flag) != 0);
 }
 
-static __always_inline void emit_lsm_denial(__u32 hook_id, const struct exe_id *id, const char *detail)
+static __always_inline void emit_lsm_denial(__u32 hook_id, const struct exe_id *id, const char *detail, __u8 blocked)
 {
     struct lsm_event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
     if (!e)
@@ -348,7 +348,7 @@ static __always_inline void emit_lsm_denial(__u32 hook_id, const struct exe_id *
     e->pid = bpf_get_current_pid_tgid() >> 32;
     e->uid = bpf_get_current_uid_gid();
     e->hook_id = hook_id;
-    e->blocked = 1;
+    e->blocked = blocked;
     e->dev = id->dev;
     e->ino = id->ino;
     bpf_get_current_comm(e->comm, sizeof(e->comm));
@@ -382,7 +382,7 @@ int BPF_PROG(copyfail_guard, struct socket *sock, struct sockaddr *address, int 
     if (current_exe_has_flag(ALLOW_FLAG_AF_ALG_AEAD, &id))
         return 0;
 
-    emit_lsm_denial(1, &id, alg.name);
+    emit_lsm_denial(1, &id, alg.name, ${copyfailReturn === '-EPERM' ? 1 : 0});
     return ${copyfailReturn};
 }
 
@@ -405,13 +405,17 @@ ${
   cfg.allowDelegatedBpfTokens
     ? `
     if (BPF_CORE_READ(attr, prog_token_fd) > 0) {
-        ${cfg.auditDelegatedBpfTokens ? 'emit_lsm_denial(2, &id, "BPF_TOKEN_DELEGATED");' : ''}
+        ${
+          cfg.auditDelegatedBpfTokens
+            ? 'const char token_detail[SALG_NAME_LEN] = "BPF_TOKEN_DELEGATED";\n        emit_lsm_denial(2, &id, token_detail, 0);'
+            : ''
+        }
         return 0;
     }`
     : ''
 }
 
-    emit_lsm_denial(2, &id, detail);
+    emit_lsm_denial(2, &id, detail, 1);
     return -EPERM;
 }
 
@@ -428,7 +432,7 @@ int BPF_PROG(block_uring_sqpoll, int ret)
     struct task_struct *task = bpf_get_current_task_btf();
     id.ino = BPF_CORE_READ(task, mm, exe_file, f_inode, i_ino);
     id.dev = BPF_CORE_READ(task, mm, exe_file, f_inode, i_sb, s_dev);
-    emit_lsm_denial(3, &id, detail);
+    emit_lsm_denial(3, &id, detail, ${sqpollReturn === '-EPERM' ? 1 : 0});
     return ${sqpollReturn};
 }
 `;

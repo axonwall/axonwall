@@ -6,6 +6,7 @@ import { getSession } from './auth';
 import { assertActionPermitted } from './auth-guard';
 import { getAgentToken } from './agent-client';
 import { getDesiredStateInternal } from './desired-state-internal';
+import { assertSafeOutboundUrl } from './ssrf-guard';
 
 export interface LiveFleetSatellite {
   id: string;
@@ -60,7 +61,7 @@ function isLoopbackHost(hostname: string): boolean {
   return clean === '127.0.0.1' || clean === 'localhost' || clean === '::1';
 }
 
-function requestControllerJson<T>(
+async function requestControllerJson<T>(
   baseUrl: string,
   token: string,
   method: 'GET' | 'POST',
@@ -68,14 +69,24 @@ function requestControllerJson<T>(
   body?: unknown,
   timeoutMs = 4000
 ): Promise<FleetApiEnvelope<T>> {
+  let parsed: URL;
+  try {
+    const { url } = await assertSafeOutboundUrl(`${baseUrl}${reqPath}`, {
+      allowHttp: true,
+      allowPrivate: true,
+    });
+    parsed = url;
+  } catch (err: any) {
+    return { reachable: false, error: err?.message || 'Invalid controller URL' };
+  }
+
   return new Promise((resolve) => {
-    let parsed: URL;
-    try {
-      parsed = new URL(`${baseUrl}${reqPath}`);
-    } catch (err: any) {
-      resolve({ reachable: false, error: err?.message || 'Invalid controller URL' });
-      return;
-    }
+    let settled = false;
+    const finish = (env: FleetApiEnvelope<T>) => {
+      if (settled) return;
+      settled = true;
+      resolve(env);
+    };
 
     const payload = body !== undefined ? JSON.stringify(body) : undefined;
     const isHttps = parsed.protocol === 'https:';
@@ -101,12 +112,20 @@ function requestControllerJson<T>(
         ...(isHttps && isLoopbackHost(parsed.hostname) ? { rejectUnauthorized: false } : {}),
       },
       (res) => {
+        const status = res.statusCode ?? 500;
+        if (status >= 300 && status < 400) {
+          res.resume();
+          finish({ reachable: false, status, error: `Controller redirect (${status}) blocked by SSRF policy` });
+          return;
+        }
         let raw = '';
         res.on('data', (chunk) => {
           raw += chunk;
         });
+        res.on('error', (err: any) => {
+          finish({ reachable: false, error: err?.message || 'Controller response stream failed' });
+        });
         res.on('end', () => {
-          const status = res.statusCode ?? 500;
           let json: any = null;
           try {
             json = raw ? JSON.parse(raw) : null;
@@ -114,9 +133,9 @@ function requestControllerJson<T>(
             json = null;
           }
           if (status >= 200 && status < 300) {
-            resolve({ reachable: true, status, data: json as T });
+            finish({ reachable: true, status, data: json as T });
           } else {
-            resolve({
+            finish({
               reachable: true,
               status,
               error: json?.error || json?.message || `Controller HTTP ${status}`,
@@ -129,10 +148,10 @@ function requestControllerJson<T>(
 
     req.on('timeout', () => {
       req.destroy();
-      resolve({ reachable: false, error: 'Controller request timed out' });
+      finish({ reachable: false, error: 'Controller request timed out' });
     });
     req.on('error', (err: any) => {
-      resolve({ reachable: false, error: err?.message || 'Controller unreachable' });
+      finish({ reachable: false, error: err?.message || 'Controller unreachable' });
     });
     if (payload) {
       req.write(payload);
@@ -176,19 +195,28 @@ export async function getLiveFleetFlowsAction(): Promise<FleetApiEnvelope<Record
   );
 }
 
+const MAC_TARGET_RE = /^([0-9a-fA-F]{2}[:-]){5}([0-9a-fA-F]{2})$/;
+
 export async function triggerFleetSyncAction(
-  nodeId?: string
-): Promise<FleetApiEnvelope<{ syncedCount?: number; message?: string }>> {
+  _nodeId?: string
+): Promise<FleetApiEnvelope<{ syncedCount?: number; syncedSatellites?: number; message?: string }>> {
   const session = await getSession();
   assertActionPermitted(session, 'admin');
   const { baseUrl, token } = await resolveControllerConnection();
-  return await requestControllerJson<{ syncedCount?: number; message?: string }>(
-    baseUrl,
-    token,
-    'POST',
-    '/api/v1/fleet/sync',
-    nodeId ? { nodeId } : {}
-  );
+  // Controller /api/v1/fleet/sync expects an empty body to re-sync from on-disk /etc/axonwall/state.json.
+  const res = await requestControllerJson<{
+    syncedCount?: number;
+    syncedSatellites?: number;
+    message?: string;
+  }>(baseUrl, token, 'POST', '/api/v1/fleet/sync');
+  if (res.data) {
+    const count = res.data.syncedCount ?? res.data.syncedSatellites;
+    res.data = {
+      ...res.data,
+      ...(typeof count === 'number' ? { syncedCount: count, syncedSatellites: count } : {}),
+    };
+  }
+  return res;
 }
 
 export async function blockFleetTargetAction(
@@ -198,13 +226,15 @@ export async function blockFleetTargetAction(
 ): Promise<FleetApiEnvelope<{ blockedCount?: number; message?: string }>> {
   const session = await getSession();
   assertActionPermitted(session, 'admin');
+  const cleanTarget = target.trim();
+  const isMac = MAC_TARGET_RE.test(cleanTarget);
   const { baseUrl, token } = await resolveControllerConnection();
   return await requestControllerJson<{ blockedCount?: number; message?: string }>(
     baseUrl,
     token,
     'POST',
     '/api/v1/fleet/block',
-    { target: target.trim(), ttlSeconds, reason }
+    { target: cleanTarget, ...(isMac ? { isMac: true } : {}), ttlSeconds, reason }
   );
 }
 
@@ -214,12 +244,14 @@ export async function unblockFleetTargetAction(
 ): Promise<FleetApiEnvelope<{ unblockedCount?: number; message?: string }>> {
   const session = await getSession();
   assertActionPermitted(session, 'admin');
+  const cleanTarget = target.trim();
+  const isMac = MAC_TARGET_RE.test(cleanTarget);
   const { baseUrl, token } = await resolveControllerConnection();
   return await requestControllerJson<{ unblockedCount?: number; message?: string }>(
     baseUrl,
     token,
     'POST',
     '/api/v1/fleet/unblock',
-    { target: target.trim(), reason }
+    { target: cleanTarget, ...(isMac ? { isMac: true } : {}), reason }
   );
 }

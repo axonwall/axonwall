@@ -872,7 +872,8 @@ export async function ensureVigilanteConfig() {
     try {
       await fs.access(configFile);
     } catch {
-      await fs.writeFile(configFile, DEFAULT_CONFIG_YAML, 'utf8');
+      await fs.writeFile(configFile, DEFAULT_CONFIG_YAML, { encoding: 'utf8', mode: 0o600 });
+      await fs.chmod(configFile, 0o600).catch(() => {});
       created = true;
       logger.info('CONFIG', `Initialized default config.yaml at ${configFile}`);
     }
@@ -1011,7 +1012,12 @@ export function ensureVigilanteConfigSync() {
       fsSync.mkdirSync(instancesDir, { recursive: true });
     }
     if (!fsSync.existsSync(configFile)) {
-      fsSync.writeFileSync(configFile, DEFAULT_CONFIG_YAML, 'utf8');
+      fsSync.writeFileSync(configFile, DEFAULT_CONFIG_YAML, { encoding: 'utf8', mode: 0o600 });
+      try {
+        fsSync.chmodSync(configFile, 0o600);
+      } catch {
+        // Ignore chmod fallback error
+      }
     }
   } catch (err) {
     // Ignore sync fallback error
@@ -1099,9 +1105,10 @@ export function loadConfig() {
 export async function saveConfig(config) {
   const configFile = getVigilanteConfigFile();
   const dir = getVigilanteConfigDir();
-  await fs.mkdir(dir, { recursive: true });
+  await fs.mkdir(dir, { recursive: true, mode: 0o700 });
   const yamlStr = yamlDump(config, { indent: 2 });
-  await fs.writeFile(configFile, yamlStr, 'utf8');
+  await fs.writeFile(configFile, yamlStr, { encoding: 'utf8', mode: 0o600 });
+  await fs.chmod(configFile, 0o600);
   logger.info('CONFIG', `Saved configuration to ${configFile}`);
 }
 

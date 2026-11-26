@@ -253,7 +253,7 @@ describe('Headscale WAN Invite Access & Port Knocking compilation', () => {
     expect(rawHaproxy).not.toContain('../etc/passwd');
     expect(rawHaproxy).not.toContain('\ninjected');
 
-    // Port collision + bindPort inside knock sequence warnings
+    // Port collision + bindPort inside knock sequence disables WAN invite cleanly
     const collidedState = makeBaseState({
       haproxy: {
         enabled: true,
@@ -288,9 +288,27 @@ describe('Headscale WAN Invite Access & Port Knocking compilation', () => {
     const res = compileNftables(collidedState);
     expect(res.warnings.some((w) => w.includes('Port 8443 is already in use'))).toBe(true);
     expect(res.warnings.some((w) => w.includes('cannot include the HTTPS invite port'))).toBe(true);
-    expect(res.warnings.some((w) => w.includes('Ignored invalid Headscale WAN invite allowedCidr'))).toBe(true);
-    // Invalid allowedCidrs only => fails closed with bare return
-    expect(res.nftScript).toContain('  chain headscale_wan_invite {\n    return\n');
+    expect(res.nftScript).not.toContain('chain headscale_wan_invite');
+    expect(res.nftScript).not.toContain('tcp dport 8443 jump headscale_wan_invite');
+    const collidedCfgFile = res.files.find((f) => f.path === '/etc/axonwall/managed/headscale_wan_config.json');
+    expect(JSON.parse(collidedCfgFile!.content).enabled).toBe(false);
+    expect(JSON.parse(collidedCfgFile!.content).portKnockingEnabled).toBe(false);
+
+    // Invalid allowedCidrs only on non-colliding port => fails closed with bare return
+    const invalidCidrState = makeBaseState({
+      headscale: {
+        enabled: true,
+        wanInvite: {
+          enabled: true,
+          hostname: 'join.corp.example',
+          bindPort: 9443,
+          allowedCidrs: ['not-an-ip'],
+        },
+      },
+    });
+    const invalidRes = compileNftables(invalidCidrState);
+    expect(invalidRes.warnings.some((w) => w.includes('Ignored invalid Headscale WAN invite allowedCidr'))).toBe(true);
+    expect(invalidRes.nftScript).toContain('  chain headscale_wan_invite {\n    return\n');
 
     // YAML vpn.yaml round-trip
     const yamlState = makeBaseState({

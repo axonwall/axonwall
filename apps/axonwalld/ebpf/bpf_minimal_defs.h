@@ -77,6 +77,9 @@ static __u64 (*const bpf_get_socket_cookie)(void *ctx) =
 static __u64 (*const bpf_get_current_cgroup_id)(void) =
 	(void *)BPF_FUNC_get_current_cgroup_id;
 
+static __u64 (*const bpf_skb_cgroup_id)(const void *skb) =
+	(void *)BPF_FUNC_skb_cgroup_id;
+
 static long (*const bpf_probe_read_user)(void *dst, __u32 size, const void *unsafe_ptr) =
 	(void *)BPF_FUNC_probe_read_user;
 

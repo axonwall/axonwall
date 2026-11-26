@@ -85,24 +85,6 @@ export function HostDetailDrawer({
     return 'center';
   });
 
-  if (!node) return null;
-
-  const handleSetOpacity = (newOpacity: number) => {
-    setOpacity(newOpacity);
-    if (typeof window !== 'undefined') {
-      localStorage.setItem('nastymap_modal_opacity', newOpacity.toString());
-    }
-  };
-
-  const handleSetDockMode = (newMode: 'center' | 'right') => {
-    setDockMode(newMode);
-    if (typeof window !== 'undefined') {
-      localStorage.setItem('nastymap_modal_dock', newMode);
-    }
-  };
-
-  const IconComp = getHostIcon(node.osFamily, node.deviceType, node.nodeType);
-
   const notify = (message: string, type: 'info' | 'success' | 'warning' | 'error' = 'info') => {
     setToast({ message, type });
     setTimeout(() => {
@@ -117,7 +99,7 @@ export function HostDetailDrawer({
   };
 
   const actionContext: HostActionContext = {
-    node,
+    node: node ?? undefined,
     updateHost: handleUpdateHostInternal,
     notify,
     closeDrawer: onClose,
@@ -140,8 +122,9 @@ export function HostDetailDrawer({
     }
   };
 
-  // Keyboard shortcut listener for custom host actions & escape
+  // Keyboard shortcut listener for custom host actions & escape (must run unconditionally before early return)
   useEffect(() => {
+    if (!node) return;
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         onClose();
@@ -165,7 +148,25 @@ export function HostDetailDrawer({
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [customActions, host, onClose]);
+  }, [customActions, host, node, onClose]);
+
+  if (!node) return null;
+
+  const handleSetOpacity = (newOpacity: number) => {
+    setOpacity(newOpacity);
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('nastymap_modal_opacity', newOpacity.toString());
+    }
+  };
+
+  const handleSetDockMode = (newMode: 'center' | 'right') => {
+    setDockMode(newMode);
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('nastymap_modal_dock', newMode);
+    }
+  };
+
+  const IconComp = getHostIcon(node.osFamily, node.deviceType, node.nodeType);
 
   const handleSaveComment = () => {
     if (onUpdateComment && host) {

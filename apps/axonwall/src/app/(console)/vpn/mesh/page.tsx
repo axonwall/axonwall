@@ -407,13 +407,26 @@ export default function MeshVpnPage() {
         throw new Error(json?.error || `Failed to update WAN window (${res.status})`);
       }
       setWanWindowStatus(json.data);
-      setStatusMsg(
-        action === 'close'
-          ? 'WAN invite manual window closed.'
-          : action === 'arm'
-            ? `WAN invite window manually armed for ${Math.round(durationSec / 60)} minutes.`
-            : 'Synced WAN invite window with active invites.'
-      );
+      if (action === 'arm') {
+        if (json.data?.windowOpen) {
+          setStatusMsg(`WAN invite window manually armed for ${Math.round(durationSec / 60)} minutes.`);
+        } else {
+          setStatusMsg(null);
+          setError(
+            json.data?.reason === 'disabled'
+              ? 'WAN invite window did not open because WAN Invite Access is not enabled on the daemon yet — save settings first.'
+              : `WAN invite window did not open (status: ${json.data?.reason || 'closed'}).`
+          );
+        }
+      } else if (action === 'close') {
+        setStatusMsg(
+          json.data?.windowOpen
+            ? `Manual WAN invite window cleared; listener remains open (${json.data?.reason || 'active'}).`
+            : 'WAN invite manual window closed.'
+        );
+      } else {
+        setStatusMsg('Synced WAN invite window with active invites.');
+      }
     } catch (err: any) {
       setError(err?.message || 'Failed to update WAN invite window');
     } finally {

@@ -8,7 +8,7 @@
 # Supports:
 #   • Local execution directly on an Axonwall host (/etc/rancher/k3s/k3s.yaml)
 #   • Remote execution over SSH from an administrator's workstation/laptop
-#   • Automatic failover VIP resolution (e.g. 10.80.0.200:6443)
+#   • Automatic failover VIP resolution (from /etc/axonwall/ha.yaml or --server)
 #   • Non-destructive merging into existing ~/.kube/config with automated backup
 # ==============================================================================
 set -euo pipefail
@@ -25,7 +25,7 @@ CLUSTER_NAME="axonwall-k3s"
 USE_VIP=false
 OVERWRITE=false
 PRINT_ONLY=false
-SSH_USER="${USER:-thoth3430}"
+SSH_USER="${USER:-admin}"
 SSH_PORT="22"
 
 show_help() {
@@ -34,12 +34,12 @@ Usage:
   ${SCRIPT_NAME} [options] [HOST]
 
 Arguments:
-  HOST                      Remote appliance hostname or IP (e.g. 10.80.0.200, thoth3430@10.80.0.202).
+  HOST                      Remote appliance hostname or IP (e.g. 192.168.1.1, ${SSH_USER}@node-ip).
                             If omitted, the script inspects the local machine (/etc/rancher/k3s/k3s.yaml).
 
 Options:
-  -s, --server <URL>        Override the Kubernetes API server URL (e.g. https://10.80.0.200:6443).
-      --vip                 Use cluster HA floating Virtual IP (10.80.0.200:6443) instead of localhost.
+  -s, --server <URL>        Override the Kubernetes API server URL (e.g. https://<vip-or-ip>:6443).
+      --vip                 Resolve HA floating Virtual IP from /etc/axonwall/ha.yaml instead of localhost.
   -c, --context <name>      Name of the context and cluster to create or update (default: ${CONTEXT_NAME}).
   -u, --user <name>         Name of the user credentials entry (default: ${USER_NAME}).
   -o, --output <path>       Target kubeconfig file path (default: ${DEFAULT_KUBECONFIG}).
@@ -49,13 +49,13 @@ Options:
   -h, --help                Show this help message.
 
 Examples:
-  # On an Axonwall appliance (klaxon/saxon):
+  # On an Axonwall appliance:
   ${SCRIPT_NAME}                      # Sets up ~/.kube/config for the current user
-  ${SCRIPT_NAME} --vip                # Points ~/.kube/config to the HA Virtual IP (10.80.0.200:6443)
+  ${SCRIPT_NAME} --vip                # Points ~/.kube/config to the HA Virtual IP from /etc/axonwall/ha.yaml
 
   # On your admin workstation:
-  ${SCRIPT_NAME} 10.80.0.200          # Fetches credentials via SSH from the HA cluster VIP
-  ${SCRIPT_NAME} thoth3430@10.80.0.202 # Fetches credentials from klaxon node
+  ${SCRIPT_NAME} 192.168.1.1          # Fetches credentials via SSH from the primary appliance
+  ${SCRIPT_NAME} ${SSH_USER}@<node-ip> # Fetches credentials from a specific cluster node
 EOF
 }
 
@@ -131,7 +131,7 @@ if [[ -z "${TARGET_HOST}" ]]; then
   if [[ ! -f "${LOCAL_K3S_CONFIG}" ]]; then
     echo "Error: ${LOCAL_K3S_CONFIG} not found on this system." >&2
     echo "If you are running on your workstation, please specify the appliance IP:" >&2
-    echo "  ${SCRIPT_NAME} 10.80.0.200" >&2
+    echo "  ${SCRIPT_NAME} <appliance-ip>" >&2
     exit 1
   fi
 
@@ -173,19 +173,19 @@ SERVER_URL=""
 if [[ -n "${SERVER_OVERRIDE}" ]]; then
   SERVER_URL="${SERVER_OVERRIDE}"
 elif [[ "${USE_VIP}" == "true" ]]; then
-  # Try to find HA VIP if local, or fallback to default Axonwall LAN VIP 10.80.0.200
-  HA_VIP="10.80.0.200"
-  if [[ -f "/etc/axonwall/ha.yaml" ]]; then
-    FOUND_VIP="$(python3 -c '
+  HA_VIP="${AXONWALL_HA_VIP:-}"
+  if [[ -z "${HA_VIP}" ]] && [[ -f "/etc/axonwall/ha.yaml" ]]; then
+    HA_VIP="$(python3 -c '
 import re
 with open("/etc/axonwall/ha.yaml") as f:
     vips = re.findall(r"-\s*([0-9.]+)/\d+", f.read())
 lan_vips = [v for v in vips if v.startswith("10.") or v.startswith("192.168.") or re.match(r"^172\.(1[6-9]|2\d|3[01])\.", v)]
-print(lan_vips[0] if lan_vips else (vips[0] if vips else "10.80.0.200"))
+print(lan_vips[0] if lan_vips else (vips[0] if vips else ""))
 ' 2>/dev/null || true)"
-    if [[ -n "${FOUND_VIP}" ]]; then
-      HA_VIP="${FOUND_VIP}"
-    fi
+  fi
+  if [[ -z "${HA_VIP}" ]]; then
+    echo "Error: --vip requested, but no VIP could be resolved from /etc/axonwall/ha.yaml (set AXONWALL_HA_VIP or pass --server https://<vip>:6443)." >&2
+    exit 1
   fi
   SERVER_URL="https://${HA_VIP}:6443"
 elif [[ -n "${TARGET_HOST}" ]]; then
@@ -199,35 +199,32 @@ else
 fi
 
 # 3. Process YAML: update server endpoint, cluster, user, and context names
-python3 - <<EOF
+PY_STATUS=0
+python3 - "${RAW_YAML}" "${PROCESSED_YAML}" "${SERVER_URL}" "${CLUSTER_NAME}" "${USER_NAME}" "${CONTEXT_NAME}" <<'EOF' || PY_STATUS=$?
 import re, sys
 
 try:
-    with open("${RAW_YAML}", "r") as f:
+    raw_yaml, processed_yaml, server_url, cluster_name, user_name, context_name = sys.argv[1:7]
+    with open(raw_yaml, "r") as f:
         content = f.read()
 
-    server_url = "${SERVER_URL}"
-    cluster_name = "${CLUSTER_NAME}"
-    user_name = "${USER_NAME}"
-    context_name = "${CONTEXT_NAME}"
-
     if server_url:
-        content = re.sub(r"(\s*server:\s*)https?://[^\s]+", rf"\g<1>{server_url}", content)
+        content = re.sub(r"(\s*server:\s*)https?://[^\s]+", lambda m: m.group(1) + server_url, content)
 
-    content = re.sub(r"(\s*name:\s*)default(\s*\ncontexts:)", rf"\g<1>{cluster_name}\g<2>", content)
-    content = re.sub(r"(\s*cluster:\s*)default", rf"\g<1>{cluster_name}", content)
-    content = re.sub(r"(\s*user:\s*)default", rf"\g<1>{user_name}", content)
-    content = re.sub(r"(\s*name:\s*)default(\s*\ncurrent-context:)", rf"\g<1>{context_name}\g<2>", content)
-    content = re.sub(r"(\s*current-context:\s*)default", rf"\g<1>{context_name}", content)
-    content = re.sub(r"(\s*-\s*name:\s*)default(\s*\n\s*user:)", rf"\g<1>{user_name}\g<2>", content)
+    content = re.sub(r"(\s*name:\s*)default(\s*\ncontexts:)", lambda m: m.group(1) + cluster_name + m.group(2), content)
+    content = re.sub(r"(\s*cluster:\s*)default", lambda m: m.group(1) + cluster_name, content)
+    content = re.sub(r"(\s*user:\s*)default", lambda m: m.group(1) + user_name, content)
+    content = re.sub(r"(\s*name:\s*)default(\s*\ncurrent-context:)", lambda m: m.group(1) + context_name + m.group(2), content)
+    content = re.sub(r"(\s*current-context:\s*)default", lambda m: m.group(1) + context_name, content)
+    content = re.sub(r"(\s*-\s*name:\s*)default(\s*\n\s*user:)", lambda m: m.group(1) + user_name + m.group(2), content)
 
-    with open("${PROCESSED_YAML}", "w") as f:
+    with open(processed_yaml, "w") as f:
         f.write(content)
 except Exception as e:
+    print(f"kubeconfig python rewrite failed: {e}", file=sys.stderr)
     sys.exit(2)
 EOF
 
-PY_STATUS=$?
 if [[ ${PY_STATUS} -ne 0 ]]; then
   # Fallback: using sed
   sed -e "s|server: https://127.0.0.1:6443|server: ${SERVER_URL}|g" \
@@ -257,7 +254,7 @@ if [[ -f "${DEFAULT_KUBECONFIG}" ]] && [[ -s "${DEFAULT_KUBECONFIG}" ]] && [[ "$
   if command -v kubectl >/dev/null 2>&1; then
     echo "Merging context '${CONTEXT_NAME}' into ${DEFAULT_KUBECONFIG}..."
     MERGED_CONF="${TMP_DIR}/merged.yaml"
-    KUBECONFIG="${DEFAULT_KUBECONFIG}:${PROCESSED_YAML}" kubectl config view --flatten > "${MERGED_CONF}"
+    KUBECONFIG="${PROCESSED_YAML}:${DEFAULT_KUBECONFIG}" kubectl config view --flatten > "${MERGED_CONF}"
     mv "${MERGED_CONF}" "${DEFAULT_KUBECONFIG}"
     kubectl --kubeconfig="${DEFAULT_KUBECONFIG}" config use-context "${CONTEXT_NAME}" >/dev/null 2>&1 || true
   else

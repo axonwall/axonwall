@@ -1012,6 +1012,72 @@ export function parseStorageFromLsblk(
   });
 }
 
+const NON_SECRET_KEYS = new Set([
+  'publicKey',
+  'wgPeerPublicKey',
+  'gpgKeyId',
+  'keyOut',
+  'keyFormat',
+  'keyLocation',
+  'authMethod',
+  'redactionStyle',
+  'bpfTokenProfileId',
+  'v3AuthUser',
+  'v3AuthAlgo',
+  'v3AuthLevel',
+  'v3CryptoAlgo',
+  'lastShippedKey',
+  'accessKey',
+]);
+
+const RECURSIVE_SECRET_KEY_PATTERN =
+  /(?:password|secret|token|salt|apiKey|presharedKey|privateKey|encryptionKey|hmacKey|secretKey|mtlsKey|serverKey|authPass|privPass|cryptoPass)(?:Base64)?$/i;
+
+function isSecretKeyName(key: string): boolean {
+  if (NON_SECRET_KEYS.has(key)) return false;
+  if (
+    key.endsWith('Path') ||
+    key.endsWith('Url') ||
+    key.endsWith('Sha256') ||
+    key.endsWith('Enabled') ||
+    key.endsWith('Format') ||
+    key.endsWith('Location') ||
+    key.endsWith('Id')
+  ) {
+    return false;
+  }
+  return RECURSIVE_SECRET_KEY_PATTERN.test(key);
+}
+
+function redactSecretFieldsRecursively(node: unknown, seen = new Set<object>()): void {
+  if (!node || typeof node !== 'object') return;
+  if (seen.has(node)) return;
+  seen.add(node);
+
+  if (Array.isArray(node)) {
+    for (const item of node) {
+      redactSecretFieldsRecursively(item, seen);
+    }
+    return;
+  }
+
+  const record = node as Record<string, unknown>;
+  for (const [key, val] of Object.entries(record)) {
+    if (typeof val === 'string') {
+      if (
+        val.length > 0 &&
+        val !== REDACTED_SECRET_PLACEHOLDER &&
+        val !== REDACTED_KEY32_PLACEHOLDER &&
+        isSecretKeyName(key)
+      ) {
+        record[key] = REDACTED_SECRET_PLACEHOLDER;
+      }
+    } else if (val && typeof val === 'object') {
+      redactSecretFieldsRecursively(val, seen);
+    }
+  }
+}
+
 /**
  * Deep-clones DesiredState and optionally redacts secrets and/or applies template transformations.
  */
@@ -1101,13 +1167,32 @@ export function prepareDesiredStateForCloudInit(
         if (cloned.ha.sqliteSync.authToken) {
           cloned.ha.sqliteSync.authToken = REDACTED_SECRET_PLACEHOLDER;
         }
+        if (cloned.ha.sqliteSync.litestreamAccessKeyId) {
+          cloned.ha.sqliteSync.litestreamAccessKeyId = REDACTED_SECRET_PLACEHOLDER;
+        }
         if (cloned.ha.sqliteSync.litestreamSecretAccessKey) {
           cloned.ha.sqliteSync.litestreamSecretAccessKey = REDACTED_SECRET_PLACEHOLDER;
         }
       }
     }
-    if (cloned.observability?.clickhouse?.password) {
-      cloned.observability.clickhouse.password = REDACTED_SECRET_PLACEHOLDER;
+    if (cloned.observability) {
+      if (cloned.observability.clickhouse?.password) {
+        cloned.observability.clickhouse.password = REDACTED_SECRET_PLACEHOLDER;
+      }
+      if (cloned.observability.victoriaMetrics?.bearerToken) {
+        cloned.observability.victoriaMetrics.bearerToken = REDACTED_SECRET_PLACEHOLDER;
+      }
+      if (cloned.observability.victoriaLogs?.bearerToken) {
+        cloned.observability.victoriaLogs.bearerToken = REDACTED_SECRET_PLACEHOLDER;
+      }
+      if (cloned.observability.offload) {
+        if (cloned.observability.offload.ingestToken) {
+          cloned.observability.offload.ingestToken = REDACTED_SECRET_PLACEHOLDER;
+        }
+        if (cloned.observability.offload.metrics?.scrapeToken) {
+          cloned.observability.offload.metrics.scrapeToken = REDACTED_SECRET_PLACEHOLDER;
+        }
+      }
     }
     if (cloned.freeradius && Array.isArray(cloned.freeradius.clients)) {
       for (const client of cloned.freeradius.clients) {
@@ -1142,8 +1227,20 @@ export function prepareDesiredStateForCloudInit(
         cloned.nas.s3.secretKey = REDACTED_SECRET_PLACEHOLDER;
       }
     }
-    if (cloned.snmp?.community) {
-      cloned.snmp.community = REDACTED_SECRET_PLACEHOLDER;
+    if (cloned.snmp) {
+      if (cloned.snmp.community) {
+        cloned.snmp.community = REDACTED_SECRET_PLACEHOLDER;
+      }
+      if (Array.isArray(cloned.snmp.v3Users)) {
+        for (const u of cloned.snmp.v3Users) {
+          if (u.authPassword) {
+            u.authPassword = REDACTED_SECRET_PLACEHOLDER;
+          }
+          if (u.privPassword) {
+            u.privPassword = REDACTED_SECRET_PLACEHOLDER;
+          }
+        }
+      }
     }
     if (cloned.virt) {
       if (Array.isArray(cloned.virt.vms)) {
@@ -1169,6 +1266,9 @@ export function prepareDesiredStateForCloudInit(
       }
     }
     if (cloned.threatHarvester) {
+      if (cloned.threatHarvester.anonymizationSalt) {
+        cloned.threatHarvester.anonymizationSalt = REDACTED_SECRET_PLACEHOLDER;
+      }
       if (cloned.threatHarvester.teacherLlm?.apiKey) {
         cloned.threatHarvester.teacherLlm.apiKey = REDACTED_SECRET_PLACEHOLDER;
       }
@@ -1193,6 +1293,54 @@ export function prepareDesiredStateForCloudInit(
         }
       }
     }
+    if (cloned.netflow) {
+      if (cloned.netflow.storage?.clickhouse?.password) {
+        cloned.netflow.storage.clickhouse.password = REDACTED_SECRET_PLACEHOLDER;
+      }
+      if (cloned.netflow.selfExport?.metadataSync?.apiToken) {
+        cloned.netflow.selfExport.metadataSync.apiToken = REDACTED_SECRET_PLACEHOLDER;
+      }
+    }
+    if (cloned.netbox) {
+      if (cloned.netbox.superuserPassword) {
+        cloned.netbox.superuserPassword = REDACTED_SECRET_PLACEHOLDER;
+      }
+      if (cloned.netbox.apiToken) {
+        cloned.netbox.apiToken = REDACTED_SECRET_PLACEHOLDER;
+      }
+    }
+    if (cloned.librenms) {
+      if (cloned.librenms.adminPassword) {
+        cloned.librenms.adminPassword = REDACTED_SECRET_PLACEHOLDER;
+      }
+      if (cloned.librenms.apiToken) {
+        cloned.librenms.apiToken = REDACTED_SECRET_PLACEHOLDER;
+      }
+      if (cloned.librenms.webhookSecret) {
+        cloned.librenms.webhookSecret = REDACTED_SECRET_PLACEHOLDER;
+      }
+      if (cloned.librenms.snmpDefaults) {
+        if (cloned.librenms.snmpDefaults.v3AuthPass) {
+          cloned.librenms.snmpDefaults.v3AuthPass = REDACTED_SECRET_PLACEHOLDER;
+        }
+        if (cloned.librenms.snmpDefaults.v3CryptoPass) {
+          cloned.librenms.snmpDefaults.v3CryptoPass = REDACTED_SECRET_PLACEHOLDER;
+        }
+        if (cloned.librenms.snmpDefaults.community) {
+          cloned.librenms.snmpDefaults.community = REDACTED_SECRET_PLACEHOLDER;
+        }
+      }
+    }
+    if (cloned.topology && Array.isArray(cloned.topology.peers)) {
+      for (const peer of cloned.topology.peers) {
+        if (peer.apiToken) {
+          peer.apiToken = REDACTED_SECRET_PLACEHOLDER;
+        }
+      }
+    }
+
+    // Recursive defense-in-depth safety pass over all remaining secret-like string fields
+    redactSecretFieldsRecursively(cloned);
   }
 
   if (templateMode) {

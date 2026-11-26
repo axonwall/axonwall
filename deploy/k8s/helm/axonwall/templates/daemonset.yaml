@@ -85,10 +85,19 @@ spec:
         app.kubernetes.io/name: axonwall-ui
         app.kubernetes.io/instance: {{ .Release.Name }}
     spec:
+      securityContext:
+        fsGroup: 1001
       containers:
         - name: axonwall-ui
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy | default "IfNotPresent" }}
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1001
+            runAsGroup: 1001
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
           env:
             - name: AGENT_API_SOCKET
               value: /run/axonwalld/agent-api.sock
@@ -102,6 +111,17 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.auth.existingSecret | default "axonwall-auth-secret" }}
                   key: {{ .Values.auth.agentTokenKey | default "agent-token" }}
+            - name: LOCAL_ADMIN_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.auth.existingSecret | default "axonwall-auth-secret" }}
+                  key: {{ .Values.auth.localAdminUserKey | default "local-admin-user" }}
+                  optional: true
+            - name: LOCAL_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.auth.existingSecret | default "axonwall-auth-secret" }}
+                  key: {{ .Values.auth.localAdminPasswordKey | default "local-admin-password" }}
             - name: LDAP_URL
               value: "ldap://{{ .Values.ldap.host | default "axonwall-ldap" }}:{{ .Values.ldap.port | default 389 }}"
             - name: LDAP_BASE_DN

@@ -163,9 +163,13 @@ func (m *VFIOManager) BindVfio(bdf string) error {
 		return fmt.Errorf("invalid PCI BDF format: %s", bdf)
 	}
 
-	devDir := filepath.Join("/sys/bus/pci/devices", bdf)
+	devDir := filepath.Join(m.sysRoot(), "bus", "pci", "devices", bdf)
 	if _, err := os.Stat(devDir); os.IsNotExist(err) {
 		return fmt.Errorf("pci device %s does not exist", bdf)
+	}
+
+	if isBoundToVfio(devDir) {
+		return nil
 	}
 
 	// 1. Ensure vfio-pci module is loaded
@@ -175,7 +179,9 @@ func (m *VFIOManager) BindVfio(bdf string) error {
 	driverLink := filepath.Join(devDir, "driver")
 	if _, err := os.Readlink(driverLink); err == nil {
 		unbindPath := filepath.Join(driverLink, "unbind")
-		_ = os.WriteFile(unbindPath, []byte(bdf), 0200)
+		if err := os.WriteFile(unbindPath, []byte(bdf), 0200); err != nil {
+			return fmt.Errorf("failed to unbind %s from current driver: %w", bdf, err)
+		}
 	}
 
 	// 3. Set driver_override to vfio-pci
@@ -185,12 +191,15 @@ func (m *VFIOManager) BindVfio(bdf string) error {
 	}
 
 	// 4. Bind to vfio-pci
-	bindPath := "/sys/bus/pci/drivers/vfio-pci/bind"
+	bindPath := filepath.Join(m.sysRoot(), "bus", "pci", "drivers", "vfio-pci", "bind")
 	if err := os.WriteFile(bindPath, []byte(bdf), 0200); err != nil {
 		// If already bound or handled, check if driver is now vfio-pci
-		if dl, lErr := os.Readlink(driverLink); lErr == nil && filepath.Base(dl) == "vfio-pci" {
+		if isBoundToVfio(devDir) {
 			return nil
 		}
+		// Roll back driver_override and trigger a rescan so the host driver can reclaim the device.
+		_ = os.WriteFile(overridePath, []byte("\n"), 0644)
+		_ = os.WriteFile(filepath.Join(m.sysRoot(), "bus", "pci", "rescan"), []byte("1"), 0200)
 		return fmt.Errorf("failed to bind %s to vfio-pci: %v", bdf, err)
 	}
 
@@ -249,8 +258,11 @@ func (m *VFIOManager) ConfigureSriov(bdf string, numVfs int) error {
 	if !bdfRegex.MatchString(bdf) {
 		return fmt.Errorf("invalid PCI BDF format: %s", bdf)
 	}
+	if numVfs < 0 {
+		return fmt.Errorf("invalid VF count %d: must be >= 0", numVfs)
+	}
 
-	devDir := filepath.Join("/sys/bus/pci/devices", bdf)
+	devDir := filepath.Join(m.sysRoot(), "bus", "pci", "devices", bdf)
 	sriovPath := filepath.Join(devDir, "sriov_numvfs")
 	if _, err := os.Stat(sriovPath); os.IsNotExist(err) {
 		return fmt.Errorf("device %s does not support SR-IOV (sriov_numvfs missing)", bdf)
@@ -264,7 +276,9 @@ func (m *VFIOManager) ConfigureSriov(bdf string, numVfs int) error {
 	}
 
 	// Writing 0 first is required by many drivers before allocating new VFs
-	_ = os.WriteFile(sriovPath, []byte("0"), 0644)
+	if err := os.WriteFile(sriovPath, []byte("0"), 0644); err != nil {
+		return fmt.Errorf("failed to reset VFs on %s: %w", bdf, err)
+	}
 
 	if numVfs > 0 {
 		val := strconv.Itoa(numVfs)

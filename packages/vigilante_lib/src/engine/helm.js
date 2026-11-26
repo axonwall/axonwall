@@ -4,6 +4,24 @@ import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { getVigilanteValuesDir, getInstanceValuesDir, sanitizePathComponent } from './config.js';
 
+const tempDirsByArgs = new WeakMap();
+
+/**
+ * Clean up any temporary rendered values directory created for an args array
+ * returned by resolveChartValuesArgs.
+ * @param {string[]} args
+ */
+export async function cleanupHelmTempValues(args) {
+  const dir = tempDirsByArgs.get(args);
+  if (!dir) return;
+  tempDirsByArgs.delete(args);
+  try {
+    await fs.rm(dir, { recursive: true, force: true });
+  } catch {
+    // Ignore cleanup errors
+  }
+}
+
 /**
  * Replace template placeholders in values content
  * @param {string} content
@@ -16,7 +34,9 @@ export function renderTemplate(content, context = {}) {
     '{{DOMAIN}}': context.domain || 'vigilante.local',
     '{{TLS_SECRET}}': context.tlsSecretName || 'vigil-soc-tls',
     '{{NAMESPACE}}': context.namespace || 'default',
-    '{{CLUSTER_NAME}}': context.clusterName || 'vigilante-dev'
+    '{{CLUSTER_NAME}}': context.clusterName || 'vigilante-dev',
+    '{{OPENSEARCH_ADMIN_SECRET}}': context.opensearchAdminSecret || 'opensearch-admin-secret',
+    ...(context.replacements || {})
   };
 
   for (const [key, val] of Object.entries(placeholders)) {
@@ -51,6 +71,7 @@ export async function resolveChartValuesArgs({
   tlsSecretName = 'vigil-soc-tls',
   namespace = 'default',
   clusterName = 'vigilante-dev',
+  replacements = {},
   onLog = null
 }) {
   const args = [];
@@ -79,11 +100,12 @@ export async function resolveChartValuesArgs({
         domain,
         tlsSecretName,
         namespace,
-        clusterName
+        clusterName,
+        replacements
       });
 
       const renderedFilePath = path.join(await getTempDir(), renderedName('rendered.yaml'));
-      await fs.writeFile(renderedFilePath, renderedContent, 'utf8');
+      await fs.writeFile(renderedFilePath, renderedContent, { encoding: 'utf8', mode: 0o600 });
 
       args.push('-f', renderedFilePath);
     } catch (err) {
@@ -178,11 +200,12 @@ export async function resolveChartValuesArgs({
         domain,
         tlsSecretName,
         namespace,
-        clusterName
+        clusterName,
+        replacements
       });
 
       const userRenderedFilePath = path.join(await getTempDir(), renderedName('user-rendered.yaml'));
-      await fs.writeFile(userRenderedFilePath, renderedUserContent, 'utf8');
+      await fs.writeFile(userRenderedFilePath, renderedUserContent, { encoding: 'utf8', mode: 0o600 });
 
       args.push('-f', userRenderedFilePath);
       appliedCustom = true;
@@ -192,6 +215,9 @@ export async function resolveChartValuesArgs({
     }
   }
 
+  if (tempDir) {
+    tempDirsByArgs.set(args, tempDir);
+  }
   return args;
 }
 

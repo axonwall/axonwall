@@ -99,7 +99,7 @@ export interface DeceptionCanary {
 }
 
 const DEFAULT_MODULE_SPECS: Array<Omit<SecurityModuleStatus, 'enabled' | 'health' | 'telemetryEps' | 'lastEventAt'>> = [
-  { id: 'vigil-soc', name: 'Vigil SOC BattleStation', category: 'siem_edr', description: 'Centralized SecOps cockpit and alert triage console', port: 3000, subdomain: 'soc' },
+  { id: 'vigil-soc', name: 'Vigil SOC BattleStation', category: 'siem_edr', description: 'Centralized SecOps cockpit and alert triage console', port: 3000, subdomain: 'vigil' },
   { id: 'vigil-local', name: 'Vigil Local Agent', category: 'threat_detection', description: 'Local autonomous threat response sensor', port: 9100, subdomain: 'local-soc' },
   { id: 'kctf', name: 'kCTF HoneyMesh & Flags', category: 'deception', description: 'Isolated sandbox honeynets and dynamic canary services', port: 8080, subdomain: 'kctf' },
   { id: 'openvas', name: 'OpenVAS / Greenbone Scanner', category: 'vulnerability', description: 'Comprehensive network vulnerability and CVE assessment', port: 9392, subdomain: 'openvas' },
@@ -415,30 +415,10 @@ export async function getAttackGraphDataAction(): Promise<{
   const session = await getSession();
   assertActionPermitted(session);
 
-  // Return topological attack path nodes representing hybrid enterprise mesh
-  const nodes: AttackNode[] = [
-    { id: 'DA', label: 'Domain Admins', type: 'Group', compromised: false, highValue: true },
-    { id: 'DC01', label: 'DC01.CORP.LOCAL', type: 'Computer', compromised: false, highValue: true },
-    { id: 'SQL01', label: 'SQL01.CORP.LOCAL', type: 'Computer', compromised: false, highValue: false },
-    { id: 'SVC_SQL', label: 'svc_sql_backup', type: 'User', compromised: true, highValue: false },
-    { id: 'DEV_WKSTN', label: 'WS-DEV-04', type: 'Computer', compromised: true, highValue: false },
-    { id: 'BOB_DEV', label: 'bob.dev@corp.local', type: 'User', compromised: true, highValue: false },
-    { id: 'CORP_ROOT', label: 'CORP.LOCAL Root Domain', type: 'Domain', compromised: false, highValue: true },
-  ];
-
-  const edges: AttackEdge[] = [
-    { id: 'e1', source: 'BOB_DEV', target: 'DEV_WKSTN', relationship: 'AdminTo', riskWeight: 40 },
-    { id: 'e2', source: 'DEV_WKSTN', target: 'SVC_SQL', relationship: 'HasSession', riskWeight: 75 },
-    { id: 'e3', source: 'SVC_SQL', target: 'SQL01', relationship: 'GenericAll', riskWeight: 85 },
-    { id: 'e4', source: 'SQL01', target: 'DA', relationship: 'MemberOf', riskWeight: 95 },
-    { id: 'e5', source: 'DA', target: 'DC01', relationship: 'GenericAll', riskWeight: 100 },
-    { id: 'e6', source: 'DC01', target: 'CORP_ROOT', relationship: 'Contains', riskWeight: 100 },
-  ];
-
   return {
-    nodes,
-    edges,
-    criticalPathsCount: 2,
+    nodes: [],
+    edges: [],
+    criticalPathsCount: 0,
   };
 }
 
@@ -450,47 +430,10 @@ export async function getDeceptionMeshStatusAction(): Promise<{
   const session = await getSession();
   assertActionPermitted(session);
 
-  const canaries: DeceptionCanary[] = [
-    {
-      id: 'canary-1',
-      name: 'High-Value Database Decoy (Postgres 16)',
-      type: 'fake_ssh',
-      ipAddress: '192.168.100.220',
-      trippedCount: 4,
-      lastTrippedAt: new Date(Date.now() - 1000 * 60 * 12).toISOString(),
-      status: 'triggered',
-    },
-    {
-      id: 'canary-2',
-      name: 'Active Directory Kerberoast Decoy SPN',
-      type: 'kerberoast_spn',
-      ipAddress: '192.168.100.225',
-      trippedCount: 1,
-      lastTrippedAt: new Date(Date.now() - 1000 * 60 * 180).toISOString(),
-      status: 'triggered',
-    },
-    {
-      id: 'canary-3',
-      name: 'kCTF Ephemeral Web Sandbox Honeycomb',
-      type: 'kctf_web',
-      ipAddress: '10.43.100.55',
-      trippedCount: 0,
-      status: 'active',
-    },
-    {
-      id: 'canary-4',
-      name: 'Decoy Backup SMB Share (/mnt/accounting)',
-      type: 'smb_decoy',
-      ipAddress: '192.168.100.230',
-      trippedCount: 0,
-      status: 'active',
-    },
-  ];
-
   return {
-    canaries,
-    activeHoneynetsCount: 4,
-    isolatedAttackersCount: 2,
+    canaries: [],
+    activeHoneynetsCount: 0,
+    isolatedAttackersCount: 0,
   };
 }
 
@@ -502,24 +445,10 @@ export async function getPurpleTeamMatrixAction(): Promise<{
   const session = await getSession();
   assertActionPermitted(session);
 
-  const techniques: PurpleTeamTechnique[] = [
-    { id: 'T1059.001', tactic: 'Execution', name: 'PowerShell Payload Execution', status: 'blocked', detectionRule: 'falco:proc_spawn_powershell', testedAt: '2026-10-18T10:15:00Z' },
-    { id: 'T1003.001', tactic: 'Credential Access', name: 'LSASS Memory Dumping', status: 'blocked', detectionRule: 'wazuh:lsass_minidump_attempt', testedAt: '2026-10-18T11:00:00Z' },
-    { id: 'T1046', tactic: 'Discovery', name: 'Network Service Scanning', status: 'detected', detectionRule: 'suricata:nmap_syn_scan', testedAt: '2026-10-18T12:30:00Z' },
-    { id: 'T1558.003', tactic: 'Credential Access', name: 'Kerberoasting SPN Query', status: 'blocked', detectionRule: 'flamingo:kerberoast_ticket_request', testedAt: '2026-10-18T13:45:00Z' },
-    { id: 'T1021.002', tactic: 'Lateral Movement', name: 'SMB/Windows Admin Shares', status: 'detected', detectionRule: 'zeek:smb_admin_share_access', testedAt: '2026-10-18T14:20:00Z' },
-    { id: 'T1071.001', tactic: 'Command and Control', name: 'Web Protocols (C2 Beaconing)', status: 'blocked', detectionRule: 'axonwall:soar_c2_ja3_fingerprint', testedAt: '2026-10-18T15:00:00Z' },
-    { id: 'T1498', tactic: 'Impact', name: 'Network Denial of Service (SYN Flood)', status: 'blocked', detectionRule: 'nftables:syn_flood_protect', testedAt: '2026-10-18T16:10:00Z' },
-    { id: 'T1053.003', tactic: 'Persistence', name: 'Cron / Systemd Scheduled Tasks', status: 'detected', detectionRule: 'wazuh:cron_file_modified', testedAt: '2026-10-18T17:00:00Z' },
-  ];
-
-  const blockedOrDetected = techniques.filter((t) => t.status === 'blocked' || t.status === 'detected').length;
-  const coveragePercent = Math.round((blockedOrDetected / techniques.length) * 100);
-
   return {
-    techniques,
-    coveragePercent,
-    totalSimulations: 8,
+    techniques: [],
+    coveragePercent: 0,
+    totalSimulations: 0,
   };
 }
 

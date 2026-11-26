@@ -160,8 +160,8 @@ export async function runDesiredStateApplyPipeline(
     lastPendingJobId = jobId;
     invalidateDesiredStateCacheInternal();
     try {
-      const { recordGitOpsChange } = await import('./gitops');
-      await recordGitOpsChange(
+      const { recordGitOpsChangeInternal } = await import('./gitops-internal');
+      await recordGitOpsChangeInternal(
         preparedState,
         options?.actorUsername || 'admin',
         `Configuration applied to /etc/axonwall/*.yaml (SHA256: ${bundleHash.slice(0, 12)})`
@@ -208,8 +208,8 @@ export async function runDesiredStateApplyPipeline(
   persistDesiredStateToDisk(preparedState);
 
   try {
-    const { recordGitOpsChange } = await import('./gitops');
-    await recordGitOpsChange(
+    const { recordGitOpsChangeInternal } = await import('./gitops-internal');
+    await recordGitOpsChangeInternal(
       preparedState,
       options?.actorUsername || 'admin',
       `Configuration applied to /etc/axonwall/*.yaml (SHA256: ${bundleHash.slice(0, 12)})`

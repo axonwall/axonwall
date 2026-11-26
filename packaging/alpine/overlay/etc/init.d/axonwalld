@@ -24,6 +24,10 @@ depend() {
 }
 
 start_pre() {
+    if grep -qE '(^|[[:space:]])(axonwall_install=1|axonwall\.install=1|axonwall\.unattended=1)($|[[:space:]])' /proc/cmdline 2>/dev/null; then
+        eerror "Installer mode active; skipping axonwalld startup"
+        return 1
+    fi
     checkpath -d -m 0770 -o root:axonwall-api /run/axonwall
     checkpath -d -m 3775 -o root:axonwall-api /var/lib/axonwall
     checkpath -d -m 0770 -o axonwall:axonwall-api /var/log/axonwall

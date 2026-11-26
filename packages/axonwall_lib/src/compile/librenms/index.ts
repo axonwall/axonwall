@@ -208,8 +208,21 @@ export function compileLibreNmsBundle(state?: Partial<DesiredState> | null): Com
     deriveBaseDn(state?.system?.domain || 'axonwall.local');
   const bindDn = ldap.bindDn?.trim() || `cn=svc-librenms,ou=services,${baseDn}`;
   const podLdapUrl = rewritePodLdapUrl(ldap.url || 'ldap://127.0.0.1:389', lanIp);
-  const ldapPort = /^ldaps:\/\//i.test(podLdapUrl) ? 636 : 389;
-  const ldapServerHost = podLdapUrl.replace(/^ldaps?:\/\//i, '').split(':')[0] || lanIp;
+  let ldapPort = /^ldaps:\/\//i.test(podLdapUrl) ? 636 : 389;
+  let ldapServerHost = lanIp;
+  try {
+    const parsedLdapUrl = new URL(podLdapUrl);
+    const isLdaps = parsedLdapUrl.protocol.toLowerCase() === 'ldaps:';
+    const parsedPort = parsedLdapUrl.port ? Number.parseInt(parsedLdapUrl.port, 10) : NaN;
+    ldapPort = Number.isInteger(parsedPort) && parsedPort >= 1 && parsedPort <= 65535 ? parsedPort : isLdaps ? 636 : 389;
+    const rawHost = parsedLdapUrl.hostname.replace(/^\[|\]$/g, '').trim();
+    if (rawHost) {
+      ldapServerHost = rawHost;
+    }
+  } catch {
+    const stripped = podLdapUrl.replace(/^ldaps?:\/\//i, '').replace(/\/.*$/, '');
+    ldapServerHost = stripped.split(':')[0] || lanIp;
+  }
 
   const ldapConfigPhp = ldap.enabled
     ? [

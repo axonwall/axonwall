@@ -14,6 +14,13 @@ export async function POST(req: NextRequest) {
     const session = await getSession();
     assertMeshSelfServicePermitted(session);
     const ownerUser = resolveHeadscaleUsername(session);
+    const network = await resolveHeadscaleNetworkInfo(req);
+    if (!network.enabled) {
+      return NextResponse.json(
+        { status: 'error', error: 'Forbidden: Mesh VPN (Headscale) is currently disabled by your administrator' },
+        { status: 403 }
+      );
+    }
 
     const body = await req.json().catch(() => ({}));
     const action = body?.action;
@@ -34,7 +41,12 @@ export async function POST(req: NextRequest) {
     }
 
     if (action === 'create') {
-      const network = await resolveHeadscaleNetworkInfo(req);
+      if (!network.allowSelfRegistration) {
+        return NextResponse.json(
+          { status: 'error', error: 'Forbidden: Self-service key creation is disabled by your administrator' },
+          { status: 403 }
+        );
+      }
       const rawHours = Number(body?.expiryHours ?? network.defaultKeyExpiryHours ?? 24);
       const expiryHours = Number.isFinite(rawHours) ? Math.min(720, Math.max(1, Math.round(rawHours))) : 24;
       const reusable = Boolean(body?.reusable);

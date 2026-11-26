@@ -210,15 +210,13 @@ export function getOllamaHost(config = null) {
  */
 export async function checkOllamaHealth(host = null) {
   const targetHost = host || getOllamaHost();
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 2500);
   try {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 2500);
-
     const res = await fetch(`${targetHost}/api/version`, {
       method: 'GET',
       signal: controller.signal
     });
-    clearTimeout(timeoutId);
 
     if (res.ok) {
       const data = await res.json();
@@ -230,6 +228,8 @@ export async function checkOllamaHealth(host = null) {
       ok: false,
       error: err.name === 'AbortError' ? 'Connection timed out' : err.message
     };
+  } finally {
+    clearTimeout(timeoutId);
   }
 }
 
@@ -240,15 +240,13 @@ export async function checkOllamaHealth(host = null) {
  */
 export async function listOllamaModels(host = null) {
   const targetHost = host || getOllamaHost();
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 3000);
   try {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 3000);
-
     const res = await fetch(`${targetHost}/api/tags`, {
       method: 'GET',
       signal: controller.signal
     });
-    clearTimeout(timeoutId);
 
     if (!res.ok) {
       throw new Error(`Ollama returned status ${res.status}`);
@@ -273,6 +271,8 @@ export async function listOllamaModels(host = null) {
   } catch (err) {
     logger.debug('LLM:OLLAMA:LIST', `Failed to query Ollama models: ${err.message}`);
     return [];
+  } finally {
+    clearTimeout(timeoutId);
   }
 }
 
@@ -559,11 +559,14 @@ export async function chatGemini({
     };
   }
 
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`;
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`;
   const response = await fetch(url, {
     method: 'POST',
     signal,
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      'x-goog-api-key': key
+    },
     body: JSON.stringify(payload)
   });
 
@@ -713,7 +716,7 @@ export async function compileMcpSecurityContext() {
             hostMap.set(host.ip, {
               ...host,
               scanName: scan.filename,
-              targetNet: report.summary?.target
+              targetNet: report.target || (typeof report.summary === 'object' ? report.summary?.target : undefined)
             });
           }
         }
@@ -729,11 +732,12 @@ export async function compileMcpSecurityContext() {
       hostTable += '|---|---|---|---|---|\n';
 
       for (const h of hosts) {
-        const hostname = h.hostnames?.[0] || '<none>';
+        const rawHost0 = h.hostnames?.[0];
+        const hostname = (typeof rawHost0 === 'string' ? rawHost0 : rawHost0?.name) || '<none>';
         const osMatch = h.osMatches?.[0]?.name || 'Unknown OS';
         const openPorts = (h.ports || [])
           .filter(p => p.state === 'open')
-          .map(p => `${p.portId}/${p.protocol} (${p.service || 'unknown'}${p.version ? ` ${p.version}` : ''})`)
+          .map(p => `${p.portid ?? p.port ?? p.portId}/${p.protocol} (${typeof p.service === 'string' ? p.service : (p.service?.name || 'unknown')}${p.version ? ` ${p.version}` : ''})`)
           .join(', ') || 'None open';
 
         const scripts = (h.ports || [])
@@ -758,10 +762,10 @@ export async function compileMcpSecurityContext() {
     if (networks.length > 0) {
       let evSection = '### Incident Response Evidence Vault Hierarchy (`net/host/data.ext`)\n';
       for (const net of networks) {
-        evSection += `- **Network**: \`${net.network || net.dirName}\` (${net.hosts?.length || 0} hosts archived)\n`;
+        evSection += `- **Network**: \`${net.networkCidr || net.network || (net.networkDir ? path.basename(net.networkDir) : 'unknown')}\` (${net.hosts?.length || 0} hosts archived)\n`;
         for (const host of net.hosts || []) {
           const artifactNames = (host.artifacts || []).map(a => `${a.name}${a.isSigned ? ' (🔏 signed)' : ''}`).join(', ');
-          evSection += `  - Host \`${host.ip}\`: ${artifactNames || 'No artifacts'}\n`;
+          evSection += `  - Host \`${host.hostIp || host.ip || 'unknown'}\`: ${artifactNames || 'No artifacts'}\n`;
         }
       }
       sections.push(evSection);
@@ -850,6 +854,7 @@ export async function runAnalystInference({
   messages = [],
   prompt = null,
   customContext = null,
+  systemPrompt = DEFAULT_SYSTEM_PROMPT,
   onChunk = null,
   onStatusUpdate = null,
   signal = null
@@ -862,7 +867,7 @@ export async function runAnalystInference({
 
   // Gather and compile live context
   const telemetryContext = customContext || await compileMcpSecurityContext();
-  const systemContent = `${DEFAULT_SYSTEM_PROMPT}\n\n${telemetryContext}`;
+  const systemContent = `${systemPrompt}\n\n${telemetryContext}`;
 
   // Build full message thread
   const conversationMessages = [
@@ -1051,8 +1056,10 @@ export async function saveAnalysisReport(topic, content, meta = {}) {
   if (cfg.gpg?.enabled) {
     try {
       const sigRes = await signFile(filePath, { keyId: cfg.gpg.keyId });
-      signaturePath = sigRes.signaturePath;
-      isSigned = true;
+      if (sigRes?.success) {
+        signaturePath = sigRes.signaturePath;
+        isSigned = true;
+      }
     } catch (err) {
       logger.warn('LLM:REPORT:GPG', `Failed to sign analysis report: ${err.message}`);
     }
@@ -1100,19 +1107,42 @@ export async function askSocraticMentor({
   }
 
   const customContext = `=== Challenge Socratic Context ===${contextSnippet}`;
+  let emittedLength = 0;
 
-  const rawResponse = await askSecurityAnalyst({
+  // Hold back any incomplete flag prefix (e.g. "VIGILANTE{sec" or partial
+  // "VIGIL") at the chunk boundary so split secrets are never streamed raw.
+  const safeStreamingCutIndex = (sanitizedFull) => {
+    const partialTag = sanitizedFull.match(/(?:VIGILANTE|FLAG|CTF)\{[^}\s]*$/i);
+    if (partialTag) return partialTag.index;
+    const partialPrefix = sanitizedFull.match(/(?:V(?:I(?:G(?:I(?:L(?:A(?:N(?:T(?:E)?)?)?)?)?)?)?)?|F(?:L(?:A(?:G)?)?)?|C(?:T(?:F)?)?)$/i);
+    if (partialPrefix && partialPrefix[0].length > 0) return partialPrefix.index;
+    return sanitizedFull.length;
+  };
+
+  const res = await runAnalystInference({
     prompt: prompt || 'Can you review my observations and guide my next analytical steps using the Socratic method?',
     customContext,
+    systemPrompt: SOCRATIC_MENTOR_PROMPT,
     provider,
     model,
-    onChunk: (chunk, full) => {
-      if (onChunk) onChunk(sanitizeSocraticResponse(chunk), sanitizeSocraticResponse(full));
+    onChunk: (_chunk, full) => {
+      if (!onChunk) return;
+      const sanitizedFull = sanitizeSocraticResponse(String(full || ''));
+      const cut = safeStreamingCutIndex(sanitizedFull);
+      if (cut > emittedLength) {
+        const delta = sanitizedFull.slice(emittedLength, cut);
+        emittedLength = cut;
+        onChunk(delta, sanitizedFull.slice(0, cut));
+      }
     },
     onStatusUpdate
   });
 
-  return sanitizeSocraticResponse(rawResponse);
+  const finalText = sanitizeSocraticResponse(res?.content || '');
+  if (onChunk && finalText.length > emittedLength) {
+    onChunk(finalText.slice(emittedLength), finalText);
+  }
+  return finalText;
 }
 
 // -------------------------------------------------------------

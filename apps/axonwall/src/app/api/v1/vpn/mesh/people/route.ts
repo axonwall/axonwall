@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSession } from '@/server/auth';
-import { isPasswordChangeEnforced } from '@/server/auth-guard';
+import { assertActionPermitted } from '@/server/auth-guard';
 import { callAgentApiDetailed, callAgentApiResponse } from '@/server/agent-client';
 import {
   listUsers,
@@ -65,13 +65,7 @@ async function fetchDirectoryUsers(): Promise<{
 export async function GET(req: NextRequest) {
   try {
     const session = await getSession();
-    const pwdEnforced = isPasswordChangeEnforced(session);
-    if (!session || pwdEnforced || !session.roles.includes('admin')) {
-      return NextResponse.json(
-        { status: 'error', error: pwdEnforced ? 'Password change required' : 'Unauthorized' },
-        { status: pwdEnforced ? 403 : 401 }
-      );
-    }
+    assertActionPermitted(session, 'admin');
 
     const [network, directory, invites] = await Promise.all([
       resolveHeadscaleNetworkInfo(req),
@@ -157,13 +151,7 @@ export async function GET(req: NextRequest) {
 export async function POST(req: NextRequest) {
   try {
     const session = await getSession();
-    const pwdEnforced = isPasswordChangeEnforced(session);
-    if (!session || pwdEnforced || !session.roles.includes('admin')) {
-      return NextResponse.json(
-        { status: 'error', error: pwdEnforced ? 'Password change required' : 'Unauthorized' },
-        { status: pwdEnforced ? 403 : 401 }
-      );
-    }
+    assertActionPermitted(session, 'admin');
 
     const body = await req.json().catch(() => ({}));
     const action = body?.action;
@@ -557,9 +545,17 @@ export async function POST(req: NextRequest) {
       { status: 400 }
     );
   } catch (err: any) {
-    const status = err?.code === 'NOT_FOUND' ? 404 : 400;
+    const msg = err?.message || 'Mesh VPN people operation failed';
+    const status =
+      msg === 'Unauthorized'
+        ? 401
+        : msg.startsWith('Forbidden')
+          ? 403
+          : err?.code === 'NOT_FOUND'
+            ? 404
+            : 400;
     return NextResponse.json(
-      { status: 'error', error: err?.message || 'Mesh VPN people operation failed' },
+      { status: 'error', error: msg },
       { status }
     );
   }

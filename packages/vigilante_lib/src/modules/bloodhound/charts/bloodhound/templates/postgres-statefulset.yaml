@@ -1,3 +1,4 @@
+{{- $secretName := .Values.existingSecret | default (printf "%s-secrets" (include "bloodhound.fullname" .)) -}}
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -31,7 +32,10 @@ spec:
             - name: POSTGRES_USER
               value: {{ .Values.postgres.username | quote }}
             - name: POSTGRES_PASSWORD
-              value: {{ .Values.postgres.password | quote }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretName }}
+                  key: POSTGRES_PASSWORD
             - name: PGDATA
               value: /var/lib/postgresql/data/pgdata
           ports:

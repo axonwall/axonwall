@@ -1,6 +1,11 @@
 {{- if .Values.librenms.enabled }}
 {{- $fullname := include "axonwall-analytics.fullname" . -}}
 {{- $ns := include "axonwall-analytics.namespace" . -}}
+{{- $useEmbeddedDb := and (not .Values.librenms.db.host) .Values.librenms.db.embedded -}}
+{{- if not (or .Values.librenms.db.host .Values.librenms.db.embedded) -}}
+{{- fail "librenms.enabled requires either librenms.db.host (external MariaDB/MySQL) or librenms.db.embedded=true" -}}
+{{- end -}}
+{{- if .Values.librenms.persistence.enabled }}
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -17,6 +22,7 @@ spec:
     requests:
       storage: {{ .Values.librenms.persistence.size | quote }}
 ---
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -27,6 +33,10 @@ metadata:
     app.kubernetes.io/component: librenms
 spec:
   replicas: 1
+  {{- if .Values.librenms.persistence.enabled }}
+  strategy:
+    type: Recreate
+  {{- end }}
   selector:
     matchLabels:
       app.kubernetes.io/instance: {{ .Release.Name }}
@@ -36,14 +46,64 @@ spec:
       labels:
         {{- include "axonwall-analytics.labels" . | nindent 8 }}
         app.kubernetes.io/component: librenms
+      annotations:
+        checksum/secret: {{ include (print $.Template.BasePath "/secrets.yaml") . | sha256sum }}
     spec:
       containers:
+        {{- if $useEmbeddedDb }}
+        - name: mariadb
+          image: "{{ .Values.librenms.db.image.repository }}:{{ .Values.librenms.db.image.tag }}"
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          env:
+            - name: MARIADB_DATABASE
+              value: {{ .Values.librenms.db.name | quote }}
+            - name: MARIADB_USER
+              value: {{ .Values.librenms.db.user | quote }}
+            - name: MARIADB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "axonwall-analytics.secretName" . }}
+                  key: librenms-db-password
+            - name: MARIADB_RANDOM_ROOT_PASSWORD
+              value: "yes"
+          ports:
+            - name: mysql
+              containerPort: 3306
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", "mariadb-admin ping -h 127.0.0.1 -u\"$MARIADB_USER\" -p\"$MARIADB_PASSWORD\""]
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.librenms.db.resources | nindent 12 }}
+          volumeMounts:
+            - name: db-data
+              mountPath: /var/lib/mysql
+        {{- end }}
         - name: librenms
           image: "{{ .Values.librenms.image.repository }}:{{ .Values.librenms.image.tag }}"
           imagePullPolicy: {{ .Values.global.imagePullPolicy }}
           env:
             - name: TZ
               value: {{ .Values.librenms.timezone | quote }}
+            - name: DB_HOST
+              value: {{ if $useEmbeddedDb }}"127.0.0.1"{{ else }}{{ .Values.librenms.db.host | quote }}{{ end }}
+            - name: DB_PORT
+              value: {{ .Values.librenms.db.port | default 3306 | quote }}
+            - name: DB_NAME
+              value: {{ .Values.librenms.db.name | quote }}
+            - name: DB_USER
+              value: {{ .Values.librenms.db.user | quote }}
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "axonwall-analytics.secretName" . }}
+                  key: librenms-db-password
+            - name: APP_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "axonwall-analytics.secretName" . }}
+                  key: librenms-app-key
           ports:
             - name: http
               containerPort: 8000
@@ -54,8 +114,16 @@ spec:
               mountPath: /data
       volumes:
         - name: data
+          {{- if .Values.librenms.persistence.enabled }}
           persistentVolumeClaim:
             claimName: {{ $fullname }}-librenms-data
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        {{- if $useEmbeddedDb }}
+        - name: db-data
+          emptyDir: {}
+        {{- end }}
 ---
 apiVersion: v1
 kind: Service

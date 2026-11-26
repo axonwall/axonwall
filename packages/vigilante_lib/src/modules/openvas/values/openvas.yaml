@@ -2,9 +2,13 @@ hostname: openvas.{{DOMAIN}}
 domain: {{DOMAIN}}
 tlsSecretName: {{TLS_SECRET}}
 
+# Credentials are generated per deployment in a Kubernetes Secret (existingSecret)
+# or supplied via custom Helm --values override.
+existingSecret: ""
+
 admin:
   username: admin
-  password: admin
+  password: ""
 
 initFeeds: true
 

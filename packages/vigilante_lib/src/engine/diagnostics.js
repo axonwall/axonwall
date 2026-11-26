@@ -3,27 +3,34 @@ import { execa } from 'execa';
 import { saveTriageBundle } from './evidence.js';
 import { logger } from '../utils/logger.js';
 import { assertCliTarget, isValidHostname } from './config.js';
+import { assertSafeOutboundTarget } from './ssrf.js';
 
 function assertDiagnosticHost(host, label) {
   const trimmed = (host || '127.0.0.1').trim();
   const clean = assertCliTarget(trimmed, label);
-  if (/[/?#@\s\u0000-\u001f\\]/.test(clean) || (!net.isIP(clean) && !isValidHostname(clean))) {
+  const bare = clean.replace(/^\[|\]$/g, '');
+  if (/[/?#@\s\u0000-\u001f\\]/.test(clean) || (!net.isIP(bare) && !isValidHostname(bare))) {
     throw new Error(`Invalid ${label} '${host}': must be a valid hostname or IP address`);
   }
-  return clean;
+  return bare;
 }
 
-function assertNotMetadataHost(host) {
-  const lower = String(host || '').toLowerCase();
-  if (
-    lower === 'metadata.google.internal' ||
-    lower.startsWith('169.254.') ||
-    lower.startsWith('::ffff:169.254.') ||
-    lower.startsWith('fe80:') ||
-    lower.startsWith('fe80%')
-  ) {
-    throw new Error(`Access to link-local/metadata host '${host}' is blocked`);
+function assertSafeHttpPath(httpPath = '/') {
+  const cleanPath = String(httpPath ?? '/').trim() || '/';
+  if (!cleanPath.startsWith('/') || /[\s\u0000-\u001f]/.test(cleanPath)) {
+    throw new Error(`Invalid HTTP probe path '${httpPath}'`);
   }
+  return cleanPath;
+}
+
+async function assertSafeDiagnosticTarget(targetOrUrl, label, options = {}, allowBareHost = true) {
+  return assertSafeOutboundTarget(targetOrUrl, {
+    label,
+    allowBareHost,
+    allowPrivate: options.allowPrivate,
+    allowLoopback: options.allowLoopback,
+    allowMetadata: false
+  });
 }
 
 function formatHostAuthority(host) {
@@ -67,8 +74,9 @@ export async function isBinaryAvailable(binary) {
  * @param {number} [count=4]
  * @returns {Promise<{ success: boolean, output: string, error?: string }>}
  */
-export async function runPing(host, count = 4) {
+export async function runPing(host, count = 4, options = {}) {
   const target = assertDiagnosticHost(host, 'ping target');
+  await assertSafeDiagnosticTarget(target, 'ping target', options);
   const cleanCount = assertBoundedCount(count, 4, 1, 20, 'ping count');
   logger.info('DIAG:PING', `Executing ping -c ${cleanCount} ${target}`);
 
@@ -96,6 +104,7 @@ export async function runPing(host, count = 4) {
  * @param {Object} [options]
  * @param {number} [options.port]
  * @param {boolean} [options.isHttps=false]
+ * @param {string} [options.path='/']
  * @param {number} [options.requests=50]
  * @param {number} [options.concurrency=5]
  * @returns {Promise<{ success: boolean, output: string, tool: string }>}
@@ -103,14 +112,18 @@ export async function runPing(host, count = 4) {
 export async function runBenchmark(host, {
   port = null,
   isHttps = false,
+  path = '/',
   requests = 50,
-  concurrency = 5
+  concurrency = 5,
+  allowPrivate,
+  allowLoopback
 } = {}) {
   const target = assertDiagnosticHost(host, 'benchmark target');
-  assertNotMetadataHost(target);
   const portNum = assertDiagnosticPort(port, isHttps ? 443 : 80);
   const protocol = isHttps || portNum === 443 ? 'https' : 'http';
-  const targetUrl = `${protocol}://${formatHostAuthority(target)}:${portNum}/`;
+  const cleanPath = assertSafeHttpPath(path);
+  const targetUrl = `${protocol}://${formatHostAuthority(target)}:${portNum}${cleanPath}`;
+  await assertSafeDiagnosticTarget(targetUrl, 'benchmark target', { allowPrivate, allowLoopback }, false);
   const cleanRequests = assertBoundedCount(requests, 50, 1, 500, 'benchmark requests');
   const cleanConcurrency = assertBoundedCount(concurrency, 5, 1, 50, 'benchmark concurrency');
 
@@ -141,13 +154,16 @@ export async function runBenchmark(host, {
   logger.info('DIAG:BENCH_CURL', `Executing curl benchmark loop against ${targetUrl}`);
   try {
     const startTime = Date.now();
+    const probeCount = Math.min(cleanRequests, 10);
     const curlPromises = [];
-    for (let i = 0; i < 10; i++) {
+    for (let i = 0; i < probeCount; i++) {
       curlPromises.push(execa('curl', [
         '-s',
+        '--proto', '=http,https',
         '-o', '/dev/null',
         '-w', 'HTTP %{http_code} | Connect: %{time_connect}s | TTFB: %{time_starttransfer}s | Total: %{time_total}s\n',
         '--connect-timeout', '2',
+        '--max-time', '5',
         targetUrl
       ]));
     }
@@ -155,7 +171,7 @@ export async function runBenchmark(host, {
     const totalTimeMs = Date.now() - startTime;
     const lines = [
       `=== HTTP Benchmark Fallback (curl) for ${targetUrl} ===`,
-      `Executed 10 concurrent HTTP probes in ${(totalTimeMs / 1000).toFixed(3)}s`,
+      `Executed ${probeCount} concurrent HTTP probes in ${(totalTimeMs / 1000).toFixed(3)}s`,
       '',
       ...results.map((r, i) => r.status === 'fulfilled' ? `[Req #${i + 1}] ${r.value.stdout.trim()}` : `[Req #${i + 1}] Failed: ${r.reason.message}`),
       '',
@@ -182,10 +198,12 @@ export async function runBenchmark(host, {
 /**
  * Execute MTR (My Traceroute) or traceroute against host
  * @param {string} host
+ * @param {Object} [options]
  * @returns {Promise<{ success: boolean, output: string, tool: string }>}
  */
-export async function runMtr(host) {
+export async function runMtr(host, options = {}) {
   const target = assertDiagnosticHost(host, 'mtr target');
+  await assertSafeDiagnosticTarget(target, 'mtr target', options);
   const hasMtr = await isBinaryAvailable('mtr');
 
   if (hasMtr) {
@@ -247,12 +265,13 @@ export async function runMtr(host) {
  * @param {Object} [options]
  * @returns {Promise<{ success: boolean, output: string }>}
  */
-export async function runCurlHeaders(host, { port = null, isHttps = false } = {}) {
+export async function runCurlHeaders(host, { port = null, isHttps = false, path = '/', allowPrivate, allowLoopback } = {}) {
   const target = assertDiagnosticHost(host, 'curl target');
-  assertNotMetadataHost(target);
   const portNum = assertDiagnosticPort(port, isHttps ? 443 : 80);
   const protocol = isHttps || portNum === 443 ? 'https' : 'http';
-  const targetUrl = `${protocol}://${formatHostAuthority(target)}:${portNum}/`;
+  const cleanPath = assertSafeHttpPath(path);
+  const targetUrl = `${protocol}://${formatHostAuthority(target)}:${portNum}${cleanPath}`;
+  await assertSafeDiagnosticTarget(targetUrl, 'curl target', { allowPrivate, allowLoopback }, false);
 
   logger.info('DIAG:CURL_HEADERS', `Executing curl -I -sS -k ${targetUrl}`);
   try {
@@ -260,7 +279,9 @@ export async function runCurlHeaders(host, { port = null, isHttps = false } = {}
       '-I',
       '-sS',
       '-k',
+      '--proto', '=http,https',
       '--connect-timeout', '3',
+      '--max-time', '8',
       targetUrl
     ]);
     return {
@@ -281,16 +302,18 @@ export async function runCurlHeaders(host, { port = null, isHttps = false } = {}
 /**
  * Execute DNS resolution & reverse lookup (dig / nslookup)
  * @param {string} host
+ * @param {Object} [options]
  * @returns {Promise<{ success: boolean, output: string }>}
  */
-export async function runDnsLookup(host) {
+export async function runDnsLookup(host, options = {}) {
   const target = assertDiagnosticHost(host, 'dig target');
+  await assertSafeDiagnosticTarget(target, 'dig target', options);
   const hasDig = await isBinaryAvailable('dig');
 
   if (hasDig) {
     logger.info('DIAG:DIG', `Executing dig ${target}`);
     try {
-      const isIp = /^[\d.]+$/.test(target);
+      const isIp = net.isIP(target) !== 0;
       const digArgs = isIp ? ['-x', target, '+noall', '+answer', '+stats'] : [target, 'ANY', '+noall', '+answer', '+stats'];
       const { stdout } = await execa('dig', digArgs);
       return {
@@ -323,10 +346,12 @@ export async function runDnsLookup(host) {
  * Extract full TLS certificate chain and crypto metadata using OpenSSL s_client
  * @param {string} host
  * @param {number} [port=443]
+ * @param {Object} [options]
  * @returns {Promise<{ success: boolean, output: string, command: string }>}
  */
-export async function runTlsCertDump(host, port = 443) {
+export async function runTlsCertDump(host, port = 443, options = {}) {
   const target = assertDiagnosticHost(host, 'tls target');
+  await assertSafeDiagnosticTarget(target, 'tls target', options);
   const portNum = assertDiagnosticPort(port, 443);
   const connectTarget = `${formatHostAuthority(target)}:${portNum}`;
   logger.info('DIAG:TLS_CERTS', `Executing openssl s_client -showcerts -connect ${connectTarget}`);
@@ -367,7 +392,8 @@ export async function runTlsCertDump(host, port = 443) {
  * @returns {Promise<{ success: boolean, output: string, command: string, entries: Array<string> }>}
  */
 export async function runArpNeighLookup(host) {
-  const target = (host || '').trim();
+  const raw = String(host || '').trim();
+  const target = raw ? assertDiagnosticHost(raw, 'arp target') : '';
   logger.info('DIAG:ARP_NEIGH', `Checking kernel neighbor table for ${target}`);
 
   try {
@@ -421,21 +447,30 @@ export async function runArpNeighLookup(host) {
 export async function runFullTriageCapture(host, {
   networkCidr = 'local_network',
   port = null,
-  isHttps = false
+  ports = [],
+  isHttps = false,
+  allowPrivate,
+  allowLoopback
 } = {}) {
-  const target = (host || '127.0.0.1').trim();
+  const target = assertDiagnosticHost(host, 'triage target');
+  const ssrfOpts = { allowPrivate, allowLoopback };
+  await assertSafeDiagnosticTarget(target, 'triage target', ssrfOpts);
+  const resolvedPort = port ?? (Array.isArray(ports) && ports.length > 0 ? ports[0] : null);
+  if (resolvedPort !== null && resolvedPort !== undefined) {
+    assertDiagnosticPort(resolvedPort, 443);
+  }
   const startTime = Date.now();
   logger.info('DIAG:TRIAGE_ALL', `Running complete IR triage bundle on ${target} (${networkCidr})`);
 
   // Run all forensic probes concurrently
   const [pingRes, mtrRes, dnsRes, tlsRes, httpRes, arpRes, benchRes] = await Promise.allSettled([
-    runPing(target, 4),
-    runMtr(target),
-    runDnsLookup(target),
-    runTlsCertDump(target, port || 443),
-    runCurlHeaders(target, { port, isHttps }),
+    runPing(target, 4, ssrfOpts),
+    runMtr(target, ssrfOpts),
+    runDnsLookup(target, ssrfOpts),
+    runTlsCertDump(target, resolvedPort || 443, ssrfOpts),
+    runCurlHeaders(target, { port: resolvedPort, isHttps, ...ssrfOpts }),
     runArpNeighLookup(target),
-    runBenchmark(target, { port, isHttps, requests: 20, concurrency: 4 })
+    runBenchmark(target, { port: resolvedPort, isHttps, requests: 20, concurrency: 4, ...ssrfOpts })
   ]);
 
   const bundle = {

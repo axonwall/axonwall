@@ -20,6 +20,23 @@ export const DECOY_TYPES = {
   K8S_API: 'K8S_API'
 };
 
+const activeHoneynetMeshes = new Set();
+
+function attachTcpSocketGuards(socket, type, openSockets, idleTimeoutMs) {
+  openSockets.add(socket);
+  socket.setTimeout(idleTimeoutMs);
+  socket.on('timeout', () => {
+    socket.destroy();
+  });
+  socket.on('error', (err) => {
+    logger.warn('HONEYNET', `Decoy ${type} socket error: ${err.message}`);
+    socket.destroy();
+  });
+  socket.on('close', () => {
+    openSockets.delete(socket);
+  });
+}
+
 /**
  * Start a standalone ephemeral decoy service on a specified port
  * @param {string} serviceType 'SSH', 'REDIS', or 'HTTP'
@@ -30,12 +47,18 @@ export const DECOY_TYPES = {
 export async function startDecoyService(serviceType, port = 0, options = {}) {
   const onAlert = options.onAlert || (() => {});
   const type = (serviceType || '').toUpperCase();
+  const host = options.host || '127.0.0.1';
+  const idleTimeoutMs = Number.isFinite(options.idleTimeoutMs) && options.idleTimeoutMs > 0
+    ? options.idleTimeoutMs
+    : 15000;
+  const openSockets = new Set();
 
   let server;
   let allocatedPort = port;
 
   if (type === DECOY_TYPES.SSH) {
     server = net.createServer((socket) => {
+      attachTcpSocketGuards(socket, 'SSH', openSockets, idleTimeoutMs);
       const clientIp = socket.remoteAddress || '127.0.0.1';
       const clientPort = socket.remotePort || 0;
 
@@ -62,6 +85,7 @@ export async function startDecoyService(serviceType, port = 0, options = {}) {
     });
   } else if (type === DECOY_TYPES.REDIS) {
     server = net.createServer((socket) => {
+      attachTcpSocketGuards(socket, 'REDIS', openSockets, idleTimeoutMs);
       const clientIp = socket.remoteAddress || '127.0.0.1';
       const clientPort = socket.remotePort || 0;
 
@@ -120,22 +144,42 @@ export async function startDecoyService(serviceType, port = 0, options = {}) {
         warning: 'Authorized access only'
       }));
     });
+    server.requestTimeout = idleTimeoutMs;
+    server.headersTimeout = idleTimeoutMs;
   }
 
   await new Promise((resolve, reject) => {
-    server.listen(port, () => {
+    const onStartupError = (err) => reject(err);
+    server.once('error', onStartupError);
+    server.listen(port, host, () => {
+      server.removeListener('error', onStartupError);
+      server.on('error', (err) => {
+        logger.warn('HONEYNET', `Decoy ${type} server error: ${err.message}`);
+      });
       allocatedPort = server.address().port;
       resolve();
     });
-    server.on('error', reject);
   });
+
+  const stop = () =>
+    new Promise(res => {
+      for (const sock of openSockets) {
+        try {
+          sock.destroy();
+        } catch {}
+      }
+      openSockets.clear();
+      server.closeAllConnections?.();
+      server.close(() => res());
+    });
 
   return {
     id: `decoy-${type.toLowerCase()}-${allocatedPort}`,
     type,
+    host,
     port: allocatedPort,
     server,
-    stop: () => new Promise(res => server.close(res))
+    stop
   };
 }
 
@@ -160,28 +204,53 @@ export async function createHoneynetMesh(config = {}) {
 
   for (const s of decoysToStart) {
     try {
-      const decoy = await startDecoyService(s, 0, { onAlert });
+      const decoy = await startDecoyService(s, 0, {
+        onAlert,
+        host: config.host,
+        idleTimeoutMs: config.idleTimeoutMs
+      });
       runningDecoys.push(decoy);
     } catch (err) {
       logger.warn(`Honeynet: could not start decoy ${s}: ${err.message}`);
     }
   }
 
-  return {
+  let tornDown = false;
+  let mesh;
+  const teardown = async () => {
+    if (tornDown) return;
+    tornDown = true;
+    activeHoneynetMeshes.delete(mesh);
+    for (const d of runningDecoys) {
+      try {
+        await d.stop();
+      } catch {}
+    }
+  };
+
+  mesh = {
     meshId,
     status: 'ACTIVE',
     startTime: new Date().toISOString(),
     decoys: runningDecoys,
     alerts,
     getAlerts: () => [...alerts],
-    teardown: async () => {
-      for (const d of runningDecoys) {
-        try {
-          await d.stop();
-        } catch {}
-      }
-    }
+    teardown
   };
+  activeHoneynetMeshes.add(mesh);
+  return mesh;
+}
+
+/**
+ * Tear down all active honeynet meshes registered in this process
+ */
+export async function teardownAllHoneynetMeshes() {
+  const meshes = Array.from(activeHoneynetMeshes);
+  for (const m of meshes) {
+    try {
+      await m.teardown();
+    } catch {}
+  }
 }
 
 /**

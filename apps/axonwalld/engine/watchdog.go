@@ -107,6 +107,7 @@ type PersistedSlotVersions struct {
 // WatchdogEngine manages A/B partition verification, GRUB boot-counting, and automated recovery.
 type WatchdogEngine struct {
 	mu               sync.RWMutex
+	zbmMu            sync.Mutex
 	grubenvPath      string
 	cmdlinePath      string
 	slotVersionsPath string
@@ -584,8 +585,8 @@ func (we *WatchdogEngine) detectInitialState() {
 		btrfsTopology = we.detectBtrfsTopologyLocked()
 		btrfsSnapshots = we.listBtrfsSnapshotsLocked()
 		slotAVer = appVer
-		if len(btrfsSnapshots) > 0 {
-			slotBVer = fmt.Sprintf("Snapper #%d", btrfsSnapshots[0].ID)
+		if snapID := selectBtrfsRollbackSnapshotID(btrfsSnapshots); snapID > 0 {
+			slotBVer = fmt.Sprintf("Snapper #%d", snapID)
 		} else if slotBVer == "" {
 			slotBVer = "Btrfs + Snapper"
 		}
@@ -785,9 +786,9 @@ func (we *WatchdogEngine) GetStatus() PartitionStatus {
 			we.status.BtrfsTopology = top
 		}
 		snaps := we.listBtrfsSnapshotsLocked()
-		if len(snaps) > 0 {
+		if snapID := selectBtrfsRollbackSnapshotID(snaps); snapID > 0 {
 			we.status.BtrfsSnapshots = snaps
-			we.status.SlotBVersion = fmt.Sprintf("Snapper #%d", snaps[0].ID)
+			we.status.SlotBVersion = fmt.Sprintf("Snapper #%d", snapID)
 		} else {
 			we.status.BtrfsSnapshots = nil
 			if we.status.SlotBVersion == "" {
@@ -1256,6 +1257,9 @@ func (we *WatchdogEngine) CloneSnapshotToBootEnvironment(snapshot, newBeName str
 // error is returned, so activation is atomic or reported failed — never a
 // success with bootfs and the watchdog's view of active/fallback disagreeing.
 func (we *WatchdogEngine) ActivateBootEnvironment(beName string) error {
+	we.zbmMu.Lock()
+	defer we.zbmMu.Unlock()
+
 	beName = strings.TrimSpace(beName)
 	if !zbmIdentifierRegex.MatchString(beName) {
 		return fmt.Errorf("invalid boot environment name: %q", beName)
@@ -1382,6 +1386,9 @@ func (we *WatchdogEngine) ActivateBootEnvironment(beName string) error {
 
 // DeleteBootEnvironment deletes a standby Boot Environment.
 func (we *WatchdogEngine) DeleteBootEnvironment(beName string) error {
+	we.zbmMu.Lock()
+	defer we.zbmMu.Unlock()
+
 	beName = strings.TrimSpace(beName)
 	if !zbmIdentifierRegex.MatchString(beName) {
 		return fmt.Errorf("invalid boot environment name: %q", beName)
@@ -1547,6 +1554,11 @@ func (we *WatchdogEngine) runVerificationSequence() {
 			// GRUB save_env fails with "sparse file not allowed" on Btrfs, so grubenv is disabled.
 			commitOK = true
 			log.Printf("[Watchdog] Health quorum verified on Btrfs + Snapper root subvolume @.")
+		} else if we.status.InstallMode == "host" || we.status.InstallMode == "rolling" {
+			// Host-managed and rolling single-root installations do not use A/B GRUB boot counting;
+			// writing /boot/grub/grubenv on a host install would misclassify it as "ab" on next boot.
+			commitOK = true
+			log.Printf("[Watchdog] Health quorum verified in %s mode (grubenv untouched).", we.status.InstallMode)
 		} else {
 			// Reset bootcount in GRUB environment
 			if err := we.writeGrubEnvKey("bootcount", "0"); err != nil {
@@ -1829,6 +1841,9 @@ func (we *WatchdogEngine) TriggerRollback() error {
 		mode = detectInstallModeCustom(we.cmdlinePath)
 	}
 
+	if mode == "host" {
+		return fmt.Errorf("A/B partition rollback is not available on Host Managed installations")
+	}
 	if mode == "rolling" {
 		return fmt.Errorf("A/B partition rollback is not available on Rolling Single-Root installations")
 	}
@@ -1842,17 +1857,11 @@ func (we *WatchdogEngine) TriggerRollback() error {
 		if err == nil {
 			fallbackBe = strings.TrimSpace(string(fallbackOut))
 		}
-		// E-H2 (round-3): refresh the list (script-side arming never
-		// tells the daemon) and arm a BE other than the running one.
-		// fallback_be is the last verified-good BE, which after one
-		// passing verification IS the running BE — arming it verbatim
-		// was a no-op rollback that reported success while rebooting
-		// into the same bad BE. Prefer the newest non-running,
-		// non-staged standby (the selectRollbackBE path, R4-E-L2:
-		// rollback means "last verified-good BE", so a staged,
-		// untested BE is never a rollback candidate); only use
-		// fallback_be when it names a different BE that still
-		// exists. Fail loudly when no other BE exists.
+		// Refresh the BE list and arm a BE other than the running one.
+		// Prefer a valid, existing non-running org.axonwall:fallback_be
+		// (recorded only after a passing verification commit) before
+		// falling back to the selectRollbackBE heuristic, so an untested
+		// operator clone cannot shadow the last verified-good fallback BE.
 		we.status.BootEnvironments = we.listBootEnvironmentsLocked()
 		runningBe := we.status.ActiveRootDevice
 		for _, be := range we.status.BootEnvironments {
@@ -1862,29 +1871,16 @@ func (we *WatchdogEngine) TriggerRollback() error {
 		}
 		runningName := strings.TrimPrefix(runningBe, "zroot/ROOT/")
 		target := ""
-		// Prefer the newest non-running, non-staged standby (the
-		// selectRollbackBE path, R4-E-L2). selectRollbackBE skips
-		// the ActiveNow entry, but the list can carry no ActiveNow
-		// flag (e.g. /proc/mounts unreadable) — and then it could
-		// return the running BE itself as the newest standby.
-		// Filter the running BE out first, so the choice never
-		// depends on the ActiveNow flags being right.
 		nonRunning := make([]ZfsBootEnvironment, 0, len(we.status.BootEnvironments))
 		for _, be := range we.status.BootEnvironments {
 			if be.Dataset != runningBe && be.Name != runningName {
 				nonRunning = append(nonRunning, be)
 			}
 		}
-		if be := selectRollbackBE(nonRunning); be != nil {
+		if fallbackBe != "" && fallbackBe != "-" && fallbackBe != runningBe && fallbackBe != runningName && we.zbmBeExistsLocked(fallbackBe) {
+			target = fallbackBe
+		} else if be := selectRollbackBE(nonRunning); be != nil {
 			target = be.Dataset
-		} else if fallbackBe != "" && fallbackBe != "-" && fallbackBe != runningBe && fallbackBe != runningName {
-			// No usable standby: trust the fallback pointer only if
-			// it names a BE that still exists in the refreshed list.
-			// A dangling pointer (BE deleted since it was recorded)
-			// must fail loudly, not re-arm the running BE.
-			if we.zbmBeExistsLocked(fallbackBe) {
-				target = fallbackBe
-			}
 		}
 		if target == "" {
 			return fmt.Errorf("no verified-good fallback Boot Environment available for rollback: no non-staged standby Boot Environment other than the running one (%s)", runningBe)
@@ -1928,6 +1924,9 @@ func (we *WatchdogEngine) ActivateSlot(targetSlot string) error {
 		mode = detectInstallModeCustom(we.cmdlinePath)
 	}
 
+	if mode == "host" {
+		return fmt.Errorf("A/B partition slot switching is not available on Host Managed installations")
+	}
 	if mode == "rolling" {
 		return fmt.Errorf("A/B partition slot switching is not available on Rolling Single-Root installations")
 	}
@@ -2015,6 +2014,9 @@ func (we *WatchdogEngine) ApplyFirmwareUpdate(targetSlot, targetVersion string) 
 	isZbm := currMode == "zbm" || detectedMode == "zbm"
 	isBtrfs := !isZbm && (currMode == "btrfs" || detectedMode == "btrfs")
 	isRolling := !isZbm && !isBtrfs && (currMode == "rolling" || detectedMode == "rolling")
+	if currMode == "host" || (!isZbm && !isBtrfs && !isRolling && detectedMode == "host") {
+		return "", fmt.Errorf("A/B partition firmware slot updates are not available on Host Managed installations")
+	}
 	targetSlot = strings.ToUpper(strings.TrimSpace(targetSlot))
 	if isRolling || isBtrfs {
 		targetSlot = "A"
@@ -2068,8 +2070,8 @@ func (we *WatchdogEngine) ApplyFirmwareUpdate(targetSlot, targetVersion string) 
 		we.status.InstallMode = "btrfs"
 		we.status.SlotAVersion = targetVersion
 		we.status.BtrfsSnapshots = we.listBtrfsSnapshotsLocked()
-		if len(we.status.BtrfsSnapshots) > 0 {
-			we.status.SlotBVersion = fmt.Sprintf("Snapper #%d", we.status.BtrfsSnapshots[0].ID)
+		if snapID := selectBtrfsRollbackSnapshotID(we.status.BtrfsSnapshots); snapID > 0 {
+			we.status.SlotBVersion = fmt.Sprintf("Snapper #%d", snapID)
 		} else {
 			we.status.SlotBVersion = "Btrfs + Snapper"
 		}
@@ -2174,6 +2176,9 @@ func readGrubEnvAtPath(envPath string) map[string]string {
 
 // writeGrubEnvKey updates or appends a key in the grubenv file.
 func (we *WatchdogEngine) writeGrubEnvKey(key, value string) error {
+	if we.status.InstallMode == "host" || we.status.InstallMode == "rolling" {
+		return fmt.Errorf("grubenv writes are disabled in %s mode", we.status.InstallMode)
+	}
 	err := writeGrubEnvKeyAtPath(we.grubenvPath, we.readGrubEnvInternal(), key, value)
 	if err != nil {
 		return err
@@ -2191,8 +2196,7 @@ func (we *WatchdogEngine) writeGrubEnvKey(key, value string) error {
 	if we.grubenvPath != "/boot/grub/grubenv" {
 		return nil
 	}
-	cmdlineBytes, cErr := os.ReadFile(we.cmdlinePath)
-	if cErr != nil || !strings.Contains(string(cmdlineBytes), "axon_root_b") {
+	if slot, ok := detectRunningSlotFromCmdline(we.cmdlinePath); !ok || slot != "B" {
 		return nil
 	}
 	if os.Geteuid() != 0 {
@@ -2203,9 +2207,12 @@ func (we *WatchdogEngine) writeGrubEnvKey(key, value string) error {
 	if statErr != nil || (info.Mode()&os.ModeDevice) == 0 {
 		return fmt.Errorf("cannot mirror grubenv to Slot A: device %s is not a block device: %v", slotADev, statErr)
 	}
-	mntDir := "/run/axonwall/grubsync-a"
-	if mErr := os.MkdirAll(mntDir, 0700); mErr != nil {
-		return fmt.Errorf("cannot mirror grubenv to Slot A: cannot create mount point %s: %w", mntDir, mErr)
+	if mkErr := os.MkdirAll("/run/axonwall", 0700); mkErr != nil {
+		return fmt.Errorf("cannot mirror grubenv to Slot A: cannot create /run/axonwall: %w", mkErr)
+	}
+	mntDir, mErr := os.MkdirTemp("/run/axonwall", "grubsync-a-*")
+	if mErr != nil {
+		return fmt.Errorf("cannot mirror grubenv to Slot A: cannot create temp mount point: %w", mErr)
 	}
 	if mErr := exec.Command("mount", slotADev, mntDir).Run(); mErr != nil {
 		_ = os.Remove(mntDir)
@@ -2221,7 +2228,8 @@ func (we *WatchdogEngine) writeGrubEnvKey(key, value string) error {
 	if uErr := exec.Command("umount", mntDir).Run(); uErr != nil {
 		// The mirror write already landed; a stuck mount is loud
 		// but does not change what GRUB will boot.
-		log.Printf("[Watchdog] Warning: failed to unmount Slot A grubenv mirror %s: %v", mntDir, uErr)
+		log.Printf("[Watchdog] Warning: failed to unmount Slot A grubenv mirror %s: %v (attempting lazy unmount)", mntDir, uErr)
+		_ = exec.Command("umount", "-l", mntDir).Run()
 	}
 	_ = os.Remove(mntDir)
 	if mirrorErr != nil {
@@ -2346,6 +2354,34 @@ func (we *WatchdogEngine) detectBtrfsTopologyLocked() string {
 		}
 	}
 	return ""
+}
+
+func selectBtrfsRollbackSnapshotID(snaps []BtrfsSnapperSnapshot) int {
+	if len(snaps) == 0 {
+		return 0
+	}
+	byID := make(map[int]BtrfsSnapperSnapshot, len(snaps))
+	for _, s := range snaps {
+		byID[s.ID] = s
+	}
+	// snaps is sorted descending by ID; prefer the latest "pre" snapshot or
+	// the PreNum referenced by a "post" snapshot before falling back to snaps[0].
+	for _, s := range snaps {
+		if strings.EqualFold(s.Type, "pre") {
+			return s.ID
+		}
+		if strings.EqualFold(s.Type, "post") && s.PreNum > 0 {
+			if _, ok := byID[s.PreNum]; ok {
+				return s.PreNum
+			}
+		}
+	}
+	for _, s := range snaps {
+		if s.PreNum > 0 {
+			return s.PreNum
+		}
+	}
+	return snaps[0].ID
 }
 
 // ListBtrfsSnapshots enumerates live Snapper snapshots from the snapper CLI, falling back to info.xml files.

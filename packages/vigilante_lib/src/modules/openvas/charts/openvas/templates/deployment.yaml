@@ -1,3 +1,4 @@
+{{- $adminSecret := .Values.existingSecret | default (printf "%s-admin" (include "openvas.fullname" .)) -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -31,7 +32,7 @@ spec:
             - name: POSTGRES_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "openvas.fullname" . }}-admin
+                  name: {{ $adminSecret }}
                   key: postgresPassword
           volumeMounts:
             - name: psql-storage
@@ -197,12 +198,12 @@ spec:
             - name: ADMIN_USERNAME
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "openvas.fullname" . }}-admin
+                  name: {{ $adminSecret }}
                   key: username
             - name: ADMIN_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "openvas.fullname" . }}-admin
+                  name: {{ $adminSecret }}
                   key: password
           volumeMounts:
             - name: gvmd-storage

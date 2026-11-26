@@ -168,9 +168,9 @@ func TestMMDBReaderCityAndASNAndHTTPUpdate(t *testing.T) {
 		t.Fatalf("unexpected ASN lookup: ok=%v asn=%d org=%q", okA, asn, org)
 	}
 
-	// Test HTTP atomic updater (valid reload + corrupt rejection without clobbering)
+	// Test HTTPS atomic updater (rejects http://, private IPs, and unsafe destination paths; accepts valid TLS reload + preserves on corrupt payload)
 	serveCorrupt := false
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if serveCorrupt {
 			_, _ = w.Write([]byte("not-a-valid-mmdb-file"))
 			return
@@ -187,12 +187,31 @@ func TestMMDBReaderCityAndASNAndHTTPUpdate(t *testing.T) {
 	cityPath := filepath.Join(dir, "City.mmdb")
 	asnPath := filepath.Join(dir, "ASN.mmdb")
 	gm := NewGeoIPManager()
+	// 1. Default strict enforcement checks
+	if err := gm.UpdateFromURLs(context.Background(), "http://example.com/city.mmdb", "", "/var/lib/axonwall/geoip/City.mmdb", ""); err == nil {
+		t.Fatalf("expected UpdateFromURLs to reject plain http:// scheme")
+	}
+	if err := gm.UpdateFromURLs(context.Background(), srv.URL+"/city.mmdb", "", "/var/lib/axonwall/geoip/City.mmdb", ""); err == nil {
+		t.Fatalf("expected UpdateFromURLs default client to reject loopback IP")
+	}
+	if err := gm.UpdateFromURLs(context.Background(), "https://93.184.216.34/city.mmdb", "", cityPath, ""); err == nil {
+		t.Fatalf("expected UpdateFromURLs default confinement to reject path outside /var/lib/axonwall")
+	}
+
+	// 2. Test-scoped TLS client & temp dir confinement check atomic valid reload + corrupt preservation
+	gm.httpClient = srv.Client()
+	gm.allowedBaseDirs = []string{dir}
 	if err := gm.UpdateFromURLs(context.Background(), srv.URL+"/city.mmdb", srv.URL+"/asn.mmdb", cityPath, asnPath); err != nil {
 		t.Fatalf("UpdateFromURLs valid payload failed: %v", err)
 	}
 	cLoaded, aLoaded, _ := gm.Status()
 	if !cLoaded || !aLoaded {
 		t.Fatalf("expected both City and ASN loaded after HTTP update, got city=%v asn=%v", cLoaded, aLoaded)
+	}
+
+	// IPv4-mapped IPv6 address must unmap cleanly in LookupCity
+	if iso6, _, _, _, ok6 := gm.LookupCity(netip.MustParseAddr("::ffff:1.1.1.1")); !ok6 || iso6 != "AU" {
+		t.Fatalf("expected ::ffff:1.1.1.1 unmapped lookup to resolve AU, got iso=%q ok=%v", iso6, ok6)
 	}
 
 	// Corrupt download must fail AND preserve previous valid readers
@@ -700,4 +719,114 @@ func TestNetFlowFederationAndPrometheusMetrics(t *testing.T) {
 			t.Fatalf("missing metric %q in Prometheus output:\n%s", needle, prom)
 		}
 	}
+}
+
+func TestIPFIXTemplateWithdrawalPartialAndOverflowSafety(t *testing.T) {
+	dec := NewFlowDecoder()
+	sample := []FlowRecord{{
+		TimestampMs: time.Now().UnixMilli(),
+		SrcIP:       "10.80.0.10",
+		DstIP:       "1.1.1.1",
+		SrcPort:     1234,
+		DstPort:     443,
+		Protocol:    6,
+		Bytes:       500,
+		Packets:     5,
+	}}
+	pkt := EncodeIPFIXPacket(10, 1, true, sample)
+	if _, flows, _, err := dec.DecodePacket("10.80.0.1", pkt, time.Now()); err != nil || len(flows) != 1 {
+		t.Fatalf("seed IPFIX packet failed: err=%v len=%d", err, len(flows))
+	}
+	if len(dec.GetTemplates()) != 1 {
+		t.Fatalf("expected 1 cached template, got %d", len(dec.GetTemplates()))
+	}
+
+	// Bogus fieldCount=65535 on 8-byte template body must NOT panic/alloc huge slice or cache template
+	badBody := []byte{1, 1, 0xFF, 0xFF, 0, 8, 0, 4}
+	dec.parseIPFIXTemplates("10.80.0.9", 10, badBody, false, time.Now())
+	if len(dec.GetTemplates()) != 1 {
+		t.Fatalf("bogus oversized fieldCount must be rejected, got templates=%d", len(dec.GetTemplates()))
+	}
+
+	// Partial enterprise field truncated before 4-byte enterprise ID must be discarded
+	partialBody := []byte{1, 2, 0, 1, 0x80, 1, 0, 4}
+	dec.parseIPFIXTemplates("10.80.0.9", 10, partialBody, false, time.Now())
+	if len(dec.GetTemplates()) != 1 {
+		t.Fatalf("partial truncated template must be discarded, got templates=%d", len(dec.GetTemplates()))
+	}
+
+	// RFC 7011 template withdrawal (fieldCount=0) removes matching template
+	tid := dec.GetTemplates()[0].TemplateID
+	withdrawBody := make([]byte, 4)
+	binary.BigEndian.PutUint16(withdrawBody[0:2], tid)
+	binary.BigEndian.PutUint16(withdrawBody[2:4], 0)
+	dec.parseIPFIXTemplates("10.80.0.1", 10, withdrawBody, false, time.Now())
+	if len(dec.GetTemplates()) != 0 {
+		t.Fatalf("expected template withdrawal to delete template %d, got %d remaining", tid, len(dec.GetTemplates()))
+	}
+}
+
+func TestMMDBNodeCountOverflowRejected(t *testing.T) {
+	// Construct tiny payload with forged huge node_count causing uint64 multiplication overflow if unchecked
+	var meta bytes.Buffer
+	meta.WriteByte((7 << 5) | 2) // map of 2 entries
+	writeStr := func(s string) {
+		meta.WriteByte(byte((2 << 5) | len(s)))
+		meta.WriteString(s)
+	}
+	writeStr("node_count")
+	meta.WriteByte((6 << 5) | 8) // uint64 (8 bytes)
+	_ = binary.Write(&meta, binary.BigEndian, uint64(0x4000000000000001))
+	writeStr("record_size")
+	meta.WriteByte((5 << 5) | 1) // uint16 (1 byte)
+	meta.WriteByte(24)
+
+	raw := append([]byte{0, 0, 0, 0}, mmdbMetadataMarker...)
+	raw = append(raw, meta.Bytes()...)
+	if _, err := OpenMMDBBytes(raw); err == nil {
+		t.Fatalf("expected OpenMMDBBytes to reject overflowing node_count")
+	}
+}
+
+func TestFQLCompositeNotEqualSemanticsAndCHSQL(t *testing.T) {
+	rec := FlowRecord{
+		SrcIP: "10.0.0.1", DstIP: "8.8.8.8",
+		InIfName: "eth0", OutIfName: "wan0",
+		SrcAsn: 64512, DstAsn: 15169,
+		SrcCountry: "LAN", DstCountry: "US",
+		SrcCity: "Local", DstCity: "Chicago",
+		SrcHost: "gw", DstHost: "dns", HostName: "axon-1",
+	}
+	for _, expr := range []string{
+		"ip!=8.8.8.8",
+		"if!=wan0",
+		"asn!=15169",
+		"country!=US",
+		"city!=Chicago",
+		"host!=axon-1",
+	} {
+		ast, err := ParseFQL(expr)
+		if err != nil {
+			t.Fatalf("ParseFQL(%q) error: %v", expr, err)
+		}
+		if ast.Eval(&rec) {
+			t.Fatalf("expected local Eval(%q) to return false when one side matches excluded value", expr)
+		}
+		sqlStr, _, sqlErr := CompileFQLToClickHouseSQL(ast)
+		if sqlErr != nil {
+			t.Fatalf("CompileFQLToClickHouseSQL(%q) error: %v", expr, sqlErr)
+		}
+		if !strings.Contains(sqlStr, " AND ") || strings.Contains(sqlStr, " OR ") {
+			t.Fatalf("expected composite != SQL for %q to join predicates with AND, got %q", expr, sqlStr)
+		}
+	}
+}
+
+func TestFlowEnricherStopAndEnrichSafe(t *testing.T) {
+	enr := NewFlowEnricher(nil, nil, nil)
+	enr.Stop()
+	// Idempotent Stop and non-panicking Enrich after Stop
+	enr.Stop()
+	f := FlowRecord{SrcIP: "10.0.0.1", DstIP: "1.1.1.1", Protocol: 6}
+	enr.Enrich(&f)
 }

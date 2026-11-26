@@ -135,8 +135,9 @@ export function importPfsenseConfig(xmlContent: string): ImportReport {
 
   // 2. VLANs
   const vlans: Vlan[] = [];
-  if (root.vlans?.tag) {
-    const rawTags = Array.isArray(root.vlans.tag) ? root.vlans.tag : [root.vlans.tag];
+  const rawVlanEntries = root.vlans?.vlan || root.vlans?.tag;
+  if (rawVlanEntries) {
+    const rawTags = Array.isArray(rawVlanEntries) ? rawVlanEntries : [rawVlanEntries];
     for (const t of rawTags) {
       if (!t.tag) continue;
       const tagNum = Number.parseInt(String(t.tag), 10);
@@ -294,7 +295,9 @@ export function importPfsenseConfig(xmlContent: string): ImportReport {
         destination: dst,
         destinationPort: dstPort,
         gateway: r.gateway ? String(r.gateway) : undefined,
-        log: Boolean(r.log),
+        ...(negatedSrc ? { invertSource: true } : {}),
+        ...(negatedDst ? { invertDestination: true } : {}),
+        log: isXmlFlagSet(r.log),
         enabled: isEnabled,
         description: finalDescr,
         sortOrder,
@@ -327,7 +330,7 @@ export function importPfsenseConfig(xmlContent: string): ImportReport {
         destinationPort: normalizeXmlPort(n.destination?.port || localPort || '', aliasMap),
         targetIp: n.target ? String(n.target) : '',
         targetPort: normalizeXmlPort(localPort || '', aliasMap),
-        log: Boolean(n.log),
+        log: isXmlFlagSet(n.log),
         enabled: !isXmlFlagSet(n.disabled),
         description: n.descr ? String(n.descr) : '',
         sortOrder: natSort,
@@ -360,7 +363,7 @@ export function importPfsenseConfig(xmlContent: string): ImportReport {
         destination: 'any',
         destinationPort: '',
         targetIp: o.target ? String(o.target) : undefined,
-        log: Boolean(o.log),
+        log: isXmlFlagSet(o.log),
         enabled: !isXmlFlagSet(o.disabled),
         description: o.descr ? String(o.descr) : 'Outbound NAT',
         sortOrder: natSort,

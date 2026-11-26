@@ -14,21 +14,22 @@ import (
 )
 
 const (
-	nfnlSubsysUlog   = 4
-	nfulnlMsgPacket  = 0
-	nfulnlMsgConfig  = 1
-	nfulnlCfgCmd     = 1
-	nfulnlCfgMode    = 2
-	nfulnlCmdPfUnbind = 1
-	nfulnlCmdPfBind   = 2
-	nfulnlCmdBind     = 3
-	nfulnlCopyPacket = 2
+	nfnlSubsysUlog    = 4
+	nfulnlMsgPacket   = 0
+	nfulnlMsgConfig   = 1
+	nfulnlCfgCmd      = 1
+	nfulnlCfgMode     = 2
+	nfulnlCmdBind     = 1
+	nfulnlCmdUnbind   = 2
+	nfulnlCmdPfBind   = 3
+	nfulnlCmdPfUnbind = 4
+	nfulnlCopyPacket  = 2
 
-	nfulaTimestamp    = 3
-	nfulaIfindexIndev = 5
-	nfulaIfindexOutdev = 7
-	nfulaPayload      = 9
-	nfulaPrefix       = 10
+	nfulaTimestamp     = 3
+	nfulaIfindexIndev  = 4
+	nfulaIfindexOutdev = 5
+	nfulaPayload       = 9
+	nfulaPrefix        = 10
 )
 
 type StructuredLogEntry struct {
@@ -149,15 +150,32 @@ func (n *NflogReader) Start(group uint16, rateLimitPerSec int, nodeID, hostname 
 	}
 	_ = unix.SetsockoptTimeval(fd, unix.SOL_SOCKET, unix.SO_RCVTIMEO, &unix.Timeval{Sec: 1, Usec: 0})
 
-	// Configure NFLOG group binding for IPv4 & IPv6
-	for _, cmd := range [][]byte{
-		buildNflogConfigMsg(group, unix.AF_INET, nfulnlCmdPfUnbind, 1, 0),
-		buildNflogConfigMsg(group, unix.AF_INET6, nfulnlCmdPfUnbind, 2, 0),
-		buildNflogConfigMsg(group, unix.AF_INET, nfulnlCmdPfBind, 3, 0),
-		buildNflogConfigMsg(group, unix.AF_INET6, nfulnlCmdPfBind, 4, 0),
-		buildNflogConfigMsg(group, 0, nfulnlCmdBind, 5, 128),
-	} {
-		_ = unix.Sendto(fd, cmd, 0, &unix.SockaddrNetlink{Family: unix.AF_NETLINK})
+	// Configure NFLOG group binding for IPv4 & IPv6 with NLM_F_ACK verification
+	cfgSeqs := []struct {
+		pf        uint8
+		cmd       uint8
+		seq       uint32
+		copyBytes uint32
+		allowEnoent bool
+	}{
+		{unix.AF_INET, nfulnlCmdPfUnbind, 1, 0, true},
+		{unix.AF_INET6, nfulnlCmdPfUnbind, 2, 0, true},
+		{unix.AF_INET, nfulnlCmdPfBind, 3, 0, false},
+		{unix.AF_INET6, nfulnlCmdPfBind, 4, 0, false},
+		{0, nfulnlCmdBind, 5, 128, false},
+	}
+	for _, c := range cfgSeqs {
+		msg := buildNflogConfigMsg(group, c.pf, c.cmd, c.seq, c.copyBytes)
+		if err := unix.Sendto(fd, msg, 0, &unix.SockaddrNetlink{Family: unix.AF_NETLINK}); err != nil {
+			_ = unix.Close(fd)
+			log.Printf("[Observability] NFLOG config sendto failed (group=%d cmd=%d): %v", group, c.cmd, err)
+			return
+		}
+		if err := waitNetlinkAck(fd, c.seq, c.allowEnoent); err != nil {
+			_ = unix.Close(fd)
+			log.Printf("[Observability] NFLOG config ACK failed (group=%d cmd=%d): %v", group, c.cmd, err)
+			return
+		}
 	}
 
 	ifMap := snapshotLocalIfIndexMap()
@@ -237,24 +255,66 @@ func snapshotLocalIfIndexMap() map[uint32]string {
 	return out
 }
 
+func waitNetlinkAck(fd int, expectedSeq uint32, allowEnoent bool) error {
+	buf := make([]byte, 4096)
+	for {
+		n, _, err := unix.Recvfrom(fd, buf, 0)
+		if err != nil {
+			if err == unix.EINTR {
+				continue
+			}
+			return err
+		}
+		if n < 16 {
+			return fmt.Errorf("short netlink ACK response (%d bytes)", n)
+		}
+		off := 0
+		for off+16 <= n {
+			nlLen := int(binary.LittleEndian.Uint32(buf[off : off+4]))
+			nlType := binary.LittleEndian.Uint16(buf[off+4 : off+6])
+			nlSeq := binary.LittleEndian.Uint32(buf[off+8 : off+12])
+			if nlLen < 16 || off+nlLen > n {
+				break
+			}
+			if nlType == unix.NLMSG_ERROR && nlSeq == expectedSeq {
+				if nlLen < 20 {
+					return fmt.Errorf("truncated NLMSG_ERROR (%d bytes)", nlLen)
+				}
+				errno := int32(binary.LittleEndian.Uint32(buf[off+16 : off+20]))
+				if errno == 0 {
+					return nil
+				}
+				if allowEnoent && errno == -int32(unix.ENOENT) {
+					return nil
+				}
+				return fmt.Errorf("netlink error %d (%s)", errno, unix.Errno(-errno).Error())
+			}
+			aligned := (nlLen + 3) &^ 3
+			if aligned <= 0 {
+				break
+			}
+			off += aligned
+		}
+	}
+}
+
 func buildNflogConfigMsg(group uint16, pf uint8, cmd uint8, seq uint32, copyBytes uint32) []byte {
 	var attrs []byte
-	// NFULA_CFG_CMD: len=8 (4 hdr + 4 cmd struct), type=1
+	// NFULA_CFG_CMD: nla_len=5 (4 hdr + 1 u8 command), padded to 8
 	cmdAttr := make([]byte, 8)
-	binary.LittleEndian.PutUint16(cmdAttr[0:2], 8)
+	binary.LittleEndian.PutUint16(cmdAttr[0:2], 5)
 	binary.LittleEndian.PutUint16(cmdAttr[2:4], nfulnlCfgCmd)
 	cmdAttr[4] = cmd
-	cmdAttr[5] = 0
-	binary.BigEndian.PutUint16(cmdAttr[6:8], uint16(pf))
 	attrs = append(attrs, cmdAttr...)
 
 	if copyBytes > 0 {
-		// NFULA_CFG_MODE: len=10 (4 hdr + 4 copy_range BE + 1 copy_mode + 1 pad), padded to 12
+		// NFULA_CFG_MODE: nla_len=10 (4 hdr + 4 copy_range BE + 1 copy_mode + 1 _pad), padded to 12
 		modeAttr := make([]byte, 12)
-		binary.LittleEndian.PutUint16(modeAttr[0:2], 9)
+		binary.LittleEndian.PutUint16(modeAttr[0:2], 10)
 		binary.LittleEndian.PutUint16(modeAttr[2:4], nfulnlCfgMode)
 		binary.BigEndian.PutUint32(modeAttr[4:8], copyBytes)
 		modeAttr[8] = nfulnlCopyPacket
+		modeAttr[9] = 0
 		attrs = append(attrs, modeAttr...)
 	}
 
@@ -262,7 +322,7 @@ func buildNflogConfigMsg(group uint16, pf uint8, cmd uint8, seq uint32, copyByte
 	msg := make([]byte, totalLen)
 	binary.LittleEndian.PutUint32(msg[0:4], uint32(totalLen))
 	binary.LittleEndian.PutUint16(msg[4:6], uint16((nfnlSubsysUlog<<8)|nfulnlMsgConfig))
-	binary.LittleEndian.PutUint16(msg[6:8], unix.NLM_F_REQUEST)
+	binary.LittleEndian.PutUint16(msg[6:8], unix.NLM_F_REQUEST|unix.NLM_F_ACK)
 	binary.LittleEndian.PutUint32(msg[8:12], seq)
 	msg[16] = pf
 	msg[17] = 0 // NFNETLINK_V0

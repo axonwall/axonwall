@@ -54,9 +54,25 @@ function computeEntryHash(entryWithoutHash: Omit<McpAuditLogEntry, 'entryHash'>)
 function getLastHash(auditPath: string): string {
   try {
     if (!fs.existsSync(auditPath)) return GENESIS_HASH;
-    const content = fs.readFileSync(auditPath, 'utf8').trim();
-    if (!content) return GENESIS_HASH;
-    const lines = content.split('\n');
+    const fd = fs.openSync(auditPath, 'r');
+    let content = '';
+    try {
+      const stat = fs.fstatSync(fd);
+      if (stat.size <= 0) return GENESIS_HASH;
+      const maxTail = 256 * 1024;
+      const readSize = Math.min(stat.size, maxTail);
+      const startOffset = stat.size - readSize;
+      const buf = Buffer.allocUnsafe(readSize);
+      const bytesRead = fs.readSync(fd, buf, 0, readSize, startOffset);
+      content = buf.subarray(0, bytesRead).toString('utf8');
+      if (startOffset > 0) {
+        const nlIdx = content.indexOf('\n');
+        content = nlIdx >= 0 ? content.slice(nlIdx + 1) : '';
+      }
+    } finally {
+      fs.closeSync(fd);
+    }
+    const lines = content.trim().split('\n');
     for (let i = lines.length - 1; i >= 0; i--) {
       const line = lines[i]?.trim();
       if (!line) continue;

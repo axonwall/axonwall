@@ -168,14 +168,16 @@ func (e *NftablesEngine) Rollback() error {
 	}
 
 	slog.Info("Initiating nftables rollback...")
-	_ = e.Flush()
 
+	// ApplyNftBatchNetlink performs atomic table replacement inside a single Netlink transaction,
+	// so avoid pre-flushing here (which would open a fail-open window if restoring fails).
 	if err := applyScriptInternal(e.lastKnownGood); err != nil {
 		return fmt.Errorf("nft rollback failed: %w", err)
 	}
 
 	slog.Info("Successfully rolled back nftables ruleset.")
 	e.currentScript = e.lastKnownGood
+	e.restoreFleetBlocksLocked()
 
 	return nil
 }
@@ -557,18 +559,37 @@ func (e *NftablesEngine) loadFleetBlocks() []fleetBlockEntry {
 func (e *NftablesEngine) RestoreFleetBlocks() {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	e.restoreFleetBlocksLocked()
+}
+
+// restoreFleetBlocksLocked restores persisted and active in-memory TTL-bounded fleet blocks
+// after a table replacement (Apply or Rollback). Callers hold e.mu.
+func (e *NftablesEngine) restoreFleetBlocksLocked() {
 	if e.fleetBlocks == nil {
 		e.fleetBlocks = make(map[string]*fleetBlockEntry)
 	}
-	now := time.Now()
+	candidates := make(map[string]fleetBlockEntry)
 	for _, persisted := range e.loadFleetBlocks() {
-		entry := persisted
-		key := fleetBlockKey(entry.SetName, entry.Target)
+		candidates[fleetBlockKey(persisted.SetName, persisted.Target)] = persisted
+	}
+	for key, mem := range e.fleetBlocks {
+		if mem != nil {
+			cp := *mem
+			cp.timer = nil
+			candidates[key] = cp
+		}
+	}
+	now := time.Now()
+	for key, entry := range candidates {
 		rem := entry.ExpiresAt.Sub(now)
 		if rem <= 0 {
+			if old, ok := e.fleetBlocks[key]; ok && old.timer != nil {
+				old.timer.Stop()
+			}
 			if err := e.unblockTargetLocked(&entry); err != nil {
 				slog.Warn("Failed to remove already-expired persisted fleet block", "target", entry.Target, "set", entry.SetName, "error", err)
 			} else {
+				delete(e.fleetBlocks, key)
 				slog.Info("Removed already-expired persisted fleet block", "target", entry.Target, "set", entry.SetName)
 			}
 			continue

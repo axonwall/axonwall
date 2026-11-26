@@ -33,17 +33,22 @@ export function compileKeepalived(ha: HighAvailabilityConfig, hostname: string =
 
     const effectiveRole = ha.role || ha.nodeRole || 'master';
     const isMaster = effectiveRole === 'master' && !ha.maintenanceMode;
+    const useNoPreempt = vrrp.nopreempt !== false;
+    // Keepalived forbids `nopreempt` on a `state MASTER` instance; force BACKUP initial state when nopreempt is enabled
+    const vrrpState = useNoPreempt ? 'BACKUP' : isMaster ? 'MASTER' : 'BACKUP';
     // In maintenance mode, drop priority to lowest to force peer takeover
     const effectivePriority = ha.maintenanceMode ? 1 : Math.max(1, Math.min(255, Number(vrrp.priority) || 100));
     const safeVrid = Math.max(1, Math.min(255, Number(vrrp.vrid) || 1));
 
     lines.push(`vrrp_instance ${safeName} {`);
-    lines.push(`    state ${isMaster ? 'MASTER' : 'BACKUP'}`);
+    lines.push(`    state ${vrrpState}`);
     lines.push(`    interface ${safeInterface}`);
     lines.push(`    virtual_router_id ${safeVrid}`);
     lines.push(`    priority ${effectivePriority}`);
     lines.push('    advert_int 1');
-    lines.push('    nopreempt');
+    if (useNoPreempt) {
+      lines.push('    nopreempt');
+    }
 
     if (vrrp.authPassword) {
       const safePassword = vrrp.authPassword.split(/[\r\n]/)[0].trim().replace(/[\r\n\s]+/g, '').slice(0, 8);
@@ -93,10 +98,14 @@ export function compileConntrackd(ha: HighAvailabilityConfig, localIp: string = 
   lines.push('# conntrackd.conf - Axonwall High Availability State Synchronization');
   lines.push('Sync {');
   lines.push(`    Mode ${safeMode} {`);
-  lines.push('        ResendQueueSize 131072');
+  if (safeMode === 'FTFW') {
+    lines.push('        ResendQueueSize 131072');
+  }
   lines.push('        CommitTimeout 180');
   lines.push('        PurgeTimeout 60');
-  lines.push('        ACKWindowSize 300');
+  if (safeMode === 'FTFW') {
+    lines.push('        ACKWindowSize 300');
+  }
   lines.push('    }');
   lines.push('');
 

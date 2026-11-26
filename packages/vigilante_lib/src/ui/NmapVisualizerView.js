@@ -253,7 +253,7 @@ export const NmapVisualizerView = memo(function NmapVisualizerView({
   const executePing = async (host) => {
     if (!host) return;
     setActiveDiagnostic({ tool: 'Ping (ICMP)', host: host.ip, isRunning: true, output: '' });
-    const res = await runPing(host.ip);
+    const res = await runPing(host.ip, 4, { allowPrivate: true, allowLoopback: true });
     await saveEvidenceFile(networkTarget, host.ip, 'ping.json', res);
     const updatedEvidence = await listHostEvidence(networkTarget, host.ip);
     setHostEvidenceList(updatedEvidence);
@@ -276,7 +276,7 @@ export const NmapVisualizerView = memo(function NmapVisualizerView({
     const targetPort = httpPort ? httpPort.port : (hasHttps ? 443 : 80);
 
     setActiveDiagnostic({ tool: 'HTTP Benchmark (ab)', host: host.ip, isRunning: true, output: '' });
-    const res = await runBenchmark(host.ip, { port: targetPort, isHttps: hasHttps });
+    const res = await runBenchmark(host.ip, { port: targetPort, isHttps: hasHttps, allowPrivate: true, allowLoopback: true });
     await saveEvidenceFile(networkTarget, host.ip, 'benchmark.txt', res.output);
     const updatedEvidence = await listHostEvidence(networkTarget, host.ip);
     setHostEvidenceList(updatedEvidence);
@@ -295,7 +295,7 @@ export const NmapVisualizerView = memo(function NmapVisualizerView({
   const executeMtr = async (host) => {
     if (!host) return;
     setActiveDiagnostic({ tool: 'MTR Network Path Trace', host: host.ip, isRunning: true, output: '' });
-    const res = await runMtr(host.ip);
+    const res = await runMtr(host.ip, { allowPrivate: true, allowLoopback: true });
     await saveEvidenceFile(networkTarget, host.ip, 'mtr.txt', res.output);
     const updatedEvidence = await listHostEvidence(networkTarget, host.ip);
     setHostEvidenceList(updatedEvidence);
@@ -318,7 +318,7 @@ export const NmapVisualizerView = memo(function NmapVisualizerView({
     const targetPort = httpPort ? httpPort.port : (hasHttps ? 443 : 80);
 
     setActiveDiagnostic({ tool: 'HTTP Headers & TLS (curl)', host: host.ip, isRunning: true, output: '' });
-    const res = await runCurlHeaders(host.ip, { port: targetPort, isHttps: hasHttps });
+    const res = await runCurlHeaders(host.ip, { port: targetPort, isHttps: hasHttps, allowPrivate: true, allowLoopback: true });
     await saveEvidenceFile(networkTarget, host.ip, 'http_headers.txt', res.output);
     const updatedEvidence = await listHostEvidence(networkTarget, host.ip);
     setHostEvidenceList(updatedEvidence);
@@ -340,7 +340,7 @@ export const NmapVisualizerView = memo(function NmapVisualizerView({
     const targetPort = sslPort ? sslPort.port : 443;
 
     setActiveDiagnostic({ tool: 'OpenSSL TLS Certificate Dump', host: host.ip, isRunning: true, output: '' });
-    const res = await runTlsCertDump(host.ip, targetPort);
+    const res = await runTlsCertDump(host.ip, targetPort, { allowPrivate: true, allowLoopback: true });
     await saveEvidenceFile(networkTarget, host.ip, 'tls_certificates.pem', res.output);
     const updatedEvidence = await listHostEvidence(networkTarget, host.ip);
     setHostEvidenceList(updatedEvidence);
@@ -359,7 +359,7 @@ export const NmapVisualizerView = memo(function NmapVisualizerView({
   const executeDns = async (host) => {
     if (!host) return;
     setActiveDiagnostic({ tool: 'DNS Resolution & PTR (dig)', host: host.ip, isRunning: true, output: '' });
-    const res = await runDnsLookup(host.ip);
+    const res = await runDnsLookup(host.ip, { allowPrivate: true, allowLoopback: true });
     await saveEvidenceFile(networkTarget, host.ip, 'dns_records.json', res);
     const updatedEvidence = await listHostEvidence(networkTarget, host.ip);
     setHostEvidenceList(updatedEvidence);
@@ -442,7 +442,9 @@ export const NmapVisualizerView = memo(function NmapVisualizerView({
     const res = await runFullTriageCapture(host.ip, {
       networkCidr: networkTarget,
       port: targetPort,
-      isHttps: hasHttps
+      isHttps: hasHttps,
+      allowPrivate: true,
+      allowLoopback: true
     });
 
     const updatedEvidence = await listHostEvidence(networkTarget, host.ip);

@@ -11,10 +11,13 @@ service:
   port: 3000
 
 auth:
-  # Secret containing mandatory JWT_SECRET and AXONWALL_AGENT_TOKEN keys.
+  # Secret containing mandatory JWT_SECRET, AXONWALL_AGENT_TOKEN, and local admin keys.
   existingSecret: "axonwall-auth-secret"
   jwtSecretKey: "jwt-secret"
   agentTokenKey: "agent-token"
+  localAdminUserKey: "local-admin-user"
+  localAdminPasswordKey: "local-admin-password"
+  localAdminUserDefault: "admin"
 
 nodeFirewall:
   enabled: true

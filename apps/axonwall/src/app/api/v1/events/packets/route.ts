@@ -4,7 +4,7 @@ import http from 'node:http';
 import { clearCachedAgentToken, getAgentToken } from '@/server/agent-client';
 import { getAgentApiSocketPath } from '@/server/dev-paths';
 import { getSession } from '@/server/auth';
-import { isPasswordChangeEnforced } from '@/server/auth-guard';
+import { assertActionPermitted } from '@/server/auth-guard';
 
 export async function GET(req: NextRequest) {
   // Live packet capture is privileged telemetry: require a console
@@ -12,14 +12,11 @@ export async function GET(req: NextRequest) {
   // through a session-checked server/agent.ts helper), so the check
   // lives here -- it was the one API route missing it (audit A-06/B-10).
   const session = await getSession();
-  const pwdEnforced = isPasswordChangeEnforced(session);
-  if (!session || pwdEnforced) {
-    return new Response(pwdEnforced ? 'Forbidden: Password change required' : 'Unauthorized', {
-      status: pwdEnforced ? 403 : 401,
-    });
-  }
-  if (!session.roles?.includes('admin')) {
-    return new Response('Forbidden: Admin role required', { status: 403 });
+  try {
+    assertActionPermitted(session, 'admin');
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : 'Unauthorized';
+    return new Response(msg, { status: msg === 'Unauthorized' ? 401 : 403 });
   }
 
   const { searchParams } = new URL(req.url);

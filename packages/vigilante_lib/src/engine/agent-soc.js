@@ -1,5 +1,6 @@
 import fs from 'node:fs/promises';
 import fsSync from 'node:fs';
+import net from 'node:net';
 import path from 'node:path';
 import { getHostDossier, buildHostDossier } from './dossier.js';
 import { runNucleiScan } from './nuclei.js';
@@ -8,7 +9,7 @@ import { listBloodhoundIngests } from './bloodhound.js';
 import { generateMitreCoverageMatrix } from './mitre.js';
 import { generateNistIncidentRecord, calculateNistIncidentScore } from './nist.js';
 import { isolatePod, blockIp } from './soar.js';
-import { ensureVigilanteConfig, getVigilanteEvidenceDir, getHostEvidenceDir } from './config.js';
+import { ensureVigilanteConfig, getVigilanteEvidenceDir, getHostEvidenceDir, sanitizePathComponent } from './config.js';
 import { saveEvidenceFile } from './evidence.js';
 import { autoSignIfConfigured } from './gpg.js';
 import { logger } from '../utils/logger.js';
@@ -43,7 +44,7 @@ export async function runAgentSocInvestigation(targetOrOptions, options = {}) {
     namespace = options.namespace || 'default';
   }
 
-  const cleanTarget = String(target).replace(/[^a-zA-Z0-9.-]/g, '_');
+  const cleanTarget = sanitizePathComponent(String(target || 'unknown-target'), 'target');
   logger.info('AGENT_SOC', `Starting autonomous investigation ${incidentId} for target: ${target}`);
 
   const reasoningTrace = [];
@@ -114,50 +115,100 @@ export async function runAgentSocInvestigation(targetOrOptions, options = {}) {
   const identityAlerts = dossier.identity?.bloodhoundAlerts || [];
   reasoningTrace[2].observation = `Found ${bhIngests.length} identity datasets. Target has ${identityAlerts.length} Active Directory alerts.`;
 
-  // Step 4: MITRE ATT&CK Framework Mapping
+  // Step 4: MITRE ATT&CK Framework Mapping from actual telemetry
   reasoningTrace.push({
     step: 4,
     phase: 'Containment Strategy',
     action: 'generate_mitre_report',
     thought: `Mapping observed indicators to MITRE tactics and techniques.`
   });
-  const mappedTechniques = ['T1059.004', 'T1068', 'T1071.001'];
-  reasoningTrace[3].observation = `Mapped to ${mappedTechniques.length} MITRE techniques: ${mappedTechniques.join(', ')}.`;
+  const techniqueSet = new Set();
+  const scanFindings = activeScanResult?.synthetic ? [] : (activeScanResult?.findings || []);
+  const criticalOrHighFindings = scanFindings.filter(f => ['critical', 'high'].includes(String(f.severity || '').toLowerCase()));
+  const dossierAlerts = dossier.runtime?.alerts || dossier.alerts || [];
+  if (triggerAlert?.mitreTechnique) techniqueSet.add(triggerAlert.mitreTechnique);
+  if (/shell|exec|rce/i.test(String(triggerAlert?.title || ''))) techniqueSet.add('T1059.004');
+  if (identityAlerts.length > 0) techniqueSet.add('T1078');
+  if (criticalOrHighFindings.length > 0) techniqueSet.add('T1190');
+  if (dossierAlerts.length > 0) techniqueSet.add('T1068');
+  const mappedTechniques = Array.from(techniqueSet);
+  reasoningTrace[3].observation = mappedTechniques.length > 0
+    ? `Mapped to ${mappedTechniques.length} MITRE techniques: ${mappedTechniques.join(', ')}.`
+    : 'No active MITRE ATT&CK techniques confirmed across target telemetry.';
 
   // Step 5: Incident Prioritization & Containment Evaluation
+  const riskScore = Number(dossier.riskScore || 0);
+  const triggerSev = String(triggerAlert?.severity || '').toUpperCase();
+  const hasRealSignals =
+    riskScore >= 40 ||
+    criticalOrHighFindings.length > 0 ||
+    identityAlerts.length > 0 ||
+    dossierAlerts.length > 0 ||
+    triggerSev === 'CRITICAL' ||
+    triggerSev === 'HIGH';
+
+  const functionalImpact = (riskScore >= 80 || criticalOrHighFindings.some(f => f.severity === 'critical') || triggerSev === 'CRITICAL')
+    ? 'HIGH'
+    : hasRealSignals ? 'MEDIUM' : 'LOW';
+  const informationImpact = (identityAlerts.length > 0 || riskScore >= 70)
+    ? 'CORE_SYSTEMS'
+    : hasRealSignals ? 'PROPRIETARY' : 'NONE';
+
   const prioritization = calculateNistIncidentScore({
-    attackVector: 'WEB',
-    signType: 'INCIDENT',
-    functionalImpact: 'HIGH',
-    informationImpact: 'CORE_SYSTEMS',
-    recoverabilityEffort: 'REGULAR'
+    attackVector: (dossier.network?.openPorts || []).some(p => [80, 443, 8080, 8443].includes(p)) ? 'WEB' : 'OTHER',
+    signType: hasRealSignals ? 'INCIDENT' : 'PRECURSOR',
+    functionalImpact,
+    informationImpact,
+    recoverabilityEffort: functionalImpact === 'HIGH' ? 'REGULAR' : 'SUPPLEMENTED'
   });
 
+  const computedScore = Math.max(riskScore, hasRealSignals ? (prioritization.score || 50) : 0);
+  let threatLevel = 'LOW';
+  if (computedScore >= 80 || triggerSev === 'CRITICAL' || criticalOrHighFindings.some(f => f.severity === 'critical')) {
+    threatLevel = 'CRITICAL';
+  } else if (computedScore >= 60 || criticalOrHighFindings.length > 0 || triggerSev === 'HIGH') {
+    threatLevel = 'HIGH';
+  } else if (computedScore >= 30 || identityAlerts.length > 0) {
+    threatLevel = 'MEDIUM';
+  } else if (computedScore === 0 && scanFindings.length === 0 && dossierAlerts.length === 0) {
+    threatLevel = 'NONE';
+  }
+
   const verdict = {
-    threatLevel: 'CRITICAL',
-    nistCategory: 'CAT-3 (Malicious Code)',
-    score: prioritization.score || 85,
-    summary: `Active compromise detected on target ${target}. Privilege escalation observed with C2 communication.`
+    threatLevel,
+    nistCategory: hasRealSignals ? 'CAT-3 (Malicious Code / Intrusion)' : 'CAT-0 (Benign / No Active Threat)',
+    score: computedScore,
+    summary: hasRealSignals
+      ? `Observed ${criticalOrHighFindings.length} high/critical scan findings, ${identityAlerts.length} AD alerts, and dossier risk ${riskScore}/100 on ${target}.`
+      : `No active compromise indicators detected on ${target} (dossier risk ${riskScore}/100, 0 high/critical findings).`
   };
 
   let containment = null;
-  if (automatedContainment) {
+  if (automatedContainment && (threatLevel === 'CRITICAL' || threatLevel === 'HIGH')) {
     reasoningTrace.push({
       step: 5,
       phase: 'Active Containment',
       action: 'soar_containment',
       thought: `Threat level is ${verdict.threatLevel}. Executing automated SOAR containment.`
     });
-    try {
-      containment = await isolatePod({
-        podName: target,
-        namespace,
-        reason: `Autonomous SOAR Containment: High risk score (${verdict.score}/100) - ${triggerAlert.title || 'Compromise'}`
-      });
-      reasoningTrace[4].observation = `Applied isolation NetworkPolicy: ${containment.policyName} (ID: ${containment.containmentId})`;
-    } catch (soarErr) {
-      containment = await blockIp({ ip: target, reason: 'Automated Agent Containment' });
-      reasoningTrace[4].observation = `Applied firewall IP block: ${target} (ID: ${containment.containmentId})`;
+    const bareTarget = String(target).replace(/^\[|\]$/g, '');
+    if (net.isIP(bareTarget)) {
+      containment = await blockIp({ ip: bareTarget, reason: `Automated Agent Containment (${verdict.threatLevel}: ${verdict.score}/100)` });
+      if (containment?.status === 'ERROR') {
+        throw new Error(`SOAR IP containment failed for ${bareTarget}: ${containment.error || 'unknown error'}`);
+      }
+      reasoningTrace[4].observation = `Applied firewall IP block: ${bareTarget} (ID: ${containment.containmentId})`;
+    } else {
+      try {
+        containment = await isolatePod({
+          podName: target,
+          namespace,
+          reason: `Autonomous SOAR Containment: High risk score (${verdict.score}/100) - ${triggerAlert.title || 'Compromise'}`
+        });
+        reasoningTrace[4].observation = `Applied isolation NetworkPolicy: ${containment.policyName} (ID: ${containment.containmentId})`;
+      } catch (soarErr) {
+        reasoningTrace[4].observation = `Pod containment skipped/failed for ${target}: ${soarErr.message}`;
+      }
     }
   }
 

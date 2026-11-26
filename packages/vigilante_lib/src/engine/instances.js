@@ -77,7 +77,12 @@ function withInstanceWriteLock(instanceName, fn) {
   const key = sanitizePathComponent(instanceName || 'vigilante-dev');
   const prev = instanceWriteChains.get(key) || Promise.resolve();
   const run = prev.then(fn, fn);
-  instanceWriteChains.set(key, run.catch(() => {}));
+  const settled = run.catch(() => {}).finally(() => {
+    if (instanceWriteChains.get(key) === settled) {
+      instanceWriteChains.delete(key);
+    }
+  });
+  instanceWriteChains.set(key, settled);
   return run;
 }
 

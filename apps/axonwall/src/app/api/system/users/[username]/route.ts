@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSession } from '@/server/auth';
-import { assertActionPermitted } from '@/server/auth-guard';
+import { assertActionPermitted, assertInteractiveSession } from '@/server/auth-guard';
 import { updateLocalUser, deleteLocalUser } from '@/server/users';
 
 export async function PUT(
@@ -9,6 +9,7 @@ export async function PUT(
 ) {
   try {
     const session = await getSession();
+    assertInteractiveSession(session);
     assertActionPermitted(session, 'admin');
 
     const { username } = await params;
@@ -27,6 +28,7 @@ export async function DELETE(
 ) {
   try {
     const session = await getSession();
+    assertInteractiveSession(session);
     assertActionPermitted(session, 'admin');
 
     const { username } = await params;

@@ -92,7 +92,6 @@ function upsertById<T extends { id: string }>(items: T[], next: T): T[] {
 
 function TopologyStudioCanvas({ focusQuery }: { focusQuery?: string }) {
   const { fitView, setCenter } = useReactFlow();
-  const { applyState } = useDesiredStateApply();
 
   const [liveState, setLiveState] = useState<DesiredState | null>(null);
   const [draftState, setDraftState] = useState<DesiredState | null>(null);
@@ -143,6 +142,12 @@ function TopologyStudioCanvas({ focusQuery }: { focusQuery?: string }) {
       setLoadingState(false);
     }
   }, []);
+
+  const { applyState, refreshFingerprint } = useDesiredStateApply({
+    onConfigChanged: () => {
+      void loadDesiredState();
+    },
+  });
 
   useEffect(() => {
     void loadDesiredState();
@@ -1031,6 +1036,10 @@ function TopologyStudioCanvas({ focusQuery }: { focusQuery?: string }) {
             setLiveState(structuredClone(draftState));
           }
           setBanner({ kind: 'ok', text: 'Phased fabric apply succeeded.' });
+          void refreshFingerprint();
+          if (typeof window !== 'undefined') {
+            window.dispatchEvent(new Event('axonwall:status-refresh'));
+          }
           void probeNow();
         }}
       />

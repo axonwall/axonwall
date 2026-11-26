@@ -94,6 +94,7 @@ collector:
     ipfixUdp: 4739
     sflowUdp: 6343
   persistence:
+    enabled: true
     stateSize: 10Gi
 
 controller:
@@ -114,9 +115,29 @@ librenms:
   enabled: false
   image:
     repository: librenms/librenms
-    tag: "latest"
+    tag: "24.10.1"
   timezone: "UTC"
+  db:
+    # Set host to connect to an external MariaDB/MySQL instance; otherwise an embedded
+    # MariaDB sidecar runs in the LibreNMS pod so LibreNMS starts out of the box.
+    embedded: true
+    host: ""
+    port: 3306
+    name: "librenms"
+    user: "librenms"
+    password: ""
+    image:
+      repository: mariadb
+      tag: "11.4.5"
+    resources:
+      requests:
+        cpu: "100m"
+        memory: "256Mi"
+      limits:
+        cpu: "1000m"
+        memory: "1Gi"
   persistence:
+    enabled: true
     size: 20Gi
   resources:
     requests:
@@ -127,11 +148,15 @@ librenms:
       memory: "2Gi"
 
 auth:
-  # Leave blank to auto-generate deterministic secrets at Helm install, or inject sealed secrets via existingSecret
+  # Leave blank to auto-generate (and preserve across helm upgrades via lookup), or inject sealed secrets via existingSecret
   existingSecret: ""
   agentToken: ""
   jwtSecret: ""
+  ztpToken: ""
+  localAdminUser: "admin"
+  localAdminPassword: ""
   observabilityIngestToken: ""
+  librenmsAppKey: ""
 
 service:
   uiType: ClusterIP
