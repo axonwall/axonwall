@@ -1306,6 +1306,8 @@ lb build
 # 6. Move output image
 if [[ -f live-image-amd64.hybrid.iso ]]; then
   mv live-image-amd64.hybrid.iso "${OUTPUT_DIR}/${ISO_NAME}"
+  chmod 0755 "${OUTPUT_DIR}"
+  chmod 0644 "${OUTPUT_DIR}/${ISO_NAME}"
   (cd "${OUTPUT_DIR}" && sha256sum "${ISO_NAME}" > "${ISO_NAME}.sha256")
   echo "=================================================="
   echo "[✓] Successfully built Axonwall Appliance ISO:"
