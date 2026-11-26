@@ -629,12 +629,11 @@ chmod +x config/includes.chroot/usr/share/axonwall/vault/axonwall-vault-provisio
   fi
 
   # Stage K3s + ZFS Storage Host payload into /usr/share/axonwall/k3s-storage/
-  # (including the pinned k3s binary, parallel to weed under vault/) and OpenEBS
-  # manifest into /usr/share/axonwall/k3s/zfs-operator.yaml so the unified ISO
-  # can install axonwall, vault, OR k3s-storage offline while keeping NGFW Lean Core clean.
+  # and OpenEBS manifest into /usr/share/axonwall/k3s/zfs-operator.yaml so the
+  # unified ISO can install axonwall, vault, OR k3s-storage while keeping NGFW
+  # Lean Core clean and staying under the 1.9 GiB release asset limit.
   mkdir -p config/includes.chroot/usr/share/axonwall/k3s-storage \
            config/includes.chroot/usr/share/axonwall/k3s
-  stage_pinned_k3s "config/includes.chroot/usr/share/axonwall/k3s-storage/k3s"
   cp "${SCRIPT_DIR}/../k3s-storage/nftables.conf" \
      "${SCRIPT_DIR}/../k3s-storage/90-k3s-storage.conf" \
      "${SCRIPT_DIR}/../k3s-storage/k3s-storage.modules.conf" \
