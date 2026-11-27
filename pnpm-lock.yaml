@@ -209,8 +209,8 @@ importers:
         specifier: ^2.1.1
         version: 2.1.1
       jose:
-        specifier: ^6.0.8
-        version: 6.2.12
+        specifier: ^6.2.18
+        version: 6.2.18
       lucide-react:
         specifier: ^1.60.0
         version: 1.60.0(@types/react@19.3.0)(react@19.3.1)
@@ -313,8 +313,8 @@ importers:
         specifier: ^5.4.1
         version: 5.11.2
       jose:
-        specifier: ^6.0.8
-        version: 6.2.12
+        specifier: ^6.2.18
+        version: 6.2.18
       ldapts:
         specifier: ^9.2.0
         version: 9.2.0
@@ -402,8 +402,8 @@ importers:
         specifier: ^5.0.0
         version: 5.0.0(ink@8.0.0(@types/react@19.3.0)(react@19.3.1))(react@19.3.1)
       jose:
-        specifier: ^6.0.8
-        version: 6.2.12
+        specifier: ^6.2.18
+        version: 6.2.18
       js-yaml:
         specifier: ^5.3.0
         version: 5.5.0
@@ -2070,8 +2070,8 @@ packages:
     resolution: {integrity: sha512-AC/7JofJvZGrrneWNaEnJeOLUx+JlGt7tNa0wZiRPT4MY1wmfKjt2+6O2p2uz2+skll8OZZmJMNqeke7kKbNgQ==}
     hasBin: true
 
-  jose@6.2.12:
-    resolution: {integrity: sha512-9NiFmJEex0sy2Dk58j2UGBSHgUs2ypF9eZSu4L6vjOX3Dp96Sw1F3uL+H+D1sx02jZZdzUT0HgvCy59CuvXcWw==}
+  jose@6.2.18:
+    resolution: {integrity: sha512-doV4thUwgkrycJH4yLeqwTGIIZphHl+pk7CPReuMIhYhncmgzdko85MaCG4YQFTxqMFr1/oEH32tZuKKovcDEg==}
 
   js-yaml@5.5.0:
     resolution: {integrity: sha512-paNr4LFIFPjeeSmwNYdrb8FafLLG/Cr2Af3GjbsHJ5CxIjH4r0c2emlmRdAtpPAieP1gRVzk6buBbVP5gBMGAg==}
@@ -3123,7 +3123,7 @@ snapshots:
       express: 5.3.0(supports-color@7.2.0)
       express-rate-limit: 8.7.1(express@5.3.0(supports-color@7.2.0))(supports-color@7.2.0)
       hono: 4.13.13
-      jose: 6.2.12
+      jose: 6.2.18
       json-schema-typed: 8.0.2
       pkce-challenge: 5.0.1
       raw-body: 3.0.2
@@ -4179,7 +4179,7 @@ snapshots:
 
   jiti@2.7.0: {}
 
-  jose@6.2.12: {}
+  jose@6.2.18: {}
 
   js-yaml@5.5.0:
     dependencies:
