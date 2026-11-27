@@ -4,7 +4,7 @@ replicaCount: 1
 image:
   repository: ghcr.io/axonwall/axonwall-ui
   pullPolicy: IfNotPresent
-  tag: "v0.16.3"
+  tag: "v0.16.4"
   # Pin immutable sha256:... digest in production deployments
   digest: ""
 
@@ -25,7 +25,7 @@ nodeFirewall:
   enabled: true
   image:
     repository: ghcr.io/axonwall/axonwalld
-    tag: "v0.16.3"
+    tag: "v0.16.4"
     # Pin immutable sha256:... digest in production deployments
     digest: ""
 
