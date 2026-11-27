@@ -38,11 +38,11 @@ import (
 )
 
 const (
-	harvesterEvtNetSketch     uint8 = 1
-	harvesterEvtNetPayload    uint8 = 2
-	harvesterEvtProcExec      uint8 = 3
-	harvesterEvtProcMemfd     uint8 = 4
-	harvesterEvtTlsCleartext  uint8 = 5
+	harvesterEvtNetSketch    uint8 = 1
+	harvesterEvtNetPayload   uint8 = 2
+	harvesterEvtProcExec     uint8 = 3
+	harvesterEvtProcMemfd    uint8 = 4
+	harvesterEvtTlsCleartext uint8 = 5
 
 	harvesterAnomDarkPort     uint8 = 1 << 0
 	harvesterAnomDnsEntropy   uint8 = 1 << 1
@@ -51,11 +51,11 @@ const (
 	harvesterAnomFirehose     uint8 = 1 << 4
 	harvesterAnomTlsHello     uint8 = 1 << 5
 
-	maxPendingHarvesterFlows   = 8192
-	maxInMemoryEpisodes        = 2000
-	defaultHarvesterSpoolDir   = "/var/lib/axonwall/threat-corpus"
+	maxPendingHarvesterFlows         = 8192
+	maxInMemoryEpisodes              = 2000
+	defaultHarvesterSpoolDir         = "/var/lib/axonwall/threat-corpus"
 	threatHarvesterMaskedPlaceholder = "********"
-	harvesterDefaultSftSystem  = "You are Axonwall Blackbox, an autonomous NGFW and Ring-0 eBPF threat reasoning model. Analyze the chronological telemetry episode, identify the MITRE ATT&CK technique and malicious/benign verdict, and emit the exact Axonwall MCP containment tool call when warranted."
+	harvesterDefaultSftSystem        = "You are Axonwall Blackbox, an autonomous NGFW and Ring-0 eBPF threat reasoning model. Analyze the chronological telemetry episode, identify the MITRE ATT&CK technique and malicious/benign verdict, and emit the exact Axonwall MCP containment tool call when warranted."
 )
 
 // errHarvesterBpfUnavailable marks the environment-level "Ring-0 eBPF
@@ -92,25 +92,27 @@ type ThreatTeacherLlmConfig struct {
 	// explicitly to send raw IPs/SNI/CausalDsl to the teacher
 	// endpoint (only for a local/trusted teacher).
 	AllowRawTelemetry bool `json:"allowRawTelemetry,omitempty"`
+	AllowLoopback     bool `json:"allowLoopback,omitempty"`
 }
 
 type ThreatFleetShipperConfig struct {
-	Enabled       bool   `json:"enabled"`
-	Endpoint      string `json:"endpoint"`
-	Region        string `json:"region"`
-	Bucket        string `json:"bucket"`
-	Prefix        string `json:"prefix"`
-	AccessKey     string `json:"accessKey,omitempty"`
-	SecretKey     string `json:"secretKey,omitempty"`
-	UsePathStyle  bool   `json:"usePathStyle"`
+	Enabled      bool   `json:"enabled"`
+	Endpoint     string `json:"endpoint"`
+	Region       string `json:"region"`
+	Bucket       string `json:"bucket"`
+	Prefix       string `json:"prefix"`
+	AccessKey    string `json:"accessKey,omitempty"`
+	SecretKey    string `json:"secretKey,omitempty"`
+	UsePathStyle bool   `json:"usePathStyle"`
 	// R4-A-L6: explicit operator opt-in for a plaintext http:// S3
 	// endpoint (e.g. local MinIO over HTTP). Default false: the
 	// shipper refuses plaintext endpoints instead of silently
 	// shipping the corpus readable on the wire.
 	AllowPlaintextEndpoint bool   `json:"allowPlaintextEndpoint,omitempty"`
-	LastShippedAt string `json:"lastShippedAt,omitempty"`
-	LastShippedKey string `json:"lastShippedKey,omitempty"`
-	LastError     string `json:"lastError,omitempty"`
+	AllowLoopback          bool   `json:"allowLoopback,omitempty"`
+	LastShippedAt          string `json:"lastShippedAt,omitempty"`
+	LastShippedKey         string `json:"lastShippedKey,omitempty"`
+	LastError              string `json:"lastError,omitempty"`
 }
 
 type ThreatHarvesterConfig struct {
@@ -231,42 +233,97 @@ func normalizeThreatHarvesterConfig(cfg ThreatHarvesterConfig) ThreatHarvesterCo
 	return cfg
 }
 
-// IsBinaryAllowedForTlsUprobe enforces strict safety gating on TLS cleartext uprobes.
-// Control-plane daemons (axonwalld, sshd, eluvix, vault, slapd, minio, k3s, containerd, systemd)
-// are unconditionally rejected even if matching wildcard or allowlist entries.
-func IsBinaryAllowedForTlsUprobe(exePath, comm string, allowlist []string, isHoneypot, autoHoneypot bool) bool {
-	baseExe := strings.ToLower(strings.TrimSpace(filepath.Base(exePath)))
-	normComm := strings.ToLower(strings.TrimSpace(comm))
-	lowerFull := strings.ToLower(strings.TrimSpace(exePath))
+func canonicalizeUprobeCandidatePath(raw string) (cleaned string, resolved string) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return "", ""
+	}
+	cleaned = filepath.Clean(trimmed)
+	if target, err := filepath.EvalSymlinks(cleaned); err == nil && target != "" {
+		return cleaned, target
+	}
+	if target, err := resolveEvalSymlinksWithTail(cleaned); err == nil && target != "" {
+		return cleaned, target
+	}
+	return cleaned, cleaned
+}
 
+func isExcludedUprobePath(p string) bool {
+	trimmed := strings.TrimSpace(p)
+	if trimmed == "" {
+		return false
+	}
+	lowerFull := strings.ToLower(trimmed)
+	baseExe := strings.ToLower(filepath.Base(trimmed))
 	if baseExe == "." || baseExe == "/" {
 		baseExe = ""
 	}
-	if baseExe == "" && normComm == "" {
+	for excluded := range excludedUprobeBinaries {
+		if baseExe == excluded {
+			return true
+		}
+		if baseExe != "" && strings.HasPrefix(baseExe, excluded+"-") {
+			return true
+		}
+		if strings.Contains(lowerFull, "/"+excluded+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+// IsBinaryAllowedForTlsUprobe enforces strict safety gating on TLS cleartext uprobes.
+// Control-plane daemons (axonwalld, sshd, eluvix, vault, slapd, minio, k3s, containerd, systemd)
+// are unconditionally rejected even via symlinks, wildcards, or allowlist entries.
+func IsBinaryAllowedForTlsUprobe(exePath, comm string, allowlist []string, isHoneypot, autoHoneypot bool) bool {
+	rawExe, resolvedExe := canonicalizeUprobeCandidatePath(exePath)
+	normComm := strings.ToLower(strings.TrimSpace(comm))
+
+	if rawExe == "" && normComm == "" {
 		return false
 	}
 	for excluded := range excludedUprobeBinaries {
-		if baseExe == excluded || normComm == excluded {
+		if normComm == excluded || (normComm != "" && strings.HasPrefix(normComm, excluded+"-")) {
 			return false
 		}
-		if strings.HasPrefix(baseExe, excluded+"-") || strings.Contains(lowerFull, "/"+excluded+"/") {
-			return false
-		}
+	}
+	if isExcludedUprobePath(rawExe) || isExcludedUprobePath(resolvedExe) {
+		return false
 	}
 	if isHoneypot && autoHoneypot {
 		return true
 	}
+
+	lowerRawExe := strings.ToLower(rawExe)
+	lowerResExe := strings.ToLower(resolvedExe)
+	baseRawExe := strings.ToLower(filepath.Base(rawExe))
+	baseResExe := strings.ToLower(filepath.Base(resolvedExe))
+	if baseRawExe == "." || baseRawExe == "/" {
+		baseRawExe = ""
+	}
+	if baseResExe == "." || baseResExe == "/" {
+		baseResExe = ""
+	}
+
 	for _, entry := range allowlist {
 		clean := strings.TrimSpace(entry)
 		if clean == "" || clean == "*" {
 			continue // Never honor dangerous wildcards
 		}
-		lowerEntry := strings.ToLower(clean)
-		entryBase := strings.ToLower(filepath.Base(clean))
-		if excludedUprobeBinaries[entryBase] {
+		rawEntry, resolvedEntry := canonicalizeUprobeCandidatePath(clean)
+		if isExcludedUprobePath(rawEntry) || isExcludedUprobePath(resolvedEntry) {
 			continue
 		}
-		if lowerFull == lowerEntry || baseExe == entryBase || (normComm != "" && normComm == entryBase) {
+		lowerRawEntry := strings.ToLower(rawEntry)
+		lowerResEntry := strings.ToLower(resolvedEntry)
+		baseRawEntry := strings.ToLower(filepath.Base(rawEntry))
+		baseResEntry := strings.ToLower(filepath.Base(resolvedEntry))
+
+		if (lowerRawExe != "" && (lowerRawExe == lowerRawEntry || lowerRawExe == lowerResEntry)) ||
+			(lowerResExe != "" && (lowerResExe == lowerRawEntry || lowerResExe == lowerResEntry)) ||
+			(baseRawExe != "" && (baseRawExe == baseRawEntry || baseRawExe == baseResEntry)) ||
+			(baseResExe != "" && (baseResExe == baseRawEntry || baseResExe == baseResEntry)) ||
+			(normComm != "" && (normComm == baseRawEntry || normComm == baseResEntry)) {
 			return true
 		}
 	}
@@ -274,12 +331,12 @@ func IsBinaryAllowedForTlsUprobe(exePath, comm string, allowlist []string, isHon
 }
 
 type ThreatEpisode struct {
-	ID                 string   `json:"id"`
-	CreatedAt          string   `json:"createdAt"`
-	TimestampUnixMs    int64    `json:"timestampUnixMs"`
-	LabelTier          string   `json:"labelTier"`    // "gold_malicious" | "silver_malicious" | "benign_sampled" | "unlabeled_anomaly"
-	ReviewStatus       string   `json:"reviewStatus"` // "pending" | "approved_malicious" | "marked_benign" | "pinned_gold"
-	Pinned             bool     `json:"pinned"`
+	ID              string `json:"id"`
+	CreatedAt       string `json:"createdAt"`
+	TimestampUnixMs int64  `json:"timestampUnixMs"`
+	LabelTier       string `json:"labelTier"`    // "gold_malicious" | "silver_malicious" | "benign_sampled" | "unlabeled_anomaly"
+	ReviewStatus    string `json:"reviewStatus"` // "pending" | "approved_malicious" | "marked_benign" | "pinned_gold"
+	Pinned          bool   `json:"pinned"`
 	// R4-A-M5: true for episodes built by InjectSimulatedEpisode.
 	// Simulated episodes exercise the pipeline but are not real
 	// telemetry: they are excluded from the exported training corpus
@@ -334,10 +391,10 @@ type ThreatHarvesterStats struct {
 	// write failures). Surfaced here so a quietly shrinking corpus
 	// is visible instead of silently under-reported.
 	RecordFailures      uint64 `json:"recordFailures"`
-	SpoolUsedBytes     int64  `json:"spoolUsedBytes"`
-	SpoolQuotaBytes    int64  `json:"spoolQuotaBytes"`
-	ZfsBacked          bool   `json:"zfsBacked"`
-	BackpressureTripped bool  `json:"backpressureTripped"`
+	SpoolUsedBytes      int64  `json:"spoolUsedBytes"`
+	SpoolQuotaBytes     int64  `json:"spoolQuotaBytes"`
+	ZfsBacked           bool   `json:"zfsBacked"`
+	BackpressureTripped bool   `json:"backpressureTripped"`
 }
 
 type ThreatHarvesterStatusSnapshot struct {
@@ -365,6 +422,7 @@ type pendingFlowRecord struct {
 	sni            string
 	procComm       string
 	procPid        uint32
+	procTid        uint32
 	memfdExec      bool
 	darkPortHit    bool
 	watchlistHit   bool
@@ -397,8 +455,10 @@ type ThreatHarvesterManager struct {
 	// attach new ones instead of only attaching once. The links are
 	// also tracked in m.links (closed by detachBpfLocked); the maps
 	// are the reconcile index.
-	tcxLinks    map[string][]link.Link
-	uprobeLinks map[string]link.Link
+	tcxLinks        map[string][]link.Link
+	uprobeLinks     map[string]link.Link
+	uprobeExeIDs    map[string]axebpf.ThreatHarvesterHarvesterExeId
+	uprobeHookNames map[string]string
 
 	recordFailures atomic.Uint64 // R4-A-L7: cumulative RecordEpisode failures from FlushReadyFlows
 
@@ -433,17 +493,19 @@ type procContextMeta struct {
 func NewThreatHarvesterManager(ebpfMgr *EBPFManager, lsmMgr *LsmGuardManager, vigilanteMgr *VigilanteManager, mcpMgr *McpTrafficManager) *ThreatHarvesterManager {
 	cfg := DefaultThreatHarvesterConfig()
 	mgr := &ThreatHarvesterManager{
-		cfg:           cfg,
-		ebpfMgr:       ebpfMgr,
-		lsmMgr:        lsmMgr,
-		vigilanteMgr:  vigilanteMgr,
-		mcpMgr:        mcpMgr,
-		pendingFlows:  make(map[string]*pendingFlowRecord),
-		recentProcCgs: make(map[uint64]procContextMeta),
-		episodes:      make([]ThreatEpisode, 0, 128),
-		tcxLinks:      make(map[string][]link.Link),
-		uprobeLinks:   make(map[string]link.Link),
-		stopCh:        make(chan struct{}),
+		cfg:             cfg,
+		ebpfMgr:         ebpfMgr,
+		lsmMgr:          lsmMgr,
+		vigilanteMgr:    vigilanteMgr,
+		mcpMgr:          mcpMgr,
+		pendingFlows:    make(map[string]*pendingFlowRecord),
+		recentProcCgs:   make(map[uint64]procContextMeta),
+		episodes:        make([]ThreatEpisode, 0, 128),
+		tcxLinks:        make(map[string][]link.Link),
+		uprobeLinks:     make(map[string]link.Link),
+		uprobeExeIDs:    make(map[string]axebpf.ThreatHarvesterHarvesterExeId),
+		uprobeHookNames: make(map[string]string),
+		stopCh:          make(chan struct{}),
 	}
 	mgr.loadIndexLocked()
 	mgr.ensureBackgroundLoops()
@@ -767,6 +829,8 @@ func (m *ThreatHarvesterManager) detachBpfLocked() {
 	m.attachedIfs = nil
 	m.tcxLinks = make(map[string][]link.Link)
 	m.uprobeLinks = make(map[string]link.Link)
+	m.uprobeExeIDs = make(map[string]axebpf.ThreatHarvesterHarvesterExeId)
+	m.uprobeHookNames = make(map[string]string)
 	if m.bpfLoaded {
 		_ = m.objs.Close()
 		m.bpfLoaded = false
@@ -879,30 +943,100 @@ func (m *ThreatHarvesterManager) detachTcxLocked(ifName string) error {
 	return errors.Join(errs...)
 }
 
+func (m *ThreatHarvesterManager) removeUnusedUprobeExeIDLocked(id axebpf.ThreatHarvesterHarvesterExeId) {
+	if m.objs.HarvesterUprobeAllowlist == nil {
+		return
+	}
+	for _, existing := range m.uprobeExeIDs {
+		if existing == id {
+			return
+		}
+	}
+	_ = m.objs.HarvesterUprobeAllowlist.Delete(&id)
+}
+
+func (m *ThreatHarvesterManager) syncUprobeAllowlistMapLocked() error {
+	if m.objs.HarvesterUprobeAllowlist == nil {
+		return fmt.Errorf("harvester uprobe allowlist map is not loaded")
+	}
+	desired := make(map[axebpf.ThreatHarvesterHarvesterExeId]bool, len(m.uprobeExeIDs))
+	for _, id := range m.uprobeExeIDs {
+		desired[id] = true
+		v := uint8(1)
+		if err := m.objs.HarvesterUprobeAllowlist.Put(&id, &v); err != nil {
+			return fmt.Errorf("harvester uprobe allowlist map insert (dev=%d ino=%d): %w", id.Dev, id.Ino, err)
+		}
+	}
+	var stale []axebpf.ThreatHarvesterHarvesterExeId
+	it := m.objs.HarvesterUprobeAllowlist.Iterate()
+	var iterKey axebpf.ThreatHarvesterHarvesterExeId
+	var iterVal uint8
+	for it.Next(&iterKey, &iterVal) {
+		if !desired[iterKey] {
+			stale = append(stale, iterKey)
+		}
+	}
+	if err := it.Err(); err != nil {
+		return fmt.Errorf("harvester uprobe allowlist map iterate: %w", err)
+	}
+	for _, k := range stale {
+		if err := m.objs.HarvesterUprobeAllowlist.Delete(&k); err != nil {
+			return fmt.Errorf("harvester uprobe allowlist map delete (dev=%d ino=%d): %w", k.Dev, k.Ino, err)
+		}
+	}
+	return nil
+}
+
 // attachTlsUprobeLocked attaches the guarded SSL_write uprobe for one
-// allowlisted binary and records it for reconcile. A binary the policy
+// allowlisted binary, populates its canonical (s_dev, i_ino) in the in-kernel
+// uprobe allowlist map, and records it for reconcile. A binary the policy
 // excludes is skipped silently (nil) — that is a policy decision, not
 // an attach failure.
 func (m *ThreatHarvesterManager) attachTlsUprobeLocked(candidate string) error {
 	if !IsBinaryAllowedForTlsUprobe(candidate, filepath.Base(candidate), m.cfg.TlsUprobeAllowlist, false, m.cfg.AutoHoneypotTlsUprobes) {
 		return nil
 	}
-	ex, err := link.OpenExecutable(candidate)
+	resolved, err := filepath.EvalSymlinks(strings.TrimSpace(candidate))
+	if err != nil || resolved == "" {
+		return fmt.Errorf("resolve executable %s for TLS uprobe: %w", candidate, err)
+	}
+	if isExcludedUprobePath(resolved) {
+		return nil
+	}
+	exeID, err := ResolveExecutableID(resolved)
 	if err != nil {
-		return fmt.Errorf("open executable %s for TLS uprobe: %w", candidate, err)
+		return fmt.Errorf("resolve executable ID %s for TLS uprobe: %w", resolved, err)
+	}
+	if m.objs.HarvesterUprobeAllowlist == nil {
+		return fmt.Errorf("harvester uprobe allowlist map is not loaded")
+	}
+	harvExeID := axebpf.ThreatHarvesterHarvesterExeId{Dev: exeID.Dev, Ino: exeID.Ino}
+	allowVal := uint8(1)
+	if err := m.objs.HarvesterUprobeAllowlist.Put(&harvExeID, &allowVal); err != nil {
+		return fmt.Errorf("populate harvester uprobe allowlist for %s: %w", resolved, err)
+	}
+
+	ex, err := link.OpenExecutable(resolved)
+	if err != nil {
+		m.removeUnusedUprobeExeIDLocked(harvExeID)
+		return fmt.Errorf("open executable %s for TLS uprobe: %w", resolved, err)
 	}
 	up, err := ex.Uprobe("SSL_write", m.objs.UprobeHarvesterSslWrite, nil)
 	if err != nil {
-		return fmt.Errorf("attach SSL_write uprobe on %s: %w", candidate, err)
+		m.removeUnusedUprobeExeIDLocked(harvExeID)
+		return fmt.Errorf("attach SSL_write uprobe on %s: %w", resolved, err)
 	}
+	hookName := "uprobe/SSL_write:" + filepath.Base(resolved)
 	m.links = append(m.links, up)
-	m.activeHooks = append(m.activeHooks, "uprobe/SSL_write:"+filepath.Base(candidate))
+	m.activeHooks = append(m.activeHooks, hookName)
 	m.uprobeLinks[candidate] = up
+	m.uprobeExeIDs[candidate] = harvExeID
+	m.uprobeHookNames[candidate] = hookName
 	return nil
 }
 
-// detachTlsUprobeLocked closes the SSL_write uprobe for one binary and
-// drops its bookkeeping.
+// detachTlsUprobeLocked closes the SSL_write uprobe for one binary, removes its
+// (s_dev, i_ino) from the in-kernel allowlist if unreferenced, and drops bookkeeping.
 func (m *ThreatHarvesterManager) detachTlsUprobeLocked(candidate string) error {
 	up, ok := m.uprobeLinks[candidate]
 	if !ok {
@@ -911,7 +1045,16 @@ func (m *ThreatHarvesterManager) detachTlsUprobeLocked(candidate string) error {
 	err := up.Close()
 	m.removeLinkLocked(up)
 	delete(m.uprobeLinks, candidate)
-	m.activeHooks = removeStrings(m.activeHooks, "uprobe/SSL_write:"+filepath.Base(candidate))
+	if hookName, hasHook := m.uprobeHookNames[candidate]; hasHook {
+		m.activeHooks = removeStrings(m.activeHooks, hookName)
+		delete(m.uprobeHookNames, candidate)
+	} else {
+		m.activeHooks = removeStrings(m.activeHooks, "uprobe/SSL_write:"+filepath.Base(candidate))
+	}
+	if exeID, hasID := m.uprobeExeIDs[candidate]; hasID {
+		delete(m.uprobeExeIDs, candidate)
+		m.removeUnusedUprobeExeIDLocked(exeID)
+	}
 	if err != nil {
 		return fmt.Errorf("close TLS uprobe on %s: %w", candidate, err)
 	}
@@ -1156,6 +1299,13 @@ func (m *ThreatHarvesterManager) syncOrAttachBpfLocked() error {
 			return fmt.Errorf("harvester dark-port map delete for port %d: %w", p, err)
 		}
 	}
+
+	if err := m.syncUprobeAllowlistMapLocked(); err != nil {
+		if initialAttach {
+			m.detachBpfLocked()
+		}
+		return err
+	}
 	return nil
 }
 
@@ -1231,6 +1381,9 @@ func (m *ThreatHarvesterManager) ingestRingEvent(ev *axebpf.ThreatHarvesterHarve
 	}
 
 	key := fmt.Sprintf("%d:%s:%d->%s:%d/%d", ev.SocketCookie, uint32ToIPv4(ev.SrcV4), ev.SrcPort, uint32ToIPv4(ev.DstV4), ev.DstPort, ev.Proto)
+	if ev.EventType == harvesterEvtTlsCleartext {
+		key = fmt.Sprintf("uprobe:%d:%d:%d", ev.Pid, ev.Tid, ev.CgroupId)
+	}
 	rec, ok := m.pendingFlows[key]
 	if !ok {
 		rec = &pendingFlowRecord{
@@ -1250,6 +1403,15 @@ func (m *ThreatHarvesterManager) ingestRingEvent(ev *axebpf.ThreatHarvesterHarve
 	rec.socketCookie = ev.SocketCookie
 	if ev.CgroupId != 0 {
 		rec.cgroupID = ev.CgroupId
+	}
+	if ev.Pid != 0 && rec.procPid == 0 {
+		rec.procPid = ev.Pid
+	}
+	if ev.Tid != 0 && rec.procTid == 0 {
+		rec.procTid = ev.Tid
+	}
+	if comm != "" && rec.procComm == "" {
+		rec.procComm = comm
 	}
 	if ctxMeta, exists := m.recentProcCgs[rec.cgroupID]; exists {
 		if rec.procComm == "" {
@@ -1513,7 +1675,11 @@ func formatSequencePreview(sizes []int16, iats []uint32) string {
 }
 
 func buildEpisodeFromFlow(rec *pendingFlowRecord, srcIP, dstIP, labelTier string, score float64, oracles, mitre []string, pinGold bool) ThreatEpisode {
-	id := fmt.Sprintf("ep-%d-%04x", rec.firstSeen.UnixNano()/1e6, (rec.key.SrcPort^rec.key.DstPort)&0xFFFF)
+	suffix := (rec.key.SrcPort ^ rec.key.DstPort) & 0xFFFF
+	if rec.tlsCleartext && suffix == 0 {
+		suffix = uint16((rec.procPid*31)^rec.procTid^uint32(rec.cgroupID)) & 0xFFFF
+	}
+	id := fmt.Sprintf("ep-%d-%04x", rec.firstSeen.UnixNano()/1e6, suffix)
 	pktSizes := rec.pktSizes[:]
 	iats := rec.iatUs[:]
 	durMs := rec.lastSeen.Sub(rec.firstSeen).Seconds() * 1000.0
@@ -1964,6 +2130,131 @@ func (m *ThreatHarvesterManager) ReviewEpisode(id, action string) (*ThreatEpisod
 	return nil, fmt.Errorf("episode %s not found", id)
 }
 
+var (
+	harvesterBlockedV4CIDRs []*net.IPNet
+	harvesterBlockedV6CIDRs []*net.IPNet
+)
+
+func init() {
+	for _, cidr := range []string{
+		"0.0.0.0/8",
+		"169.254.0.0/16",
+	} {
+		if _, ipNet, err := net.ParseCIDR(cidr); err == nil {
+			harvesterBlockedV4CIDRs = append(harvesterBlockedV4CIDRs, ipNet)
+		}
+	}
+	for _, cidr := range []string{
+		"::/128",
+		"fe80::/10",
+		"fec0::/10",
+		"100::/64",
+		"2001:db8::/32",
+		"2001::/32",
+		"2002::/16",
+		"64:ff9b:1::/48",
+	} {
+		if _, ipNet, err := net.ParseCIDR(cidr); err == nil {
+			harvesterBlockedV6CIDRs = append(harvesterBlockedV6CIDRs, ipNet)
+		}
+	}
+}
+
+func isExplicitLoopbackHost(host string) bool {
+	trimmed := strings.TrimSpace(host)
+	if trimmed == "" {
+		return false
+	}
+	if strings.EqualFold(trimmed, "localhost") {
+		return true
+	}
+	if ip := net.ParseIP(trimmed); ip != nil {
+		return ip.IsLoopback()
+	}
+	return false
+}
+
+func isBlockedHarvesterSSRFIP(ip net.IP, allowLoopback bool) bool {
+	if ip == nil {
+		return true
+	}
+	if ip.IsUnspecified() || ip.IsMulticast() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+		return true
+	}
+	if ip.IsLoopback() {
+		return !allowLoopback
+	}
+	if v4 := ip.To4(); v4 != nil {
+		for _, cidr := range harvesterBlockedV4CIDRs {
+			if cidr.Contains(v4) {
+				return true
+			}
+		}
+		return false
+	}
+	for _, cidr := range harvesterBlockedV6CIDRs {
+		if cidr.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+// newHarvesterSafeHTTPClient constructs an HTTP client for outbound harvester
+// integrations that rejects redirects and enforces post-DNS IP filtering
+// against link-local/IMDS, unspecified, and (unless opted in) loopback targets.
+func newHarvesterSafeHTTPClient(timeout time.Duration, allowLoopback bool) *http.Client {
+	dialer := &net.Dialer{
+		Timeout:   10 * time.Second,
+		KeepAlive: 30 * time.Second,
+	}
+	transport := &http.Transport{
+		Proxy: nil,
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			host, port, err := net.SplitHostPort(addr)
+			if err != nil {
+				return nil, fmt.Errorf("invalid outbound address %q: %w", addr, err)
+			}
+			var ips []net.IP
+			if parsed := net.ParseIP(host); parsed != nil {
+				ips = []net.IP{parsed}
+			} else {
+				resolved, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+				if err != nil {
+					return nil, fmt.Errorf("resolve %q: %w", host, err)
+				}
+				for _, r := range resolved {
+					ips = append(ips, r.IP)
+				}
+			}
+			if len(ips) == 0 {
+				return nil, fmt.Errorf("no IP addresses resolved for %q", host)
+			}
+			for _, ip := range ips {
+				if isBlockedHarvesterSSRFIP(ip, allowLoopback) {
+					return nil, fmt.Errorf("blocked SSRF target IP %s for host %q", ip.String(), host)
+				}
+			}
+			var lastErr error
+			for _, ip := range ips {
+				conn, err := dialer.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
+				if err == nil {
+					return conn, nil
+				}
+				lastErr = err
+			}
+			return nil, lastErr
+		},
+	}
+	return &http.Client{
+		Timeout:   timeout,
+		Transport: transport,
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+}
+
 // AnnotateEpisodeWithTeacherLLM calls an OpenAI-compatible Teacher-LLM endpoint
 // with strict hourly call-budget enforcement to refine Silver/ambiguous reasoning.
 //
@@ -1992,6 +2283,11 @@ func (m *ThreatHarvesterManager) AnnotateEpisodeWithTeacherLLM(ctx context.Conte
 	if !cfg.Enabled || strings.TrimSpace(cfg.Endpoint) == "" {
 		return nil, fmt.Errorf("teacher LLM annotator is disabled in configuration")
 	}
+	parsedEndpoint, err := url.Parse(strings.TrimSpace(cfg.Endpoint))
+	if err != nil || (parsedEndpoint.Scheme != "http" && parsedEndpoint.Scheme != "https") || parsedEndpoint.Host == "" {
+		return nil, fmt.Errorf("invalid teacher LLM endpoint URL %q", cfg.Endpoint)
+	}
+	allowLoopback := cfg.AllowLoopback || isExplicitLoopbackHost(parsedEndpoint.Hostname())
 
 	// R4-A-M7: anonymize IPs, SNI, and the Causal DSL before building
 	// the teacher prompt. Fail closed if the anonymizer cannot be
@@ -2047,7 +2343,7 @@ func (m *ThreatHarvesterManager) AnnotateEpisodeWithTeacherLLM(ctx context.Conte
 		"temperature": 0.1,
 	})
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, cfg.Endpoint, bytes.NewReader(reqBody))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, parsedEndpoint.String(), bytes.NewReader(reqBody))
 	if err != nil {
 		return nil, err
 	}
@@ -2056,7 +2352,7 @@ func (m *ThreatHarvesterManager) AnnotateEpisodeWithTeacherLLM(ctx context.Conte
 		req.Header.Set("Authorization", "Bearer "+cfg.ApiKey)
 	}
 
-	client := &http.Client{Timeout: 30 * time.Second}
+	client := newHarvesterSafeHTTPClient(30*time.Second, allowLoopback)
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("teacher LLM request failed: %w", err)
@@ -2326,11 +2622,15 @@ func (m *ThreatHarvesterManager) ShipCorpusToS3(ctx context.Context) (string, er
 	// must opt in explicitly (FleetShipper.AllowPlaintextEndpoint),
 	// and even then the shipment is logged loudly.
 	if baseURL.Scheme != "https" {
-		if !ship.AllowPlaintextEndpoint {
+		if !ship.AllowPlaintextEndpoint || baseURL.Scheme != "http" {
 			return "", fmt.Errorf("refusing to ship corpus to plaintext S3 endpoint %q (scheme %q): set fleetShipper.allowPlaintextEndpoint=true explicitly for a local plaintext endpoint", ship.Endpoint, baseURL.Scheme)
 		}
 		log.Printf("[ThreatHarvester] WARNING: shipping corpus to plaintext S3 endpoint %q (allowPlaintextEndpoint opt-in); the corpus travels unencrypted", ship.Endpoint)
 	}
+	if baseURL.Host == "" {
+		return "", fmt.Errorf("invalid S3 endpoint URL %q: missing host", ship.Endpoint)
+	}
+	allowLoopback := ship.AllowLoopback || (ship.AllowPlaintextEndpoint && isExplicitLoopbackHost(baseURL.Hostname()))
 	if ship.UsePathStyle {
 		baseURL.Path = strings.TrimRight(baseURL.Path, "/") + "/" + ship.Bucket + "/" + keyName
 	} else {
@@ -2379,7 +2679,7 @@ func (m *ThreatHarvesterManager) ShipCorpusToS3(ctx context.Context) (string, er
 			ship.AccessKey, scope, signedHeaders, sig))
 	}
 
-	client := &http.Client{Timeout: 60 * time.Second}
+	client := newHarvesterSafeHTTPClient(60*time.Second, allowLoopback)
 	resp, err := client.Do(req)
 	if err != nil {
 		m.mu.Lock()

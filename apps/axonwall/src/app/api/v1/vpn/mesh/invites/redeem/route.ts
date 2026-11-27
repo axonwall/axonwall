@@ -4,6 +4,7 @@ import { mintSupabaseToken } from '@axonwall/lib/ldap';
 import { DEFAULT_ROLES, type UserSession } from '@axonwall/lib/rbac';
 import { callAgentApiDetailed, callAgentApiResponse } from '@/server/agent-client';
 import { getJwtSecret, SESSION_COOKIE } from '@/server/auth-constants';
+import { getDesiredStateInternal } from '@/server/desired-state-internal';
 import { createPreAuthKey, ensureUser, isHeadscaleSocketReady } from '@/server/headscale';
 import {
   checkInviteRateLimit,
@@ -15,9 +16,23 @@ import {
   resolveClientIp,
   resolveHeadscaleNetworkInfo,
 } from '@/server/headscale-network';
+import { checkPluginApiGuard } from '@/server/plugin-guard';
 import { bumpUserSessionEpoch, stampSessionEpoch } from '@/server/session-revocation';
 
 export async function POST(req: NextRequest) {
+  const pluginGuard = await checkPluginApiGuard('headscale');
+  if (pluginGuard) {
+    pluginGuard.headers.set('Cache-Control', 'no-store');
+    return pluginGuard;
+  }
+  const desiredState = await getDesiredStateInternal().catch(() => null);
+  if (desiredState?.headscale?.enabled !== true) {
+    return NextResponse.json(
+      { status: 'error', error: 'Forbidden: Mesh VPN (Headscale) is currently disabled' },
+      { status: 403, headers: { 'Cache-Control': 'no-store' } }
+    );
+  }
+
   const clientIp = resolveClientIp(req);
   if (!checkInviteRateLimit(clientIp)) {
     return NextResponse.json(
@@ -183,20 +198,22 @@ export async function POST(req: NextRequest) {
       maxAge: 8 * 3600,
     });
 
-    const portalBase = network.portalUrl ? network.portalUrl.replace(/\/+$/, '') : '';
-    const redirectTo = portalBase ? `${portalBase}/vpn` : '/vpn';
+    const redirectTo = '/vpn';
 
-    return NextResponse.json({
-      status: 'ok',
-      redirectTo,
-      portalUrl: network.portalUrl,
-      username: invite.username,
-      starterKey: result.starterKey,
-      headscaleError: result.headscaleError,
-      serverUrl: network.serverUrl,
-      magicDnsDomain: network.magicDnsDomain,
-      quickConnectCommand: buildQuickConnectCommand(network.serverUrl, result.starterKey?.key),
-    });
+    return NextResponse.json(
+      {
+        status: 'ok',
+        redirectTo,
+        portalUrl: network.portalUrl,
+        username: invite.username,
+        starterKey: result.starterKey,
+        headscaleError: result.headscaleError,
+        serverUrl: network.serverUrl,
+        magicDnsDomain: network.magicDnsDomain,
+        quickConnectCommand: buildQuickConnectCommand(network.serverUrl, result.starterKey?.key),
+      },
+      { headers: { 'Cache-Control': 'no-store' } }
+    );
   } catch (err: any) {
     const code = err?.code;
     const status =

@@ -8,23 +8,45 @@ import {
 } from './config.js';
 import { autoSignIfConfigured } from './gpg.js';
 import { saveEvidenceFile } from './evidence.js';
+import { assertSafeOutboundTarget, safeFetch, readResponseWithLimit } from './ssrf.js';
 import { logger } from '../utils/logger.js';
 
 /**
  * Check if BloodHound CE API endpoint is reachable
  * @param {Object} [options]
  * @param {string} [options.url]
- * @returns {Promise<{ reachable: boolean, endpoint: string, error?: string }>}
+ * @returns {Promise<{ reachable: boolean, endpoint: string, status?: number, error?: string }>}
  */
 export async function checkBloodhoundAvailable(options = {}) {
-  const url = options.url || 'http://127.0.0.1:8080/api/v2/health';
+  const isDefaultUrl = !options.url;
+  const rawUrl = options.url || 'http://127.0.0.1:8080/api/v2/health';
+  const validatedTarget = await assertSafeOutboundTarget(rawUrl, {
+    label: 'BloodHound API URL',
+    allowPrivate: options.allowPrivate ?? isDefaultUrl,
+    allowLoopback: options.allowLoopback ?? isDefaultUrl,
+    allowMetadata: false,
+    dnsLookup: options.dnsLookup,
+    failOnDnsError: options.failOnDnsError
+  });
+  const safeUrl = validatedTarget.url.toString();
+
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 2000);
   try {
-    const resp = await fetch(url, { signal: controller.signal });
-    return { reachable: resp.ok, endpoint: url, status: resp.status };
+    const resp = await safeFetch(safeUrl, {
+      signal: controller.signal,
+      redirect: 'error'
+    }, {
+      validatedTarget,
+      allowPrivate: options.allowPrivate ?? isDefaultUrl,
+      allowLoopback: options.allowLoopback ?? isDefaultUrl,
+      allowMetadata: false,
+      maxBytes: options.maxBytes
+    });
+    await readResponseWithLimit(resp, options.maxBytes);
+    return { reachable: resp.ok, endpoint: safeUrl, status: resp.status };
   } catch (err) {
-    return { reachable: false, endpoint: url, error: err.message };
+    return { reachable: false, endpoint: safeUrl, error: err.message };
   } finally {
     clearTimeout(timeout);
   }

@@ -5,6 +5,7 @@ import { clearCachedAgentToken, getAgentToken } from '@/server/agent-client';
 import { getAgentApiSocketPath } from '@/server/dev-paths';
 import { getSession } from '@/server/auth';
 import { assertActionPermitted } from '@/server/auth-guard';
+import { checkPluginApiGuard } from '@/server/plugin-guard';
 
 export async function GET(req: NextRequest) {
   // Live packet capture is privileged telemetry: require a console
@@ -18,6 +19,8 @@ export async function GET(req: NextRequest) {
     const msg = err instanceof Error ? err.message : 'Unauthorized';
     return new Response(msg, { status: msg === 'Unauthorized' ? 401 : 403 });
   }
+  const guard = await checkPluginApiGuard('packet-diagnostics');
+  if (guard) return guard;
 
   const { searchParams } = new URL(req.url);
   const iface = searchParams.get('interface') || 'any';

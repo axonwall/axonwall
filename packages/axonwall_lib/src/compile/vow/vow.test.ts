@@ -216,4 +216,12 @@ spec:
     expect(bundle.argoManifestsYaml).toContain('providerId: axonwall-openldap');
     expect(bundle.argoManifestsYaml).toContain('bindDn: cn=svc-vow,ou=services,dc=edge,dc=corp,dc=io');
   });
+
+  it('defaults VowConfigSchema.defaultRole to viewer instead of admin', async () => {
+    const { VowConfigSchema } = await import('../../schemas/index.js');
+    const vowDefaults = VowConfigSchema.parse({});
+    expect(vowDefaults.defaultRole).toBe('viewer');
+    const { compileVowAuthzYaml } = await import('./index.js');
+    expect(compileVowAuthzYaml(vowDefaults)).toContain('defaultRole: viewer');
+  });
 });

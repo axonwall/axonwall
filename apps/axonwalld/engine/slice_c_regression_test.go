@@ -686,6 +686,7 @@ func TestSliceC_TopologyConfirmGuardAndTargetedPatch(t *testing.T) {
 
 	cfgDir := t.TempDir()
 	tm := NewTopologyManager(cfgDir, nil, nil, nil, nil, nil)
+	tm.SetAllowLoopbackForTest(true)
 	tm.svcRunner = func(context.Context, string) error { return nil }
 	rawCfg, _ := json.Marshal(TopologyRuntimeBundle{
 		Enabled: true,

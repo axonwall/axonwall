@@ -2,13 +2,14 @@ existingSecret: ""
 
 image:
   repository: specterops/bloodhound
-  tag: "latest"
+  tag: "6.3.0"
+  digest: ""
   pullPolicy: IfNotPresent
 
 postgres:
   image:
     repository: postgres
-    tag: "16-alpine"
+    tag: "16.6-alpine"
     pullPolicy: IfNotPresent
   database: bloodhound
   username: bloodhound
@@ -44,6 +45,21 @@ ingress:
     - secretName: bloodhound-tls
       hosts:
         - bloodhound.vigilante.local
+
+podSecurityContext:
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+
+networkPolicy:
+  enabled: true
+  ingressControllerNamespaceSelector:
+    kubernetes.io/metadata.name: kube-system
 
 resources:
   requests:

@@ -497,4 +497,105 @@ axonwall:
     expect(entPkgs).toContain('etckeeper');
     expect(entPkgs).toContain('zsh');
   });
+
+  it('redacts k3s.externalDatastoreEndpoint and credentials in *Url fields while enforcing top-level validators and 0o100600 ISO mode', () => {
+    const state = DesiredStateSchema.parse({
+      k3s: {
+        enabled: true,
+        externalDatastoreEndpoint: 'postgres://k3s_user:pg-super-secret@10.0.0.50:5432/k3s',
+        s3Endpoint: 'https://s3user:s3pass@minio.internal:9000/k3s?X-Amz-Security-Token=amz-tok',
+      },
+      ddns: {
+        enabled: true,
+        entries: [
+          {
+            provider: 'custom',
+            hostname: 'gw.example.com',
+            interface: 'wan',
+            customUpdateUrl: 'https://ddnsuser:ddnspass@dyn.example.com/update?token=ddns-secret-tok',
+          },
+        ],
+      },
+      netflow: {
+        enabled: true,
+        reporting: {
+          enabled: true,
+          webhookUrl: 'https://hooks.slack.com/services/T0001/B0002/slack-webhook-secret',
+        },
+      },
+      threatHarvester: {
+        enabled: true,
+        webhookUrl: 'https://whuser:whpass@hooks.example.com/alert?api_key=alert-secret',
+      },
+      ha: {
+        enabled: true,
+        sqliteSync: {
+          litestreamEndpoint: 'https://lsuser:lspass@s3.example.com/bucket?token=ls-tok',
+        },
+      },
+    });
+
+    const redactedYaml = exportCloudInitYaml({ desiredState: state }, { redactSecrets: true });
+    for (const secret of [
+      'pg-super-secret',
+      'k3s_user',
+      's3user',
+      's3pass',
+      'amz-tok',
+      'ddnsuser',
+      'ddnspass',
+      'ddns-secret-tok',
+      'slack-webhook-secret',
+      'whuser',
+      'whpass',
+      'alert-secret',
+      'lsuser',
+      'lspass',
+      'ls-tok',
+    ]) {
+      expect(redactedYaml).not.toContain(secret);
+    }
+    const parsedRedacted = parseCloudInitYaml(redactedYaml);
+    expect(parsedRedacted.axonwall?.desired_state?.k3s?.externalDatastoreEndpoint).toBe(
+      REDACTED_SECRET_PLACEHOLDER,
+    );
+
+    // Top-level FullCloudInitSchema enforces LINUX_USERNAME and OPENSSH_PUBKEY
+    expect(() => parseCloudInitYaml('#cloud-config\nuser: "bad user;rm"\n')).toThrow();
+    expect(() =>
+      parseCloudInitYaml('#cloud-config\nssh_authorized_keys:\n  - "not-a-valid-ssh-key"\n'),
+    ).toThrow();
+
+    // Rock Ridge PX mode on user-data is 0o100600 (0x8180) and meta-data is 0o100644 (0x81a4)
+    const isoBytes = buildNoCloudIso('#cloud-config\nhostname: mode-test\n', 'instance-id: i-1\n');
+    const findPxModeAfter = (name: string): number | null => {
+      const nameBytes = new TextEncoder().encode(name);
+      for (let i = 0; i < isoBytes.length - nameBytes.length; i++) {
+        let match = true;
+        for (let j = 0; j < nameBytes.length; j++) {
+          if (isoBytes[i + j] !== nameBytes[j]) {
+            match = false;
+            break;
+          }
+        }
+        if (match) {
+          // Search backwards up to 64 bytes inside this directory record for 'PX'
+          for (let k = i - 4; k >= Math.max(0, i - 64); k--) {
+            if (isoBytes[k] === 0x50 && isoBytes[k + 1] === 0x58 && isoBytes[k + 2] === 36) {
+              return (
+                (isoBytes[k + 4]! |
+                  (isoBytes[k + 5]! << 8) |
+                  (isoBytes[k + 6]! << 16) |
+                  (isoBytes[k + 7]! << 24)) >>>
+                0
+              );
+            }
+          }
+        }
+      }
+      return null;
+    };
+    expect(findPxModeAfter('user-data')).toBe(0o100600);
+    expect(findPxModeAfter('meta-data')).toBe(0o100644);
+  });
 });

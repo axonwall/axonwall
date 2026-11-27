@@ -5,11 +5,44 @@
  */
 
 import fs from 'node:fs/promises';
+import { constants as fsConstants } from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { getVigilanteCarveDir, getVigilanteConfigDir } from './config.js';
 import { logger } from '../utils/logger.js';
 import { autoSignIfConfigured } from './gpg.js';
+
+/**
+ * Atomically create and write a carved file without following symlinks or overwriting existing artifacts.
+ * @private
+ */
+async function writeExclusiveCarvedFile(carveDir, baseFilename, fileBuf) {
+  const ext = path.extname(baseFilename);
+  const stem = ext ? baseFilename.slice(0, -ext.length) : baseFilename;
+  const openFlags = fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_WRONLY | (fsConstants.O_NOFOLLOW || 0);
+
+  for (let n = 0; n < 10000; n++) {
+    const candidateName = n === 0 ? baseFilename : `${stem}-${n}${ext}`;
+    const candidatePath = path.join(carveDir, candidateName);
+    let handle;
+    try {
+      handle = await fs.open(candidatePath, openFlags, 0o600);
+      await handle.writeFile(fileBuf);
+      await handle.chmod(0o600).catch(() => {});
+      return { filename: candidateName, carvedPath: candidatePath };
+    } catch (err) {
+      if (err && (err.code === 'EEXIST' || err.code === 'ELOOP')) {
+        continue;
+      }
+      throw err;
+    } finally {
+      if (handle) {
+        await handle.close().catch(() => {});
+      }
+    }
+  }
+  throw new Error(`Exceeded maximum unique filename attempts for '${baseFilename}'`);
+}
 
 /**
  * Carve files from raw PCAP stream buffers or network transaction payloads
@@ -19,7 +52,8 @@ import { autoSignIfConfigured } from './gpg.js';
  */
 export async function carveFilesFromPayload(payloadData, options = {}) {
   const carveDir = options.outputDir || getVigilanteCarveDir();
-  await fs.mkdir(carveDir, { recursive: true });
+  await fs.mkdir(carveDir, { recursive: true, mode: 0o700 });
+  await fs.chmod(carveDir, 0o700).catch(() => {});
 
   const rawStr = Buffer.isBuffer(payloadData) ? payloadData.toString('binary') : String(payloadData);
   const carvedFiles = [];
@@ -67,20 +101,10 @@ export async function carveFilesFromPayload(payloadData, options = {}) {
     const md5 = crypto.createHash('md5').update(fileBuf).digest('hex');
 
     // Two responses carrying the same filename must not overwrite each
-    // other: suffix -1, -2, ... until the target is free.
-    let carvedPath = path.join(carveDir, filename);
-    for (let n = 1; ; n++) {
-      try {
-        await fs.access(carvedPath);
-        const ext = path.extname(filename);
-        const stem = ext ? filename.slice(0, -ext.length) : filename;
-        filename = `${stem}-${n}${ext}`;
-        carvedPath = path.join(carveDir, filename);
-      } catch {
-        break;
-      }
-    }
-    await fs.writeFile(carvedPath, fileBuf);
+    // other: atomically reserve the first free suffix via O_CREAT|O_EXCL|O_NOFOLLOW.
+    const written = await writeExclusiveCarvedFile(carveDir, filename, fileBuf);
+    filename = written.filename;
+    const carvedPath = written.carvedPath;
 
     carvedFiles.push({
       fileId: `carve-${Date.now().toString(36)}-${crypto.randomBytes(3).toString('hex')}`,
@@ -105,12 +129,11 @@ export async function carveFilesFromPayload(payloadData, options = {}) {
       const parts = rawStr.split(smbMarker);
       for (let i = 1; i < parts.length; i++) {
         const smbData = parts[i];
-        const filename = `smb-carved-${Date.now().toString(36)}-${i}.dat`;
+        const baseSmbName = `smb-carved-${Date.now().toString(36)}-${i}.dat`;
         const fileBuf = Buffer.from(smbData, 'binary');
         const sha256 = crypto.createHash('sha256').update(fileBuf).digest('hex');
         const md5 = crypto.createHash('md5').update(fileBuf).digest('hex');
-        const carvedPath = path.join(carveDir, filename);
-        await fs.writeFile(carvedPath, fileBuf);
+        const { filename, carvedPath } = await writeExclusiveCarvedFile(carveDir, baseSmbName, fileBuf);
 
         carvedFiles.push({
           fileId: `carve-smb-${Date.now().toString(36)}-${i}`,

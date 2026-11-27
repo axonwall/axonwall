@@ -1,4 +1,7 @@
 import { NextResponse } from 'next/server';
+import { getSession } from '@/server/auth';
+import { assertActionPermitted } from '@/server/auth-guard';
+import { checkPluginApiGuard } from '@/server/plugin-guard';
 import {
   getK3sRuntimeStatus,
   triggerK3sHaAutoJoin,
@@ -8,6 +11,11 @@ import {
 
 export async function GET() {
   try {
+    const session = await getSession();
+    assertActionPermitted(session);
+    const guard = await checkPluginApiGuard('core-k3s');
+    if (guard) return guard;
+
     const [status, etcdSnapshots] = await Promise.all([
       getK3sRuntimeStatus(),
       getK3sEtcdSnapshotsAction().catch(() => []),
@@ -25,6 +33,11 @@ export async function GET() {
 
 export async function POST(req: Request) {
   try {
+    const session = await getSession();
+    assertActionPermitted(session, 'admin');
+    const guard = await checkPluginApiGuard('core-k3s');
+    if (guard) return guard;
+
     const body = await req.json();
     if (body.action === 'join') {
       const res = await triggerK3sHaAutoJoin();

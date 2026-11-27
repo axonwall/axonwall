@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import fsSync from 'node:fs';
 import path from 'node:path';
 import { getVigilanteCtiDir, ensureVigilanteConfig } from './config.js';
+import { safeFetch, readResponseWithLimit } from './ssrf.js';
 import { logger } from '../utils/logger.js';
 
 // Sample fallback CTI indicators for offline testing / baseline detection
@@ -21,13 +22,24 @@ export const SAMPLE_MALICIOUS_DOMAINS = [
 ];
 
 /**
- * Fetch with timeout helper
+ * Fetch with timeout, SSRF pinning, redirect rejection, and byte-capped reading
  */
-async function fetchWithTimeout(url, timeoutMs = 3000) {
+async function fetchWithTimeout(url, timeoutMs = 3000, options = {}) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const res = await fetch(url, { signal: controller.signal });
+    const res = await safeFetch(url, {
+      signal: controller.signal,
+      redirect: 'error'
+    }, {
+      label: 'CTI feed URL',
+      allowPrivate: options.allowPrivate ?? false,
+      allowLoopback: options.allowLoopback ?? false,
+      allowMetadata: false,
+      dnsLookup: options.dnsLookup,
+      failOnDnsError: options.failOnDnsError,
+      maxBytes: options.maxBytes
+    });
     clearTimeout(timer);
     return res;
   } catch (err) {
@@ -67,14 +79,17 @@ export async function syncFeodoTrackerC2(options = {}) {
   }
   if (!cacheFresh) {
     try {
-      const resp = await fetchWithTimeout('https://feodotracker.abuse.ch/downloads/ipblocklist.json', 2500);
+      const resp = await fetchWithTimeout('https://feodotracker.abuse.ch/downloads/ipblocklist.json', 2500, options);
       if (resp.ok) {
-        const data = await resp.json();
+        const body = await readResponseWithLimit(resp, options.maxBytes);
+        const data = JSON.parse(body);
         const fetchedIps = (Array.isArray(data) ? data : []).map(item => item.ip_address).filter(Boolean);
         if (fetchedIps.length > 0) {
           ips = Array.from(new Set([...ips, ...fetchedIps]));
           logger.info('CTI', `Synchronized ${ips.length} C2 IPs from abuse.ch Feodo Tracker`);
         }
+      } else {
+        await resp.body?.cancel?.().catch(() => {});
       }
     } catch (err) {
       logger.warn('CTI', `Feodo Tracker remote sync offline, using local/cached dataset: ${err.message}`);
@@ -130,12 +145,15 @@ export async function syncUrlhausThreats(options = {}) {
   }
   if (!cacheFresh) {
     try {
-      const resp = await fetchWithTimeout('https://urlhaus.abuse.ch/downloads/json_recent/', 2500);
+      const resp = await fetchWithTimeout('https://urlhaus.abuse.ch/downloads/json_recent/', 2500, options);
       if (resp.ok) {
-        const data = await resp.json();
+        const body = await readResponseWithLimit(resp, options.maxBytes);
+        const data = JSON.parse(body);
         const fetched = Object.values(data).flatMap(item => Array.isArray(item) ? item.map(u => u.url) : []);
         if (fetched.length > 0) urls = Array.from(new Set([...urls, ...fetched]));
         logger.info('CTI', `Synchronized ${urls.length} malicious URLs from abuse.ch URLhaus`);
+      } else {
+        await resp.body?.cancel?.().catch(() => {});
       }
     } catch (err) {
       logger.warn('CTI', `URLhaus remote sync offline, using local dataset: ${err.message}`);
@@ -281,13 +299,15 @@ alert ip any any -> [185.220.101.5] any (msg:"ET DROP Known Cobalt Strike C2 Tra
 
   let ruleContent = defaultRules;
   try {
-    const resp = await fetchWithTimeout('https://rules.emergingthreats.net/open/suricata-7.0.0/emerging-all.rules', 2500);
+    const resp = await fetchWithTimeout('https://rules.emergingthreats.net/open/suricata-7.0.0/emerging-all.rules', 2500, options);
     if (resp.ok) {
-      const text = await resp.text();
+      const text = await readResponseWithLimit(resp, options.maxBytes);
       if (text.length > 1000) {
         ruleContent = text;
         logger.info('CTI', `Updated Suricata signatures (${(text.length / 1024).toFixed(1)} KB)`);
       }
+    } else {
+      await resp.body?.cancel?.().catch(() => {});
     }
   } catch (err) {
     logger.warn('CTI', `Remote ET Open rules download timed out, using baseline rule set: ${err.message}`);

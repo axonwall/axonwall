@@ -1812,6 +1812,20 @@ func (d *DirectoryManager) syncLocalNSSMirrorIfNoSSSD(deletedUser string) {
 	d.applyLocalNSSMirror(deletedUser, ldapUsers, ldapGroups)
 }
 
+func isPrivilegedNSSGroup(name string, gid int) bool {
+	if gid < 1000 || gid == 65534 {
+		return true
+	}
+	return privilegedSystemGroups[name]
+}
+
+func isPrivilegedNSSUser(name string, uid, gid int) bool {
+	if name == "root" || name == "axonwall" || name == "axonwall-api" || name == "sshd" || name == "nobody" {
+		return true
+	}
+	return uid < 1000 || gid < 1000 || uid == 65534 || gid == 65534
+}
+
 func (d *DirectoryManager) applyLocalNSSMirror(deletedUser string, ldapUsers []LocalUser, ldapGroups []LocalGroup) {
 	mirroredUsers, mirroredGroups := loadMirroredNSSState(mirroredNSSStatePath)
 
@@ -1819,11 +1833,11 @@ func (d *DirectoryManager) applyLocalNSSMirror(deletedUser string, ldapUsers []L
 	var activeUsers []string
 	for _, u := range ldapUsers {
 		cleanU := cleanNSSField(u.Username)
-		if !isValidNSSIdent(cleanU) {
+		if !isValidNSSIdent(cleanU) || isPrivilegedNSSUser(cleanU, u.UID, u.GID) {
 			continue
 		}
 		ldapUserByName[cleanU] = u
-		if cleanU != "root" && cleanU != deletedUser {
+		if cleanU != deletedUser {
 			activeUsers = append(activeUsers, cleanU)
 		}
 		if u.HomeDir != "" && u.UID >= 1000 {
@@ -1836,11 +1850,12 @@ func (d *DirectoryManager) applyLocalNSSMirror(deletedUser string, ldapUsers []L
 	var activeGroups []string
 	for _, g := range ldapGroups {
 		cleanG := cleanNSSField(g.Name)
-		if isValidNSSIdent(cleanG) {
-			ldapGroupByName[cleanG] = g
-			if cleanG != deletedUser {
-				activeGroups = append(activeGroups, cleanG)
-			}
+		if !isValidNSSIdent(cleanG) || isPrivilegedNSSGroup(cleanG, g.GID) {
+			continue
+		}
+		ldapGroupByName[cleanG] = g
+		if cleanG != deletedUser {
+			activeGroups = append(activeGroups, cleanG)
 		}
 	}
 	if groupBytes, err := os.ReadFile(etcGroupPath); err == nil {
@@ -1860,12 +1875,17 @@ func (d *DirectoryManager) applyLocalNSSMirror(deletedUser string, ldapUsers []L
 				continue
 			}
 			gName := parts[0]
-			gGID, _ := strconv.Atoi(parts[2])
+			gGID, gErr := strconv.Atoi(parts[2])
 			if deletedUser != "" && gName == deletedUser && mirroredGroups[gName] {
 				continue
 			}
 			if lg, ok := ldapGroupByName[gName]; ok {
 				seenGroups[gName] = true
+				// Never merge LDAP members into low-GID (< 1000) or privileged local system groups.
+				if gErr != nil || isPrivilegedNSSGroup(gName, gGID) {
+					newGroupLines = append(newGroupLines, line)
+					continue
+				}
 				// Merge existing local system members with LDAP members
 				memberMap := make(map[string]bool)
 				var mergedMembers []string
@@ -1899,7 +1919,7 @@ func (d *DirectoryManager) applyLocalNSSMirror(deletedUser string, ldapUsers []L
 		}
 		for _, lg := range ldapGroups {
 			cleanG := cleanNSSField(lg.Name)
-			if !isValidNSSIdent(cleanG) || seenGroups[cleanG] || (deletedUser != "" && cleanG == deletedUser) {
+			if !isValidNSSIdent(cleanG) || isPrivilegedNSSGroup(cleanG, lg.GID) || seenGroups[cleanG] || (deletedUser != "" && cleanG == deletedUser) {
 				continue
 			}
 			var cleanMembers []string
@@ -1941,7 +1961,7 @@ func (d *DirectoryManager) applyLocalNSSMirror(deletedUser string, ldapUsers []L
 			if deletedUser != "" && uName == deletedUser && isTrackedMirror {
 				continue
 			}
-			if lu, ok := ldapUserByName[uName]; ok && uName != "root" {
+			if lu, ok := ldapUserByName[uName]; ok && !isPrivilegedNSSUser(uName, uUID, lu.GID) {
 				seenUsers[uName] = true
 				validUsers[uName] = true
 				gecos := appendAxonwallLDAPTag(cleanNSSField(strings.ReplaceAll(lu.Comment, ":", " ")))
@@ -1961,7 +1981,7 @@ func (d *DirectoryManager) applyLocalNSSMirror(deletedUser string, ldapUsers []L
 		}
 		for _, lu := range ldapUsers {
 			cleanU := cleanNSSField(lu.Username)
-			if !isValidNSSIdent(cleanU) || seenUsers[cleanU] || cleanU == "root" || (deletedUser != "" && cleanU == deletedUser) {
+			if !isValidNSSIdent(cleanU) || isPrivilegedNSSUser(cleanU, lu.UID, lu.GID) || seenUsers[cleanU] || (deletedUser != "" && cleanU == deletedUser) {
 				continue
 			}
 			validUsers[cleanU] = true

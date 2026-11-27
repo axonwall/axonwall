@@ -26,6 +26,22 @@ function normalizeRecordSize(raw: unknown): '4K' | '16K' | '64K' | '128K' | '512
   return '128K';
 }
 
+function normalizeSafeMntPath(rawPath: string): string | null {
+  const trimmed = rawPath.trim();
+  if (!trimmed || /[\0\r\n\\]/.test(trimmed) || !trimmed.startsWith('/')) {
+    return null;
+  }
+  const rawSegments = trimmed.split('/');
+  if (rawSegments.some((seg) => seg === '..')) {
+    return null;
+  }
+  const parts = rawSegments.filter((seg) => seg !== '' && seg !== '.');
+  if (parts.length < 2 || parts[0] !== 'mnt') {
+    return null;
+  }
+  return `/${parts.join('/')}`;
+}
+
 export function importTruenasConfig(content: string): ImportReport {
   const warnings: string[] = [];
   const trimmed = content.trim();
@@ -155,11 +171,16 @@ export function importTruenasConfig(content: string): ImportReport {
     ) as Array<Record<string, unknown>>;
     for (const sh of rawSmb) {
       const name = String(sh.name || '').trim();
-      const path = String(sh.path || '').trim();
-      if (!name || !path) continue;
+      const rawPath = String(sh.path || '').trim();
+      if (!name || !rawPath) continue;
+      const safePath = normalizeSafeMntPath(rawPath);
+      if (!safePath) {
+        warnings.push(`Skipped TrueNAS SMB share "${name}" with unsafe or non-/mnt path "${rawPath}".`);
+        continue;
+      }
       smbShares.push({
         name,
-        path,
+        path: safePath,
         comment: String(sh.comment || '').slice(0, 255),
         readOnly: Boolean(sh.ro || sh.readOnly),
         guestOk: Boolean(sh.guestok || sh.guestOk),
@@ -183,11 +204,12 @@ export function importTruenasConfig(content: string): ImportReport {
       const firstSec = (secArr[0] || 'sys').toLowerCase();
       const secFlavor: 'sys' | 'krb5' | 'krb5i' | 'krb5p' =
         firstSec === 'krb5p' || firstSec === 'krb5i' || firstSec === 'krb5' ? firstSec : 'sys';
+      const explicitRoot = String(ex.maproot_user ?? ex.mapRootUser ?? '').trim().toLowerCase() === 'root';
       nfsExports.push({
         path: rawPath,
         allowedNetworks: nets,
         readOnly: Boolean(ex.ro || ex.readOnly),
-        mapRootUser: ex.maproot_user === 'nobody' ? 'nobody' : 'root',
+        mapRootUser: explicitRoot ? 'root' : 'nobody',
         secFlavor,
         async: false,
         enabled: ex.enabled !== false,
@@ -199,23 +221,52 @@ export function importTruenasConfig(content: string): ImportReport {
     for (const tgt of rawIscsi) {
       const baseName = String(tgt.name || 'target0').replace(/[^a-zA-Z0-9.:-]/g, '-');
       const iqn = baseName.startsWith('iqn.') ? baseName : `iqn.2026-10.io.axonwall:${baseName}`;
-      const rawZvol = String(tgt.zvol || tgt.disk || `/dev/zvol/${pools[0]?.name || 'tank'}/${baseName}`);
+      const rawZvol = String(tgt.zvol || tgt.disk || `/dev/zvol/${pools[0]?.name || 'tank'}/${baseName}`).trim();
+      const candidateZvol = rawZvol.startsWith('/dev/zvol/')
+        ? rawZvol
+        : rawZvol.startsWith('/')
+          ? ''
+          : `/dev/zvol/${rawZvol.replace(/^\/+/, '')}`;
+      if (
+        !candidateZvol ||
+        candidateZvol.includes('..') ||
+        !/^\/dev\/zvol\/[a-zA-Z0-9._-]+\/[a-zA-Z0-9._/-]+$/.test(candidateZvol)
+      ) {
+        warnings.push(`Skipped TrueNAS iSCSI target "${iqn}" with unsafe or non-zvol path "${rawZvol}".`);
+        continue;
+      }
+      const rawInitiators = Array.isArray(tgt.allowedInitiators)
+        ? tgt.allowedInitiators
+        : Array.isArray(tgt.initiators)
+          ? tgt.initiators
+          : [];
+      const allowedInitiators = rawInitiators.map((s) => String(s).trim()).filter(Boolean);
+      const chapUser = String(tgt.chapUser ?? tgt.chap_user ?? '').trim();
+      const chapSecret = String(tgt.chapSecret ?? tgt.chap_secret ?? '').trim();
+      const hasChap = Boolean(chapUser && chapSecret);
+      const isUnprotected = allowedInitiators.length === 0 && !hasChap;
+      if (isUnprotected) {
+        warnings.push(
+          `Imported TrueNAS iSCSI target "${iqn}" with enabled: false because allowedInitiators and CHAP credentials are empty.`,
+        );
+      }
+
       iscsiTargets.push({
         iqn,
         portalIp: '0.0.0.0',
         portalPort: 3260,
-        allowedInitiators: [],
-        chapUser: '',
-        chapSecret: '',
+        allowedInitiators,
+        chapUser,
+        chapSecret,
         luns: [
           {
             lunId: 0,
-            zvolPath: rawZvol.startsWith('/dev/') ? rawZvol : `/dev/zvol/${rawZvol}`,
+            zvolPath: candidateZvol,
             blockSize: '4096',
             readOnly: false,
           },
         ],
-        enabled: true,
+        enabled: isUnprotected ? false : tgt.enabled !== false,
         description: String(tgt.alias || `Imported TrueNAS iSCSI target ${baseName}`).slice(0, 255),
       });
     }
@@ -263,9 +314,15 @@ export function importTruenasConfig(content: string): ImportReport {
     let curShare: Partial<SmbShare> | null = null;
     const flushShare = () => {
       if (curShare && curShare.name && curShare.path) {
+        const safePath = normalizeSafeMntPath(curShare.path);
+        if (!safePath) {
+          warnings.push(`Skipped SMB share "${curShare.name}" with unsafe or non-/mnt path "${curShare.path}".`);
+          curShare = null;
+          return;
+        }
         smbShares.push({
           name: curShare.name,
-          path: curShare.path.startsWith('/mnt/') ? curShare.path : `/mnt/tank/${curShare.name}`,
+          path: safePath,
           comment: curShare.comment || '',
           readOnly: Boolean(curShare.readOnly),
           guestOk: Boolean(curShare.guestOk),
@@ -305,11 +362,12 @@ export function importTruenasConfig(content: string): ImportReport {
           const host = paren === -1 ? spec : spec.slice(0, paren);
           if (host && host !== '*') nets.push(host);
         }
+        const hasNoRootSquash = /(?:[(,])\s*no_root_squash\s*(?:[,)])/.test(line);
         nfsExports.push({
           path: expPath,
           allowedNetworks: nets.length > 0 ? nets : ['192.168.1.0/24'],
           readOnly: line.includes('(ro') || line.includes(',ro,') || line.includes(',ro)'),
-          mapRootUser: line.includes('all_squash') ? 'nobody' : 'root',
+          mapRootUser: hasNoRootSquash ? 'root' : 'nobody',
           secFlavor: line.includes('sec=krb5p') ? 'krb5p' : line.includes('sec=krb5i') ? 'krb5i' : line.includes('sec=krb5') ? 'krb5' : 'sys',
           async: line.includes('async'),
           enabled: true,

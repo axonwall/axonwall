@@ -8,6 +8,7 @@ import {
 } from '../../../../../../server/headscale';
 import { getSession } from '../../../../../../server/auth';
 import { assertActionPermitted } from '../../../../../../server/auth-guard';
+import { checkPluginApiGuard } from '../../../../../../server/plugin-guard';
 
 function mapMeshErrStatus(err: unknown): number {
   if (err instanceof SyntaxError) return 400;
@@ -23,6 +24,8 @@ export async function GET(req: Request) {
   try {
     const session = await getSession();
     assertActionPermitted(session, 'admin');
+    const guard = await checkPluginApiGuard('headscale');
+    if (guard) return guard;
     const { searchParams } = new URL(req.url);
     const user = searchParams.get('user') || undefined;
     const machines = await listMachines(user);
@@ -36,6 +39,8 @@ export async function POST(req: Request) {
   try {
     const session = await getSession();
     assertActionPermitted(session, 'admin');
+    const guard = await checkPluginApiGuard('headscale');
+    if (guard) return guard;
     const body = await req.json();
     if (!body || typeof body !== 'object' || Array.isArray(body)) {
       return NextResponse.json({ status: 'error', error: 'Invalid JSON request body' }, { status: 400 });

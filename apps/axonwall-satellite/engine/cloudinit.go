@@ -36,8 +36,14 @@ type CloudInitWriteFile struct {
 	Permissions string
 }
 
+func isIMDSDatasource(datasource string) bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(datasource)), "imds")
+}
+
 // MergeCloudInitIntoBootConfig merges parsed Cloud-Init metadata, network-config, and user-data
-// into an existing EdgeBootConfig. Values present in Cloud-Init override baked-in UKI defaults.
+// into an existing EdgeBootConfig. Values present in Cloud-Init override baked-in UKI defaults,
+// except unauthenticated IMDS payloads which cannot overwrite pre-populated HubURL, ZtpToken,
+// SatelliteID, existing CA/client certs, firewall policy, or enable InsecureBootstrap.
 func MergeCloudInitIntoBootConfig(base *EdgeBootConfig, payload CloudInitPayload, rootDir string) error {
 	if base == nil {
 		return fmt.Errorf("nil EdgeBootConfig")
@@ -45,6 +51,7 @@ func MergeCloudInitIntoBootConfig(base *EdgeBootConfig, payload CloudInitPayload
 	if rootDir == "" {
 		rootDir = "/"
 	}
+	fromIMDS := isIMDSDatasource(payload.Datasource) || isIMDSDatasource(base.CloudInitSource)
 
 	// 1. Parse meta-data (hostname / instance-id)
 	if strings.TrimSpace(payload.MetaData) != "" {
@@ -74,7 +81,7 @@ func MergeCloudInitIntoBootConfig(base *EdgeBootConfig, payload CloudInitPayload
 
 	// 3. Parse user-data (#cloud-config YAML, JSON, or AXONWALL_* env lines)
 	if strings.TrimSpace(payload.UserData) != "" {
-		if err := ApplyCloudInitUserData(base, payload.UserData, rootDir); err != nil {
+		if err := applyCloudInitUserDataWithOpts(base, payload.UserData, rootDir, fromIMDS); err != nil {
 			return err
 		}
 	}
@@ -139,6 +146,10 @@ func ParseCloudInitMetaData(raw string) (instanceID string, hostname string) {
 // ApplyCloudInitUserData parses #cloud-config YAML, JSON, or key=value user-data
 // and populates EdgeBootConfig as well as writing any provisioned certificates or files.
 func ApplyCloudInitUserData(cfg *EdgeBootConfig, raw string, rootDir string) error {
+	return applyCloudInitUserDataWithOpts(cfg, raw, rootDir, cfg != nil && isIMDSDatasource(cfg.CloudInitSource))
+}
+
+func applyCloudInitUserDataWithOpts(cfg *EdgeBootConfig, raw string, rootDir string, fromIMDS bool) error {
 	if rootDir == "" {
 		rootDir = "/"
 	}
@@ -149,17 +160,17 @@ func ApplyCloudInitUserData(cfg *EdgeBootConfig, raw string, rootDir string) err
 
 	// Support JSON user-data payloads directly
 	if strings.HasPrefix(trimmed, "{") {
-		return applyCloudInitJSON(cfg, trimmed, rootDir)
+		return applyCloudInitJSONWithOpts(cfg, trimmed, rootDir, fromIMDS)
 	}
 
 	lines := strings.Split(strings.ReplaceAll(raw, "\r\n", "\n"), "\n")
 
 	var (
-		inAxonwallSection   bool
-		axonwallIndent      int
-		inInterfacesList    bool
-		inRoutesList        bool
-		inWriteFilesList    bool
+		inAxonwallSection         bool
+		axonwallIndent            int
+		inInterfacesList          bool
+		inRoutesList              bool
+		inWriteFilesList          bool
 		listSectionIndent         int
 		currentBlockKey           string
 		currentBlockIndent        int
@@ -379,7 +390,7 @@ func ApplyCloudInitUserData(cfg *EdgeBootConfig, raw string, rootDir string) err
 		}
 
 		val = unquoteYAML(val)
-		applyScalarConfigKV(cfg, key, val)
+		applyScalarConfigKVWithOpts(cfg, key, val, fromIMDS)
 	}
 
 	flushBlockScalar()
@@ -387,30 +398,36 @@ func ApplyCloudInitUserData(cfg *EdgeBootConfig, raw string, rootDir string) err
 
 	// Write any inline certificates through the symlink-safe O_NOFOLLOW helper
 	if caCertPEM != "" {
-		_ = writeCloudInitFile(cfg, CloudInitWriteFile{
+		if err := writeCloudInitFileWithOpts(cfg, CloudInitWriteFile{
 			Path:        "/etc/axonwall/certs/ca.crt",
 			Content:     strings.TrimSpace(caCertPEM) + "\n",
 			Permissions: "0600",
-		}, rootDir)
+		}, rootDir, fromIMDS); err != nil {
+			slog.Warn("Skipped cloud-init inline ca_cert write", "error", err)
+		}
 	}
 	if clientCertPEM != "" {
-		_ = writeCloudInitFile(cfg, CloudInitWriteFile{
+		if err := writeCloudInitFileWithOpts(cfg, CloudInitWriteFile{
 			Path:        "/etc/axonwall/certs/satellite.crt",
 			Content:     strings.TrimSpace(clientCertPEM) + "\n",
 			Permissions: "0600",
-		}, rootDir)
+		}, rootDir, fromIMDS); err != nil {
+			slog.Warn("Skipped cloud-init inline client_cert write", "error", err)
+		}
 	}
 	if clientKeyPEM != "" {
-		_ = writeCloudInitFile(cfg, CloudInitWriteFile{
+		if err := writeCloudInitFileWithOpts(cfg, CloudInitWriteFile{
 			Path:        "/etc/axonwall/certs/satellite.key",
 			Content:     strings.TrimSpace(clientKeyPEM) + "\n",
 			Permissions: "0600",
-		}, rootDir)
+		}, rootDir, fromIMDS); err != nil {
+			slog.Warn("Skipped cloud-init inline client_key write", "error", err)
+		}
 	}
 
 	// Process write_files entries
 	for _, wf := range writeFiles {
-		if err := writeCloudInitFile(cfg, wf, rootDir); err != nil {
+		if err := writeCloudInitFileWithOpts(cfg, wf, rootDir, fromIMDS); err != nil {
 			slog.Warn("Skipped cloud-init write_files entry", "path", wf.Path, "error", err)
 		}
 	}
@@ -850,7 +867,12 @@ func FetchIMDSCloudInit(ctx context.Context, baseURL string) (CloudInitPayload, 
 	}
 	baseURL = strings.TrimRight(baseURL, "/")
 
-	client := &http.Client{Timeout: 1500 * time.Millisecond}
+	client := &http.Client{
+		Timeout: 1500 * time.Millisecond,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
 
 	// 1. OpenStack / ConfigDrive HTTP / Hetzner / DigitalOcean (/openstack/latest/...)
 	if userData, ok := httpGetString(ctx, client, baseURL+"/openstack/latest/user_data", nil); ok && strings.TrimSpace(userData) != "" {
@@ -1035,6 +1057,10 @@ func httpGetString(ctx context.Context, client *http.Client, reqURL string, head
 }
 
 func applyScalarConfigKV(cfg *EdgeBootConfig, rawKey, val string) {
+	applyScalarConfigKVWithOpts(cfg, rawKey, val, cfg != nil && isIMDSDatasource(cfg.CloudInitSource))
+}
+
+func applyScalarConfigKVWithOpts(cfg *EdgeBootConfig, rawKey, val string, fromIMDS bool) {
 	if val == "" {
 		return
 	}
@@ -1045,17 +1071,34 @@ func applyScalarConfigKV(cfg *EdgeBootConfig, rawKey, val string) {
 
 	switch key {
 	case "hub", "hub_url", "huburl", "core", "core_url", "controller_url", "controllerurl", "ztp_controller_url":
+		if fromIMDS && cfg.HubURL != "" {
+			slog.Warn("Ignoring IMDS attempt to overwrite pre-populated HubURL")
+			return
+		}
 		cfg.HubURL = val
 	case "id", "satellite_id", "satelliteid", "hostname", "fqdn":
+		cleanID := sanitizeIdentifier(val)
 		if key == "hostname" || key == "fqdn" {
-			cfg.Hostname = sanitizeIdentifier(val)
+			if fromIMDS && cfg.Hostname != "" {
+				slog.Warn("Ignoring IMDS attempt to overwrite pre-populated Hostname")
+			} else {
+				cfg.Hostname = cleanID
+			}
 			if cfg.SatelliteID == "" {
-				cfg.SatelliteID = sanitizeIdentifier(val)
+				cfg.SatelliteID = cleanID
 			}
 		} else {
-			cfg.SatelliteID = sanitizeIdentifier(val)
+			if fromIMDS && cfg.SatelliteID != "" {
+				slog.Warn("Ignoring IMDS attempt to overwrite pre-populated SatelliteID")
+				return
+			}
+			cfg.SatelliteID = cleanID
 		}
 	case "token", "ztp_token", "ztptoken", "enrollment_token", "enrollmenttoken", "ztp_enrollment_token":
+		if fromIMDS && cfg.ZtpToken != "" {
+			slog.Warn("Ignoring IMDS attempt to overwrite pre-populated ZtpToken")
+			return
+		}
 		cfg.ZtpToken = val
 	case "sku", "sku_profile", "skuprofile":
 		cfg.SkuProfile = val
@@ -1066,6 +1109,10 @@ func applyScalarConfigKV(cfg *EdgeBootConfig, rawKey, val string) {
 			cfg.WatchdogSec = sec
 		}
 	case "insecure_bootstrap", "insecurebootstrap":
+		if fromIMDS {
+			slog.Warn("Ignoring IMDS attempt to enable insecure_bootstrap")
+			return
+		}
 		cfg.InsecureBootstrap = (val == "1" || strings.EqualFold(val, "true") || strings.EqualFold(val, "yes"))
 	case "wan", "lan", "mgmt":
 		if spec, ok := parseInterfaceBootArg(key, val); ok {
@@ -1143,6 +1190,19 @@ func applyWriteFileKV(wf *CloudInitWriteFile, line string) bool {
 }
 
 func writeCloudInitFile(cfg *EdgeBootConfig, wf CloudInitWriteFile, rootDir string) error {
+	return writeCloudInitFileWithOpts(cfg, wf, rootDir, cfg != nil && isIMDSDatasource(cfg.CloudInitSource))
+}
+
+func isProtectedIMDSCertPath(cleanRel string) bool {
+	switch cleanRel {
+	case "/etc/axonwall/certs/ca.crt", "/etc/axonwall/certs/satellite.crt", "/etc/axonwall/certs/satellite.key":
+		return true
+	default:
+		return false
+	}
+}
+
+func writeCloudInitFileWithOpts(cfg *EdgeBootConfig, wf CloudInitWriteFile, rootDir string, fromIMDS bool) error {
 	cleanRel := filepath.Clean("/" + strings.TrimSpace(wf.Path))
 	// Restrict cloud-init write_files to safe configuration paths in RAM
 	allowedExactFiles := []string{
@@ -1171,6 +1231,9 @@ func writeCloudInitFile(cfg *EdgeBootConfig, wf CloudInitWriteFile, rootDir stri
 	}
 	if !allowed {
 		return fmt.Errorf("path %q outside allowed /etc/axonwall scope", cleanRel)
+	}
+	if fromIMDS && cleanRel == "/etc/nftables.conf" {
+		return fmt.Errorf("refusing IMDS write to firewall policy %q", cleanRel)
 	}
 
 	rawBytes := []byte(wf.Content)
@@ -1241,6 +1304,12 @@ func writeCloudInitFile(cfg *EdgeBootConfig, wf CloudInitWriteFile, rootDir stri
 	destPath := filepath.Join(rootClean, strings.TrimPrefix(cleanRel, "/"))
 	if fi, lerr := os.Lstat(destPath); lerr == nil && fi.Mode()&os.ModeSymlink != 0 {
 		return fmt.Errorf("refusing symlink target %q during cloud-init write_files", destPath)
+	} else if fromIMDS && isProtectedIMDSCertPath(cleanRel) {
+		if lerr == nil {
+			return fmt.Errorf("refusing IMDS overwrite of existing certificate %q", cleanRel)
+		} else if !os.IsNotExist(lerr) {
+			return lerr
+		}
 	}
 	f, err := os.OpenFile(destPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, perm)
 	if err != nil {
@@ -1265,7 +1334,7 @@ func writeCloudInitFile(cfg *EdgeBootConfig, wf CloudInitWriteFile, rootDir stri
 				continue
 			}
 			parts := strings.SplitN(line, "=", 2)
-			applyScalarConfigKV(cfg, parts[0], unquoteYAML(strings.TrimSpace(parts[1])))
+			applyScalarConfigKVWithOpts(cfg, parts[0], unquoteYAML(strings.TrimSpace(parts[1])), fromIMDS)
 		}
 	}
 
@@ -1351,6 +1420,10 @@ func applyCloudInitJSONArray(cfg *EdgeBootConfig, key string, arr []interface{})
 }
 
 func applyCloudInitJSON(cfg *EdgeBootConfig, rawJSON, rootDir string) error {
+	return applyCloudInitJSONWithOpts(cfg, rawJSON, rootDir, cfg != nil && isIMDSDatasource(cfg.CloudInitSource))
+}
+
+func applyCloudInitJSONWithOpts(cfg *EdgeBootConfig, rawJSON, rootDir string, fromIMDS bool) error {
 	var doc map[string]interface{}
 	if err := json.Unmarshal([]byte(rawJSON), &doc); err != nil {
 		return err
@@ -1358,25 +1431,31 @@ func applyCloudInitJSON(cfg *EdgeBootConfig, rawJSON, rootDir string) error {
 	writeInlineCert := func(normKey, val string) bool {
 		switch normKey {
 		case "cacert", "cacertpem":
-			_ = writeCloudInitFile(cfg, CloudInitWriteFile{
+			if err := writeCloudInitFileWithOpts(cfg, CloudInitWriteFile{
 				Path:        "/etc/axonwall/certs/ca.crt",
 				Content:     strings.TrimSpace(val) + "\n",
 				Permissions: "0600",
-			}, rootDir)
+			}, rootDir, fromIMDS); err != nil {
+				slog.Warn("Skipped JSON cloud-init ca_cert write", "error", err)
+			}
 			return true
 		case "clientcert", "clientcertpem", "satellitecert":
-			_ = writeCloudInitFile(cfg, CloudInitWriteFile{
+			if err := writeCloudInitFileWithOpts(cfg, CloudInitWriteFile{
 				Path:        "/etc/axonwall/certs/satellite.crt",
 				Content:     strings.TrimSpace(val) + "\n",
 				Permissions: "0600",
-			}, rootDir)
+			}, rootDir, fromIMDS); err != nil {
+				slog.Warn("Skipped JSON cloud-init client_cert write", "error", err)
+			}
 			return true
 		case "clientkey", "clientkeypem", "satellitekey":
-			_ = writeCloudInitFile(cfg, CloudInitWriteFile{
+			if err := writeCloudInitFileWithOpts(cfg, CloudInitWriteFile{
 				Path:        "/etc/axonwall/certs/satellite.key",
 				Content:     strings.TrimSpace(val) + "\n",
 				Permissions: "0600",
-			}, rootDir)
+			}, rootDir, fromIMDS); err != nil {
+				slog.Warn("Skipped JSON cloud-init client_key write", "error", err)
+			}
 			return true
 		}
 		return false
@@ -1387,12 +1466,12 @@ func applyCloudInitJSON(cfg *EdgeBootConfig, rawJSON, rootDir string) error {
 			switch tv := v.(type) {
 			case string:
 				if !writeInlineCert(normKey, tv) {
-					applyScalarConfigKV(cfg, k, tv)
+					applyScalarConfigKVWithOpts(cfg, k, tv, fromIMDS)
 				}
 			case bool:
-				applyScalarConfigKV(cfg, k, strconv.FormatBool(tv))
+				applyScalarConfigKVWithOpts(cfg, k, strconv.FormatBool(tv), fromIMDS)
 			case float64:
-				applyScalarConfigKV(cfg, k, strconv.FormatFloat(tv, 'f', -1, 64))
+				applyScalarConfigKVWithOpts(cfg, k, strconv.FormatFloat(tv, 'f', -1, 64), fromIMDS)
 			case []interface{}:
 				if normKey == "writefiles" {
 					for _, item := range tv {
@@ -1404,7 +1483,7 @@ func applyCloudInitJSON(cfg *EdgeBootConfig, rawJSON, rootDir string) error {
 						if err := json.Unmarshal(raw, &wf); err != nil || wf.Path == "" {
 							continue
 						}
-						if err := writeCloudInitFile(cfg, wf, rootDir); err != nil {
+						if err := writeCloudInitFileWithOpts(cfg, wf, rootDir, fromIMDS); err != nil {
 							slog.Warn("Skipped JSON cloud-init write_files entry", "path", wf.Path, "error", err)
 						}
 					}

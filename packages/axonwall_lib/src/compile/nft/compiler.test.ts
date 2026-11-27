@@ -660,5 +660,32 @@ describe('Axonwall nftables Compiler — Device Validation and Flowtable Handlin
     expect(customCompiled.nftScript).toContain('tcp dport 22 accept comment "Allow SSH on wg0"');
     expect(customCompiled.nftScript).not.toContain('iifname "wg0" accept comment "wireguard-tunnel-input"');
   });
+
+  it('validates SatelliteNodeSchema id & metrics.skuProfile and sanitizes node.id/skuProfile in compileSatelliteNftables (SEC-H12)', async () => {
+    const { SatelliteNodeSchema } = await import('../../schemas/index.js');
+    expect(() => SatelliteNodeSchema.parse({ id: 'sat-1\nflush ruleset', name: 'bad' })).toThrow();
+    expect(() =>
+      SatelliteNodeSchema.parse({
+        id: 'sat-1',
+        name: 'bad-sku',
+        metrics: { skuProfile: 'evil\ncomment' as any },
+      }),
+    ).toThrow();
+    expect(() =>
+      SatelliteNodeSchema.parse({
+        id: 'sat_01.edge-a',
+        name: 'good',
+        metrics: { skuProfile: 'generic-edge' },
+      }),
+    ).not.toThrow();
+
+    const sanitized = compileSatelliteNftables({
+      id: 'sat-1\nflush ruleset; #',
+      skuProfile: 'sku-vm-virtio\nadd rule',
+    });
+    expect(sanitized.nftScript).toContain('# Node: sat-1_flush_ruleset___ | Role: satellite | SKU: sku-vm-virtio_add_rule');
+    expect(sanitized.nftScript).not.toContain('\nflush ruleset;');
+    expect(sanitized.nftScript).not.toContain('\nadd rule');
+  });
 });
 

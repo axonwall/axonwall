@@ -13,24 +13,28 @@ ConditionKernelCommandLine=!axonwall.unattended=1
 [Service]
 Type=simple
 User=axonwall-headscale
-Group=axonwall-api
+Group=axonwall-headscale
 Environment="HEADSCALE_CONFIG=/etc/headscale/config.yaml"
 ExecStart=/usr/sbin/headscale serve
 Restart=always
 RestartSec=5
 LimitNOFILE=65536
 LimitNPROC=65536
+LimitCORE=0
 
 # Sandbox capabilities
+NoNewPrivileges=true
+CapabilityBoundingSet=
 ProtectSystem=strict
 ProtectHome=yes
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectControlGroups=yes
 PrivateTmp=yes
-# headscale requires capability to bind ports, etc. or we can just run it under standard user and allow high ports, 
-# but it might need to interact with wg tunnels if derp is configured, though mostly it's just HTTP/gRPC API.
-# Axonwall data is stored in /var/lib/axonwall
+RestrictSUIDSGID=true
+LockPersonality=true
+# headscale serves HTTP/gRPC on localhost (127.0.0.1:8080/9090/50443/3478) and /run/headscale/headscale.sock.
+# Axonwall data is stored in /var/lib/axonwall/headscale.
 RuntimeDirectory=headscale
 RuntimeDirectoryMode=0770
 RuntimeDirectoryPreserve=yes

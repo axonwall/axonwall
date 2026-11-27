@@ -1,8 +1,9 @@
 [Unit]
 Description=Axonwall Vault storage (SeaweedFS)
 Documentation=https://github.com/seaweedfs/seaweedfs
-After=network-online.target axonwall-vault-firstboot.service
+After=network-online.target nftables.service axonwall-vault-firstboot.service
 Wants=network-online.target
+Requires=nftables.service
 # Enabled in the image but inert until firstboot has written the S3
 # identity config; the ordering edge lives here (never in the firstboot
 # unit) so no service ever starts a unit it is ordered against.
@@ -23,20 +24,24 @@ Group=axonwall-vault
 #                                    AWS semantics; the upstream default
 #                                    (true) destroys non-empty buckets
 #   -s3.autoCreateBucket=false       bucket creation is a provisioning act
-# Only the S3 port (8333, TLS) is reachable from the LAN; the static
-# nftables ruleset (/etc/nftables.conf) drops the master (9333), volume
-# (8080), filer (8888/18888) and auxiliary (8181/9101) listeners, which
-# are the store's root-equivalent admin domain.
+# Only the S3 port (8333, TLS) binds 0.0.0.0 behind nftables.service; the
+# master (9333/19333), volume (8080/18080), and filer (8888/18888)
+# admin listeners are bound strictly to 127.0.0.1, and auxiliary Iceberg
+# (8181) / Lance (9101) listeners are disabled.
 ExecStart=/usr/sbin/weed server \
   -dir=/var/lib/axonwall/vault \
-  -ip.bind=0.0.0.0 \
+  -ip=127.0.0.1 \
+  -ip.bind=127.0.0.1 \
   -master.port=9333 \
   -volume.port=8080 \
   -master.volumeSizeLimitMB=5120 \
   -filer.port=8888 \
   -filer.disableHttp=true \
   -s3 \
+  -s3.ip.bind=0.0.0.0 \
   -s3.port=8333 \
+  -s3.port.iceberg=0 \
+  -s3.port.lance=0 \
   -s3.config=/etc/axonwall/seaweedfs-s3.json \
   -s3.allowDeleteBucketNotEmpty=false \
   -s3.autoCreateBucket=false \
@@ -48,6 +53,20 @@ RestartSec=5
 # do not SIGKILL it into a half-drained state.
 TimeoutStopSec=90
 LimitNOFILE=65536
+LimitCORE=0
+
+# Sandboxing
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/axonwall/vault
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+CapabilityBoundingSet=
+RestrictSUIDSGID=true
+LockPersonality=true
 
 [Install]
 WantedBy=multi-user.target

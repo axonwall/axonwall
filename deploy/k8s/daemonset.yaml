@@ -14,8 +14,12 @@ spec:
       labels:
         app.kubernetes.io/name: axonwall-node-firewall
     spec:
+      automountServiceAccountToken: false
       hostNetwork: true
       dnsPolicy: ClusterFirstWithHostNet
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
       tolerations:
         - operator: Exists
       containers:
@@ -30,12 +34,16 @@ spec:
                   name: axonwall-auth-secret
                   key: agent-token
           securityContext:
-            privileged: true
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
             capabilities:
+              drop:
+                - ALL
               add:
                 - NET_ADMIN
                 - NET_RAW
-                - SYS_ADMIN
+                - BPF
+                - PERFMON
           resources:
             limits:
               cpu: 500m
@@ -44,6 +52,10 @@ spec:
               cpu: 50m
               memory: 64Mi
           volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: run
+              mountPath: /run
             - name: run-socket
               mountPath: /run/axonwalld
             - name: var-lib
@@ -52,6 +64,10 @@ spec:
               mountPath: /lib/modules
               readOnly: true
       volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: run
+          emptyDir: {}
         - name: run-socket
           hostPath:
             path: /run/axonwalld

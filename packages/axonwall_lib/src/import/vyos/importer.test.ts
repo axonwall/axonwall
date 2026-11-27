@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { importVyosConfig } from './index.js';
 import { compileNftables } from '../../compile/nft/index.js';
+import { DesiredStateSchema } from '../../schemas/index.js';
 
 const SAMPLE_VYOS_BOOT = `
 system {
@@ -164,5 +165,97 @@ firewall {
     expect(report.state.rules[1]!.action).toBe('block');
     expect(report.state.rules[1]!.destinationPort).toBe('53');
     expect(report.state.rules[1]!.enabled).toBe(false);
+    expect(() => DesiredStateSchema.parse(report.state)).not.toThrow();
+  });
+
+  it('preserves DNAT and SNAT source/destination/port filters and fails closed on negated/exclude NAT [SEC-H20]', () => {
+    const report = importVyosConfig(`
+firewall {
+    group {
+        address-group Partner_IPs {
+            address 203.0.113.10
+            address 203.0.113.20
+        }
+    }
+}
+nat {
+    destination {
+        rule 10 {
+            inbound-interface eth0
+            protocol tcp
+            source {
+                group {
+                    address-group Partner_IPs
+                }
+                port 1024-65535
+            }
+            destination {
+                address 198.51.100.10
+                port 8443
+            }
+            translation {
+                address 192.168.20.50
+                port 443
+            }
+        }
+        rule 20 {
+            inbound-interface eth0
+            protocol tcp
+            source {
+                address !10.0.0.0/8
+            }
+            destination {
+                port 80
+            }
+            translation {
+                address 192.168.20.51
+                port 80
+            }
+        }
+    }
+    source {
+        rule 100 {
+            outbound-interface eth0
+            protocol tcp
+            source {
+                address 192.168.20.0/24
+                port 1024-65535
+            }
+            destination {
+                address 198.51.100.200
+                port 443
+            }
+            translation {
+                address 198.51.100.1
+            }
+        }
+    }
+}
+`);
+    expect(report.natRulesCount).toBe(3);
+
+    const dnat = report.state.nat[0]!;
+    expect(dnat.type).toBe('dnat');
+    expect(dnat.source).toBe('$Partner_IPs');
+    expect(dnat.sourcePort).toBe('1024-65535');
+    expect(dnat.destination).toBe('198.51.100.10');
+    expect(dnat.destinationPort).toBe('8443');
+    expect(dnat.targetIp).toBe('192.168.20.50');
+    expect(dnat.targetPort).toBe('443');
+    expect(dnat.enabled).toBe(true);
+
+    const negatedDnat = report.state.nat[1]!;
+    expect(negatedDnat.enabled).toBe(false);
+    expect(report.warnings.length).toBeGreaterThanOrEqual(1);
+
+    const snat = report.state.nat[2]!;
+    expect(snat.type).toBe('snat');
+    expect(snat.source).toBe('192.168.20.0/24');
+    expect(snat.sourcePort).toBe('1024-65535');
+    expect(snat.destination).toBe('198.51.100.200');
+    expect(snat.destinationPort).toBe('443');
+    expect(snat.targetIp).toBe('198.51.100.1');
+
+    expect(() => DesiredStateSchema.parse(report.state)).not.toThrow();
   });
 });

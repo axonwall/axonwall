@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
 import { FirewallRuleSchema, FORBIDDEN_RING0_BPF_PROGS } from '../schemas/index.js';
 import { HOSTED_EDGE_VM_ID, HOSTED_EDGE_VMID, HOSTED_EDGE_VM_NAME } from '../compile/virt/index.js';
+import { isValidCIDR, isValidIPv4, isValidIPv6 } from '../util/index.js';
 
 // ============================================================================
 // 1. MCP Capability Scopes & Policy Limits
@@ -144,9 +145,11 @@ export const McpBlackholeRequestSchema = z.object({
 });
 export type McpBlackholeRequest = z.infer<typeof McpBlackholeRequestSchema>;
 
+const SAFE_MCP_IFACE_REGEX = /^[a-zA-Z0-9_.:-]+$/;
+
 export const McpShapeRequestSchema = z.object({
   target: z.string().min(3).max(64),
-  interface: z.string().max(32).default('wan'),
+  interface: z.string().min(1).max(32).regex(SAFE_MCP_IFACE_REGEX, 'Invalid interface name').default('wan'),
   direction: z.enum(['both', 'egress', 'ingress']).default('both'),
   rateKbps: z.number().int().min(8).max(10_000_000),
   ceilKbps: z.number().int().min(8).max(10_000_000).optional(),
@@ -187,9 +190,17 @@ export const McpDnsSinkholeRequestSchema = z.object({
 export type McpDnsSinkholeRequest = z.infer<typeof McpDnsSinkholeRequestSchema>;
 
 export const McpPcapSampleRequestSchema = z.object({
-  interface: z.string().min(1).max(32).default('wan'),
-  srcIp: z.string().max(64).optional(),
-  dstIp: z.string().max(64).optional(),
+  interface: z.string().min(1).max(32).regex(SAFE_MCP_IFACE_REGEX, 'Invalid interface name').default('wan'),
+  srcIp: z
+    .string()
+    .max(64)
+    .refine((v) => isValidIPv4(v) || isValidIPv6(v) || isValidCIDR(v), 'Invalid srcIp IP/CIDR')
+    .optional(),
+  dstIp: z
+    .string()
+    .max(64)
+    .refine((v) => isValidIPv4(v) || isValidIPv6(v) || isValidCIDR(v), 'Invalid dstIp IP/CIDR')
+    .optional(),
   protocol: z.enum(['any', 'tcp', 'udp', 'icmp', 'icmp6', 'arp']).default('any'),
   port: z.number().int().min(1).max(65535).optional(),
   maxPackets: z.number().int().min(1).max(100).default(25),
@@ -472,12 +483,16 @@ export interface ParsedIpOrCidr {
   isSingleHost: boolean;
 }
 
+function uint32ToIpv4(v: number): string {
+  return `${(v >>> 24) & 0xff}.${(v >>> 16) & 0xff}.${(v >>> 8) & 0xff}.${v & 0xff}`;
+}
+
 export function parseIpv4ToUint32(ip: string): number | null {
   const parts = ip.trim().split('.');
   if (parts.length !== 4) return null;
   let result = 0;
   for (const p of parts) {
-    if (!/^\d{1,3}$/.test(p)) return null;
+    if (!/^(0|[1-9]\d{0,2})$/.test(p)) return null;
     const n = Number(p);
     if (n < 0 || n > 255) return null;
     result = ((result << 8) | n) >>> 0;
@@ -534,11 +549,12 @@ export function parseIpOrCidr(input: string): ParsedIpOrCidr | null {
       if (rawPrefix < 0 || rawPrefix > 128) return null;
       v4Prefix = rawPrefix >= 96 ? rawPrefix - 96 : rawPrefix <= 32 ? rawPrefix : 0;
     }
+    const canonicalV4 = uint32ToIpv4(v4Val);
     return {
       family: 4,
-      address: v4Addr,
+      address: canonicalV4,
       prefixLen: v4Prefix,
-      normalizedCidr: `${v4Addr}/${v4Prefix}`,
+      normalizedCidr: `${canonicalV4}/${v4Prefix}`,
       isSingleHost: v4Prefix === 32,
     };
   }
@@ -578,15 +594,16 @@ export function parseIpOrCidr(input: string): ParsedIpOrCidr | null {
   if (v4Val === null) return null;
   let prefixLen = 32;
   if (prefixPart !== null) {
-    if (!/^\d{1,2}$/.test(prefixPart)) return null;
+    if (!/^(0|[1-9]\d?)$/.test(prefixPart)) return null;
     prefixLen = Number(prefixPart);
     if (prefixLen < 0 || prefixLen > 32) return null;
   }
+  const canonicalV4 = uint32ToIpv4(v4Val);
   return {
     family: 4,
-    address: addrPart,
+    address: canonicalV4,
     prefixLen,
-    normalizedCidr: `${addrPart}/${prefixLen}`,
+    normalizedCidr: `${canonicalV4}/${prefixLen}`,
     isSingleHost: prefixLen === 32,
   };
 }

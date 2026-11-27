@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getSession } from '@/server/auth';
 import { assertMeshSelfServicePermitted } from '@/server/auth-guard';
 import { getDesiredStateInternal } from '@/server/desired-state-internal';
+import { checkPluginApiGuard } from '@/server/plugin-guard';
 import {
   ensureUser,
   isHeadscaleSocketReady,
@@ -24,6 +25,8 @@ export async function GET(req: NextRequest) {
   try {
     const session = await getSession();
     assertMeshSelfServicePermitted(session);
+    const pluginGuard = await checkPluginApiGuard('headscale');
+    if (pluginGuard) return pluginGuard;
 
     const headscaleUser = resolveHeadscaleUsername(session);
     const [network, state] = await Promise.all([

@@ -67,6 +67,7 @@ import {
   computeClusterCapacitySummary,
   type K3sPulseHistoryPoint,
 } from '@/lib/k3s-visuals';
+import { matchFilterHaystack } from '@/lib/regex-safe';
 
 type ViewMode = 'explorer' | 'pulse' | 'topology';
 
@@ -98,8 +99,7 @@ const KEYBOARD_SHORTCUTS: { key: string; desc: string }[] = [
 ];
 
 function matchFilterQuery(item: K3sResourceItem, rawQuery: string): boolean {
-  const q = rawQuery.trim();
-  if (!q) return true;
+  if (!rawQuery.trim()) return true;
   const hay = [
     item.name,
     item.namespace || '',
@@ -111,23 +111,7 @@ function matchFilterQuery(item: K3sResourceItem, rawQuery: string): boolean {
     .join(' ')
     .toLowerCase();
 
-  const neg = q.startsWith('!');
-  const expr = neg ? q.slice(1).trim() : q;
-  if (!expr) return true;
-
-  let matched = false;
-  if (expr.startsWith('/') && expr.endsWith('/') && expr.length > 2) {
-    try {
-      const re = new RegExp(expr.slice(1, -1), 'i');
-      matched = re.test(hay);
-    } catch {
-      matched = hay.includes(expr.toLowerCase());
-    }
-  } else {
-    const terms = expr.toLowerCase().split(/\s+/).filter(Boolean);
-    matched = terms.every((t) => hay.includes(t));
-  }
-  return neg ? !matched : matched;
+  return matchFilterHaystack(hay, rawQuery);
 }
 
 export function K9sExplorerWorkbench() {

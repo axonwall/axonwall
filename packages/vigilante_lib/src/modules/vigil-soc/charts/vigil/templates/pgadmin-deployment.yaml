@@ -23,11 +23,18 @@ spec:
       serviceAccountName: {{ include "vigil.serviceAccountName" . }}
       {{- include "vigil.imagePullSecrets" . | nindent 6 }}
       securityContext:
+        runAsNonRoot: true
+        runAsUser: 5050
+        runAsGroup: 5050
         fsGroup: 5050
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: pgadmin
           image: "{{ .Values.pgadmin.image.repository }}:{{ .Values.pgadmin.image.tag }}"
           imagePullPolicy: {{ .Values.pgadmin.image.pullPolicy | default "IfNotPresent" }}
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
           env:
             - name: PGADMIN_DEFAULT_EMAIL
               value: {{ .Values.pgadmin.auth.email | quote }}
@@ -37,7 +44,7 @@ spec:
                   name: {{ .Values.pgadmin.auth.existingSecret | default (printf "%s-pgadmin" (include "vigil.fullname" .)) }}
                   key: PGADMIN_DEFAULT_PASSWORD
             - name: PGADMIN_CONFIG_SERVER_MODE
-              value: "False"
+              value: "True"
           ports:
             - name: http
               containerPort: 80

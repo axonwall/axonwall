@@ -1,3 +1,4 @@
+{{- $secretName := .Values.existingSecret | default (printf "%s-secrets" (include "wazuh.fullname" .)) -}}
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -22,11 +23,23 @@ spec:
         app.kubernetes.io/component: manager
         app.kubernetes.io/instance: {{ .Release.Name }}
     spec:
+      automountServiceAccountToken: false
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
       hostname: wazuh-manager
       initContainers:
         - name: wait-for-indexer
           image: {{ .Values.images.busybox }}
           imagePullPolicy: {{ .Values.imagePullPolicy }}
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65534
+            runAsGroup: 65534
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
           command: ["/bin/sh", "-c"]
           args:
             - |
@@ -44,6 +57,19 @@ spec:
         - name: wazuh-manager
           image: {{ .Values.images.manager }}
           imagePullPolicy: {{ .Values.imagePullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+              add:
+                - CHOWN
+                - DAC_OVERRIDE
+                - FOWNER
+                - SETGID
+                - SETUID
+                - KILL
+                - NET_BIND_SERVICE
           env:
             - name: HOSTNAME
               value: wazuh-manager
@@ -52,7 +78,10 @@ spec:
             - name: INDEXER_USERNAME
               value: {{ .Values.credentials.indexerUsername | quote }}
             - name: INDEXER_PASSWORD
-              value: {{ .Values.credentials.indexerPassword | quote }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretName }}
+                  key: INDEXER_PASSWORD
             - name: FILEBEAT_SSL_VERIFICATION_MODE
               value: full
             - name: SSL_CERTIFICATE_AUTHORITIES
@@ -64,7 +93,10 @@ spec:
             - name: API_USERNAME
               value: {{ .Values.credentials.apiUsername | quote }}
             - name: API_PASSWORD
-              value: {{ .Values.credentials.apiPassword | quote }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretName }}
+                  key: API_PASSWORD
           ports:
             - name: events
               containerPort: 1514

@@ -4,6 +4,14 @@
 # =============================================================================
 set -euo pipefail
 
+LBR_TMP_DIR=""
+cleanup_lbr() {
+  if [[ -n "${LBR_TMP_DIR:-}" ]]; then
+    rm -rf "$LBR_TMP_DIR"
+  fi
+}
+trap cleanup_lbr EXIT INT TERM
+
 echo "=== [1] Checking Kernel Taint & Offensive BPF Helper Warnings ==="
 cat /proc/sys/kernel/tainted 2>/dev/null || true
 dmesg 2>/dev/null | grep -iE "bpf_probe_write_user|bpf_override_return|taint" | tail -n 20 || echo "[+] No dmesg helper warnings."
@@ -33,10 +41,14 @@ fi
 
 echo -e "\n=== [5] Sampling Silicon Hardware PMU Last Branch Records (Intel LBR / AMD BRS) ==="
 if command -v perf >/dev/null 2>&1; then
-  perf record -e branches:k -j any,k -a -o /tmp/axonwall-lbr.data -- sleep 1 >/dev/null 2>&1 && \
-    perf script -i /tmp/axonwall-lbr.data --fields comm,pid,brstacksym 2>/dev/null | grep -E "bpf_trampoline|bpf_prog_" | head -n 20 || \
+  LBR_TMP_DIR="$(umask 077 && mktemp -d /tmp/axonwall-lbr.XXXXXX)"
+  chmod 0700 "$LBR_TMP_DIR"
+  LBR_DATA="${LBR_TMP_DIR}/axonwall-lbr.data"
+  perf record -e branches:k -j any,k -a -o "$LBR_DATA" -- sleep 1 >/dev/null 2>&1 && \
+    perf script -i "$LBR_DATA" --fields comm,pid,brstacksym 2>/dev/null | grep -E "bpf_trampoline|bpf_prog_" | head -n 20 || \
     echo "[+] No unexpected PMU LBR jumps into bpf_trampoline detected (or PMU LBR unsupported in VM)."
-  rm -f /tmp/axonwall-lbr.data
+  rm -rf "$LBR_TMP_DIR"
+  LBR_TMP_DIR=""
 else
   echo "[i] linux-perf not installed."
 fi

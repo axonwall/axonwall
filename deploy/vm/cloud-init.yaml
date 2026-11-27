@@ -22,8 +22,8 @@ users:
     sudo: ALL=(ALL) NOPASSWD:ALL
     shell: /bin/bash
     lock_passwd: false
-    ssh_authorized_keys:
-      - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGenericBootstrapKeyAxonwallDeployment admin@axonwall
+    ssh_authorized_keys: []
+      # - ssh-ed25519 <YOUR_SSH_PUBLIC_KEY> admin@axonwall
 
 # Additional packages to install via cloud-init
 packages:
@@ -42,11 +42,11 @@ axonwall:
   # ----------------------------------------------------------------------------
   auth:
     admin_username: admin
-    admin_password: "InitialComplexPassword123!"
+    admin_password: "CHANGE_ME_ON_DEPLOY"
     ztp:
       enabled: true
       controller_url: "https://controller.axonwall.corp:8443"
-      enrollment_token: "ztp_tok_sec_994a3e2b1c8f4d0a"
+      enrollment_token: "CHANGE_ME_ON_DEPLOY"
 
   # ----------------------------------------------------------------------------
   # 2. Storage & Partition Layout (Bare-metal ISO & Cloud Provisioning)
@@ -68,7 +68,7 @@ axonwall:
       enabled: true
       tpm2_auto_unlock: true
       # Optional recovery passphrase if TPM2 chip is unavailable or cleared
-      passphrase: "BackupVaultRecoveryPassphrase#2026"
+      passphrase: "CHANGE_ME_ON_DEPLOY"
       cipher: aes-xts-plain64
       key_size: 512
 

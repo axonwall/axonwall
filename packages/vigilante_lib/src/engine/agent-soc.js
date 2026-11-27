@@ -34,13 +34,14 @@ export async function runAgentSocInvestigation(targetOrOptions, options = {}) {
     target = targetOrOptions.target || targetOrOptions.podName || 'unknown-target';
     incidentId = targetOrOptions.incidentId || `IR-${Date.now().toString(36).toUpperCase()}`;
     triggerAlert = targetOrOptions.triggerAlert || { title: 'Unknown Alert', source: 'Manual' };
-    automatedContainment = targetOrOptions.automatedContainment ?? targetOrOptions.autoContain ?? true;
+    // Require explicit opt-in for autonomous containment (default: false)
+    automatedContainment = (targetOrOptions.automatedContainment ?? targetOrOptions.autoContain) === true;
     namespace = targetOrOptions.namespace || 'default';
   } else {
     target = targetOrOptions || 'unknown-target';
     incidentId = options.incidentId || `IR-${Date.now().toString(36).toUpperCase()}`;
     triggerAlert = options.triggerAlert || options.trigger || { title: 'Unknown Alert', source: 'Manual' };
-    automatedContainment = options.automatedContainment ?? options.autoContain ?? false;
+    automatedContainment = (options.automatedContainment ?? options.autoContain) === true;
     namespace = options.namespace || 'default';
   }
 
@@ -136,7 +137,7 @@ export async function runAgentSocInvestigation(targetOrOptions, options = {}) {
     ? `Mapped to ${mappedTechniques.length} MITRE techniques: ${mappedTechniques.join(', ')}.`
     : 'No active MITRE ATT&CK techniques confirmed across target telemetry.';
 
-  // Step 5: Incident Prioritization & Containment Evaluation
+  // Step 5: Incident Prioritization & Multi-Signal Containment Corroboration
   const riskScore = Number(dossier.riskScore || 0);
   const triggerSev = String(triggerAlert?.severity || '').toUpperCase();
   const hasRealSignals =
@@ -146,6 +147,30 @@ export async function runAgentSocInvestigation(targetOrOptions, options = {}) {
     dossierAlerts.length > 0 ||
     triggerSev === 'CRITICAL' ||
     triggerSev === 'HIGH';
+
+  const corroboratingSignals = [];
+  if (triggerSev === 'CRITICAL' || triggerSev === 'HIGH') {
+    corroboratingSignals.push('trigger_alert_severity');
+  }
+  if (criticalOrHighFindings.length > 0) {
+    corroboratingSignals.push('active_scan_findings');
+  }
+  if (identityAlerts.length > 0) {
+    corroboratingSignals.push('bloodhound_identity_alerts');
+  }
+  if (dossierAlerts.length > 0) {
+    corroboratingSignals.push('dossier_runtime_alerts');
+  }
+  if (riskScore >= 70) {
+    corroboratingSignals.push('high_dossier_risk_score');
+  }
+  const dossierVulnCount =
+    (dossier.vulnerabilities?.cves?.length || 0) +
+    (dossier.vulnerabilities?.secrets?.length || 0) +
+    (dossier.vulnerabilities?.misconfigs?.length || 0);
+  const hasMultiSignalCorroboration =
+    corroboratingSignals.length >= 2 ||
+    (riskScore >= 85 && (dossierVulnCount + dossierAlerts.length + identityAlerts.length + criticalOrHighFindings.length) >= 2);
 
   const functionalImpact = (riskScore >= 80 || criticalOrHighFindings.some(f => f.severity === 'critical') || triggerSev === 'CRITICAL')
     ? 'HIGH'
@@ -178,6 +203,8 @@ export async function runAgentSocInvestigation(targetOrOptions, options = {}) {
     threatLevel,
     nistCategory: hasRealSignals ? 'CAT-3 (Malicious Code / Intrusion)' : 'CAT-0 (Benign / No Active Threat)',
     score: computedScore,
+    corroborated: hasMultiSignalCorroboration,
+    corroborationSignals: corroboratingSignals,
     summary: hasRealSignals
       ? `Observed ${criticalOrHighFindings.length} high/critical scan findings, ${identityAlerts.length} AD alerts, and dossier risk ${riskScore}/100 on ${target}.`
       : `No active compromise indicators detected on ${target} (dossier risk ${riskScore}/100, 0 high/critical findings).`
@@ -185,29 +212,47 @@ export async function runAgentSocInvestigation(targetOrOptions, options = {}) {
 
   let containment = null;
   if (automatedContainment && (threatLevel === 'CRITICAL' || threatLevel === 'HIGH')) {
-    reasoningTrace.push({
-      step: 5,
-      phase: 'Active Containment',
-      action: 'soar_containment',
-      thought: `Threat level is ${verdict.threatLevel}. Executing automated SOAR containment.`
-    });
-    const bareTarget = String(target).replace(/^\[|\]$/g, '');
-    if (net.isIP(bareTarget)) {
-      containment = await blockIp({ ip: bareTarget, reason: `Automated Agent Containment (${verdict.threatLevel}: ${verdict.score}/100)` });
-      if (containment?.status === 'ERROR') {
-        throw new Error(`SOAR IP containment failed for ${bareTarget}: ${containment.error || 'unknown error'}`);
-      }
-      reasoningTrace[4].observation = `Applied firewall IP block: ${bareTarget} (ID: ${containment.containmentId})`;
+    if (!hasMultiSignalCorroboration) {
+      reasoningTrace.push({
+        step: 5,
+        phase: 'Active Containment',
+        action: 'soar_containment_deferred',
+        thought: `Threat level is ${verdict.threatLevel}, evaluating autonomous containment eligibility.`,
+        observation: `Autonomous containment skipped: requires multi-signal corroboration (observed ${corroboratingSignals.length} independent signal(s): ${corroboratingSignals.join(', ') || 'none'}).`
+      });
     } else {
-      try {
-        containment = await isolatePod({
-          podName: target,
-          namespace,
-          reason: `Autonomous SOAR Containment: High risk score (${verdict.score}/100) - ${triggerAlert.title || 'Compromise'}`
-        });
-        reasoningTrace[4].observation = `Applied isolation NetworkPolicy: ${containment.policyName} (ID: ${containment.containmentId})`;
-      } catch (soarErr) {
-        reasoningTrace[4].observation = `Pod containment skipped/failed for ${target}: ${soarErr.message}`;
+      const containmentStep = {
+        step: 5,
+        phase: 'Active Containment',
+        action: 'soar_containment',
+        thought: `Threat level is ${verdict.threatLevel} with multi-signal corroboration (${corroboratingSignals.join(', ')}). Executing automated SOAR containment.`
+      };
+      reasoningTrace.push(containmentStep);
+      const bareTarget = String(target).replace(/^\[|\]$/g, '');
+      if (net.isIP(bareTarget)) {
+        try {
+          containment = await blockIp({ ip: bareTarget, reason: `Automated Agent Containment (${verdict.threatLevel}: ${verdict.score}/100)` });
+          if (containment?.status === 'ERROR') {
+            containment = null;
+            containmentStep.observation = `IP containment failed for ${bareTarget}`;
+          } else {
+            containmentStep.observation = `Applied firewall IP block: ${bareTarget} (ID: ${containment.containmentId})`;
+          }
+        } catch (soarErr) {
+          containment = null;
+          containmentStep.observation = `IP containment skipped/failed for ${bareTarget}: ${soarErr.message}`;
+        }
+      } else {
+        try {
+          containment = await isolatePod({
+            podName: target,
+            namespace,
+            reason: `Autonomous SOAR Containment: High risk score (${verdict.score}/100) - ${triggerAlert.title || 'Compromise'}`
+          });
+          containmentStep.observation = `Applied isolation NetworkPolicy: ${containment.policyName} (ID: ${containment.containmentId})`;
+        } catch (soarErr) {
+          containmentStep.observation = `Pod containment skipped/failed for ${target}: ${soarErr.message}`;
+        }
       }
     }
   }

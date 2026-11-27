@@ -113,6 +113,13 @@ helper. Prefer the Secret when both are set.
 - name: REDIS_URL
   value: {{ include "vigil.redis.url" . | quote }}
 {{- else if .Values.redis.enabled }}
+{{- if .Values.redis.auth.enabled }}
+- name: REDIS_PASSWORD
+  valueFrom:
+    secretKeyRef:
+      name: {{ include "vigil.redis.passwordSecret" . }}
+      key: {{ include "vigil.redis.passwordSecretKey" . }}
+{{- end }}
 - name: REDIS_URL
   value: {{ include "vigil.redis.url" . | quote }}
 {{- else if .Values.redis.external.url }}

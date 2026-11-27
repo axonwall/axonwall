@@ -7,6 +7,7 @@ import (
 	"crypto"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/sha1"
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/hex"
@@ -16,6 +17,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -989,5 +991,170 @@ func TestUninstallSkipsProtectedAndSharedPackages(t *testing.T) {
 	rem, skipped = pm.filterSafeUninstallPackages("coroot-ebpf-apm", []string{"bpftool", "linux-perf"})
 	if len(rem) != 0 || len(skipped) != 2 {
 		t.Fatalf("expected shared bpftool & linux-perf skipped, got rem=%v skipped=%v", rem, skipped)
+	}
+}
+
+func buildTestOpenPGPV4KeyPacket(payload []byte) ([]byte, string) {
+	body := append([]byte{4, 0, 0, 0, 1, 1}, payload...)
+	var pkt []byte
+	pkt = append(pkt, 0x80|0x40|6)
+	if len(body) < 192 {
+		pkt = append(pkt, byte(len(body)))
+	} else {
+		n := len(body) - 192
+		pkt = append(pkt, byte((n>>8)+192), byte(n&0xff))
+	}
+	pkt = append(pkt, body...)
+
+	h := sha1.New()
+	h.Write([]byte{0x99, byte(len(body) >> 8), byte(len(body))})
+	h.Write(body)
+	return pkt, strings.ToUpper(hex.EncodeToString(h.Sum(nil)))
+}
+
+func TestTailscaleAptRepoHardening(t *testing.T) {
+	// 1. Validate Debian codename strictly (^[a-z0-9-]+$).
+	for _, badCodename := range []string{
+		"trixie;id",
+		"../bookworm",
+		"Bookworm",
+		"trixie main",
+		"trixie$(whoami)",
+		"trixie/sid",
+	} {
+		osRel := filepath.Join(t.TempDir(), "os-release")
+		_ = os.WriteFile(osRel, []byte("VERSION_CODENAME=\""+badCodename+"\"\n"), 0644)
+		if _, err := readValidatedDebianCodename(osRel); err == nil {
+			t.Fatalf("expected codename %q to be rejected", badCodename)
+		}
+	}
+
+	validPkt, validFP := buildTestOpenPGPV4KeyPacket([]byte("tailscale-test-key-material-01"))
+	roguePkt, _ := buildTestOpenPGPV4KeyPacket([]byte("rogue-extra-key-material-02"))
+	validSum := sha256.Sum256(validPkt)
+	validSHA := hex.EncodeToString(validSum[:])
+
+	var listEndpointCalled bool
+	var keyringMode string
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, ".tailscale-keyring.list") {
+			listEndpointCalled = true
+			_, _ = w.Write([]byte("deb [trusted=yes] https://evil.example/repo evil main\n"))
+			return
+		}
+		switch keyringMode {
+		case "corrupt":
+			_, _ = w.Write([]byte("not-an-openpgp-keyring"))
+		case "rogue_appended":
+			_, _ = w.Write(append(append([]byte{}, validPkt...), roguePkt...))
+		case "wrong_key":
+			_, _ = w.Write(roguePkt)
+		default:
+			_, _ = w.Write(validPkt)
+		}
+	}))
+	defer srv.Close()
+
+	osRel := filepath.Join(t.TempDir(), "os-release")
+	_ = os.WriteFile(osRel, []byte("ID=debian\nVERSION_CODENAME=bookworm\n"), 0644)
+
+	// 2. Reject corrupt keyring, wrong fingerprint, or appended rogue key.
+	for _, mode := range []string{"corrupt", "wrong_key", "rogue_appended"} {
+		keyringMode = mode
+		tmp := t.TempDir()
+		err := prepareTailscaleAptRepoWithOptions(tailscaleRepoOptions{
+			osReleasePath:     osRel,
+			baseURL:           srv.URL,
+			repoBaseURL:       "https://pkgs.tailscale.com/stable/debian",
+			keyringPath:       filepath.Join(tmp, "tailscale-archive-keyring.gpg"),
+			listPath:          filepath.Join(tmp, "tailscale.list"),
+			pinnedFingerprint: validFP,
+			httpClient:        srv.Client(),
+			skipAptUpdate:     true,
+		})
+		if err == nil {
+			t.Fatalf("mode %s: expected verification error, got nil", mode)
+		}
+		if _, statErr := os.Stat(filepath.Join(tmp, "tailscale-archive-keyring.gpg")); !os.IsNotExist(statErr) {
+			t.Fatalf("mode %s: keyring file must not be written on verification failure", mode)
+		}
+	}
+
+	// 3. Reject non-HTTPS base URL.
+	tmpHTTP := t.TempDir()
+	if err := prepareTailscaleAptRepoWithOptions(tailscaleRepoOptions{
+		osReleasePath:     osRel,
+		baseURL:           "http://pkgs.tailscale.com/stable/debian",
+		keyringPath:       filepath.Join(tmpHTTP, "keyring.gpg"),
+		listPath:          filepath.Join(tmpHTTP, "tailscale.list"),
+		pinnedFingerprint: validFP,
+		skipAptUpdate:     true,
+	}); err == nil {
+		t.Fatal("expected plain http:// Tailscale keyring URL to be rejected")
+	}
+
+	// 4. Valid pinned keyring writes keyring + locally generated sources.list without touching remote .list.
+	keyringMode = "valid"
+	tmpOK := t.TempDir()
+	krPath := filepath.Join(tmpOK, "tailscale-archive-keyring.gpg")
+	listPath := filepath.Join(tmpOK, "tailscale.list")
+	if err := prepareTailscaleAptRepoWithOptions(tailscaleRepoOptions{
+		osReleasePath:     osRel,
+		baseURL:           srv.URL,
+		repoBaseURL:       "https://pkgs.tailscale.com/stable/debian",
+		keyringPath:       krPath,
+		listPath:          listPath,
+		pinnedFingerprint: validFP,
+		pinnedSHA256s:     []string{validSHA},
+		httpClient:        srv.Client(),
+		skipAptUpdate:     true,
+	}); err != nil {
+		t.Fatalf("expected valid pinned keyring install to succeed, got: %v", err)
+	}
+	if listEndpointCalled {
+		t.Fatal("remote .tailscale-keyring.list endpoint must never be fetched or trusted")
+	}
+	listBytes, err := os.ReadFile(listPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantLine := fmt.Sprintf("deb [signed-by=%s] https://pkgs.tailscale.com/stable/debian bookworm main\n", krPath)
+	if string(listBytes) != wantLine {
+		t.Fatalf("unexpected generated tailscale.list:\n got: %q\nwant: %q", string(listBytes), wantLine)
+	}
+
+	// 5. Cross-check OpenPGP v4 fingerprint parser against real gpg --export if gpg is installed.
+	if gpgBin, lookErr := exec.LookPath("gpg"); lookErr == nil {
+		gpgHome := filepath.Join(t.TempDir(), "gnupg")
+		if err := os.MkdirAll(gpgHome, 0700); err != nil {
+			t.Fatal(err)
+		}
+		batch := "Key-Type: RSA\nKey-Length: 2048\nName-Real: Axonwall Test\nName-Email: test@axonwall.local\n%no-protection\n%commit\n"
+		genCmd := exec.Command(gpgBin, "--homedir", gpgHome, "--batch", "--gen-key")
+		genCmd.Stdin = strings.NewReader(batch)
+		if out, genErr := genCmd.CombinedOutput(); genErr == nil {
+			fpOut, fpErr := exec.Command(gpgBin, "--homedir", gpgHome, "--batch", "--with-colons", "--list-keys").Output()
+			expBytes, expErr := exec.Command(gpgBin, "--homedir", gpgHome, "--batch", "--export").Output()
+			if fpErr == nil && expErr == nil && len(expBytes) > 0 {
+				var gpgFP string
+				for _, line := range strings.Split(string(fpOut), "\n") {
+					if strings.HasPrefix(line, "fpr:") {
+						parts := strings.Split(line, ":")
+						if len(parts) > 9 && parts[9] != "" {
+							gpgFP = parts[9]
+							break
+						}
+					}
+				}
+				if gpgFP != "" {
+					parsedFPs, parseErr := parseOpenPGPPublicKeyFingerprints(expBytes)
+					if parseErr != nil || len(parsedFPs) != 1 || parsedFPs[0] != gpgFP {
+						t.Fatalf("OpenPGP fingerprint mismatch against gpg: parsed=%v err=%v want=%s", parsedFPs, parseErr, gpgFP)
+					}
+				}
+			}
+		} else {
+			t.Logf("skipping real gpg cross-check (gpg --gen-key failed in sandbox: %s)", string(out))
+		}
 	}
 }

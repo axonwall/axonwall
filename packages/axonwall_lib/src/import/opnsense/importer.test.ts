@@ -3,6 +3,8 @@ import { importOpnsenseConfig } from './index.js';
 import { compileKeaDhcp4 } from '../../compile/kea/index.js';
 import { compileUnbound } from '../../compile/unbound/index.js';
 import { compileWireGuard } from '../../compile/wireguard/index.js';
+import { compileNftables } from '../../compile/nft/index.js';
+import { DesiredStateSchema } from '../../schemas/index.js';
 
 const SAMPLE_OPNSENSE_XML = `<?xml version="1.0"?>
 <opnsense version="24.7">
@@ -103,6 +105,94 @@ describe('OPNsense XML Importer', () => {
     expect(report.state.rules[0].destinationPort).toBe('443');
     expect(report.state.nat[0].targetIp).toBe('192.168.1.10');
     expect(report.state.nat[0].targetPort).toBe('80');
+    expect(() => DesiredStateSchema.parse(report.state)).not.toThrow();
+  });
+
+  it('fails closed on unknown/non-pass rule types and skips match rules [SEC-H20]', () => {
+    const xml = `<?xml version="1.0"?>
+<opnsense>
+  <filter>
+    <rule>
+      <type>match</type>
+      <interface>wan</interface>
+      <protocol>tcp</protocol>
+      <source><any/></source>
+      <destination><any/><port>443</port></destination>
+      <descr>OPNsense match rule</descr>
+    </rule>
+    <rule>
+      <type>unknown_op</type>
+      <interface>wan</interface>
+      <protocol>tcp</protocol>
+      <source><any/></source>
+      <destination><any/><port>22</port></destination>
+      <descr>Invalid OPNsense type</descr>
+    </rule>
+  </filter>
+</opnsense>`;
+    const report = importOpnsenseConfig(xml);
+    expect(report.rulesCount).toBe(1);
+    expect(report.state.rules[0]!.action).toBe('block');
+    expect(report.state.rules[0]!.enabled).toBe(false);
+    expect(report.reviewItems?.length).toBe(1);
+    expect(report.warnings.some((w) => w.includes('match'))).toBe(true);
+
+    const { nftScript } = compileNftables(report.state);
+    expect(nftScript).not.toContain('dport 443');
+    expect(nftScript).not.toContain('dport 22');
+    expect(() => DesiredStateSchema.parse(report.state)).not.toThrow();
+  });
+
+  it('preserves DNAT source/destination filters and disables negated DNAT rules [SEC-H20]', () => {
+    const xml = `<?xml version="1.0"?>
+<opnsense>
+  <nat>
+    <rule>
+      <interface>wan</interface>
+      <protocol>tcp</protocol>
+      <source><address>203.0.113.42</address><port>50000</port></source>
+      <destination><address>198.51.100.5</address><port>8443</port></destination>
+      <target>192.168.1.10</target>
+      <local_port>443</local_port>
+      <descr>Partner-only DNAT</descr>
+    </rule>
+    <rule>
+      <interface>wan</interface>
+      <protocol>tcp</protocol>
+      <source><not/><address>198.51.100.99</address></source>
+      <destination><port>80</port></destination>
+      <target>192.168.1.11</target>
+      <local_port>80</local_port>
+      <descr>Negated DNAT</descr>
+    </rule>
+  </nat>
+</opnsense>`;
+    const report = importOpnsenseConfig(xml);
+    expect(report.natRulesCount).toBe(2);
+    expect(report.state.nat[0]!.source).toBe('203.0.113.42');
+    expect(report.state.nat[0]!.sourcePort).toBe('50000');
+    expect(report.state.nat[0]!.destination).toBe('198.51.100.5');
+    expect(report.state.nat[0]!.destinationPort).toBe('8443');
+    expect(report.state.nat[0]!.targetIp).toBe('192.168.1.10');
+    expect(report.state.nat[0]!.targetPort).toBe('443');
+    expect(report.state.nat[0]!.enabled).toBe(true);
+
+    expect(report.state.nat[1]!.enabled).toBe(false);
+    expect(() => DesiredStateSchema.parse(report.state)).not.toThrow();
+  });
+
+  it('disables XML entity expansion against XXE / Billion Laughs [SEC-L10]', () => {
+    const xxeXml = `<?xml version="1.0"?>
+<!DOCTYPE foo [
+  <!ENTITY secret "EXPANDED_OPN_SECRET">
+]>
+<opnsense>
+  <system>
+    <hostname>&secret;</hostname>
+  </system>
+</opnsense>`;
+    const report = importOpnsenseConfig(xxeXml);
+    expect(report.state.system.hostname).not.toBe('EXPANDED_OPN_SECRET');
   });
 });
 

@@ -29,6 +29,11 @@ import {
 } from 'lucide-react';
 import { getCurrentDesiredState } from '@/server/agent';
 import { useDesiredStateApply } from '@/lib/use-desired-state-apply';
+import {
+  buildPortKnockPreviewCommand,
+  buildTailscaleConnectCommand,
+  sanitizeHostname,
+} from '@/lib/shell-quote';
 import type { DesiredState } from '@axonwall/lib/schemas';
 
 type Tab = 'people' | 'machines' | 'keys';
@@ -339,7 +344,7 @@ export default function MeshVpnPage() {
           defaultKeyExpiryHours,
           wanInvite: {
             enabled: wanInviteEnabled,
-            hostname: wanHostname.trim().replace(/^https?:\/\//i, '').replace(/\/.*$/, '').replace(/:\d+$/, ''),
+            hostname: sanitizeHostname(wanHostname) || '',
             bindPort: Math.min(65535, Math.max(1, Math.round(Number(wanBindPort) || 8443))),
             certName: wanCertName.trim() || 'hub',
             autoWindow: wanAutoWindow,
@@ -581,11 +586,10 @@ export default function MeshVpnPage() {
       if (!res.ok || json?.status !== 'ok') {
         throw new Error(json?.error || `Failed to create auth key (HTTP ${res.status})`);
       }
-      const loginArg = serverUrl.trim() ? `--login-server=${serverUrl.trim().replace(/\/+$/, '')}` : '--login-server=<HEADSCALE_URL>';
       setCreatedKeyBanner({
         key: json.data.key,
         user: newKeyUser.trim(),
-        command: `sudo tailscale up ${loginArg} --authkey=${json.data.key}`,
+        command: buildTailscaleConnectCommand('linux', serverUrl, json.data.key, '<HEADSCALE_URL>'),
       });
       void fetchTabData();
     } catch (err: any) {
@@ -1187,13 +1191,7 @@ export default function MeshVpnPage() {
                   <div className="bg-slate-900 border border-slate-800 rounded-lg p-2.5 text-[11px]">
                     <span className="text-slate-400 block mb-1">Client Knock Command Preview:</span>
                     <code className="font-mono text-amber-300 break-all">
-                      {`for p in ${knockSequenceInput
-                        .split(/[,\s]+/)
-                        .map((s) => s.trim())
-                        .filter(Boolean)
-                        .join(' ')}; do ${
-                        knockProtocol === 'tcp' ? 'nc -z -w 1' : "printf 'knock' | nc -u -w 1"
-                      } ${wanHostname.trim() || '<INVITE_HOST>'} "$p" >/dev/null 2>&1 || true; sleep 0.25; done`}
+                      {buildPortKnockPreviewCommand(wanHostname, knockProtocol, knockSequenceInput)}
                     </code>
                   </div>
                 </div>

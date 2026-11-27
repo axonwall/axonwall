@@ -52,7 +52,7 @@ spec:
         # From the helper the URL and REDIS_DB also come from, so the three cannot
         # drift. The value exists for an external Redis, whose database is its own.
         databaseIndex: {{ .Values.agentWorker.autoscaling.keda.databaseIndex | default (include "vigil.redis.database" .) | quote }}
-      {{- if and .Values.redis.bitnami.enabled .Values.redis.bitnami.auth.enabled }}
+      {{- if or (and .Values.redis.bitnami.enabled .Values.redis.bitnami.auth.enabled) (and .Values.redis.enabled .Values.redis.auth.enabled) }}
       authenticationRef:
         name: {{ include "vigil.agentWorker.fullname" . }}-keda-auth
       {{- end }}
@@ -70,5 +70,19 @@ spec:
     - parameter: password
       name: {{ include "vigil.redis.bitnami.passwordSecret" . }}
       key: {{ include "vigil.redis.bitnami.passwordSecretKey" . }}
+{{- else if and .Values.redis.enabled .Values.redis.auth.enabled }}
+---
+apiVersion: keda.sh/v1alpha1
+kind: TriggerAuthentication
+metadata:
+  name: {{ include "vigil.agentWorker.fullname" . }}-keda-auth
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "vigil.componentLabels" (dict "context" . "component" "agent-worker") | nindent 4 }}
+spec:
+  secretTargetRef:
+    - parameter: password
+      name: {{ include "vigil.redis.passwordSecret" . }}
+      key: {{ include "vigil.redis.passwordSecretKey" . }}
 {{- end }}
 {{- end }}

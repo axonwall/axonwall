@@ -14,11 +14,65 @@ import (
 )
 
 var (
-	validGitCommitHashRe   = regexp.MustCompile(`^[0-9a-fA-F]{4,64}$`)
-	safeEtckeeperOptionRe  = regexp.MustCompile(`^[a-zA-Z0-9._\-\s=:/]*$`)
-	safeEtckeeperPkgMgrRe  = regexp.MustCompile(`^[a-zA-Z0-9._\-]+$`)
-	safeEtckeeperPathFltRe = regexp.MustCompile(`^[a-zA-Z0-9._\-/]+$`)
+	validGitCommitHashRe     = regexp.MustCompile(`^[0-9a-fA-F]{4,64}$`)
+	safeEtckeeperPushRemoteRe = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$`)
+	safeEtckeeperPkgMgrRe    = regexp.MustCompile(`^[a-zA-Z0-9._\-]+$`)
+	safeEtckeeperPathFltRe   = regexp.MustCompile(`^[a-zA-Z0-9._\-/]+$`)
 )
+
+var allowedGitCommitBooleanFlags = map[string]bool{
+	"--quiet":     true,
+	"-q":          true,
+	"--verbose":   true,
+	"-v":          true,
+	"--no-status": true,
+}
+
+func validateEtckeeperPushRemote(etcDir, pushRemote string, gitCmdFn func(args ...string) *exec.Cmd) error {
+	if pushRemote == "" {
+		return nil
+	}
+	if !safeEtckeeperPushRemoteRe.MatchString(pushRemote) || strings.Contains(pushRemote, "..") {
+		return fmt.Errorf("invalid pushRemote value %q", pushRemote)
+	}
+	if _, err := os.Stat(filepath.Join(etcDir, ".git")); err == nil && gitCmdFn != nil {
+		out, err := gitCmdFn("remote").Output()
+		if err != nil {
+			return fmt.Errorf("failed to verify git remote %q: %w", pushRemote, err)
+		}
+		found := false
+		for _, line := range strings.Split(string(out), "\n") {
+			if strings.TrimSpace(line) == pushRemote {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return fmt.Errorf("pushRemote %q is not a configured git remote", pushRemote)
+		}
+	}
+	return nil
+}
+
+func validateGitCommitOptions(raw string) (string, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return "", nil
+	}
+	fields := strings.Fields(trimmed)
+	seen := make(map[string]bool, len(fields))
+	var normalized []string
+	for _, tok := range fields {
+		if !allowedGitCommitBooleanFlags[tok] {
+			return "", fmt.Errorf("disallowed gitCommitOptions flag %q", tok)
+		}
+		if !seen[tok] {
+			seen[tok] = true
+			normalized = append(normalized, tok)
+		}
+	}
+	return strings.Join(normalized, " "), nil
+}
 
 const (
 	axonwallIgnoreBeginMarker = "# begin section managed by axonwall"
@@ -440,13 +494,13 @@ func (m *EtckeeperManager) UpdateConfig(input EtckeeperConfig) (EtckeeperConfig,
 	}
 
 	pushRemote := strings.TrimSpace(input.PushRemote)
-	if !safeEtckeeperOptionRe.MatchString(pushRemote) {
-		return EtckeeperConfig{}, fmt.Errorf("invalid pushRemote value")
+	if err := validateEtckeeperPushRemote(m.etcDir, pushRemote, m.gitCmd); err != nil {
+		return EtckeeperConfig{}, err
 	}
 
-	gitOpts := strings.TrimSpace(input.GitCommitOptions)
-	if !safeEtckeeperOptionRe.MatchString(gitOpts) {
-		return EtckeeperConfig{}, fmt.Errorf("invalid gitCommitOptions value")
+	gitOpts, err := validateGitCommitOptions(input.GitCommitOptions)
+	if err != nil {
+		return EtckeeperConfig{}, err
 	}
 
 	var b strings.Builder

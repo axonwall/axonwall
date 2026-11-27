@@ -276,8 +276,16 @@ type TopologyManager struct {
 	kubectlRunner   func(ctx context.Context, args ...string) ([]byte, error)
 	lldpRunner      func(ctx context.Context) ([]byte, error)
 	wgRunner        func(ctx context.Context) ([]byte, error)
-	svcRunner       func(ctx context.Context, action string) error
-	haTlsLoader     func() (*tls.Config, error)
+	svcRunner          func(ctx context.Context, action string) error
+	haTlsLoader        func() (*tls.Config, error)
+	allowLoopbackPeers bool
+}
+
+// SetAllowLoopbackForTest enables or disables loopback peer connections for unit tests.
+func (m *TopologyManager) SetAllowLoopbackForTest(allow bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.allowLoopbackPeers = allow
 }
 
 func NewTopologyManager(
@@ -1026,10 +1034,15 @@ func (m *TopologyManager) buildPeerHTTPClient(peer TopologyPeerHostPayload) (*ht
 			return nil
 		}
 	}
-	return &http.Client{
-		Timeout:   5 * time.Second,
-		Transport: &http.Transport{TLSClientConfig: tlsCfg},
-	}, nil
+	m.mu.Lock()
+	allowLoopback := m.allowLoopbackPeers
+	m.mu.Unlock()
+	client, _ := newSafeHTTPClient(SafeHTTPClientOptions{
+		Timeout:         5 * time.Second,
+		AllowLoopback:   allowLoopback,
+		TLSClientConfig: tlsCfg,
+	})
+	return client, nil
 }
 
 func (m *TopologyManager) ProbeFabric(ctx context.Context) *TopologyFabricSnapshot {

@@ -41,6 +41,8 @@ type EdgeBootConfig struct {
 	UkiSlot           string              `json:"ukiSlot,omitempty"`
 	WatchdogSec       int                 `json:"watchdogSec,omitempty"`
 	InsecureBootstrap bool                `json:"insecureBootstrap,omitempty"`
+	IMDSEnabled       bool                `json:"imdsEnabled,omitempty"`
+	IMDSDisabled      bool                `json:"imdsDisabled,omitempty"`
 	CloudInitSource   string              `json:"cloudInitSource,omitempty"`
 	Interfaces        []EdgeInterfaceSpec `json:"interfaces,omitempty"`
 	Routes            []EdgeRouteSpec     `json:"routes,omitempty"`
@@ -81,6 +83,7 @@ func IsPID1() bool {
 //   - axonwall.wan=eth0:203.0.113.2/24:203.0.113.1
 //   - axonwall.lan=eth1:10.0.0.1/24
 //   - axonwall.mgmt=eth2:192.168.100.1/24
+//   - axonwall.imds=1
 func ParseKernelCmdline(cmdline string) EdgeBootConfig {
 	cfg := EdgeBootConfig{
 		SkuProfile: "generic-edge",
@@ -112,6 +115,14 @@ func ParseKernelCmdline(cmdline string) EdgeBootConfig {
 			cfg.UkiSlot = val
 		case "axonwall.insecure_bootstrap":
 			cfg.InsecureBootstrap = (val == "1" || strings.EqualFold(val, "true"))
+		case "axonwall.imds":
+			if val == "1" || strings.EqualFold(val, "true") || strings.EqualFold(val, "yes") {
+				cfg.IMDSEnabled = true
+				cfg.IMDSDisabled = false
+			} else if val == "0" || strings.EqualFold(val, "false") || strings.EqualFold(val, "no") {
+				cfg.IMDSEnabled = false
+				cfg.IMDSDisabled = true
+			}
 		case "axonwall.wan", "axonwall.lan", "axonwall.mgmt":
 			role := strings.TrimPrefix(key, "axonwall.")
 			if spec, ok := parseInterfaceBootArg(role, val); ok {
@@ -224,9 +235,22 @@ func ApplyHardenedSysctls(procSysRoot string) int {
 	return applied
 }
 
+// ShouldProbeIMDS returns true only when plaintext link-local IMDS (169.254.169.254)
+// should be probed during PID 1 boot: either explicitly enabled via axonwall.imds=1,
+// or when both HubURL and ZtpToken are empty (and IMDS was not explicitly disabled).
+func ShouldProbeIMDS(cfg EdgeBootConfig) bool {
+	if cfg.IMDSEnabled {
+		return true
+	}
+	if cfg.IMDSDisabled {
+		return false
+	}
+	return cfg.HubURL == "" && cfg.ZtpToken == ""
+}
+
 // BuildEmergencyLockdownNft generates a fail-closed baseline nftables ruleset loaded at PID 1 boot
 // before WAN interfaces come up. It drops unsolicited inbound traffic while permitting loopback,
-// established flows, ICMPv6 neighbor discovery, and outbound control-plane communication to the Hub.
+// established flows, ICMPv6 neighbor discovery, DHCPv4 client replies, and Hub communication.
 func BuildEmergencyLockdownNft(hubURL string) string {
 	var b strings.Builder
 	b.WriteString("#!/usr/sbin/nft -f\n")
@@ -245,6 +269,7 @@ func BuildEmergencyLockdownNft(hubURL string) string {
 	b.WriteString("    ct state invalid drop\n")
 	b.WriteString("    iif \"lo\" accept\n")
 	b.WriteString("    meta l4proto ipv6-icmp accept\n")
+	b.WriteString("    udp sport 67 udp dport 68 accept comment \"allow-dhcpv4\"\n")
 
 	if u, err := url.Parse(hubURL); err == nil && u.Hostname() != "" {
 		if ip := net.ParseIP(u.Hostname()); ip != nil {

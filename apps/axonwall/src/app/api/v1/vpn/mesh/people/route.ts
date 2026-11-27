@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSession } from '@/server/auth';
-import { assertActionPermitted } from '@/server/auth-guard';
+import { assertActionPermitted, assertInteractiveSession } from '@/server/auth-guard';
+import { checkPluginApiGuard } from '@/server/plugin-guard';
 import { callAgentApiDetailed, callAgentApiResponse } from '@/server/agent-client';
 import {
   listUsers,
@@ -65,7 +66,10 @@ async function fetchDirectoryUsers(): Promise<{
 export async function GET(req: NextRequest) {
   try {
     const session = await getSession();
+    assertInteractiveSession(session);
     assertActionPermitted(session, 'admin');
+    const guard = await checkPluginApiGuard('headscale');
+    if (guard) return guard;
 
     const [network, directory, invites] = await Promise.all([
       resolveHeadscaleNetworkInfo(req),
@@ -141,9 +145,18 @@ export async function GET(req: NextRequest) {
       },
     });
   } catch (err: any) {
+    const msg = err?.message || 'Failed to load Mesh VPN people directory';
+    const status =
+      msg === 'Unauthorized'
+        ? 401
+        : msg.startsWith('Forbidden')
+          ? 403
+          : err?.code === 'NOT_FOUND'
+            ? 404
+            : 500;
     return NextResponse.json(
-      { status: 'error', error: err?.message || 'Failed to load Mesh VPN people directory' },
-      { status: 500 }
+      { status: 'error', error: msg },
+      { status }
     );
   }
 }
@@ -151,7 +164,10 @@ export async function GET(req: NextRequest) {
 export async function POST(req: NextRequest) {
   try {
     const session = await getSession();
+    assertInteractiveSession(session);
     assertActionPermitted(session, 'admin');
+    const guard = await checkPluginApiGuard('headscale');
+    if (guard) return guard;
 
     const body = await req.json().catch(() => ({}));
     const action = body?.action;

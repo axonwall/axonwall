@@ -10,6 +10,7 @@ clickhouse:
   image:
     repository: clickhouse/clickhouse-server
     tag: "24.8-alpine"
+    digest: "sha256:b002e56ed5c16e224c312527f6fcba7e77216fec5d7a88a7828f59efc614feb5"
   database: "axonwall"
   username: "admin"
   password: ""
@@ -32,6 +33,7 @@ victoriametrics:
   image:
     repository: victoriametrics/victoria-metrics
     tag: "v1.156.0"
+    digest: "sha256:da8a90ac0912f16589be2b96a6441a2fca4bca415c83783d972d92e3b5b66970"
   retentionPeriod: "90d"
   persistence:
     enabled: true
@@ -49,6 +51,7 @@ victorialogs:
   image:
     repository: victoriametrics/victoria-logs
     tag: "v1.24.0-victorialogs"
+    digest: "sha256:1ec31ddccc39dc9ead2607cddbf2829be1eb5ad39890e72bba26b359be20801d"
   retentionPeriod: "30d"
   persistence:
     enabled: true
@@ -68,6 +71,8 @@ collector:
     image:
       repository: ghcr.io/axonwall/axonwalld
       tag: "v0.16.3"
+      # Pin immutable sha256:... digest in production deployments
+      digest: ""
     resources:
       requests:
         cpu: "200m"
@@ -80,6 +85,8 @@ collector:
     image:
       repository: ghcr.io/axonwall/axonwall-ui
       tag: "v0.16.3"
+      # Pin immutable sha256:... digest in production deployments
+      digest: ""
     resources:
       requests:
         cpu: "200m"
@@ -102,6 +109,8 @@ controller:
   image:
     repository: ghcr.io/axonwall/axonwall-controller
     tag: "v0.16.3"
+    # Pin immutable sha256:... digest in production deployments
+    digest: ""
   port: 2966
   resources:
     requests:
@@ -116,6 +125,7 @@ librenms:
   image:
     repository: librenms/librenms
     tag: "24.10.1"
+    digest: "sha256:4f33023b6006ddada75e9f610f09b1eb26a19df7d92c35011ad815959e6bd45e"
   timezone: "UTC"
   db:
     # Set host to connect to an external MariaDB/MySQL instance; otherwise an embedded
@@ -129,6 +139,7 @@ librenms:
     image:
       repository: mariadb
       tag: "11.4.5"
+      digest: "sha256:49117dcc565cf51aa57ac5fca59ab31213402ff0eae6ffc13c46a37b938f7e4b"
     resources:
       requests:
         cpu: "100m"
@@ -163,9 +174,15 @@ service:
   ingestType: ClusterIP
   annotations: {}
 
+networkPolicy:
+  enabled: true
+
 ingress:
   enabled: false
   className: ""
   annotations: {}
   host: "analytics.axonwall.local"
+  # Set tlsSecretName whenever ingress.enabled=true so UI sessions and ingest tokens are encrypted with TLS.
   tlsSecretName: ""
+  # Fail Helm rendering when ingress.enabled=true without tlsSecretName (set false only if TLS is terminated upstream).
+  requireTls: true

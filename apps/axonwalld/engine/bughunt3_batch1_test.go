@@ -69,6 +69,7 @@ func TestBughunt3_XdpStartWithNoInterfacesFails(t *testing.T) {
 func bughunt3DdnsManager(t *testing.T, rawJSON string) *DdnsManager {
 	t.Helper()
 	mgr := NewDdnsManager()
+	mgr.SetAllowLoopbackForTest(true)
 	if err := mgr.ApplyConfigJSON([]byte(rawJSON)); err != nil {
 		t.Fatalf("ApplyConfigJSON failed: %v", err)
 	}
@@ -113,6 +114,7 @@ func TestBughunt3_DdnsDuckDNSUsesInterfaceIP(t *testing.T) {
 	defer srv.Close()
 
 	mgr := NewDdnsManager()
+	mgr.SetAllowLoopbackForTest(true)
 	mgr.duckdnsBaseURL = srv.URL
 	if err := mgr.ApplyConfigJSON([]byte(`{"enabled": true, "entries": [
 		{"provider": "duckdns", "hostname": "myhost.duckdns.org", "interface": "", "ipVersion": "4", "apiToken": "tok123", "enabled": true}
@@ -148,6 +150,7 @@ func TestBughunt3_DdnsDuckDNSNoIPFailsWithoutCalling(t *testing.T) {
 	defer srv.Close()
 
 	mgr := NewDdnsManager()
+	mgr.SetAllowLoopbackForTest(true)
 	mgr.duckdnsBaseURL = srv.URL
 	if err := mgr.ApplyConfigJSON([]byte(`{"enabled": true, "entries": [
 		{"provider": "duckdns", "hostname": "myhost.duckdns.org", "interface": "lo", "ipVersion": "4", "apiToken": "tok123", "enabled": true}
@@ -209,6 +212,7 @@ func TestBughunt3_DdnsCloudflareUpdate(t *testing.T) {
 	defer srv.Close()
 
 	mgr := NewDdnsManager()
+	mgr.SetAllowLoopbackForTest(true)
 	mgr.cloudflareBase = srv.URL
 	if err := mgr.ApplyConfigJSON([]byte(`{"enabled": true, "entries": [
 		{"provider": "cloudflare", "hostname": "host.example.com", "zone": "zone123", "interface": "", "ipVersion": "4", "apiToken": "tok", "enabled": true}
@@ -264,6 +268,7 @@ func TestBughunt3_DdnsIntervalHonoured(t *testing.T) {
 	defer srv.Close()
 
 	mgr := NewDdnsManager()
+	mgr.SetAllowLoopbackForTest(true)
 	if err := mgr.ApplyConfigJSON([]byte(fmt.Sprintf(`{"enabled": true, "entries": [
 		{"provider": "custom", "hostname": "host.example.com", "customUpdateUrl": %q, "checkIntervalSeconds": 3600, "enabled": true}
 	]}`, srv.URL+"/update"))); err != nil {
@@ -520,7 +525,9 @@ func bughunt3VirtManager(t *testing.T) (*VirtManager, *TaskManager) {
 	VirtSpecsPath = filepath.Join(t.TempDir(), "virt-specs.json")
 	t.Cleanup(func() { VirtSpecsPath = oldPath })
 	tm := NewTaskManager()
-	return NewVirtManager(tm, NewNasManager()), tm
+	vm := NewVirtManager(tm, NewNasManager())
+	vm.SetAllowedMigrationPeers([]string{"192.0.2.1"})
+	return vm, tm
 }
 
 func TestBughunt3_CloneVMSourceZvolMissingFails(t *testing.T) {

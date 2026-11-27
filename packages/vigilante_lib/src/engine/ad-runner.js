@@ -1,7 +1,6 @@
 import crypto from 'node:crypto';
-import http from 'node:http';
 import net from 'node:net';
-import { assertSafeOutboundTarget } from './ssrf.js';
+import { assertSafeOutboundTarget, safeFetch, createPinnedLookup } from './ssrf.js';
 import { logger } from '../utils/logger.js';
 
 export const SLA_STATUS = {
@@ -413,7 +412,9 @@ export class AttackDefenseRunner {
       secretKey: this.tournament.secretKey
     });
 
-    if (flag.trim() !== expectedFlag) {
+    const providedBuf = Buffer.from(String(flag).trim(), 'utf8');
+    const expectedBuf = Buffer.from(expectedFlag, 'utf8');
+    if (providedBuf.length !== expectedBuf.length || !crypto.timingSafeEqual(providedBuf, expectedBuf)) {
       return { success: false, reason: 'Invalid flag signature' };
     }
 
@@ -527,7 +528,10 @@ export async function probeServiceSla({
   path = '/health',
   timeoutMs = 1500,
   allowPrivate,
-  allowLoopback
+  allowLoopback,
+  dnsLookup,
+  failOnDnsError,
+  maxBytes
 } = {}) {
   const rawHost = String(host ?? '127.0.0.1').trim();
   const bareHost = rawHost.replace(/^\[|\]$/g, '');
@@ -550,13 +554,17 @@ export async function probeServiceSla({
     throw new Error(`Invalid SLA probe path '${path}'`);
   }
 
-  const { hostname: cleanHost } = await assertSafeOutboundTarget(bareHost, {
+  const validatedTarget = await assertSafeOutboundTarget(bareHost, {
     label: 'SLA probe host',
     allowBareHost: true,
     allowPrivate,
     allowLoopback,
-    allowMetadata: false
+    allowMetadata: false,
+    dnsLookup,
+    failOnDnsError
   });
+  const { hostname: cleanHost, addresses } = validatedTarget;
+  const pinnedLookup = createPinnedLookup(addresses);
 
   const boundedTimeout = Math.max(50, Math.min(60000, Number.isFinite(Number(timeoutMs)) ? Number(timeoutMs) : 1500));
   const authority = net.isIP(cleanHost) === 6 ? `[${cleanHost}]` : cleanHost;
@@ -570,7 +578,7 @@ export async function probeServiceSla({
         resolve({ status: SLA_STATUS.DOWN, latencyMs: boundedTimeout, target: `${authority}:${portNum}` });
       }, boundedTimeout);
 
-      socket.connect(portNum, cleanHost, () => {
+      socket.connect({ port: portNum, host: cleanHost, lookup: pinnedLookup }, () => {
         clearTimeout(timer);
         const latencyMs = Date.now() - start;
         socket.destroy();
@@ -584,40 +592,33 @@ export async function probeServiceSla({
     });
   }
 
-  // HTTP probe
+  // HTTP probe (pinned DNS, redirect: 'error', no unbounded response buffering)
   const targetUrl = `http://${authority}:${portNum}${cleanPath}`;
-  return new Promise((resolve) => {
-    let settled = false;
-    const finish = (resObj) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      resolve(resObj);
-    };
-
-    const timer = setTimeout(() => {
-      finish({ status: SLA_STATUS.DOWN, latencyMs: boundedTimeout, target: targetUrl });
-    }, boundedTimeout);
-
-    try {
-      const req = http.get(targetUrl, (res) => {
-        res.resume();
-        const latencyMs = Date.now() - start;
-        const status = res.statusCode >= 200 && res.statusCode < 300 ? SLA_STATUS.UP : SLA_STATUS.FAULTY;
-        finish({ status, statusCode: res.statusCode, latencyMs, target: targetUrl });
-      });
-
-      req.on('error', () => {
-        finish({ status: SLA_STATUS.DOWN, latencyMs: Date.now() - start, target: targetUrl });
-      });
-
-      req.setTimeout(boundedTimeout, () => {
-        req.destroy();
-        finish({ status: SLA_STATUS.DOWN, latencyMs: boundedTimeout, target: targetUrl });
-      });
-    } catch {
-      finish({ status: SLA_STATUS.DOWN, latencyMs: Date.now() - start, target: targetUrl });
-    }
-  });
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), boundedTimeout);
+  try {
+    const res = await safeFetch(targetUrl, {
+      method: 'GET',
+      redirect: 'error',
+      signal: controller.signal
+    }, {
+      validatedTarget: { ...validatedTarget, url: new URL(targetUrl) },
+      label: 'SLA probe host',
+      allowBareHost: true,
+      allowPrivate,
+      allowLoopback,
+      allowMetadata: false,
+      maxBytes
+    });
+    await res.body?.cancel?.().catch(() => {});
+    const latencyMs = Date.now() - start;
+    const status = res.status >= 200 && res.status < 300 ? SLA_STATUS.UP : SLA_STATUS.FAULTY;
+    return { status, statusCode: res.status, latencyMs, target: targetUrl };
+  } catch {
+    const latencyMs = Math.min(boundedTimeout, Date.now() - start);
+    return { status: SLA_STATUS.DOWN, latencyMs, target: targetUrl };
+  } finally {
+    clearTimeout(timer);
+  }
 }
 

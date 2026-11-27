@@ -3,7 +3,7 @@ name: zap
 description: OWASP Zed Attack Proxy (ZAP) Headless DAST Scanner Daemon and Web UI
 type: application
 version: 0.1.0
-appVersion: "stable"
+appVersion: "2.16.0"
 keywords:
   - security
   - dast

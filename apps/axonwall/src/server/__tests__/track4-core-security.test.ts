@@ -38,6 +38,19 @@ vi.mock('../agent-client', () => ({
   callAgentApiDetailed: vi.fn(async () => ({ kind: 'unreachable' })),
 }));
 
+vi.mock('../auth', () => ({
+  getSession: vi.fn(async () => ({
+    userId: 'admin-1',
+    username: 'admin',
+    displayName: 'Admin',
+    roles: ['admin'],
+    privileges: ['*'],
+    passwordChangeRequired: false,
+    source: 'local_admin',
+    exp: Math.floor(Date.now() / 1000) + 3600,
+  })),
+}));
+
 import {
   assertActionPermitted,
   assertInteractiveSession,
@@ -289,24 +302,43 @@ describe('Track 4 Core Security & Reliability Fixes', () => {
   });
 
   describe('Headscale invites two-phase locking, corrupt store & client IP', () => {
-    it('extracts rightmost X-Forwarded-For entry in resolveClientIp', () => {
-      expect(
-        resolveClientIp(
-          new Request('http://localhost/api/v1/invites/redeem', {
-            headers: {
-              'x-forwarded-for': '198.51.100.1, 10.0.0.5, 203.0.113.42',
-              'x-real-ip': '192.0.2.10',
-            },
-          })
-        )
-      ).toBe('203.0.113.42');
-      expect(
-        resolveClientIp(
-          new Request('http://localhost/api/v1/invites/redeem', {
-            headers: { 'x-real-ip': '192.0.2.10' },
-          })
-        )
-      ).toBe('192.0.2.10');
+    it('ignores spoofed proxy headers by default and extracts rightmost X-Forwarded-For when AXONWALL_TRUST_PROXY=1', () => {
+      const prevTrustProxy = process.env.AXONWALL_TRUST_PROXY;
+      delete process.env.AXONWALL_TRUST_PROXY;
+      try {
+        expect(
+          resolveClientIp(
+            new Request('http://localhost/api/v1/invites/redeem', {
+              headers: {
+                'x-forwarded-for': '198.51.100.1, 10.0.0.5, 203.0.113.42',
+                'x-real-ip': '192.0.2.10',
+              },
+            })
+          )
+        ).toBe('unknown');
+
+        process.env.AXONWALL_TRUST_PROXY = '1';
+        expect(
+          resolveClientIp(
+            new Request('http://localhost/api/v1/invites/redeem', {
+              headers: {
+                'x-forwarded-for': '198.51.100.1, 10.0.0.5, 203.0.113.42',
+                'x-real-ip': '192.0.2.10',
+              },
+            })
+          )
+        ).toBe('203.0.113.42');
+        expect(
+          resolveClientIp(
+            new Request('http://localhost/api/v1/invites/redeem', {
+              headers: { 'x-real-ip': '192.0.2.10' },
+            })
+          )
+        ).toBe('192.0.2.10');
+      } finally {
+        if (prevTrustProxy === undefined) delete process.env.AXONWALL_TRUST_PROXY;
+        else process.env.AXONWALL_TRUST_PROXY = prevTrustProxy;
+      }
     });
 
     it('reverts redeeming -> pending on failed provisioning so invite is not burned, and fails closed on corrupt JSON', async () => {

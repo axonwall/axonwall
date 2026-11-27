@@ -31,7 +31,7 @@ import path from 'node:path';
 import net from 'node:net';
 import { loadConfig, getVigilanteConfigDir, getVigilantePlaybooksDir, resolvePathInside } from '../engine/config.js';
 import { assertSafeOutboundTarget, classifyIpRange } from '../engine/ssrf.js';
-import { loadAuthzStore, resolvePrincipalByToken, decide } from '../engine/authz.js';
+import { loadAuthzStore, resolvePrincipalByToken, resolvePrincipalBySession, decide } from '../engine/authz.js';
 import { globalModuleRegistry } from '../modules/registry.js';
 import { listAvailablePlaybooks, executeThreatPlaybook } from '../engine/threats.js';
 import {
@@ -134,7 +134,7 @@ import { semanticThreatSearch } from '../engine/vectorcti.js';
 import { appendLedgerEntry, verifyLedgerIntegrity, exportLegalChainOfCustody } from '../engine/ledger.js';
 import { calculateBlastRadius, renderAsciiAttackGraph, buildCompositeAttackGraph, findShortestAttackPath } from '../engine/attackgraph.js';
 import { parseKallsyms, detectSyscallHooking, detectHiddenModules, analyzeKernelTaint, scanRootkitArtifacts, generateRootkitReport } from '../engine/rootkit.js';
-import { compileYaraRule, scanBufferWithRules, extractCobaltStrikeConfig, scanProcessMemory, generateYaraMemoryReport } from '../engine/yarascan.js';
+import { compileYaraRule, scanBufferWithRules, extractCobaltStrikeConfig, scanProcessMemory, generateYaraMemoryReport, assertSafeLiveContainerPid } from '../engine/yarascan.js';
 import { buildCausalTimeline, identifyRootCause, calculateDwellTime, renderAsciiTimeline } from '../engine/timeline.js';
 import { createSwarmDuel, executeDuelRound, runFullDuelSimulation, evaluateDuelMetrics, generateDuelTranscript } from '../engine/swarmduel.js';
 import { generateStixId, parseStixBundle, convertMispToStix, convertStixToMisp, mergeThreatFeeds, filterIndicators } from '../engine/stixmisp.js';
@@ -353,24 +353,419 @@ function redactConfigForMcp(cfg) {
   return redactRecursiveForMcp(JSON.parse(JSON.stringify(cfg)));
 }
 
-function assertMcpWriteAuthorized(toolName, permission, extraArgs = {}) {
-  if (process.env.VIGILANTE_MCP_ALLOW_WRITE !== '1') {
+export const MCP_TOOL_POLICIES = {
+  // Network & Nmap discovery (read)
+  list_hosts: { permission: 'scans:read', target: { module: 'nmap' } },
+  get_host_details: { permission: 'scans:read', target: { module: 'nmap' } },
+  query_topology: { permission: 'scans:read', target: { module: 'nmap' } },
+  diff_nmap_scans: { permission: 'scans:read', target: { module: 'nmap' } },
+  generate_topology_map: { permission: 'scans:read', target: { module: 'nmap' } },
+  get_host_dossier: (args) => ({
+    permission: args?.refresh ? 'scans:run' : 'scans:read',
+    requireWrite: Boolean(args?.refresh),
+    target: { module: 'dossier' }
+  }),
+
+  // Evidence Vault & Forensics
+  list_evidence: { permission: 'forensics:read', target: { module: 'evidence' } },
+  verify_evidence_signature: { permission: 'forensics:read', target: { module: 'evidence' } },
+  assess_nist_incident: { permission: 'forensics:read', target: { module: 'nist' } },
+  generate_nist_postmortem: { permission: 'forensics:run', requireWrite: true, target: { module: 'nist' } },
+  run_diagnostic: (args) => ({
+    permission: args?.network ? 'forensics:run' : 'scans:run',
+    requireWrite: Boolean(args?.network),
+    target: { module: 'diagnostics' }
+  }),
+  run_triage_capture: { permission: 'forensics:run', requireWrite: true, target: { module: 'diagnostics' } },
+  replay_pcap: (args) => ({
+    permission: 'forensics:run',
+    requireWrite: true,
+    target: { module: 'traffic', namespace: args?.namespace || 'vigilante' }
+  }),
+  ingest_bloodhound_data: { permission: 'forensics:run', requireWrite: true, target: { module: 'bloodhound' } },
+  generate_mitre_report: (args) => ({
+    permission: args?.saveEvidence !== false ? 'forensics:run' : 'forensics:read',
+    requireWrite: args?.saveEvidence !== false,
+    target: { module: 'mitre' }
+  }),
+  query_security_datalake: { permission: 'forensics:run', requireWrite: true, target: { module: 'datalake' } },
+  run_sigma_threat_hunt: { permission: 'forensics:run', requireWrite: true, target: { module: 'sigma' } },
+  inspect_process_memory: { permission: 'forensics:read', target: { module: 'memdump' } },
+  scan_file_entropy: { permission: 'forensics:read', target: { module: 'ransomware' } },
+  append_audit_ledger: { permission: 'forensics:run', requireWrite: true, target: { module: 'ledger' } },
+  verify_ledger_integrity: { permission: 'forensics:read', target: { module: 'ledger' } },
+  scan_kernel_rootkits: { permission: 'forensics:read', target: { module: 'rootkit' } },
+  scan_process_yara: (args) => {
+    const hasBuffer = Boolean(args?.bufferBase64 && String(args.bufferBase64).trim().length > 0);
+    return {
+      permission: hasBuffer ? 'forensics:read' : 'forensics:run',
+      requireWrite: !hasBuffer,
+      target: { module: 'yarascan' }
+    };
+  },
+  extract_cobaltstrike_config: { permission: 'forensics:read', target: { module: 'yarascan' } },
+  synthesize_attack_dag: { permission: 'forensics:read', target: { module: 'timeline' } },
+  capture_container_snapshot: (args) => ({
+    permission: 'forensics:run',
+    requireWrite: true,
+    target: { module: 'snapshot', namespace: args?.namespace || undefined }
+  }),
+  export_rfc3161_evidence_pack: { permission: 'forensics:run', requireWrite: true, target: { module: 'evidencepack' } },
+  dissect_network_packet: { permission: 'forensics:read', target: { module: 'sniffer' } },
+
+  // Active scanners & security audits
+  run_nmap_scan: { permission: 'scans:run', requireWrite: true, target: { module: 'nmap' } },
+  check_oobscan: { permission: 'scans:read', target: { module: 'oobscan' } },
+  run_oob_scan: { permission: 'scans:run', requireWrite: true, target: { module: 'oobscan' } },
+  list_oob_scans: { permission: 'scans:read', target: { module: 'oobscan' } },
+  get_oob_scan_details: { permission: 'scans:read', target: { module: 'oobscan' } },
+  export_rakp_hashes: { permission: 'scans:run', requireWrite: true, target: { module: 'oobscan' } },
+  run_recon_scan: { permission: 'scans:run', requireWrite: true, target: { module: 'recon' } },
+  run_nuclei_scan: { permission: 'scans:run', requireWrite: true, target: { module: 'nuclei' } },
+  run_trivy_audit: { permission: 'scans:run', requireWrite: true, target: { module: 'trivy' } },
+  run_kube_audit: { permission: 'scans:run', requireWrite: true, target: { module: 'kubeaudit' } },
+  run_netexec_audit: { permission: 'scans:run', requireWrite: true, target: { module: 'netexec' } },
+  run_zap_scan: { permission: 'scans:run', requireWrite: true, target: { module: 'zap' } },
+  generate_kspm_scorecard: (args) => ({
+    permission: args?.saveEvidence !== false ? 'scans:run' : 'scans:read',
+    requireWrite: args?.saveEvidence !== false,
+    target: { module: 'kspm', namespace: args?.namespace || undefined }
+  }),
+  run_pipeline_audit: { permission: 'scans:read', target: { module: 'audit' } },
+  audit_cloud_security: { permission: 'scans:read', target: { module: 'cloudsec' } },
+  generate_container_sbom: { permission: 'scans:read', target: { module: 'supplychain' } },
+  verify_cosign_signature: { permission: 'scans:read', target: { module: 'supplychain' } },
+  calculate_attack_blast_radius: { permission: 'scans:read', target: { module: 'attackgraph' } },
+  render_terminal_attack_graph: { permission: 'scans:read', target: { module: 'attackgraph' } },
+
+  // Cluster & Modules
+  get_pods: (args) => ({
+    permission: 'cluster:read',
+    target: {
+      namespace: args?.namespace && args.namespace !== 'all' ? args.namespace : undefined,
+      clusterName: args?.clusterName || undefined
+    }
+  }),
+  get_pod_logs: (args) => ({
+    permission: 'cluster:read',
+    target: { namespace: args?.namespace || 'default', clusterName: args?.clusterName || undefined }
+  }),
+  describe_pod: (args) => ({
+    permission: 'cluster:read',
+    target: { namespace: args?.namespace || 'default', clusterName: args?.clusterName || undefined }
+  }),
+  get_cluster_status: (args) => ({
+    permission: 'cluster:read',
+    target: { namespace: args?.namespace || 'default', clusterName: args?.clusterName || 'vigilante-dev' }
+  }),
+  uninstall_module: (args) => ({
+    permission: 'modules:deploy',
+    requireWrite: true,
+    target: {
+      module: args?.moduleId || undefined,
+      namespace: args?.namespace || 'default',
+      clusterName: args?.clusterName || 'vigilante-dev'
+    }
+  }),
+  reset_module: (args) => ({
+    permission: 'modules:deploy',
+    requireWrite: true,
+    target: {
+      module: args?.moduleId || undefined,
+      namespace: args?.namespace || 'default',
+      clusterName: args?.clusterName || 'vigilante-dev'
+    }
+  }),
+
+  // OpenVAS
+  openvas_status: (args) => ({
+    permission: 'modules:read',
+    target: {
+      module: 'openvas',
+      namespace: args?.namespace || undefined,
+      clusterName: args?.clusterName || 'vigilante-dev'
+    }
+  }),
+  get_openvas_credentials: (args) => ({
+    permission: 'cluster:write',
+    requireAuth: true,
+    target: {
+      module: 'openvas',
+      namespace: args?.namespace || undefined,
+      clusterName: args?.clusterName || 'vigilante-dev'
+    }
+  }),
+  run_openvas_scan: (args) => ({
+    permission: 'scans:run',
+    requireWrite: true,
+    target: {
+      module: 'openvas',
+      namespace: args?.namespace || undefined,
+      clusterName: args?.clusterName || 'vigilante-dev'
+    }
+  }),
+  list_openvas_reports: { permission: 'scans:read', target: { module: 'openvas' } },
+
+  // kCTF & Cyber Range
+  kctf_status: (args) => ({
+    permission: 'ctf:read',
+    target: { module: 'kctf', namespace: args?.namespace || 'kctf', clusterName: args?.clusterName || 'vigilante-dev' }
+  }),
+  list_ctf_challenges: (args) => ({
+    permission: 'ctf:read',
+    target: { module: 'kctf', namespace: args?.namespace || 'kctf', clusterName: args?.clusterName || 'vigilante-dev' }
+  }),
+  spin_up_challenge: (args) => ({
+    permission: 'ctf:manage',
+    requireWrite: true,
+    target: { module: 'kctf', namespace: args?.namespace || 'kctf' }
+  }),
+  delete_ctf_challenge: (args) => ({
+    permission: 'ctf:manage',
+    requireWrite: true,
+    target: { module: 'kctf', namespace: args?.namespace || 'kctf' }
+  }),
+  get_ctf_tournament_status: (args) => ({
+    permission: 'ctf:read',
+    target: { module: 'kctf', namespace: args?.namespace || 'kctf' }
+  }),
+  submit_ctf_flag: { permission: 'ctf:read', target: { module: 'kctf' } },
+  ctf_solve_utility: { permission: 'ctf:read', target: { module: 'kctf' } },
+  ask_ctf_socratic_mentor: { permission: 'ctf:read', target: { module: 'kctf' } },
+  spawn_ctf_sandbox: (args) => ({
+    permission: 'ctf:manage',
+    requireWrite: true,
+    target: {
+      module: 'kctf',
+      namespace: args?.namespace || 'ctf-sandboxes',
+      clusterName: args?.clusterName || 'vigilante-dev'
+    }
+  }),
+  list_ctf_sandboxes: (args) => ({
+    permission: 'ctf:read',
+    target: {
+      module: 'kctf',
+      namespace: args?.namespace || 'ctf-sandboxes',
+      clusterName: args?.clusterName || 'vigilante-dev'
+    }
+  }),
+  run_ad_sla_check: { permission: 'scans:run', target: { module: 'kctf' } },
+  ctf_weak_rsa_analyzer: { permission: 'ctf:read', target: { module: 'kctf' } },
+  ctf_triage_binary: { permission: 'ctf:read', target: { module: 'kctf' } },
+  ask_ctf_crash_analyzer: { permission: 'ctf:read', target: { module: 'kctf' } },
+
+  // Telemetry, SOAR, Simulations, Deception & Falco
+  list_threat_playbooks: { permission: 'telemetry:read', target: { module: 'threats' } },
+  run_threat_simulation: (args) => ({
+    permission: 'simulations:run',
+    requireWrite: true,
+    target: {
+      module: 'opensearch',
+      namespace: args?.namespace || 'opensearch',
+      clusterName: args?.clusterName || 'vigilante-dev'
+    }
+  }),
+  isolate_workload: (args) => ({
+    permission: 'telemetry:write',
+    requireWrite: true,
+    target: { module: 'soar', namespace: args?.namespace || 'default' }
+  }),
+  release_isolation: { permission: 'telemetry:write', requireWrite: true, target: { module: 'soar' } },
+  investigate_incident: { permission: 'telemetry:write', requireWrite: true, target: { module: 'agent-soc' } },
+  query_cti: { permission: 'telemetry:read', target: { module: 'cti' } },
+  list_canary_tokens: { permission: 'telemetry:read', target: { module: 'deception' } },
+  deploy_canary_asset: (args) => ({
+    permission: 'simulations:run',
+    requireWrite: true,
+    target: { module: 'deception', namespace: args?.namespace || 'default' }
+  }),
+  run_purple_simulation: { permission: 'simulations:run', requireWrite: true, target: { module: 'purpleteam' } },
+  auto_remediate_finding: { permission: 'telemetry:read', target: { module: 'remediation' } },
+  transpile_sigma_to_sql: { permission: 'telemetry:read', target: { module: 'sigma' } },
+  run_dynamic_adversary_simulation: { permission: 'simulations:run', requireWrite: true, target: { module: 'adversary' } },
+  generate_cloud_honeytoken: { permission: 'simulations:run', requireWrite: true, target: { module: 'deception' } },
+  start_canary_webhook_listener: { permission: 'simulations:run', requireWrite: true, target: { module: 'deception' } },
+  get_socket_connection_matrix: { permission: 'telemetry:read', target: { module: 'observability' } },
+  render_mitre_heatmap: { permission: 'telemetry:read', target: { module: 'mitre' } },
+  broadcast_mesh_threat: { permission: 'telemetry:write', requireWrite: true, target: { module: 'federation' } },
+  get_mesh_peers_status: { permission: 'telemetry:read', target: { module: 'federation' } },
+  synthesize_bpf_lsm_policy: { permission: 'telemetry:read', target: { module: 'lsm' } },
+  evaluate_bpf_lsm_event: { permission: 'telemetry:read', target: { module: 'lsm' } },
+  detect_c2_beaconing: { permission: 'telemetry:read', target: { module: 'beaconing' } },
+  detect_dns_tunneling: { permission: 'telemetry:read', target: { module: 'beaconing' } },
+  deploy_ransomware_canaries: { permission: 'simulations:run', requireWrite: true, target: { module: 'ransomware' } },
+  convene_agent_warroom: { permission: 'telemetry:read', target: { module: 'warroom' } },
+  search_semantic_cti: { permission: 'telemetry:read', target: { module: 'vectorcti' } },
+  run_swarm_duel: { permission: 'telemetry:read', target: { module: 'swarmduel' } },
+  import_stix_bundle: { permission: 'telemetry:read', target: { module: 'stixmisp' } },
+  convert_misp_event: { permission: 'telemetry:read', target: { module: 'stixmisp' } },
+  deploy_honeynet_mesh: { permission: 'simulations:run', requireWrite: true, target: { module: 'honeynet' } },
+  plant_deception_breadcrumbs: { permission: 'simulations:run', requireWrite: true, target: { module: 'honeynet' } },
+  get_falco_status: (args) => ({
+    permission: 'telemetry:read',
+    target: {
+      module: 'falco',
+      namespace: args?.namespace || 'falco',
+      clusterName: args?.clusterName || 'vigilante-dev'
+    }
+  }),
+  list_falco_rules: { permission: 'telemetry:read', target: { module: 'falco' } },
+  validate_falco_rule: { permission: 'telemetry:read', target: { module: 'falco' } },
+  simulate_falco_event: (args) => ({
+    permission: 'telemetry:read',
+    target: { module: 'falco', namespace: args?.namespace || undefined }
+  }),
+  aggregate_falco_metrics: { permission: 'telemetry:read', target: { module: 'falco' } }
+};
+
+export function resolveMcpToolPolicy(name, args = {}) {
+  const entry = MCP_TOOL_POLICIES[name];
+  if (!entry) {
+    return { permission: 'cluster:write', requireWrite: false, requireAuth: false, target: {} };
+  }
+  const resolved = typeof entry === 'function' ? entry(args || {}) : entry;
+  return {
+    permission: resolved.permission,
+    requireWrite: Boolean(resolved.requireWrite),
+    requireAuth: Boolean(resolved.requireAuth),
+    target: resolved.target || {}
+  };
+}
+
+export function resolveMcpResourcePolicy(uri) {
+  if (uri === 'vigilante://hosts' || /^vigilante:\/\/hosts\/[^/]+$/.test(uri)) {
+    return { permission: 'scans:read', requireAuth: false, target: { module: 'nmap' } };
+  }
+  if (uri === 'vigilante://topology' || uri === 'vigilante://topology/svg' || uri === 'vigilante://topology/html') {
+    return { permission: 'scans:read', requireAuth: false, target: { module: 'nmap' } };
+  }
+  if (uri === 'vigilante://scans' || /^vigilante:\/\/scans\/[^/]+$/.test(uri)) {
+    return { permission: 'scans:read', requireAuth: false, target: { module: 'nmap' } };
+  }
+  if (
+    uri === 'vigilante://evidence' ||
+    /^vigilante:\/\/evidence\/[^/]+\/[^/]+$/.test(uri) ||
+    /^vigilante:\/\/evidence\/[^/]+\/[^/]+\/[^/]+$/.test(uri)
+  ) {
+    return { permission: 'forensics:read', requireAuth: false, target: { module: 'evidence' } };
+  }
+  if (uri === 'vigilante://nist/framework' || uri === 'vigilante://nist' || uri === 'vigilante://nist/incidents') {
+    return { permission: 'forensics:read', requireAuth: false, target: { module: 'nist' } };
+  }
+  if (uri === 'vigilante://pods' || uri === 'vigilante://clusters' || uri === 'vigilante://config') {
+    return { permission: 'cluster:read', requireAuth: false, target: {} };
+  }
+  if (uri === 'vigilante://modules') {
+    return { permission: 'modules:read', requireAuth: false, target: { namespace: 'default' } };
+  }
+  if (uri === 'vigilante://threats' || uri === 'vigilante://playbooks') {
+    return { permission: 'telemetry:read', requireAuth: false, target: { module: 'threats' } };
+  }
+  if (uri === 'vigilante://kctf/challenges') {
+    return { permission: 'ctf:read', requireAuth: false, target: { module: 'kctf', namespace: 'kctf' } };
+  }
+  if (uri === 'vigilante://oob/scans' || /^vigilante:\/\/oob\/scan\/[^/]+$/.test(uri)) {
+    return { permission: 'scans:read', requireAuth: false, target: { module: 'oobscan' } };
+  }
+  if (uri === 'vigilante://oob/hashes') {
+    return { permission: 'scans:run', requireAuth: true, target: { module: 'oobscan' } };
+  }
+  if (uri === 'vigilante://falco/status') {
+    const cfg = loadConfig();
+    return {
+      permission: 'telemetry:read',
+      requireAuth: false,
+      target: {
+        module: 'falco',
+        namespace: 'falco',
+        clusterName: cfg.defaults?.clusterName || 'vigilante-dev'
+      }
+    };
+  }
+  if (uri === 'vigilante://falco/rules') {
+    return { permission: 'telemetry:read', requireAuth: false, target: { module: 'falco' } };
+  }
+  return { permission: 'cluster:read', requireAuth: false, target: {} };
+}
+
+export function authorizeMcpRequest({
+  kind = 'tool',
+  name,
+  permission,
+  target = {},
+  requireWrite = false,
+  requireAuth = false,
+  args = {},
+  request = null
+}) {
+  if (!permission) {
+    throw new Error(`Access denied: missing RBAC permission mapping for MCP ${kind} '${name}'`);
+  }
+
+  if (requireWrite && process.env.VIGILANTE_MCP_ALLOW_WRITE !== '1') {
     throw new Error(
-      `MCP write/destructive tool '${toolName}' is disabled by default. Set VIGILANTE_MCP_ALLOW_WRITE=1 to authorize mutating MCP operations.`
+      `Access denied: MCP ${kind} '${name}' is disabled by default. Set VIGILANTE_MCP_ALLOW_WRITE=1 to authorize mutating or active-scanning MCP operations.`
     );
   }
+
   const loaded = loadAuthzStore();
   if (loaded.state === 'invalid') {
-    throw new Error(`MCP write tool '${toolName}' denied: authz store is invalid (fail-closed).`);
+    throw new Error(
+      `Access denied by Vigilante authz (deny_invalid_store): authz store is invalid for MCP ${kind} '${name}'.`
+    );
   }
-  if (loaded.state === 'ready' && loaded.store && Array.isArray(loaded.store.principals) && loaded.store.principals.length > 0) {
-    const mcpToken = process.env.VIGILANTE_MCP_TOKEN || extraArgs.authToken || '';
-    const principal = mcpToken ? resolvePrincipalByToken(loaded.store, mcpToken) : null;
-    const verdict = decide(loaded, principal, permission, {}, { source: 'loopback', authMethod: 'token' });
-    if (!verdict.allowed) {
-      throw new Error(`MCP write tool '${toolName}' denied by Vigilante authz (${verdict.reason})`);
+
+  const mcpToken =
+    process.env.VIGILANTE_MCP_TOKEN ||
+    request?.params?._meta?.authToken ||
+    args?.authToken ||
+    '';
+
+  const store = loaded.store || { version: 1, principals: [], sessions: [] };
+  const hasConfiguredPrincipals =
+    loaded.state === 'ready' && Array.isArray(store.principals) && store.principals.length > 0;
+
+  let principal = null;
+  if (mcpToken && loaded.state === 'ready') {
+    principal = resolvePrincipalByToken(store, mcpToken);
+    if (!principal && String(mcpToken).startsWith('vig_sess_')) {
+      const sess = resolvePrincipalBySession(store, mcpToken);
+      if (sess.principal && !sess.expired) {
+        principal = sess.principal;
+      }
     }
   }
+
+  if (requireAuth && (!hasConfiguredPrincipals || !principal)) {
+    throw new Error(
+      `Access denied by Vigilante authz (deny_unauthenticated): authenticated principal required for MCP ${kind} '${name}'.`
+    );
+  }
+
+  const normalizedTarget = {};
+  const moduleId = target.moduleId ?? target.module;
+  if (moduleId) {
+    normalizedTarget.moduleId = moduleId;
+    normalizedTarget.module = moduleId;
+  }
+  if (target.namespace) {
+    normalizedTarget.namespace = target.namespace;
+  }
+  if (target.clusterName) {
+    normalizedTarget.clusterName = target.clusterName;
+  }
+
+  const verdict = decide(loaded, principal, permission, normalizedTarget, {
+    source: 'loopback',
+    authMethod: 'token'
+  });
+  if (!verdict.allowed) {
+    throw new Error(
+      `Access denied by Vigilante authz (${verdict.reason}) for MCP ${kind} '${name}'.`
+    );
+  }
+
+  return { principal, target: normalizedTarget, verdict };
 }
 
 /**
@@ -590,6 +985,15 @@ export function createVigilanteMcpServer() {
   // -------------------------------------------------------------
   server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
     const uri = request.params.uri;
+    const resourcePolicy = resolveMcpResourcePolicy(uri);
+    authorizeMcpRequest({
+      kind: 'resource',
+      name: uri,
+      permission: resourcePolicy.permission,
+      target: resourcePolicy.target,
+      requireAuth: resourcePolicy.requireAuth,
+      request
+    });
 
     // A. Discovered Hosts Aggregation
     if (uri === 'vigilante://hosts') {
@@ -2208,7 +2612,7 @@ export function createVigilanteMcpServer() {
               },
               automatedContainment: {
                 type: 'boolean',
-                description: 'Whether to automatically isolate target if classified as CRITICAL (default: true)'
+                description: 'Whether to automatically isolate target if classified as CRITICAL (default: false)'
               }
             },
             required: ['target']
@@ -2952,6 +3356,17 @@ export function createVigilanteMcpServer() {
   // -------------------------------------------------------------
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args = {} } = request.params;
+    const toolPolicy = resolveMcpToolPolicy(name, args);
+    authorizeMcpRequest({
+      kind: 'tool',
+      name,
+      permission: toolPolicy.permission,
+      target: toolPolicy.target,
+      requireWrite: toolPolicy.requireWrite,
+      requireAuth: toolPolicy.requireAuth,
+      args,
+      request
+    });
 
     // Tool: list_hosts
     if (name === 'list_hosts') {
@@ -3394,7 +3809,6 @@ export function createVigilanteMcpServer() {
 
     // Tool: run_threat_simulation
     if (name === 'run_threat_simulation') {
-      assertMcpWriteAuthorized('run_threat_simulation', 'simulations:run', args);
       const { scenario, namespace = 'opensearch', clusterName = 'vigilante-dev' } = args;
       const safeScenario =
         typeof scenario === 'string' &&
@@ -3458,7 +3872,6 @@ export function createVigilanteMcpServer() {
 
     // Tool: generate_nist_postmortem
     if (name === 'generate_nist_postmortem') {
-      assertMcpWriteAuthorized('generate_nist_postmortem', 'forensics:run', args);
       const {
         host,
         network = '10.0.1.0_24',
@@ -3607,7 +4020,7 @@ export function createVigilanteMcpServer() {
       const safeCreds = creds
         ? {
             username: creds.username,
-            password: process.env.VIGILANTE_CLI_ADMIN === '1' ? creds.password : '********',
+            password: creds.password,
             passwordConfigured: Boolean(creds.password),
             namespace: creds.namespace
           }
@@ -3697,7 +4110,6 @@ export function createVigilanteMcpServer() {
 
     // Tool: spin_up_challenge
     if (name === 'spin_up_challenge') {
-      assertMcpWriteAuthorized('spin_up_challenge', 'ctf:manage', args);
       const {
         templateId = 'pwn-nsjail-echo',
         customName = null,
@@ -3728,7 +4140,6 @@ export function createVigilanteMcpServer() {
 
     // Tool: delete_ctf_challenge
     if (name === 'delete_ctf_challenge') {
-      assertMcpWriteAuthorized('delete_ctf_challenge', 'ctf:manage', args);
       const { challengeName, namespace = 'kctf' } = args;
       if (!challengeName) {
         throw new Error("Argument 'challengeName' is required.");
@@ -3855,7 +4266,6 @@ ${observation ? `Observation noted: ${observation}` : ''}`;
 
     // Tool: spawn_ctf_sandbox
     if (name === 'spawn_ctf_sandbox') {
-      assertMcpWriteAuthorized('spawn_ctf_sandbox', 'ctf:manage', args);
       const {
         challengeId,
         teamId = 'mcp-team',
@@ -3975,7 +4385,6 @@ ${observation ? `Observation noted: ${observation}` : ''}`;
 
     // Tool: uninstall_module
     if (name === 'uninstall_module') {
-      assertMcpWriteAuthorized('uninstall_module', 'modules:deploy', args);
       const { moduleId, namespace = 'default', clusterName = 'vigilante-dev', deleteNamespace = false } = args;
       if (!moduleId) {
         throw new Error("Argument 'moduleId' is required.");
@@ -3998,7 +4407,6 @@ ${observation ? `Observation noted: ${observation}` : ''}`;
 
     // Tool: reset_module
     if (name === 'reset_module') {
-      assertMcpWriteAuthorized('reset_module', 'modules:deploy', args);
       const { moduleId, namespace = 'default', clusterName = 'vigilante-dev', domain = 'vigilante.local' } = args;
       if (!moduleId) {
         throw new Error("Argument 'moduleId' is required.");
@@ -4088,7 +4496,6 @@ ${observation ? `Observation noted: ${observation}` : ''}`;
 
     // Tool: export_rakp_hashes
     if (name === 'export_rakp_hashes') {
-      assertMcpWriteAuthorized('export_rakp_hashes', 'scans:run', args);
       const result = await exportRakpHashes(args.outputFile);
       return {
         content: [
@@ -4320,7 +4727,6 @@ ${observation ? `Observation noted: ${observation}` : ''}`;
 
     // Tool: isolate_workload
     if (name === 'isolate_workload') {
-      assertMcpWriteAuthorized('isolate_workload', 'telemetry:write', args);
       const { podName, namespace = 'default', reason = 'Emergency containment via MCP' } = args;
       const result = await isolatePod({ podName, namespace, reason });
       return {
@@ -4335,7 +4741,6 @@ ${observation ? `Observation noted: ${observation}` : ''}`;
 
     // Tool: release_isolation
     if (name === 'release_isolation') {
-      assertMcpWriteAuthorized('release_isolation', 'telemetry:write', args);
       const { containmentId } = args;
       const result = await releaseContainment(containmentId);
       return {
@@ -4350,8 +4755,7 @@ ${observation ? `Observation noted: ${observation}` : ''}`;
 
     // Tool: investigate_incident
     if (name === 'investigate_incident') {
-      assertMcpWriteAuthorized('investigate_incident', 'telemetry:write', args);
-      const { target, incidentId, triggerAlert, automatedContainment = true } = args;
+      const { target, incidentId, triggerAlert, automatedContainment = false } = args;
       const result = await runAgentSocInvestigation({
         target,
         incidentId,
@@ -4428,7 +4832,6 @@ ${observation ? `Observation noted: ${observation}` : ''}`;
 
     // Tool: deploy_canary_asset
     if (name === 'deploy_canary_asset') {
-      assertMcpWriteAuthorized('deploy_canary_asset', 'simulations:run', args);
       const { type, name: assetName, namespace = 'default' } = args;
       let asset;
       if (type === 'secret') asset = generateCanarySecret(assetName || 'vault-prod-creds', namespace, 'aws_key');
@@ -4448,7 +4851,6 @@ ${observation ? `Observation noted: ${observation}` : ''}`;
 
     // Tool: run_purple_simulation
     if (name === 'run_purple_simulation') {
-      assertMcpWriteAuthorized('run_purple_simulation', 'simulations:run', args);
       const { scenario = 'lateral-smb-exfil' } = args;
       const sim = await runPurpleTeamSimulation(scenario);
       const scorecard = calculatePurpleScorecard(sim);
@@ -4563,7 +4965,6 @@ ${observation ? `Observation noted: ${observation}` : ''}`;
 
     // Tool: start_canary_webhook_listener
     if (name === 'start_canary_webhook_listener') {
-      assertMcpWriteAuthorized('start_canary_webhook_listener', 'simulations:run', args);
       const { port = 9099, webhookPath = '/api/v1/trap', autoContain, autoIsolate } = args;
       const resolvedAutoIsolate = autoIsolate !== undefined ? autoIsolate !== false : autoContain !== false;
       const listener = await startCanaryWebhookListener({
@@ -4628,7 +5029,6 @@ ${observation ? `Observation noted: ${observation}` : ''}`;
 
     // Tool: broadcast_mesh_threat
     if (name === 'broadcast_mesh_threat') {
-      assertMcpWriteAuthorized('broadcast_mesh_threat', 'telemetry:write', args);
       const { indicator, type = 'IP', severity = 'CRITICAL', reason = 'Manual alert', peers = [] } = args;
       const node = await createFederationNode({ peers });
       const envelope = signThreatRecord({ indicator, type, severity, reason }, node.privateKey, { nodeId: node.nodeId, publicKey: node.publicKey });
@@ -4708,7 +5108,6 @@ ${observation ? `Observation noted: ${observation}` : ''}`;
 
     // Tool: deploy_ransomware_canaries
     if (name === 'deploy_ransomware_canaries') {
-      assertMcpWriteAuthorized('deploy_ransomware_canaries', 'simulations:run', args);
       const safeDir = args.targetDirectory
         ? assertConfinedMcpPath(args.targetDirectory, 'targetDirectory')
         : path.join(getVigilanteConfigDir(), 'canary', 'ransomware');
@@ -4740,7 +5139,6 @@ ${observation ? `Observation noted: ${observation}` : ''}`;
 
     // Tool: append_audit_ledger
     if (name === 'append_audit_ledger') {
-      assertMcpWriteAuthorized('append_audit_ledger', 'forensics:run', args);
       const safeLedgerDir = args.ledgerDir
         ? assertConfinedMcpPath(args.ledgerDir, 'ledgerDir', getVigilanteConfigDir())
         : undefined;
@@ -4810,8 +5208,20 @@ ${observation ? `Observation noted: ${observation}` : ''}`;
     // Tool: scan_process_yara
     if (name === 'scan_process_yara') {
       const rule = compileYaraRule(args.rule);
-      const buf = args.bufferBase64 ? Buffer.from(args.bufferBase64, 'base64') : null;
-      const scanRes = await scanProcessMemory(args.pid || 0, [rule], { memoryBuffer: buf });
+      const hasBuffer = Boolean(args.bufferBase64 && String(args.bufferBase64).trim().length > 0);
+      const buf = hasBuffer ? Buffer.from(args.bufferBase64, 'base64') : null;
+      if (buf) {
+        if (args.pid !== undefined && args.pid !== null && Number(args.pid) === process.pid) {
+          throw new Error(`Forbidden process ID '${args.pid}': cannot reference MCP server PID`);
+        }
+        const scanRes = await scanProcessMemory(args.pid ?? 1, [rule], { memoryBuffer: buf });
+        const report = generateYaraMemoryReport(scanRes);
+        return {
+          content: [{ type: 'text', text: JSON.stringify(report, null, 2) }]
+        };
+      }
+      await assertSafeLiveContainerPid(args.pid, { allowMockMissing: false });
+      const scanRes = await scanProcessMemory(args.pid, [rule], {});
       const report = generateYaraMemoryReport(scanRes);
       return {
         content: [{ type: 'text', text: JSON.stringify(report, null, 2) }]
@@ -4866,7 +5276,6 @@ ${observation ? `Observation noted: ${observation}` : ''}`;
 
     // Tool: deploy_honeynet_mesh
     if (name === 'deploy_honeynet_mesh') {
-      assertMcpWriteAuthorized('deploy_honeynet_mesh', 'simulations:run', args);
       const mesh = await createHoneynetMesh({ services: args.services });
       activeHoneynetMeshes.add(mesh);
       return {
@@ -4876,7 +5285,6 @@ ${observation ? `Observation noted: ${observation}` : ''}`;
 
     // Tool: plant_deception_breadcrumbs
     if (name === 'plant_deception_breadcrumbs') {
-      assertMcpWriteAuthorized('plant_deception_breadcrumbs', 'simulations:run', args);
       const safeDir = args.targetDir
         ? assertConfinedMcpPath(args.targetDir, 'targetDir')
         : path.join(getVigilanteConfigDir(), 'canary', 'breadcrumbs');
@@ -4890,6 +5298,12 @@ ${observation ? `Observation noted: ${observation}` : ''}`;
     if (name === 'capture_container_snapshot') {
       const safeArgs = { ...args };
       delete safeArgs.sealingKey;
+      if (safeArgs.pid === undefined || safeArgs.pid === null) {
+        throw new Error(
+          "Argument 'pid' is required and must refer to an isolated container process (host PID 1 is forbidden)."
+        );
+      }
+      await assertSafeLiveContainerPid(safeArgs.pid, { allowMockMissing: true });
       const snapshotOptions = {};
       if (safeArgs.rootfsDir) {
         safeArgs.rootfsDir = assertConfinedMcpPath(safeArgs.rootfsDir, 'rootfsDir');

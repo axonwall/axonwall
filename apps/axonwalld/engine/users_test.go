@@ -3,6 +3,7 @@ package engine
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -189,5 +190,73 @@ func TestValidateLoginShellExists(t *testing.T) {
 		if err := validateLoginShellExists("/usr/bin/zsh"); err == nil {
 			t.Errorf("expected missing /usr/bin/zsh to fail fail-closed")
 		}
+	}
+}
+
+func TestUserGroupsValidationAndPrivilegedBlocking(t *testing.T) {
+	tmpDir := t.TempDir()
+	passwdPath := filepath.Join(tmpDir, "passwd")
+	groupPath := filepath.Join(tmpDir, "group")
+	shadowPath := filepath.Join(tmpDir, "shadow")
+
+	_ = os.WriteFile(passwdPath, []byte("root:x:0:0:root:/root:/bin/bash\nalice:x:1000:1000:Alice:/home/alice:/bin/bash\n"), 0644)
+	_ = os.WriteFile(groupPath, []byte("root:x:0:\ndaemon:x:1:\nsudo:x:27:\nwheel:x:10:\nadm:x:4:\nshadow:x:42:\ndisk:x:6:\nkmem:x:15:\naxonwall-api:x:999:\naxonwall-admin:x:1005:\ncustomers:x:1010:\n"), 0644)
+	_ = os.WriteFile(shadowPath, []byte("root:*:19000:0:99999:7:::\nalice:*:19000:0:99999:7:::\n"), 0640)
+
+	mgr := NewCustomUserManager(passwdPath, groupPath, shadowPath, nil)
+
+	// Fake failing groupadd + working useradd on PATH.
+	binDir := filepath.Join(tmpDir, "bin")
+	if err := os.MkdirAll(binDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.WriteFile(filepath.Join(binDir, "groupadd"), []byte("#!/bin/sh\necho 'groupadd denied' >&2\nexit 1\n"), 0755)
+	_ = os.WriteFile(filepath.Join(binDir, "useradd"), []byte("#!/bin/sh\nexit 0\n"), 0755)
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+
+	for _, badGroup := range []string{
+		"root", "shadow", "disk", "kmem", "axonwall-api", "sudo", "wheel", "adm",
+		"daemon", "bad group", "-evil", "UPPER", "",
+	} {
+		err := mgr.CreateUser(CreateUserRequest{
+			Username: "bob",
+			Shell:    "/bin/sh",
+			Groups:   []string{badGroup},
+		})
+		if err == nil {
+			t.Fatalf("expected CreateUser with group %q to be rejected", badGroup)
+		}
+	}
+
+	// EnsureGroupExists error must abort CreateUser instead of being silently ignored.
+	err := mgr.CreateUser(CreateUserRequest{
+		Username: "bob",
+		Shell:    "/bin/sh",
+		Groups:   []string{"missinggroup"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "failed to ensure group") {
+		t.Fatalf("expected EnsureGroupExists failure to abort CreateUser, got: %v", err)
+	}
+
+	// Valid non-system group + ApplianceRole=admin succeeds cleanly when groups exist.
+	if err := mgr.CreateUser(CreateUserRequest{
+		Username:      "bob",
+		Shell:         "/bin/sh",
+		ApplianceRole: "admin",
+		Groups:        []string{"customers"},
+	}); err != nil {
+		t.Fatalf("expected CreateUser with valid role and custom group to succeed, got: %v", err)
+	}
+
+	// UpdateUser must also reject privileged/invalid req.Groups (use root, which user.Lookup finds).
+	for _, badGroup := range []string{"shadow", "axonwall-api", "sudo", "bad:group"} {
+		gList := []string{badGroup}
+		if err := mgr.UpdateUser("root", UpdateUserRequest{Groups: &gList}); err == nil {
+			t.Fatalf("expected UpdateUser with group %q to be rejected", badGroup)
+		}
+	}
+	missingList := []string{"missinggroup"}
+	if err := mgr.UpdateUser("root", UpdateUserRequest{Groups: &missingList}); err == nil || !strings.Contains(err.Error(), "failed to ensure group") {
+		t.Fatalf("expected UpdateUser to propagate EnsureGroupExists failure, got: %v", err)
 	}
 }

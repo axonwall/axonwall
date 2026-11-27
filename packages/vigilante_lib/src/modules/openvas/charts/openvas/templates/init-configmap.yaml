@@ -14,21 +14,15 @@ data:
     warn() { echo "[WARN] $*"; }
     err() { echo "[ERROR] $*" >&2; }
 
-    run() {
-      log "RUN: $*"
-      "$@"
-      rc=$?
-      if [ $rc -ne 0 ]; then
-        err "Command failed (rc=$rc): $*"
-        return $rc
-      fi
-      return 0
-    }
-
     [ -z "${POSTGRES_USER:-}" ] && POSTGRES_USER="gvmd"
     [ -z "${POSTGRES_DATA:-}" ] && POSTGRES_DATA="/var/lib/postgresql"
-    [ -z "${POSTGRES_HOST_AUTH_METHOD:-}" ] && POSTGRES_HOST_AUTH_METHOD="md5"
+    [ -z "${POSTGRES_HOST_AUTH_METHOD:-}" ] && POSTGRES_HOST_AUTH_METHOD="scram-sha-256"
     [ -z "${POSTGRES_VERSION:-}" ] && POSTGRES_VERSION=17
+
+    if [ -z "${POSTGRES_PASSWORD:-}" ]; then
+      err "POSTGRES_PASSWORD is empty; refusing to initialize PostgreSQL without credentials."
+      exit 1
+    fi
 
     POSTGRES_DB=gvmd
     POSTGRES_HBA_CONF="/etc/postgresql/$POSTGRES_VERSION/main/pg_hba.conf"
@@ -43,9 +37,9 @@ data:
 
     HBA_DIR="$(dirname "$POSTGRES_HBA_CONF")"
     if [ -d "$HBA_DIR" ] && [ -w "$HBA_DIR" ]; then
-      log "Writing pg_hba.conf"
+      log "Writing pg_hba.conf with peer local auth and $POSTGRES_HOST_AUTH_METHOD host auth"
       {
-        echo "local all all trust"
+        echo "local all all peer"
         echo "host all all all $POSTGRES_HOST_AUTH_METHOD"
       } > "$POSTGRES_HBA_CONF" 2>/dev/null || true
     fi
@@ -65,24 +59,32 @@ data:
         done
       fi
 
-      USER_EXISTS="$(echo "SELECT 1 FROM pg_roles WHERE rolname = '$POSTGRES_USER'" | psql --host="$POSTGRES_SOCKET_DIR" -U postgres -d postgres --tuples-only 2>/dev/null || true)"
-      if [ -z "$USER_EXISTS" ]; then
-        createuser --host="$POSTGRES_SOCKET_DIR" -U postgres -DRS "$POSTGRES_USER" 2>/dev/null || true
-      fi
-      if [ -n "${POSTGRES_PASSWORD:-}" ]; then
-        psql --host="$POSTGRES_SOCKET_DIR" -U postgres -c "ALTER USER \"$POSTGRES_USER\" WITH PASSWORD '$POSTGRES_PASSWORD';" 2>/dev/null || true
-      fi
+      su -s /bin/sh -c '
+        set -eu
+        PG_USER="$1"
+        PG_PASS="$2"
+        PG_DB="$3"
+        PG_SOCK="$4"
 
-      DB_EXISTS="$(echo "SELECT 1 FROM pg_database WHERE datname = '$POSTGRES_DB';" | psql --host="$POSTGRES_SOCKET_DIR" -U postgres -d postgres --tuples-only 2>/dev/null || true)"
-      if [ -z "$DB_EXISTS" ]; then
-        createdb --host="$POSTGRES_SOCKET_DIR" -U postgres -O "$POSTGRES_USER" "$POSTGRES_DB" 2>/dev/null || true
-      fi
+        USER_EXISTS="$(printf "%s\n" "SELECT 1 FROM pg_roles WHERE rolname = :'\''user'\'';" | psql --host="$PG_SOCK" -U postgres -d postgres -tA -v user="$PG_USER" || true)"
+        if [ -z "$USER_EXISTS" ]; then
+          printf "%s\n" "CREATE ROLE :\"user\" WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT;" | psql --host="$PG_SOCK" -U postgres -d postgres -v ON_ERROR_STOP=1 -v user="$PG_USER"
+        fi
 
-      psql --host="$POSTGRES_SOCKET_DIR" -U postgres -d "$POSTGRES_DB" -c "create role dba with superuser noinherit;" 2>/dev/null || true
-      psql --host="$POSTGRES_SOCKET_DIR" -U postgres -d "$POSTGRES_DB" -c "grant dba to $POSTGRES_USER;" 2>/dev/null || true
-      psql --host="$POSTGRES_SOCKET_DIR" -U postgres -d "$POSTGRES_DB" -c 'create extension if not exists "uuid-ossp";' 2>/dev/null || true
-      psql --host="$POSTGRES_SOCKET_DIR" -U postgres -d "$POSTGRES_DB" -c 'create extension if not exists "pgcrypto";' 2>/dev/null || true
-      psql --host="$POSTGRES_SOCKET_DIR" -U postgres -d "$POSTGRES_DB" -c 'create extension if not exists "pg-gvm";' 2>/dev/null || true
+        printf "%s\n" "ALTER USER :\"user\" WITH PASSWORD :'\''pass'\'';" | psql --host="$PG_SOCK" -U postgres -d postgres -v ON_ERROR_STOP=1 -v user="$PG_USER" -v pass="$PG_PASS"
+
+        DB_EXISTS="$(printf "%s\n" "SELECT 1 FROM pg_database WHERE datname = :'\''db'\'';" | psql --host="$PG_SOCK" -U postgres -d postgres -tA -v db="$PG_DB" || true)"
+        if [ -z "$DB_EXISTS" ]; then
+          printf "%s\n" "CREATE DATABASE :\"db\" OWNER :\"user\";" | psql --host="$PG_SOCK" -U postgres -d postgres -v ON_ERROR_STOP=1 -v user="$PG_USER" -v db="$PG_DB"
+        fi
+
+        printf "%s\n" \
+          "CREATE EXTENSION IF NOT EXISTS \"uuid-ossp\";" \
+          "CREATE EXTENSION IF NOT EXISTS \"pgcrypto\";" \
+          "CREATE EXTENSION IF NOT EXISTS \"pg-gvm\";" \
+          "GRANT USAGE, CREATE ON SCHEMA public TO :\"user\";" \
+          | psql --host="$PG_SOCK" -U postgres -d "$PG_DB" -v ON_ERROR_STOP=1 -v user="$PG_USER"
+      ' - -- postgres -- "$POSTGRES_USER" "$POSTGRES_PASSWORD" "$POSTGRES_DB" "$POSTGRES_SOCKET_DIR"
 
       pg_ctlcluster "$POSTGRES_VERSION" main stop 2>/dev/null || true
     fi
@@ -96,6 +98,13 @@ data:
     #!/bin/sh
     set -u
     log() { echo "[INFO] $*"; }
+
+    ADMIN_USER="${ADMIN_USERNAME:-admin}"
+    ADMIN_PASS="${ADMIN_PASSWORD:-}"
+    if [ -z "$ADMIN_PASS" ]; then
+      echo "[ERROR] ADMIN_PASSWORD is empty; refusing to bootstrap gvmd admin user." >&2
+      exit 1
+    fi
 
     log "Waiting for gvmd socket..."
     i=0
@@ -115,21 +124,18 @@ data:
     log "Waiting for gvmd database connection..."
     j=0
     while [ $j -lt 60 ]; do
-      if su - gvmd -s /bin/sh -c "/usr/local/sbin/gvmd --get-users" >/dev/null 2>&1; then
+      if su -s /bin/sh -c 'exec /usr/local/sbin/gvmd --get-users' - gvmd >/dev/null 2>&1; then
         break
       fi
       j=$((j+1))
       sleep 2
     done
 
-    ADMIN_USER="${ADMIN_USERNAME:-admin}"
-    ADMIN_PASS="${ADMIN_PASSWORD:-admin}"
-
     log "Ensuring admin user '$ADMIN_USER' exists in gvmd..."
-    if su - gvmd -s /bin/sh -c "/usr/local/sbin/gvmd --get-users" 2>/dev/null | grep -q "^$ADMIN_USER "; then
-      su - gvmd -s /bin/sh -c "/usr/local/sbin/gvmd --user='$ADMIN_USER' --new-password='$ADMIN_PASS'" 2>/dev/null || true
+    if su -s /bin/sh -c 'exec /usr/local/sbin/gvmd --get-users' - gvmd 2>/dev/null | awk '{print $1}' | grep -Fxq -- "$ADMIN_USER"; then
+      su -s /bin/sh -c 'exec /usr/local/sbin/gvmd --user="$1" --new-password="$2"' - -- gvmd -- "$ADMIN_USER" "$ADMIN_PASS"
       log "Admin user '$ADMIN_USER' password updated."
     else
-      su - gvmd -s /bin/sh -c "/usr/local/sbin/gvmd --create-user='$ADMIN_USER' --password='$ADMIN_PASS' --role=Admin --disable-password-policy" 2>/dev/null || true
+      su -s /bin/sh -c 'exec /usr/local/sbin/gvmd --create-user="$1" --password="$2" --role=Admin --disable-password-policy' - -- gvmd -- "$ADMIN_USER" "$ADMIN_PASS"
       log "Admin user '$ADMIN_USER' created successfully."
     fi

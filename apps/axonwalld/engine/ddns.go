@@ -104,6 +104,8 @@ type DdnsManager struct {
 	cancel   context.CancelFunc
 
 	httpClient     *http.Client
+	httpTransport  *http.Transport
+	allowLoopback  bool
 	duckdnsBaseURL string
 	cloudflareBase string
 	desecBaseURL   string
@@ -111,10 +113,12 @@ type DdnsManager struct {
 }
 
 func NewDdnsManager() *DdnsManager {
+	c, tr := newSafeHTTPClient(SafeHTTPClientOptions{Timeout: 8 * time.Second})
 	return &DdnsManager{
 		statuses:       make(map[string]DdnsEntryStatus),
 		lastSync:       make(map[string]time.Time),
-		httpClient:     &http.Client{Timeout: 8 * time.Second},
+		httpClient:     c,
+		httpTransport:  tr,
 		duckdnsBaseURL: "https://www.duckdns.org",
 		cloudflareBase: "https://api.cloudflare.com/client/v4",
 		desecBaseURL:   "https://desec.io/api/v1",
@@ -122,11 +126,31 @@ func NewDdnsManager() *DdnsManager {
 	}
 }
 
+// SetAllowLoopbackForTest enables or disables loopback connections on the DDNS HTTP client for unit tests.
+func (m *DdnsManager) SetAllowLoopbackForTest(allow bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.allowLoopback = allow
+	if m.httpTransport != nil {
+		m.httpTransport.CloseIdleConnections()
+	}
+	m.httpClient, m.httpTransport = newSafeHTTPClient(SafeHTTPClientOptions{
+		Timeout:       8 * time.Second,
+		AllowLoopback: allow,
+	})
+}
+
 func (m *DdnsManager) httpDo(req *http.Request) (*http.Response, error) {
+	m.mu.Lock()
 	c := m.httpClient
 	if c == nil {
-		c = &http.Client{Timeout: 8 * time.Second}
+		c, m.httpTransport = newSafeHTTPClient(SafeHTTPClientOptions{
+			Timeout:       8 * time.Second,
+			AllowLoopback: m.allowLoopback,
+		})
+		m.httpClient = c
 	}
+	m.mu.Unlock()
 	return c.Do(req)
 }
 

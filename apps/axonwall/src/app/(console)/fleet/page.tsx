@@ -28,6 +28,11 @@ import {
 } from '@/server/fleet';
 import { useDesiredStateApply } from '@/lib/use-desired-state-apply';
 import { mergeSatelliteNodesForPersist } from '@/lib/state-preservation';
+import {
+  buildFleetZtpSnippets,
+  isValidInterfaceName,
+  isValidNodeId,
+} from '@/lib/shell-quote';
 
 interface WifiRadioInfo {
   radio: string;
@@ -335,6 +340,16 @@ function FleetPageContent() {
   const handleEnrollNode = async () => {
     const cleanId = newNodeId.trim() || `${newNodeRole === 'edge-ngfw' ? 'edge-ngfw' : 'sat-node'}-${satellites.length + 1}`;
     const cleanName = newNodeName.trim() || cleanId;
+    if (!isValidNodeId(cleanId)) {
+      alert('Invalid Node ID: use 1-64 characters from [a-zA-Z0-9._-] without spaces, quotes, or newlines.');
+      return;
+    }
+    const cleanWan = newNodeWan.trim() || 'eth0';
+    const cleanLan = newNodeLan.trim() || 'eth1';
+    if (!isValidInterfaceName(cleanWan) || !isValidInterfaceName(cleanLan)) {
+      alert('Invalid WAN/LAN interface name.');
+      return;
+    }
     if (satellites.some((s) => s.id === cleanId)) {
       alert(`Satellite node ID "${cleanId}" is already registered.`);
       return;
@@ -452,16 +467,22 @@ function FleetPageContent() {
   const totalWifiClients = satellites.reduce((acc, s) => acc + s.wifiClients, 0);
   const wifiApCount = satellites.filter((s) => s.wifiRadios.some((r) => r.enabled)).length;
 
-  const bootstrapNodeId = newNodeId.trim() || (newNodeRole === 'edge-ngfw' ? 'edge-ngfw-01' : 'sat-node-$(cat /sys/class/net/eth0/address | tr -d \':\')');
-  const ukiCmdline = `console=ttyS0,115200 quiet loglevel=3 axonwall.hub=wss://${hubHostname}:${listenPort}/ws/satellite axonwall.id=${bootstrapNodeId} axonwall.token=${hubZtpToken} axonwall.sku=${newNodeSku} axonwall.slot=A axonwall.wan=${newNodeWan}:dhcp axonwall.lan=${newNodeLan}:192.168.1.1/24`;
-  const cloudInitSnippet = `#cloud-config\nhostname: ${bootstrapNodeId}\naxonwall:\n  hub: wss://${hubHostname}:${listenPort}/ws/satellite\n  id: ${bootstrapNodeId}\n  token: ${hubZtpToken}\n  sku: ${newNodeSku}\n  interfaces:\n    - name: wan\n      device: ${newNodeWan}\n      address: dhcp\n    - name: lan\n      device: ${newNodeLan}\n      address: 192.168.1.1/24`;
-  const bootstrapCommand =
-    newNodeRole === 'edge-ngfw'
-      ? `./packaging/edge-uki/build-edge-uki.sh \\\n  --sku ${newNodeSku} \\\n  --cmdline "${ukiCmdline}"`
-      : `./axonwall-satellite \\\n  -core wss://${hubHostname}:${listenPort}/ws/satellite \\\n  -id ${bootstrapNodeId} \\\n  -token ${hubZtpToken}`;
+  const ztpSnippets = buildFleetZtpSnippets({
+    hubHostname,
+    listenPort,
+    nodeId: newNodeId,
+    nodeRole: newNodeRole,
+    nodeSku: newNodeSku,
+    wanInterface: newNodeWan,
+    lanInterface: newNodeLan,
+    ztpToken: hubZtpToken,
+  });
 
   const handleCopyZtp = () => {
-    navigator.clipboard.writeText(newNodeRole === 'edge-ngfw' ? cloudInitSnippet : bootstrapCommand);
+    if (!ztpSnippets.ok) return;
+    navigator.clipboard.writeText(
+      newNodeRole === 'edge-ngfw' ? ztpSnippets.cloudInitSnippet : ztpSnippets.bootstrapCommand
+    );
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   };
@@ -1204,27 +1225,37 @@ function FleetPageContent() {
                     ? 'Autonomous Cloud-Init User-Data (#cloud-config for Proxmox / KVM / AWS / GCP)'
                     : 'Bootstrapping Command (Run on edge device)'}
                 </label>
-                <div className="relative">
-                  <pre className="p-3 bg-slate-950 border border-slate-800 rounded-lg text-xs font-mono text-slate-300 overflow-x-auto whitespace-pre-wrap break-all">
-                    {newNodeRole === 'edge-ngfw' ? cloudInitSnippet : bootstrapCommand}
-                  </pre>
-                  <button
-                    onClick={handleCopyZtp}
-                    className="absolute top-2 right-2 p-1.5 rounded-md bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs flex items-center gap-1 border border-slate-700 cursor-pointer"
-                  >
-                    {copied ? <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
-                    <span>{copied ? 'Copied' : 'Copy'}</span>
-                  </button>
-                </div>
-                {newNodeRole === 'edge-ngfw' && (
-                  <div className="mt-2">
-                    <label className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider block mb-1">
-                      Or Custom Single-File EFI UKI Builder Command (6.4 MB BOOTX64.EFI)
-                    </label>
-                    <pre className="p-2.5 bg-slate-950/60 border border-slate-800/80 rounded-lg text-[11px] font-mono text-slate-400 overflow-x-auto whitespace-pre-wrap break-all">
-                      {bootstrapCommand}
-                    </pre>
+                {!ztpSnippets.ok ? (
+                  <div className="p-3 bg-rose-500/10 border border-rose-500/30 rounded-lg text-xs text-rose-300">
+                    {ztpSnippets.error}
                   </div>
+                ) : (
+                  <>
+                    <div className="relative">
+                      <pre className="p-3 bg-slate-950 border border-slate-800 rounded-lg text-xs font-mono text-slate-300 overflow-x-auto whitespace-pre-wrap break-all">
+                        {newNodeRole === 'edge-ngfw'
+                          ? ztpSnippets.cloudInitSnippet
+                          : ztpSnippets.bootstrapCommand}
+                      </pre>
+                      <button
+                        onClick={handleCopyZtp}
+                        className="absolute top-2 right-2 p-1.5 rounded-md bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs flex items-center gap-1 border border-slate-700 cursor-pointer"
+                      >
+                        {copied ? <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+                        <span>{copied ? 'Copied' : 'Copy'}</span>
+                      </button>
+                    </div>
+                    {newNodeRole === 'edge-ngfw' && (
+                      <div className="mt-2">
+                        <label className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider block mb-1">
+                          Or Custom Single-File EFI UKI Builder Command (6.4 MB BOOTX64.EFI)
+                        </label>
+                        <pre className="p-2.5 bg-slate-950/60 border border-slate-800/80 rounded-lg text-[11px] font-mono text-slate-400 overflow-x-auto whitespace-pre-wrap break-all">
+                          {ztpSnippets.bootstrapCommand}
+                        </pre>
+                      </div>
+                    )}
+                  </>
                 )}
               </div>
             </div>

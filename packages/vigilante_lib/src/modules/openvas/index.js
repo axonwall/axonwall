@@ -6,6 +6,7 @@ import { BaseModule } from '../base.js';
 import { execStream } from '../../utils/exec.js';
 import { applyK8sTlsSecret } from '../../engine/certs.js';
 import { ensureNamespace, ensureGeneratedK8sSecret, generateStrongSecret, getClusterContextArgs, getHelmContextArgs, getKubeExecutionEnv } from '../../engine/k8s.js';
+import { assertDnsLabel } from '../../engine/config.js';
 import { resolveChartValuesArgs, cleanupHelmTempValues } from '../../engine/helm.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -152,7 +153,7 @@ export class OpenVASModule extends BaseModule {
    * Check status of OpenVAS components
    */
   async status({ domain = 'vigilante.local', clusterName = 'vigilante-dev', namespace = null } = {}) {
-    const targetNamespace = namespace || this.namespace;
+    const targetNamespace = assertDnsLabel(namespace || this.namespace, 'namespace');
 
     try {
       const kubeEnv = getKubeExecutionEnv();
@@ -184,7 +185,6 @@ export class OpenVASModule extends BaseModule {
         installed: isInstalled,
         status: allReady ? 'Ready' : isInstalled ? 'Deploying / Degraded' : 'Not Installed',
         pods,
-        credentials: await this.getCredentials({ clusterName, namespace: targetNamespace }),
         endpoints: await this.getEndpoints({ domain, namespace: targetNamespace })
       };
     } catch {
@@ -195,7 +195,6 @@ export class OpenVASModule extends BaseModule {
         installed: false,
         status: 'Not Installed',
         pods: [],
-        credentials: null,
         endpoints: []
       };
     }
@@ -205,7 +204,7 @@ export class OpenVASModule extends BaseModule {
    * Retrieve administrative credentials from the OpenVAS secret
    */
   async getCredentials({ clusterName = 'vigilante-dev', namespace = null } = {}) {
-    const targetNamespace = namespace || this.namespace;
+    const targetNamespace = assertDnsLabel(namespace || this.namespace, 'namespace');
     const isStandardNs = targetNamespace === 'default' || targetNamespace === 'openvas';
     const secretName = isStandardNs ? 'openvas-admin' : `${targetNamespace}-openvas-admin`;
 

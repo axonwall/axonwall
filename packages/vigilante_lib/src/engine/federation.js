@@ -7,14 +7,41 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import fsSync from 'node:fs';
+import net from 'node:net';
 import path from 'node:path';
-import { getVigilanteConfigDir, ensureVigilanteConfig } from './config.js';
+import { getVigilanteConfigDir, ensureVigilanteConfig, resolvePathInside } from './config.js';
 import * as soar from './soar.js';
 import * as datalake from './datalake.js';
 import { logger } from '../utils/logger.js';
 
+export const FEDERATION_MAX_CLOCK_SKEW_MS = 5 * 60 * 1000;
+const MAX_REPLAY_CACHE_ENTRIES = 10000;
+const REPLAY_CACHE_FILENAME = 'replay_cache.json';
+
+const replayCachesByPath = new Map();
+
 export function getVigilanteFederationDir() {
   return path.join(getVigilanteConfigDir(), 'federation');
+}
+
+function getReplayCachePath() {
+  return path.join(getVigilanteFederationDir(), REPLAY_CACHE_FILENAME);
+}
+
+export function clearFederationReplayMemoryCacheForTest() {
+  replayCachesByPath.clear();
+}
+
+export function resetFederationReplayCacheForTest() {
+  replayCachesByPath.clear();
+  try {
+    const cachePath = getReplayCachePath();
+    if (fsSync.existsSync(cachePath)) {
+      fsSync.unlinkSync(cachePath);
+    }
+  } catch {
+    // Best-effort test cleanup
+  }
 }
 
 /**
@@ -85,12 +112,119 @@ export function canonicalJson(value) {
 }
 
 /**
- * The signed content of a threat envelope: payload AND signer identity AND
- * timestamp. Signing only the payload would let any relay rewrite who sent
- * a record and when.
+ * The signed content of a threat envelope: payload, signer identity,
+ * timestamp, and (when present) unique anti-replay nonce.
  */
-function signedEnvelopeContent({ payload, signerNodeId, timestamp }) {
+function signedEnvelopeContent({ payload, signerNodeId, timestamp, nonce }) {
+  if (nonce !== undefined && nonce !== null) {
+    return canonicalJson({ payload, signerNodeId, timestamp, nonce });
+  }
   return canonicalJson({ payload, signerNodeId, timestamp });
+}
+
+function computeReplayCacheKey(signedRecord) {
+  const signerNodeId = String(signedRecord.signerNodeId || '').trim();
+  const contentHash = crypto
+    .createHash('sha256')
+    .update(signedEnvelopeContent({
+      payload: signedRecord.payload,
+      signerNodeId,
+      timestamp: signedRecord.timestamp,
+      nonce: signedRecord.nonce
+    }))
+    .digest('hex');
+  const discriminator = (typeof signedRecord.nonce === 'string' && signedRecord.nonce.trim())
+    ? `nonce:${signedRecord.nonce.trim()}`
+    : `hash:${contentHash}`;
+  return crypto.createHash('sha256').update(`${signerNodeId}\0${discriminator}`).digest('hex');
+}
+
+function loadReplayCacheMapSync(cachePath, nowMs) {
+  let map = replayCachesByPath.get(cachePath);
+  if (!map) {
+    map = new Map();
+    if (fsSync.existsSync(cachePath)) {
+      try {
+        const parsed = JSON.parse(fsSync.readFileSync(cachePath, 'utf8'));
+        const entries = parsed && typeof parsed === 'object' ? parsed.entries : null;
+        if (entries && typeof entries === 'object') {
+          for (const [key, meta] of Object.entries(entries)) {
+            if (meta && typeof meta.expiresAtMs === 'number' && meta.expiresAtMs >= nowMs) {
+              map.set(key, {
+                expiresAtMs: meta.expiresAtMs,
+                recordedAtMs: typeof meta.recordedAtMs === 'number' ? meta.recordedAtMs : nowMs
+              });
+            }
+          }
+        }
+      } catch {
+        // Start clean if persisted cache was unreadable
+      }
+    }
+    replayCachesByPath.set(cachePath, map);
+  }
+
+  for (const [key, meta] of map.entries()) {
+    if (!meta || meta.expiresAtMs < nowMs) {
+      map.delete(key);
+    }
+  }
+  return map;
+}
+
+function persistReplayCacheMapSync(cachePath, map) {
+  try {
+    const dir = path.dirname(cachePath);
+    fsSync.mkdirSync(dir, { recursive: true });
+    const entries = Object.fromEntries(map.entries());
+    const tmpPath = `${cachePath}.tmp-${process.pid}-${crypto.randomBytes(4).toString('hex')}`;
+    fsSync.writeFileSync(tmpPath, JSON.stringify({ entries }, null, 2), { mode: 0o600, encoding: 'utf8' });
+    fsSync.renameSync(tmpPath, cachePath);
+  } catch (err) {
+    logger.warn('FEDERATION', `Failed to persist replay cache: ${err.message}`);
+  }
+}
+
+function recordReplayEntrySync(cachePath, cacheKey, expiresAtMs, nowMs) {
+  const map = loadReplayCacheMapSync(cachePath, nowMs);
+  if (map.has(cacheKey)) {
+    return false;
+  }
+  if (map.size >= MAX_REPLAY_CACHE_ENTRIES) {
+    const sorted = Array.from(map.entries()).sort((a, b) => a[1].recordedAtMs - b[1].recordedAtMs);
+    const evictCount = map.size - MAX_REPLAY_CACHE_ENTRIES + 1;
+    for (let i = 0; i < evictCount && i < sorted.length; i++) {
+      map.delete(sorted[i][0]);
+    }
+  }
+  map.set(cacheKey, { expiresAtMs, recordedAtMs: nowMs });
+  persistReplayCacheMapSync(cachePath, map);
+  return true;
+}
+
+function validateThreatTimestampFreshness(signedRecord, options = {}) {
+  const signerNodeId = typeof signedRecord.signerNodeId === 'string' ? signedRecord.signerNodeId.trim() : '';
+  if (!signerNodeId) {
+    return { ok: false, error: 'Invalid envelope structure: missing signerNodeId' };
+  }
+  if (typeof signedRecord.timestamp !== 'string' || !signedRecord.timestamp.trim()) {
+    return { ok: false, error: 'Invalid envelope structure: missing timestamp' };
+  }
+  const tsMs = Date.parse(signedRecord.timestamp);
+  if (!Number.isFinite(tsMs)) {
+    return { ok: false, error: 'Invalid threat record timestamp' };
+  }
+  const maxClockSkewMs = Number.isFinite(options.maxClockSkewMs) && options.maxClockSkewMs >= 0
+    ? options.maxClockSkewMs
+    : FEDERATION_MAX_CLOCK_SKEW_MS;
+  const nowMs = Number.isFinite(options.nowMs) ? options.nowMs : Date.now();
+  if (Math.abs(nowMs - tsMs) > maxClockSkewMs) {
+    return {
+      ok: false,
+      error: `Threat record timestamp '${signedRecord.timestamp}' is outside ±${Math.round(maxClockSkewMs / 1000)}s freshness window`
+    };
+  }
+  return { ok: true, signerNodeId, tsMs, nowMs, maxClockSkewMs };
 }
 
 /**
@@ -110,7 +244,8 @@ export function signThreatRecord(threatData, privateKeyPem, signerInfo = {}) {
 
   const signerNodeId = signerInfo.nodeId || 'anonymous-node';
   const timestamp = new Date().toISOString();
-  const content = signedEnvelopeContent({ payload: threatData, signerNodeId, timestamp });
+  const nonce = signerInfo.nonce || crypto.randomBytes(16).toString('hex');
+  const content = signedEnvelopeContent({ payload: threatData, signerNodeId, timestamp, nonce });
   const signature = crypto.sign(null, Buffer.from(content, 'utf8'), privateKeyPem).toString('base64');
 
   return {
@@ -118,23 +253,30 @@ export function signThreatRecord(threatData, privateKeyPem, signerInfo = {}) {
     signature,
     algorithm: 'Ed25519',
     timestamp,
+    nonce,
     signerNodeId,
     signerPublicKey: signerInfo.publicKey || null
   };
 }
 
 /**
- * Cryptographically verifies a signed threat envelope using Ed25519 public key.
+ * Cryptographically verifies a signed threat envelope using Ed25519 public key,
+ * enforcing timestamp freshness (±5 min default) and replay cache checks.
  * The key MUST be supplied by the caller from a trusted source (a pinned peer
  * key or keyring). The envelope's own signerPublicKey is never trusted: it is
  * attacker-controlled data, and verifying against it proves nothing.
  * @param {Object} signedRecord - Envelope returned by signThreatRecord
  * @param {string} publicKeyPem - Trusted Ed25519 SPKI PEM public key for the claimed signer
+ * @param {Object} [options={}] - { maxClockSkewMs, nowMs, checkReplay, recordReplay }
  * @returns {Object} { valid: boolean, error?: string, payload?: Object }
  */
-export function verifyThreatRecord(signedRecord, publicKeyPem = null) {
-  if (!signedRecord || !signedRecord.signature || !signedRecord.payload) {
+export function verifyThreatRecord(signedRecord, publicKeyPem = null, options = {}) {
+  if (!signedRecord || !signedRecord.signature || !signedRecord.payload || typeof signedRecord.payload !== 'object') {
     return { valid: false, error: 'Invalid envelope structure: missing signature or payload' };
+  }
+
+  if (signedRecord.algorithm && signedRecord.algorithm !== 'Ed25519') {
+    return { valid: false, error: `Unsupported signature algorithm '${signedRecord.algorithm}'` };
   }
 
   if (!publicKeyPem) {
@@ -144,11 +286,17 @@ export function verifyThreatRecord(signedRecord, publicKeyPem = null) {
     };
   }
 
+  const freshness = validateThreatTimestampFreshness(signedRecord, options);
+  if (!freshness.ok) {
+    return { valid: false, payload: null, error: freshness.error };
+  }
+
   try {
     const content = signedEnvelopeContent({
       payload: signedRecord.payload,
       signerNodeId: signedRecord.signerNodeId,
-      timestamp: signedRecord.timestamp
+      timestamp: signedRecord.timestamp,
+      nonce: signedRecord.nonce
     });
     const isValid = crypto.verify(
       null,
@@ -157,10 +305,34 @@ export function verifyThreatRecord(signedRecord, publicKeyPem = null) {
       Buffer.from(signedRecord.signature, 'base64')
     );
 
+    if (!isValid) {
+      return {
+        valid: false,
+        payload: null,
+        error: 'Signature verification failed: payload, signer identity, timestamp, or nonce modified, or key mismatch'
+      };
+    }
+
+    if (options.checkReplay !== false) {
+      const cachePath = getReplayCachePath();
+      const cacheKey = computeReplayCacheKey(signedRecord);
+      const map = loadReplayCacheMapSync(cachePath, freshness.nowMs);
+      if (map.has(cacheKey)) {
+        return {
+          valid: false,
+          payload: null,
+          error: `Replay detected for signer '${freshness.signerNodeId}'`
+        };
+      }
+      if (options.recordReplay === true) {
+        recordReplayEntrySync(cachePath, cacheKey, freshness.tsMs + freshness.maxClockSkewMs, freshness.nowMs);
+      }
+    }
+
     return {
-      valid: isValid,
-      payload: isValid ? signedRecord.payload : null,
-      error: isValid ? null : 'Signature verification failed: payload, signer identity, or timestamp modified, or key mismatch'
+      valid: true,
+      payload: signedRecord.payload,
+      error: null
     };
   } catch (err) {
     return {
@@ -213,9 +385,23 @@ export async function ingestFederatedThreatRecord(signedRecord, options = {}) {
   const threatsDir = path.join(federationDir, 'threats');
   await fs.mkdir(threatsDir, { recursive: true });
 
-  // 1. Verify signature
+  if (!signedRecord || !signedRecord.payload || typeof signedRecord.payload !== 'object') {
+    throw new Error('Federated threat record rejected: invalid envelope structure');
+  }
+
+  // 1. Verify signature, timestamp freshness window, and replay state
+  const freshness = validateThreatTimestampFreshness(signedRecord, options);
+  if (!freshness.ok) {
+    throw new Error(`Federated threat record rejected: ${freshness.error}`);
+  }
+
   if (options.verifySignature !== false) {
-    const verification = verifyThreatRecord(signedRecord, options.publicKeyPem);
+    const verification = verifyThreatRecord(signedRecord, options.publicKeyPem, {
+      maxClockSkewMs: options.maxClockSkewMs,
+      nowMs: options.nowMs,
+      checkReplay: true,
+      recordReplay: false
+    });
     if (!verification.valid) {
       throw new Error(`Federated threat record rejected: ${verification.error}`);
     }
@@ -224,17 +410,40 @@ export async function ingestFederatedThreatRecord(signedRecord, options = {}) {
   const payload = signedRecord.payload;
   const actionsTaken = [];
   const indicator = payload.indicator || payload.ip || payload.target;
-  const isIp = payload.type === 'IP' || payload.indicatorType === 'IP' || (indicator && /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(indicator));
+  const trimmedIndicator = typeof indicator === 'string'
+    ? indicator.trim().replace(/^\[|\]$/g, '').split('%')[0]
+    : '';
+  const isIpLiteral = Boolean(trimmedIndicator && net.isIP(trimmedIndicator));
+  const isIp = payload.type === 'IP' || payload.indicatorType === 'IP' || isIpLiteral;
+
+  // Validate IP target against protected infrastructure deny-list BEFORE recording replay or calling soar.blockIp
+  let safeBlockIp = null;
+  if (isIp && indicator) {
+    safeBlockIp = soar.assertSafeBlockTargetIp(indicator);
+  }
+
+  // Record replay entry atomically & persistently before executing SOAR side effects
+  const cachePath = getReplayCachePath();
+  const cacheKey = computeReplayCacheKey(signedRecord);
+  const recorded = recordReplayEntrySync(
+    cachePath,
+    cacheKey,
+    freshness.tsMs + freshness.maxClockSkewMs,
+    freshness.nowMs
+  );
+  if (!recorded) {
+    throw new Error(`Federated threat record rejected: Replay detected for signer '${freshness.signerNodeId}'`);
+  }
 
   // 2. Automated SOAR containment (IP Block)
-  if (isIp && indicator) {
+  if (safeBlockIp) {
     const blockResult = await soar.blockIp({
-      ip: indicator,
+      ip: safeBlockIp,
       reason: `Federated defense sync: Flagged by node ${signedRecord.signerNodeId} (${payload.reason || 'Malicious C2'})`
     });
     actionsTaken.push({
       action: 'SOAR_BLOCK_IP',
-      target: indicator,
+      target: safeBlockIp,
       containmentId: blockResult.id || blockResult.containmentId,
       status: 'BLOCKED'
     });
@@ -265,8 +474,8 @@ export async function ingestFederatedThreatRecord(signedRecord, options = {}) {
     huntMatches
   };
 
-  const threatFilePath = path.join(threatsDir, `${recordId}.json`);
-  await fs.writeFile(threatFilePath, JSON.stringify(storedRecord, null, 2), 'utf8');
+  const threatFilePath = resolvePathInside(threatsDir, `${recordId}.json`);
+  await fs.writeFile(threatFilePath, JSON.stringify(storedRecord, null, 2), { mode: 0o600, encoding: 'utf8' });
 
   logger.info('FEDERATION', `Successfully ingested federated threat ${recordId} [${indicator}]. Actions executed: ${actionsTaken.length}`);
 

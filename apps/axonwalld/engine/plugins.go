@@ -4,7 +4,9 @@ import (
 	"archive/tar"
 	"archive/zip"
 	"compress/gzip"
+	"crypto/sha1"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -4322,6 +4324,320 @@ func resetMissingZshUsersToBash() {
 	}
 }
 
+const (
+	tailscaleArchiveBaseURL          = "https://pkgs.tailscale.com/stable/debian"
+	tailscaleKeyringPath             = "/usr/share/keyrings/tailscale-archive-keyring.gpg"
+	tailscaleSourcesListPath         = "/etc/apt/sources.list.d/tailscale.list"
+	tailscaleArchiveKeyFingerprintV4 = "2596A99EAAB33821893C0A79458CA832957F5868"
+)
+
+var validDebianCodenameRe = regexp.MustCompile(`^[a-z0-9-]+$`)
+
+type tailscaleRepoOptions struct {
+	osReleasePath     string
+	baseURL           string
+	repoBaseURL       string
+	keyringPath       string
+	listPath          string
+	pinnedFingerprint string
+	pinnedSHA256s     []string
+	httpClient        *http.Client
+	skipAptUpdate     bool
+}
+
+func readValidatedDebianCodename(osReleasePath string) (string, error) {
+	if osReleasePath == "" {
+		osReleasePath = "/etc/os-release"
+	}
+	data, err := os.ReadFile(osReleasePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "trixie", nil
+		}
+		return "", fmt.Errorf("read %s: %w", osReleasePath, err)
+	}
+	codename := ""
+	for _, rawLine := range strings.Split(string(data), "\n") {
+		line := strings.TrimSpace(rawLine)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if strings.HasPrefix(line, "VERSION_CODENAME=") {
+			val := strings.TrimSpace(strings.TrimPrefix(line, "VERSION_CODENAME="))
+			val = strings.Trim(val, `"'`)
+			codename = strings.TrimSpace(val)
+			break
+		}
+	}
+	if codename == "" {
+		return "trixie", nil
+	}
+	if len(codename) > 32 || !validDebianCodenameRe.MatchString(codename) {
+		return "", fmt.Errorf("invalid Debian codename %q", codename)
+	}
+	return codename, nil
+}
+
+func parseOpenPGPPublicKeyFingerprints(data []byte) ([]string, error) {
+	if len(data) == 0 {
+		return nil, fmt.Errorf("empty OpenPGP keyring")
+	}
+	var fps []string
+	off := 0
+	for off < len(data) {
+		tagByte := data[off]
+		off++
+		if (tagByte & 0x80) == 0 {
+			return nil, fmt.Errorf("invalid OpenPGP packet header byte 0x%02x at offset %d", tagByte, off-1)
+		}
+		var pktTag byte
+		var bodyLen int
+		if (tagByte & 0x40) != 0 {
+			pktTag = tagByte & 0x3f
+			if off >= len(data) {
+				return nil, fmt.Errorf("truncated OpenPGP packet length")
+			}
+			b0 := data[off]
+			off++
+			switch {
+			case b0 < 192:
+				bodyLen = int(b0)
+			case b0 < 224:
+				if off >= len(data) {
+					return nil, fmt.Errorf("truncated 2-byte OpenPGP packet length")
+				}
+				b1 := data[off]
+				off++
+				bodyLen = ((int(b0) - 192) << 8) + int(b1) + 192
+			case b0 == 255:
+				if off+4 > len(data) {
+					return nil, fmt.Errorf("truncated 5-byte OpenPGP packet length")
+				}
+				rawLen := binary.BigEndian.Uint32(data[off : off+4])
+				off += 4
+				if rawLen > 1<<20 {
+					return nil, fmt.Errorf("OpenPGP packet too large: %d", rawLen)
+				}
+				bodyLen = int(rawLen)
+			default:
+				return nil, fmt.Errorf("unsupported partial OpenPGP packet length")
+			}
+		} else {
+			pktTag = (tagByte >> 2) & 0x0f
+			lenType := tagByte & 0x03
+			switch lenType {
+			case 0:
+				if off >= len(data) {
+					return nil, fmt.Errorf("truncated old-format 1-byte OpenPGP packet length")
+				}
+				bodyLen = int(data[off])
+				off++
+			case 1:
+				if off+2 > len(data) {
+					return nil, fmt.Errorf("truncated old-format 2-byte OpenPGP packet length")
+				}
+				bodyLen = int(binary.BigEndian.Uint16(data[off : off+2]))
+				off += 2
+			case 2:
+				if off+4 > len(data) {
+					return nil, fmt.Errorf("truncated old-format 4-byte OpenPGP packet length")
+				}
+				rawLen := binary.BigEndian.Uint32(data[off : off+4])
+				off += 4
+				if rawLen > 1<<20 {
+					return nil, fmt.Errorf("OpenPGP packet too large: %d", rawLen)
+				}
+				bodyLen = int(rawLen)
+			default:
+				return nil, fmt.Errorf("unsupported indeterminate OpenPGP packet length")
+			}
+		}
+		if bodyLen <= 0 || off+bodyLen > len(data) {
+			return nil, fmt.Errorf("invalid OpenPGP packet body length %d at offset %d", bodyLen, off)
+		}
+		body := data[off : off+bodyLen]
+		off += bodyLen
+
+		if pktTag == 6 {
+			if len(body) < 6 {
+				return nil, fmt.Errorf("truncated OpenPGP public key packet")
+			}
+			switch body[0] {
+			case 4:
+				// RFC 4880 Section 12.2: v4 fingerprint = SHA-1(0x99 || uint16(len(body)) || body)
+				h := sha1.New() // #nosec G401 -- RFC 4880 OpenPGP v4 key fingerprint definition
+				h.Write([]byte{0x99, byte(len(body) >> 8), byte(len(body))})
+				h.Write(body)
+				fps = append(fps, strings.ToUpper(hex.EncodeToString(h.Sum(nil))))
+			case 6:
+				// RFC 9580 Section 5.5.4: v6 fingerprint = SHA-256(0x9B || uint32(len(body)) || body)
+				h := sha256.New()
+				var lenBuf [4]byte
+				binary.BigEndian.PutUint32(lenBuf[:], uint32(len(body)))
+				h.Write([]byte{0x9B})
+				h.Write(lenBuf[:])
+				h.Write(body)
+				fps = append(fps, strings.ToUpper(hex.EncodeToString(h.Sum(nil))))
+			default:
+				return nil, fmt.Errorf("unsupported OpenPGP public key version %d", body[0])
+			}
+		}
+	}
+	if len(fps) == 0 {
+		return nil, fmt.Errorf("OpenPGP keyring contains no public key packets")
+	}
+	return fps, nil
+}
+
+func verifyTailscaleKeyring(data []byte, pinnedFingerprint string, pinnedSHA256s []string) error {
+	if len(data) == 0 || len(data) > 1<<20 {
+		return fmt.Errorf("invalid Tailscale keyring payload size (%d bytes)", len(data))
+	}
+	if len(pinnedSHA256s) > 0 {
+		sum := sha256.Sum256(data)
+		gotHex := hex.EncodeToString(sum[:])
+		matched := false
+		for _, want := range pinnedSHA256s {
+			if strings.EqualFold(gotHex, strings.TrimSpace(want)) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return fmt.Errorf("Tailscale keyring SHA-256 mismatch (got %s)", gotHex)
+		}
+	}
+	wantFP := strings.ToUpper(strings.ReplaceAll(strings.TrimSpace(pinnedFingerprint), " ", ""))
+	if wantFP == "" {
+		wantFP = tailscaleArchiveKeyFingerprintV4
+	}
+	fps, err := parseOpenPGPPublicKeyFingerprints(data)
+	if err != nil {
+		return fmt.Errorf("invalid Tailscale OpenPGP keyring: %w", err)
+	}
+	for _, fp := range fps {
+		if fp != wantFP {
+			return fmt.Errorf("Tailscale keyring GPG fingerprint mismatch: got %s, expected %s", fp, wantFP)
+		}
+	}
+	return nil
+}
+
+func writeFileAtomicMode(path string, data []byte, perm os.FileMode) error {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = os.Remove(tmpName)
+		}
+	}()
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(perm); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		return err
+	}
+	cleanup = false
+	return nil
+}
+
+func prepareTailscaleAptRepo() error {
+	return prepareTailscaleAptRepoWithOptions(tailscaleRepoOptions{})
+}
+
+func prepareTailscaleAptRepoWithOptions(opts tailscaleRepoOptions) error {
+	if opts.osReleasePath == "" {
+		opts.osReleasePath = "/etc/os-release"
+	}
+	if opts.baseURL == "" {
+		opts.baseURL = tailscaleArchiveBaseURL
+	}
+	if opts.repoBaseURL == "" {
+		opts.repoBaseURL = tailscaleArchiveBaseURL
+	}
+	if opts.keyringPath == "" {
+		opts.keyringPath = tailscaleKeyringPath
+	}
+	if opts.listPath == "" {
+		opts.listPath = tailscaleSourcesListPath
+	}
+	if opts.pinnedFingerprint == "" {
+		opts.pinnedFingerprint = tailscaleArchiveKeyFingerprintV4
+	}
+
+	codename, err := readValidatedDebianCodename(opts.osReleasePath)
+	if err != nil {
+		return err
+	}
+	if !strings.HasPrefix(strings.ToLower(opts.baseURL), "https://") {
+		return fmt.Errorf("Tailscale keyring URL must use https://")
+	}
+	if !strings.HasPrefix(strings.ToLower(opts.repoBaseURL), "https://") {
+		return fmt.Errorf("Tailscale apt repository URL must use https://")
+	}
+
+	client := opts.httpClient
+	if client == nil {
+		var tr *http.Transport
+		client, tr = newSafeHTTPClient(SafeHTTPClientOptions{
+			Timeout:      30 * time.Second,
+			BlockPrivate: true,
+		})
+		defer tr.CloseIdleConnections()
+	}
+
+	keyringURL := fmt.Sprintf("%s/%s.noarmor.gpg", strings.TrimRight(opts.baseURL, "/"), codename)
+	resp, err := client.Get(keyringURL)
+	if err != nil {
+		return fmt.Errorf("download Tailscale keyring: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("download Tailscale keyring: unexpected HTTP status %s", resp.Status)
+	}
+	keyringBytes, err := io.ReadAll(io.LimitReader(resp.Body, (1<<20)+1))
+	if err != nil {
+		return fmt.Errorf("read Tailscale keyring: %w", err)
+	}
+	if err := verifyTailscaleKeyring(keyringBytes, opts.pinnedFingerprint, opts.pinnedSHA256s); err != nil {
+		return err
+	}
+	if err := writeFileAtomicMode(opts.keyringPath, keyringBytes, 0644); err != nil {
+		return fmt.Errorf("write Tailscale keyring: %w", err)
+	}
+
+	listContent := fmt.Sprintf("deb [signed-by=%s] %s %s main\n", opts.keyringPath, strings.TrimRight(opts.repoBaseURL, "/"), codename)
+	if err := writeFileAtomicMode(opts.listPath, []byte(listContent), 0644); err != nil {
+		return fmt.Errorf("write Tailscale apt source list: %w", err)
+	}
+
+	if !opts.skipAptUpdate {
+		updCmd := exec.Command("apt-get", "update")
+		updCmd.Env = append(os.Environ(), "DEBIAN_FRONTEND=noninteractive")
+		if out, err := updCmd.CombinedOutput(); err != nil {
+			_ = os.Remove(opts.listPath)
+			return fmt.Errorf("apt-get update for Tailscale repo failed: %w (%s)", err, strings.TrimSpace(string(out)))
+		}
+	}
+	return nil
+}
+
 func prepareNtopAptRepo() error {
 	tmpDir, err := os.MkdirTemp("", "axonwall-ntop-*")
 	if err != nil {
@@ -4468,11 +4784,14 @@ func (pm *PluginManager) InstallPlugin(pluginID string) PluginActionResponse {
 	// Upstream repository preparation hooks for plugins not hosted in base Debian repos
 	if pm.osFamily == "debian" {
 		if pluginID == "tailscale" {
-			if _, err := os.Stat("/etc/apt/sources.list.d/tailscale.list"); os.IsNotExist(err) {
-				prepCmd := exec.Command("sh", "-c", "codename=$(. /etc/os-release 2>/dev/null && echo \"${VERSION_CODENAME:-trixie}\" || echo trixie); curl -fsSL \"https://pkgs.tailscale.com/stable/debian/${codename}.noarmor.gpg\" | tee /usr/share/keyrings/tailscale-archive-keyring.gpg >/dev/null && curl -fsSL \"https://pkgs.tailscale.com/stable/debian/${codename}.tailscale-keyring.list\" | tee /etc/apt/sources.list.d/tailscale.list >/dev/null && apt-get update")
-				prepCmd.Env = append(os.Environ(), "DEBIAN_FRONTEND=noninteractive")
-				if out, err := prepCmd.CombinedOutput(); err != nil {
-					log.Printf("[PluginManager] Warning configuring Tailscale apt repository: %v (%s)", err, string(out))
+			if _, err := os.Stat(tailscaleSourcesListPath); os.IsNotExist(err) {
+				if err := prepareTailscaleAptRepo(); err != nil {
+					log.Printf("[PluginManager] Tailscale apt repository preparation failed: %v", err)
+					return PluginActionResponse{
+						Success: false,
+						Message: fmt.Sprintf("Failed to configure verified Tailscale repository: %v", err),
+						Output:  output.String(),
+					}
 				}
 			}
 		} else if pluginID == "ntopng" {

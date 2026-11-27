@@ -1,4 +1,5 @@
 import type { DesiredState } from '../../schemas/index.js';
+import { isValidIPv4, isValidIPv6 } from '../../util/index.js';
 
 export function yamlStr(v: unknown): string {
   return JSON.stringify(String(v ?? '').replace(/[\r\n\0]/g, ''));
@@ -53,11 +54,26 @@ export function rewritePodLdapUrl(rawUrl: string, lanIp: string): string {
   return trimmed.replace(/^(ldaps?:\/\/)(127\.0\.0\.1|localhost)(?=[:/]|$)/i, `$1${lanIp}`);
 }
 
+const SAFE_UNBOUND_DOMAIN_REGEX =
+  /^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$/;
+
 export function buildUnboundLocalDataOverride(commentHeader: string, domain: string, ip: string): string {
+  const safeHeader = String(commentHeader ?? '').replace(/[\r\n\0]+/g, ' ').trim();
+  const cleanDomain = String(domain ?? '').trim().replace(/\.+$/, '');
+  const cleanIp = String(ip ?? '').trim();
+
+  if (!cleanDomain || cleanDomain.length > 253 || !SAFE_UNBOUND_DOMAIN_REGEX.test(cleanDomain)) {
+    throw new Error(`Invalid Unbound local-data domain: ${domain}`);
+  }
+  const rrType = isValidIPv4(cleanIp) ? 'A' : isValidIPv6(cleanIp) ? 'AAAA' : null;
+  if (!rrType) {
+    throw new Error(`Invalid Unbound local-data IP address: ${ip}`);
+  }
+
   return [
-    `# ${commentHeader}`,
+    `# ${safeHeader}`,
     'server:',
-    `  local-data: "${domain}. IN A ${ip}"`,
+    `  local-data: "${cleanDomain}. IN ${rrType} ${cleanIp}"`,
     '',
   ].join('\n');
 }

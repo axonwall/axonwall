@@ -15,6 +15,7 @@ import {
   Maximize2,
 } from 'lucide-react';
 import { FlowsLiveVisualStrip, type FlowsRatePoint } from '@/components/ebpf/FlowsLiveVisualStrip';
+import { buildPacketTraceCsv } from '@/lib/csv-safe';
 
 interface StreamPacket {
   index: number;
@@ -139,14 +140,8 @@ export default function FlowsDashboardPage() {
 
   const handleExportCsv = () => {
     if (packets.length === 0) return;
-    const header = 'Index,Timestamp,Protocol,SourceIP,SourcePort,DestinationIP,DestinationPort,Length,Info\n';
-    const rows = packets
-      .map(
-        (p) =>
-          `"${p.index}","${p.timestamp}","${p.protocol}","${p.srcIp}","${p.srcPort}","${p.dstIp}","${p.dstPort}","${p.length}","${p.info.replace(/"/g, '""')}"`
-      )
-      .join('\n');
-    const blob = new Blob([header + rows], { type: 'text/csv' });
+    const csv = buildPacketTraceCsv(packets);
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;

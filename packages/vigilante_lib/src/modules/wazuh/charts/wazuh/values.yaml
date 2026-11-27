@@ -1,10 +1,9 @@
 # Single-node Wazuh 4.14 lab defaults for a laptop k3d cluster.
 # This is not an HA production topology: one indexer, one manager, one dashboard.
 #
-# Dashboard login uses the upstream Wazuh single-node demo users. The bcrypt
-# hashes in files/internal_users.yml must stay in sync with indexerPassword
-# and dashboardPassword. The API password is applied by the manager at boot
-# and can be changed here without regenerating hashes.
+# Credentials and internal_users.yml bcrypt hashes are generated dynamically per
+# deployment in a Kubernetes Secret (preserved across upgrades via lookup) unless
+# supplied via existingSecret or explicit credentials.*Password overrides.
 
 images:
   indexer: wazuh/wazuh-indexer:4.14.7
@@ -16,14 +15,15 @@ images:
 certsToolVersion: "4.14"
 imagePullPolicy: IfNotPresent
 
+existingSecret: ""
+
 credentials:
   indexerUsername: admin
-  # Upstream single-node demo password. Hash lives in files/internal_users.yml.
-  indexerPassword: SecretPassword
+  indexerPassword: ""
   dashboardUsername: kibanaserver
-  dashboardPassword: kibanaserver
+  dashboardPassword: ""
   apiUsername: wazuh-wui
-  apiPassword: "MyS3cr37P450r.*-"
+  apiPassword: ""
 
 indexer:
   # 512m heap plus node.store.allow_mmap=false avoids vm.max_map_count on k3d.
@@ -84,3 +84,17 @@ ingress:
 serviceAccount:
   create: false
   name: ""
+
+networkPolicy:
+  enabled: true
+  ingressControllerNamespaceSelector:
+    kubernetes.io/metadata.name: kube-system
+  agentAllowFrom: []
+  allowExternalEgress: false
+  egressExceptCidrs:
+    - 169.254.169.254/32
+    - 10.0.0.0/8
+    - 172.16.0.0/12
+    - 192.168.0.0/16
+    - 100.64.0.0/10
+    - 127.0.0.0/8

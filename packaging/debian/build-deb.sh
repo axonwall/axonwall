@@ -231,7 +231,7 @@ HEADSCALE_VERSION="0.29.4"
 HEADSCALE_SHA256="212ed0a884c0d3541e094c4bebbe94397df6f4e01bd3d7f059c520cb55e0d757"
 if [[ ! -f "${WORK_DIR}/usr/sbin/headscale" ]]; then
   echo "[+] Downloading Headscale v${HEADSCALE_VERSION} binary..."
-  curl -fsSL -o "${WORK_DIR}/usr/sbin/headscale" "https://github.com/juanfont/headscale/releases/download/v${HEADSCALE_VERSION}/headscale_${HEADSCALE_VERSION}_linux_amd64"
+  curl -fsSL --proto '=https' --tlsv1.2 -o "${WORK_DIR}/usr/sbin/headscale" "https://github.com/juanfont/headscale/releases/download/v${HEADSCALE_VERSION}/headscale_${HEADSCALE_VERSION}_linux_amd64"
   echo "${HEADSCALE_SHA256}  ${WORK_DIR}/usr/sbin/headscale" | sha256sum -c -
   chmod 755 "${WORK_DIR}/usr/sbin/headscale"
 fi
@@ -250,7 +250,7 @@ LITESTREAM_SHA256="eb75a3de5cab03875cdae9f5f539e6aedadd66607003d9b1e7a9077948818
 if [[ ! -f "${WORK_DIR}/usr/sbin/litestream" ]]; then
   echo "[+] Downloading Litestream v${LITESTREAM_VERSION} binary..."
   LITE_TAR="$(mktemp -t litestream-XXXXXX.tar.gz)"
-  curl -fsSL -o "${LITE_TAR}" "https://github.com/benbjohnson/litestream/releases/download/v${LITESTREAM_VERSION}/litestream-v${LITESTREAM_VERSION}-linux-amd64.tar.gz"
+  curl -fsSL --proto '=https' --tlsv1.2 -o "${LITE_TAR}" "https://github.com/benbjohnson/litestream/releases/download/v${LITESTREAM_VERSION}/litestream-v${LITESTREAM_VERSION}-linux-amd64.tar.gz"
   echo "${LITESTREAM_SHA256}  ${LITE_TAR}" | sha256sum -c -
   tar -xzf "${LITE_TAR}" -C "${WORK_DIR}/usr/sbin/" litestream
   chmod 755 "${WORK_DIR}/usr/sbin/litestream"
@@ -269,7 +269,7 @@ HELM_SHA256="c91e3d7293849eff3b4dc4ea7994c338bcc92f914864d38b5789bab18a1d775d"
 if [[ ! -f "${WORK_DIR}/usr/local/bin/helm" ]]; then
   echo "[+] Downloading Helm v${HELM_VERSION} binary..."
   HELM_TAR="$(mktemp -t helm-XXXXXX.tar.gz)"
-  curl -fsSL -o "${HELM_TAR}" "https://get.helm.sh/helm-v${HELM_VERSION}-linux-amd64.tar.gz"
+  curl -fsSL --proto '=https' --tlsv1.2 -o "${HELM_TAR}" "https://get.helm.sh/helm-v${HELM_VERSION}-linux-amd64.tar.gz"
   echo "${HELM_SHA256}  ${HELM_TAR}" | sha256sum -c -
   tar -xzf "${HELM_TAR}" -C "${WORK_DIR}/usr/local/bin/" --strip-components=1 linux-amd64/helm
   chmod 755 "${WORK_DIR}/usr/local/bin/helm"
@@ -281,7 +281,7 @@ KUBECTL_VERSION="1.32.3"
 KUBECTL_SHA256="ab209d0c5134b61486a0486585604a616a5bb2fc07df46d304b3c95817b2d79f"
 if [[ ! -f "${WORK_DIR}/usr/local/bin/kubectl" ]]; then
   echo "[+] Downloading kubectl v${KUBECTL_VERSION} binary..."
-  curl -fsSL -o "${WORK_DIR}/usr/local/bin/kubectl" "https://dl.k8s.io/release/v${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
+  curl -fsSL --proto '=https' --tlsv1.2 -o "${WORK_DIR}/usr/local/bin/kubectl" "https://dl.k8s.io/release/v${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
   echo "${KUBECTL_SHA256}  ${WORK_DIR}/usr/local/bin/kubectl" | sha256sum -c -
   chmod 755 "${WORK_DIR}/usr/local/bin/kubectl"
 fi
@@ -354,7 +354,7 @@ K3S_URL_VERSION="v1.32.3%2Bk3s1"
 K3S_SHA256="b19216803650b567bf980888dec39035edaf664339c55bc4462f7a003edbef83"
 if [[ ! -f "${WORK_DIR}/var/lib/axonwall/core-k3s/bin/k3s" ]]; then
   echo "[+] Downloading K3s ${K3S_VERSION} binary..."
-  curl -fsSL -o "${WORK_DIR}/var/lib/axonwall/core-k3s/bin/k3s" "https://github.com/k3s-io/k3s/releases/download/${K3S_URL_VERSION}/k3s"
+  curl -fsSL --proto '=https' --tlsv1.2 -o "${WORK_DIR}/var/lib/axonwall/core-k3s/bin/k3s" "https://github.com/k3s-io/k3s/releases/download/${K3S_URL_VERSION}/k3s"
   echo "${K3S_SHA256}  ${WORK_DIR}/var/lib/axonwall/core-k3s/bin/k3s" | sha256sum -c -
   chmod 755 "${WORK_DIR}/var/lib/axonwall/core-k3s/bin/k3s"
 fi
@@ -375,7 +375,7 @@ WEED_SHA256="4a7d108384d044d95212d1342cdda9533fa55842c1c9b41f606ca3c8a9561124"
 if [[ ! -f "${WORK_DIR}/usr/sbin/weed" ]]; then
   echo "[+] Downloading SeaweedFS v${WEED_VERSION} binary..."
   WEED_TAR="$(mktemp -t seaweedfs-XXXXXX.tar.gz)"
-  curl -fsSL -o "${WEED_TAR}" "https://github.com/seaweedfs/seaweedfs/releases/download/${WEED_VERSION}/linux_amd64.tar.gz"
+  curl -fsSL --proto '=https' --tlsv1.2 -o "${WEED_TAR}" "https://github.com/seaweedfs/seaweedfs/releases/download/${WEED_VERSION}/linux_amd64.tar.gz"
   echo "${WEED_SHA256}  ${WEED_TAR}" | sha256sum -c -
   tar -xzf "${WEED_TAR}" -C "${WORK_DIR}/usr/sbin/" weed
   chmod 755 "${WORK_DIR}/usr/sbin/weed"
@@ -391,7 +391,7 @@ K9S_SHA256="c3752ad51a5a4015a113819c4eeb6e55a4d0e4b8e652494797532f6fc8161dd7"
 if [[ ! -f "${WORK_DIR}/var/lib/axonwall/core-k3s/bin/k9s" ]]; then
   echo "[+] Downloading K9s v${K9S_VERSION} binary..."
   K9S_TAR="$(mktemp -t k9s-XXXXXX.tar.gz)"
-  curl -fsSL -o "${K9S_TAR}" "https://github.com/derailed/k9s/releases/download/v${K9S_VERSION}/k9s_Linux_amd64.tar.gz"
+  curl -fsSL --proto '=https' --tlsv1.2 -o "${K9S_TAR}" "https://github.com/derailed/k9s/releases/download/v${K9S_VERSION}/k9s_Linux_amd64.tar.gz"
   echo "${K9S_SHA256}  ${K9S_TAR}" | sha256sum -c -
   tar -xzf "${K9S_TAR}" -C "${WORK_DIR}/var/lib/axonwall/core-k3s/bin/" k9s
   chmod 755 "${WORK_DIR}/var/lib/axonwall/core-k3s/bin/k9s"
@@ -523,10 +523,26 @@ if [[ -f "${CHROOT_SRC}/etc/modprobe.d/axonwall-blacklist.conf" ]]; then
   cp "${CHROOT_SRC}/etc/modprobe.d/axonwall-blacklist.conf" "${WORK_DIR}/etc/modprobe.d/axonwall-blacklist.conf"
   chmod 0644 "${WORK_DIR}/etc/modprobe.d/axonwall-blacklist.conf"
 fi
+if [[ -f "${CHROOT_SRC}/etc/sysctl.d/95-axonwall-kernel-hardening.conf" ]]; then
+  mkdir -p "${WORK_DIR}/etc/sysctl.d"
+  cp "${CHROOT_SRC}/etc/sysctl.d/95-axonwall-kernel-hardening.conf" "${WORK_DIR}/etc/sysctl.d/95-axonwall-kernel-hardening.conf"
+  chmod 0644 "${WORK_DIR}/etc/sysctl.d/95-axonwall-kernel-hardening.conf"
+else
+  echo "[!] ERROR: ${CHROOT_SRC}/etc/sysctl.d/95-axonwall-kernel-hardening.conf is missing; cannot build deb without kernel hardening sysctl profile." >&2
+  exit 1
+fi
 if [[ -f "${CHROOT_SRC}/etc/sysctl.d/99-axonwall.conf" ]]; then
   mkdir -p "${WORK_DIR}/etc/sysctl.d"
   cp "${CHROOT_SRC}/etc/sysctl.d/99-axonwall.conf" "${WORK_DIR}/etc/sysctl.d/99-axonwall.conf"
   chmod 0644 "${WORK_DIR}/etc/sysctl.d/99-axonwall.conf"
+fi
+if [[ -f "${CHROOT_SRC}/etc/systemd/system.conf.d/20-axonwall-no-coredump.conf" ]]; then
+  mkdir -p "${WORK_DIR}/etc/systemd/system.conf.d"
+  cp "${CHROOT_SRC}/etc/systemd/system.conf.d/20-axonwall-no-coredump.conf" "${WORK_DIR}/etc/systemd/system.conf.d/20-axonwall-no-coredump.conf"
+  chmod 0644 "${WORK_DIR}/etc/systemd/system.conf.d/20-axonwall-no-coredump.conf"
+else
+  echo "[!] ERROR: ${CHROOT_SRC}/etc/systemd/system.conf.d/20-axonwall-no-coredump.conf is missing; cannot build deb without global coredump suppression." >&2
+  exit 1
 fi
 if [[ -d "${CHROOT_SRC}/etc/axonwall/nvim" ]]; then
   mkdir -p "${WORK_DIR}/etc/axonwall/nvim"
@@ -871,10 +887,13 @@ echo "[+] Building deb package: ${PKG_NAME}.deb..."
 if command -v dpkg-deb &>/dev/null; then
   dpkg-deb -Zxz --build --root-owner-group "${WORK_DIR}" "${OUTPUT_DIR}/${PKG_NAME}.deb"
 elif command -v docker &>/dev/null; then
-  echo "[+] Running dpkg-deb inside debian:trixie container..."
+  # Digest-pinned builder image (SEC-M36). Override DEBIAN_BUILDER_IMAGE only
+  # if testing against a pre-cached offline or newer local Debian Trixie image.
+  DEBIAN_BUILDER_IMAGE="${DEBIAN_BUILDER_IMAGE:-debian:trixie@sha256:913f6706df59a68922d1dd08f78c2476560a8d367897200a6005b00e5f67c2d5}"
+  echo "[+] Running dpkg-deb inside ${DEBIAN_BUILDER_IMAGE} container..."
   docker run --rm \
     -v "${SCRIPT_DIR}:/workspace" \
-    debian:trixie \
+    "${DEBIAN_BUILDER_IMAGE}" \
     dpkg-deb -Zxz --build --root-owner-group "/workspace/build" "/workspace/output/${PKG_NAME}.deb"
 else
   echo "[-] Error: Neither dpkg-deb nor docker is available to build .deb" >&2

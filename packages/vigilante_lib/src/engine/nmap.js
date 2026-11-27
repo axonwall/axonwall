@@ -5,7 +5,10 @@ import os from 'node:os';
 import path from 'node:path';
 import { getVigilanteNmapsDir, ensureVigilanteConfig, resolvePathInside, assertCliTarget } from './config.js';
 import { autoSignIfConfigured } from './gpg.js';
+import { assertSafeScanTarget } from './ssrf.js';
 import { logger } from '../utils/logger.js';
+
+export { assertSafeScanTarget };
 
 export const SCAN_PROFILES = [
   {
@@ -375,8 +378,27 @@ export async function runNmapScan({
   target = '127.0.0.1',
   profile = 'quick',
   customArgs = [],
-  onLog = null
+  onLog = null,
+  allowPrivate = true,
+  allowLoopback = true,
+  dnsLookup,
+  failOnDnsError
 } = {}) {
+  // The target is the final positional argument: a leading-dash value
+  // would be parsed as nmap options (e.g. -iL file reads, -oN overwrite).
+  const cleanTarget = assertCliTarget((target || '127.0.0.1').trim(), 'nmap target');
+  const scanTarget = await assertSafeScanTarget(cleanTarget, {
+    label: 'nmap target',
+    allowPrivate,
+    allowLoopback,
+    allowMetadata: false,
+    dnsLookup,
+    failOnDnsError
+  });
+
+  const profileDef = SCAN_PROFILES.find(p => p.id === profile) || SCAN_PROFILES[0];
+  const profileArgs = profile === 'custom' ? sanitizeNmapCustomArgs(customArgs) : profileDef.args;
+
   await ensureVigilanteConfig();
   const nmapsDir = getVigilanteNmapsDir();
   const check = await checkNmapInstalled();
@@ -384,9 +406,6 @@ export async function runNmapScan({
     throw new Error(check.error);
   }
 
-  // The target is the final positional argument: a leading-dash value
-  // would be parsed as nmap options (e.g. -iL file reads, -oN overwrite).
-  const cleanTarget = assertCliTarget((target || '127.0.0.1').trim(), 'nmap target');
   // Safe filename replacing / and : with _
   const safeTargetName = cleanTarget.replace(/[/:]/g, '_').replace(/[^a-zA-Z0-9._-]/g, '');
   const timestamp = Date.now();
@@ -394,8 +413,9 @@ export async function runNmapScan({
   const nmapFilePath = path.join(nmapsDir, `${baseName}.nmap`);
   const xmlFilePath = path.join(nmapsDir, `${baseName}.xml`);
 
-  const profileDef = SCAN_PROFILES.find(p => p.id === profile) || SCAN_PROFILES[0];
-  const profileArgs = profile === 'custom' ? sanitizeNmapCustomArgs(customArgs) : profileDef.args;
+  const scanArgTarget = !scanTarget.isRange && !scanTarget.isIp && scanTarget.addresses.length > 0
+    ? scanTarget.addresses[0]
+    : cleanTarget;
 
   const nmapArgs = [
     ...profileArgs,
@@ -403,7 +423,7 @@ export async function runNmapScan({
     nmapFilePath,
     '-oX',
     xmlFilePath,
-    cleanTarget
+    scanArgTarget
   ];
 
   logger.info('NMAP:START', `Running scan: nmap ${nmapArgs.join(' ')}`);

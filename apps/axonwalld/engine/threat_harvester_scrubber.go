@@ -36,7 +36,7 @@ var (
 	// key name inside it.
 	reCookieHeader    = regexp.MustCompile(`(?im)^(Cookie:[ \t]*)[^\r\n]*`)
 	reSetCookieHeader = regexp.MustCompile(`(?im)^(Set-Cookie:[ \t]*)[^\r\n]*`)
-	rePemPrivKey      = regexp.MustCompile(`(?s)-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?-----END [A-Z0-9 ]*PRIVATE KEY-----`)
+	rePemPrivKey      = regexp.MustCompile(`(?s)-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----(?:.*?-----END [A-Z0-9 ]*PRIVATE KEY-----|.*)`)
 	reEmailAddr       = regexp.MustCompile(`\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,12}\b`)
 	reCardCand        = regexp.MustCompile(`\b(?:\d[ -]*?){13,19}\b`)
 	reEmbeddedV4      = regexp.MustCompile(`\b(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)\b`)

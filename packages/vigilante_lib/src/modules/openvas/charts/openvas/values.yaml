@@ -127,7 +127,23 @@ serviceAccount:
   create: false
   name: ""
 
-podSecurityContext: {}
+podSecurityContext:
+  seccompProfile:
+    type: RuntimeDefault
+
+networkPolicy:
+  enabled: true
+  ingressControllerNamespaceSelector:
+    kubernetes.io/metadata.name: kube-system
+  allowPrivateTargets: false
+  egressExceptCidrs:
+    - 169.254.169.254/32
+    - 10.0.0.0/8
+    - 172.16.0.0/12
+    - 192.168.0.0/16
+    - 100.64.0.0/10
+    - 127.0.0.0/8
+
 nodeSelector: {}
 tolerations: []
 affinity: {}

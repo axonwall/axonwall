@@ -108,7 +108,7 @@ describe('Modular Firewall, NAS (ZFS/SMB/NFS/iSCSI), and K3s+OpenEBS Compilers',
             iqn: 'iqn.2026-10.io.axonwall:storage.vms',
             portalIp: '0.0.0.0',
             portalPort: 3260,
-            luns: [{ lunId: 0, zvolPath: 'tank/vm-lun0', blockSize: '4096', readOnly: false }],
+            luns: [{ lunId: 0, zvolPath: '/dev/zvol/tank/vm-lun0', blockSize: '4096', readOnly: false }],
           },
         ],
       },
@@ -253,5 +253,65 @@ describe('Modular Firewall, NAS (ZFS/SMB/NFS/iSCSI), and K3s+OpenEBS Compilers',
     // 4. K3s compiler must fall back flannel-iface to eth0 when 'lan' does not exist
     const k3sCompiled = compileK3s(singleNicHostState);
     expect(k3sCompiled.k3sConfigYaml).toContain('flannel-iface: "eth0"');
+  });
+
+  it('defaults mapRootUser to nobody, blocks empty NFS allowedNetworks, enforces /dev/zvol/ without .., and defaults generate_node_acls to 0 (SEC-M26)', async () => {
+    const { NfsExportSchema, IscsiLunSchema } = await import('../../schemas/index.js');
+    const { compileNfsExports, compileLioTargetSaveconfig } = await import('./index.js');
+
+    const nfsDefaults = NfsExportSchema.parse({ path: '/mnt/tank/shares' });
+    expect(nfsDefaults.mapRootUser).toBe('nobody');
+
+    expect(() => NfsExportSchema.parse({ path: '/mnt/tank/shares', allowedNetworks: [] })).toThrow();
+    const skippedNfs = compileNfsExports({
+      enabled: true,
+      nfsExports: [{ path: '/mnt/tank/shares', allowedNetworks: [], readOnly: false, mapRootUser: 'nobody', async: false, enabled: true, description: '' }],
+    } as any);
+    expect(skippedNfs).not.toContain('*(rw');
+    expect(skippedNfs).toContain('# Disabled NFS export');
+
+    expect(() => IscsiLunSchema.parse({ lunId: 0, zvolPath: '/dev/sda' })).toThrow();
+    expect(() => IscsiLunSchema.parse({ lunId: 0, zvolPath: '/dev/zvol/tank/../sda' })).toThrow();
+    expect(() => IscsiLunSchema.parse({ lunId: 0, zvolPath: 'tank/vm-lun0' })).toThrow();
+
+    expect(() =>
+      compileLioTargetSaveconfig({
+        enabled: true,
+        iscsiTargets: [
+          {
+            iqn: 'iqn.2026-10.io.axonwall:bad',
+            portalIp: '0.0.0.0',
+            portalPort: 3260,
+            allowedInitiators: [],
+            chapUser: '',
+            chapSecret: '',
+            luns: [{ lunId: 0, zvolPath: '/dev/sda', blockSize: '4096', readOnly: false }],
+            enabled: true,
+            description: '',
+          },
+        ],
+      } as any),
+    ).toThrow();
+
+    const lio = JSON.parse(
+      compileLioTargetSaveconfig({
+        enabled: true,
+        iscsiTargets: [
+          {
+            iqn: 'iqn.2026-10.io.axonwall:safe',
+            portalIp: '0.0.0.0',
+            portalPort: 3260,
+            allowedInitiators: [],
+            chapUser: '',
+            chapSecret: '',
+            luns: [{ lunId: 0, zvolPath: '/dev/zvol/tank/lun0', blockSize: '4096', readOnly: false }],
+            enabled: true,
+            description: '',
+          },
+        ],
+      } as any),
+    );
+    expect(lio.targets[0].tpgs[0].attributes.generate_node_acls).toBe(0);
+    expect(lio.targets[0].tpgs[0].attributes.cache_dynamic_acls).toBe(0);
   });
 });

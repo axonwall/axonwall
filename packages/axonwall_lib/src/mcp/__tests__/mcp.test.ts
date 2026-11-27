@@ -316,4 +316,38 @@ describe('Axonwall MCP Safety Guard & Blast-Radius Validator', () => {
     expect(validateZfsResourcePath('-o mountpoint=/root', true).valid).toBe(false);
     expect(validateZfsResourcePath('tank@snap', true).valid).toBe(false);
   });
+
+  it('validates interface/srcIp/dstIp schemas, rejects leading-zero IPv4 octets, and emits canonical dotted-quad normalizedTarget (SEC-M22)', async () => {
+    const {
+      McpPcapSampleRequestSchema,
+      McpShapeRequestSchema,
+      parseIpv4ToUint32,
+      parseIpOrCidr,
+    } = await import('../index.js');
+
+    expect(parseIpv4ToUint32('012.0.0.1')).toBeNull();
+    expect(parseIpv4ToUint32('192.168.001.10')).toBeNull();
+    expect(parseIpv4ToUint32('192.168.1.10')).not.toBeNull();
+    expect(validateMcpTarget('012.0.0.1', guardCtx).valid).toBe(false);
+
+    // IPv4-mapped IPv6 emits canonical dotted-quad
+    const mapped = parseIpOrCidr('::ffff:c633:642a');
+    expect(mapped?.address).toBe('198.51.100.42');
+    const validatedMapped = validateMcpTarget('::ffff:c633:642a', guardCtx);
+    expect(validatedMapped.valid).toBe(true);
+    expect(validatedMapped.normalizedTarget).toBe('198.51.100.42');
+
+    // Schema validation on McpPcapSampleRequestSchema & McpShapeRequestSchema
+    expect(McpPcapSampleRequestSchema.safeParse({ interface: 'eth0; id' }).success).toBe(false);
+    expect(McpPcapSampleRequestSchema.safeParse({ interface: 'eth0', srcIp: '1.2.3.4 && cat /etc/passwd' }).success).toBe(false);
+    expect(McpPcapSampleRequestSchema.safeParse({ interface: 'eth0', dstIp: '012.0.0.1' }).success).toBe(false);
+    expect(McpPcapSampleRequestSchema.safeParse({ interface: 'eth0', srcIp: '198.51.100.1', dstIp: '2001:db8::/64' }).success).toBe(true);
+
+    expect(McpShapeRequestSchema.safeParse({
+      target: '198.51.100.10',
+      interface: 'eth0 && rm -rf /',
+      rateKbps: 1000,
+      audit: { reason: 'test reason', actor: 'soc-bot' },
+    }).success).toBe(false);
+  });
 });

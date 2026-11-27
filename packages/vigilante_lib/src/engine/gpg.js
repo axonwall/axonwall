@@ -204,15 +204,33 @@ export async function signFile(filePath, {
   }
 }
 
+function normalizeGpgIdentity(value) {
+  return String(value || '').trim().replace(/^0x/i, '').replace(/\s+/g, '').toUpperCase();
+}
+
+function matchesFingerprintOrKeyId(primaryFingerprint, candidate) {
+  if (!primaryFingerprint || !candidate) return false;
+  const normPrimary = normalizeGpgIdentity(primaryFingerprint);
+  const normCandidate = normalizeGpgIdentity(candidate);
+  // Reject short (<16 hex char) key IDs or non-hex strings (e.g. email UIDs)
+  // to prevent evil32 collision / UID spoofing against untrusted keys.
+  if (!/^[0-9A-F]{16,}$/.test(normCandidate)) return false;
+  if (normCandidate.length === 16) {
+    return normPrimary.endsWith(normCandidate);
+  }
+  return normPrimary === normCandidate;
+}
+
 /**
  * Verify a file signature using GPG
  * @param {string} filePath Target data file
  * @param {string} signaturePath Detached signature (.asc) file
  * @param {Object} [options]
  * @param {string} [options.gnupgHome] Custom GNUPGHOME directory
- * @returns {Promise<{ success: boolean, isValid: boolean, signerUid?: string, fingerprint?: string, keyId?: string, signedAt?: string, output: string, error?: string }>}
+ * @param {string} [options.expectedFingerprint] Expected primary-key fingerprint (or 16-char long keyId)
+ * @returns {Promise<{ success: boolean, isValid: boolean, signerUid?: string, fingerprint?: string, keyId?: string, signedAt?: string, trustLevel?: string, output: string, error?: string }>}
  */
-export async function verifyFileSignature(filePath, signaturePath, { gnupgHome = null } = {}) {
+export async function verifyFileSignature(filePath, signaturePath, { gnupgHome = null, expectedFingerprint = null } = {}) {
   const isAvail = await isGpgAvailable();
   if (!isAvail) {
     return { success: false, isValid: false, output: '', error: 'GPG binary not available' };
@@ -220,6 +238,7 @@ export async function verifyFileSignature(filePath, signaturePath, { gnupgHome =
 
   const gpgBin = await getGpgBinary();
   const env = getGpgEnv(gnupgHome);
+  const config = loadConfig();
 
   logger.info('GPG:VERIFY', `Verifying signature ${signaturePath} on ${filePath}`);
 
@@ -230,16 +249,20 @@ export async function verifyFileSignature(filePath, signaturePath, { gnupgHome =
     let hasGoodSig = false;
     let hasValidSig = false;
     let hasFailureMarker = false;
+    let hasTrustedSig = false;
+    let trustLevel = null;
     let signerUid = null;
     let fingerprint = null;
+    let primaryFingerprint = null;
     let signedAt = null;
 
     for (const line of String(stdout || '').split('\n')) {
       const m = line.match(/^\[GNUPG:\]\s+(\S+)\s*(.*)$/);
       if (!m) continue;
       const [, tag, rest] = m;
-      if (tag === 'BADSIG' || tag === 'ERRSIG' || tag === 'EXPSIG' || tag === 'EXPKEYSIG' || tag === 'REVKEYSIG' || tag === 'NODATA') {
+      if (tag === 'BADSIG' || tag === 'ERRSIG' || tag === 'EXPSIG' || tag === 'EXPKEYSIG' || tag === 'REVKEYSIG' || tag === 'NODATA' || tag === 'TRUST_NEVER') {
         hasFailureMarker = true;
+        if (tag === 'TRUST_NEVER') trustLevel = tag;
       } else if (tag === 'GOODSIG') {
         hasGoodSig = true;
         const firstSpace = rest.indexOf(' ');
@@ -249,24 +272,47 @@ export async function verifyFileSignature(filePath, signaturePath, { gnupgHome =
       } else if (tag === 'VALIDSIG') {
         hasValidSig = true;
         const parts = rest.trim().split(/\s+/);
-        if (parts[0]) fingerprint = parts[0];
+        if (parts[0]) fingerprint = parts[0].toUpperCase();
         if (parts[1]) signedAt = parts[1];
+        // VALIDSIG field index 9 holds the primary-key fingerprint
+        primaryFingerprint = (parts[9] || parts[0] || '').toUpperCase() || null;
+      } else if (tag === 'TRUST_FULLY' || tag === 'TRUST_ULTIMATE') {
+        hasTrustedSig = true;
+        trustLevel = tag;
+      } else if (tag === 'TRUST_UNDEFINED' || tag === 'TRUST_MARGINAL') {
+        trustLevel = tag;
       }
     }
 
-    const isGood = hasGoodSig && hasValidSig && !hasFailureMarker;
+    const effectivePrimaryFpr = primaryFingerprint || fingerprint;
+    const explicitPin = expectedFingerprint !== null && expectedFingerprint !== undefined && String(expectedFingerprint).trim() !== ''
+      ? String(expectedFingerprint).trim()
+      : null;
+    const configuredKeyId = config.gpg?.keyId ? String(config.gpg.keyId).trim() : null;
+
+    let trustSatisfied = false;
+    if (explicitPin) {
+      trustSatisfied = matchesFingerprintOrKeyId(effectivePrimaryFpr, explicitPin);
+    } else {
+      trustSatisfied = hasTrustedSig || (configuredKeyId ? matchesFingerprintOrKeyId(effectivePrimaryFpr, configuredKeyId) : false);
+    }
+
+    const isGood = hasGoodSig && hasValidSig && !hasFailureMarker && trustSatisfied;
     if (!signedAt) {
       const timeMatch = fullOutput.match(/Signature made ([^\n]+)/);
       if (timeMatch) signedAt = timeMatch[1];
     }
 
+    const resultFpr = effectivePrimaryFpr || fingerprint;
     return {
       success: isGood,
       isValid: isGood,
       signerUid: isGood ? signerUid : null,
-      fingerprint: isGood ? fingerprint : null,
-      keyId: isGood && fingerprint ? fingerprint.slice(-16) : null,
+      fingerprint: isGood ? resultFpr : null,
+      keyId: isGood && resultFpr ? resultFpr.slice(-16) : null,
       signedAt: isGood ? signedAt : null,
+      trustLevel,
+      ...(isGood ? {} : { error: explicitPin ? 'Signature does not match expected GPG primary-key fingerprint' : 'GPG signature is not trusted (requires TRUST_FULLY/TRUST_ULTIMATE or matching configured key fingerprint)' }),
       output: fullOutput.trim()
     };
   } catch (err) {

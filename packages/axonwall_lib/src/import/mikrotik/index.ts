@@ -222,38 +222,80 @@ export function importMikrotikConfig(rscContent: string): ImportReport {
 
     // 4. NAT Rules
     else if (currentSection.startsWith('/ip firewall nat')) {
+      const parseRosEndpoint = (addrVal?: string, listVal?: string, defaultAddr = 'any') => {
+        const raw = addrVal || (listVal ? (listVal.startsWith('!') ? `!$${listVal.slice(1).replace(/[^a-zA-Z0-9_]/g, '_')}` : `$${listVal.replace(/[^a-zA-Z0-9_]/g, '_')}`) : defaultAddr);
+        if (raw.startsWith('!')) {
+          return { value: raw.slice(1) || defaultAddr, negated: true };
+        }
+        return { value: raw, negated: false };
+      };
+      const parseRosPort = (portVal?: string) => {
+        if (!portVal) return { value: '', negated: false };
+        if (portVal.startsWith('!')) {
+          return { value: portVal.slice(1).replace(/:/g, '-'), negated: true };
+        }
+        return { value: portVal.replace(/:/g, '-'), negated: false };
+      };
+      const validNatProtos = new Set(['any', 'tcp', 'udp', 'tcp_udp', 'icmp', 'ipv6-icmp', 'esp', 'ah', 'gre']);
+      const normalizeRosNatProto = (rawProto?: string, fallback: 'any' | 'tcp' = 'tcp') => {
+        if (!rawProto) return fallback;
+        const p = rawProto.toLowerCase();
+        if (p === 'all') return 'any';
+        if (p === 'icmpv6') return 'ipv6-icmp';
+        if (validNatProtos.has(p)) return p as any;
+        return fallback;
+      };
+
+      const natSrc = parseRosEndpoint(kv['src-address'], kv['src-address-list'], 'any');
+      const natSrcPort = parseRosPort(kv['src-port']);
+      const natDstPort = parseRosPort(kv['dst-port']);
+      const hasNegatedNat = natSrc.negated || natSrcPort.negated || natDstPort.negated;
+
       if (kv.action === 'masquerade' || kv.action === 'src-nat') {
+        const natDst = parseRosEndpoint(kv['dst-address'], kv['dst-address-list'], 'any');
         const outIface = (kv['out-interface'] || 'wan').toLowerCase();
+        const isNegated = hasNegatedNat || natDst.negated;
+        const baseDesc = kv.comment || 'RouterOS Masquerade';
+        if (isNegated) {
+          warnings.push(`RouterOS NAT rule "${baseDesc}" uses negated matching (!) which cannot be represented on NatRule; imported with enabled: false.`);
+        }
         nat.push({
           type: kv.action === 'masquerade' ? 'masquerade' : 'snat',
           interface: outIface.includes('ether1') ? 'wan' : outIface,
-          protocol: 'any',
-          source: kv['src-address'] || 'any',
-          sourcePort: '',
-          destination: 'any',
-          destinationPort: '',
+          protocol: normalizeRosNatProto(kv.protocol, 'any'),
+          source: natSrc.value,
+          sourcePort: natSrcPort.value,
+          destination: natDst.value,
+          destinationPort: natDstPort.value,
           targetIp: kv['to-addresses'] || undefined,
+          ...(kv['to-ports'] ? { targetPort: kv['to-ports'].replace(/:/g, '-') } : {}),
           log: kv.log === 'yes',
-          enabled: kv.disabled !== 'yes',
-          description: kv.comment || 'RouterOS Masquerade',
+          enabled: isNegated ? false : kv.disabled !== 'yes',
+          description: isNegated ? `[REVIEW: Negated NAT] ${baseDesc}` : baseDesc,
           sortOrder: natSort,
         });
         natSort += 10;
       } else if (kv.action === 'dst-nat') {
+        const natDst = parseRosEndpoint(kv['dst-address'], kv['dst-address-list'], 'wan_ip');
         const inIface = (kv['in-interface'] || 'wan').toLowerCase();
+        const isNegated = hasNegatedNat || natDst.negated;
+        const baseDesc = kv.comment || 'RouterOS Port Forward';
+        if (isNegated) {
+          warnings.push(`RouterOS DNAT rule "${baseDesc}" uses negated matching (!) which cannot be represented on NatRule; imported with enabled: false.`);
+        }
         nat.push({
           type: 'dnat',
           interface: inIface.includes('ether1') ? 'wan' : inIface,
-          protocol: (kv.protocol as any) || 'tcp',
-          source: 'any',
-          sourcePort: '',
-          destination: 'wan_ip',
-          destinationPort: kv['dst-port'] || '',
+          protocol: normalizeRosNatProto(kv.protocol, 'tcp'),
+          source: natSrc.value,
+          sourcePort: natSrcPort.value,
+          destination: natDst.value,
+          destinationPort: natDstPort.value,
           targetIp: kv['to-addresses'] || '',
-          targetPort: kv['to-ports'] || kv['dst-port'] || '',
+          targetPort: (kv['to-ports'] || natDstPort.value || '').replace(/:/g, '-'),
           log: kv.log === 'yes',
-          enabled: kv.disabled !== 'yes',
-          description: kv.comment || 'RouterOS Port Forward',
+          enabled: isNegated ? false : kv.disabled !== 'yes',
+          description: isNegated ? `[REVIEW: Negated NAT] ${baseDesc}` : baseDesc,
           sortOrder: natSort,
         });
         natSort += 10;

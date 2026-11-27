@@ -56,7 +56,10 @@ import { isPluginEnabled } from '@axonwall/lib/plugins';
 import {
   bridgeSatelliteFlowsAndLogs,
   bridgeSatelliteMetricsToVM,
+  isValidSatelliteId,
   readCachedDesiredStateBestEffort,
+  sanitizeSatelliteFirewallLog,
+  sanitizeSatelliteFlowRecord,
 } from './telemetry-bridge.js';
 import * as os from 'node:os';
 import * as child_process from 'node:child_process';
@@ -117,13 +120,21 @@ const HUB_CERT_SAN = 'DNS:localhost,DNS:axonwall.local,IP:127.0.0.1';
 // subprocess). Callers treat anything but `true` as unusable: a pair the
 // server cannot parse would crash https.createServer just as surely as a
 // mismatched one, so both fall through to re-provisioning.
-export function certKeyPairMatches(certPath: string, keyPath: string): boolean | null {
+export function certKeyPairBuffersMatch(certBuf: Buffer | string, keyBuf: Buffer | string): boolean | null {
   try {
-    const cert = new crypto.X509Certificate(fs.readFileSync(certPath));
-    const key = crypto.createPrivateKey(fs.readFileSync(keyPath));
+    const cert = new crypto.X509Certificate(certBuf);
+    const key = crypto.createPrivateKey(keyBuf);
     const certPub = cert.publicKey.export({ type: 'spki', format: 'der' });
     const keyPub = crypto.createPublicKey(key).export({ type: 'spki', format: 'der' });
     return Buffer.compare(certPub as Buffer, keyPub as Buffer) === 0;
+  } catch {
+    return null;
+  }
+}
+
+export function certKeyPairMatches(certPath: string, keyPath: string): boolean | null {
+  try {
+    return certKeyPairBuffersMatch(fs.readFileSync(certPath), fs.readFileSync(keyPath));
   } catch {
     return null;
   }
@@ -842,6 +853,7 @@ export function loadPersistedSyncedRoutes(): PersistedSyncedRoutes | null {
       }
     },
     label: 'synced-routes.json',
+    mode: 0o600,
   });
 }
 
@@ -1248,7 +1260,355 @@ export function createPortMultiplexer(
   return tcpMultiplexer;
 }
 
-async function main() {
+export const VALID_SATELLITE_SKU_PROFILES = [
+  'sku-vm-virtio',
+  'sku-x86-intel-n100-i226',
+  'sku-x86-enterprise-10g-25g',
+  'sku-arm64-router',
+  'generic-edge',
+] as const;
+
+export type SatelliteSkuProfile = (typeof VALID_SATELLITE_SKU_PROFILES)[number];
+
+const VALID_SKU_PROFILE_SET = new Set<string>(VALID_SATELLITE_SKU_PROFILES);
+
+export function normalizeSatelliteSkuProfile(raw: unknown): SatelliteSkuProfile | undefined {
+  if (typeof raw !== 'string') return undefined;
+  const trimmed = raw.trim();
+  return VALID_SKU_PROFILE_SET.has(trimmed) ? (trimmed as SatelliteSkuProfile) : undefined;
+}
+
+export function toFiniteMetricNumber(val: unknown, nonNegative = false): number {
+  if (val === null || val === undefined || typeof val === 'boolean') return 0;
+  if (typeof val === 'string' && val.trim() === '') return 0;
+  const n = Number(val);
+  if (!Number.isFinite(n)) return 0;
+  return nonNegative ? Math.max(0, n) : n;
+}
+
+export interface SanitizedSatelliteMetrics {
+  uptimeSeconds: number;
+  cpuUsagePercent: number;
+  memUsagePercent: number;
+  activeConns: number;
+  rxBytesTotal: number;
+  txBytesTotal: number;
+  pid1Mode?: boolean;
+  kernelVersion?: string;
+  skuProfile?: SatelliteSkuProfile;
+}
+
+export function sanitizeSatelliteMetrics(raw: unknown): SanitizedSatelliteMetrics | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+  const src = raw as Record<string, unknown>;
+  const skuProfile = normalizeSatelliteSkuProfile(src.skuProfile);
+  const kernelVersion =
+    typeof src.kernelVersion === 'string' && src.kernelVersion.trim()
+      ? src.kernelVersion.trim().replace(/[\x00-\x1f\x7f]/g, '').slice(0, 128)
+      : undefined;
+
+  return {
+    uptimeSeconds: toFiniteMetricNumber(src.uptimeSeconds, true),
+    cpuUsagePercent: toFiniteMetricNumber(src.cpuUsagePercent, true),
+    memUsagePercent: toFiniteMetricNumber(src.memUsagePercent, true),
+    activeConns: toFiniteMetricNumber(src.activeConns, true),
+    rxBytesTotal: toFiniteMetricNumber(src.rxBytesTotal, true),
+    txBytesTotal: toFiniteMetricNumber(src.txBytesTotal, true),
+    ...(typeof src.pid1Mode === 'boolean' ? { pid1Mode: src.pid1Mode } : {}),
+    ...(kernelVersion ? { kernelVersion } : {}),
+    ...(skuProfile ? { skuProfile } : {}),
+  };
+}
+
+export interface PeerCertificateLike {
+  subject?: { CN?: string | string[] };
+  subjectaltname?: string;
+}
+
+/**
+ * Verifies strict case-insensitive exact binding between an authenticated mTLS
+ * client certificate (SAN URI urn:axonwall:satellite:<satId>, SAN DNS, or fallback
+ * single Subject CN when no identity SANs exist) and the claimed satId.
+ */
+export function verifySatellitePeerCertIdentity(
+  peerCert: PeerCertificateLike | null | undefined,
+  satId: string
+): boolean {
+  if (!isValidSatelliteId(satId)) return false;
+  if (!peerCert || typeof peerCert !== 'object') return false;
+  const normalizedSatId = satId.trim().toLowerCase();
+
+  const sanRaw = typeof peerCert.subjectaltname === 'string' ? peerCert.subjectaltname : '';
+  const dnsSans: string[] = [];
+  const uriSatIds: string[] = [];
+  let hasExplicitSatelliteUriSan = false;
+  let hasAnyIdentitySan = false;
+
+  if (sanRaw.trim()) {
+    for (const part of sanRaw.split(',')) {
+      const entry = part.trim();
+      if (!entry) continue;
+      const colonIdx = entry.indexOf(':');
+      if (colonIdx <= 0) continue;
+      const kind = entry.slice(0, colonIdx).trim().toUpperCase();
+      const value = entry.slice(colonIdx + 1).trim();
+      if (!value) continue;
+
+      if (kind === 'DNS') {
+        hasAnyIdentitySan = true;
+        if (!value.includes('*') && isValidSatelliteId(value)) {
+          dnsSans.push(value.toLowerCase());
+        }
+      } else if (kind === 'URI') {
+        hasAnyIdentitySan = true;
+        const prefix = 'urn:axonwall:satellite:';
+        if (value.toLowerCase().startsWith(prefix)) {
+          hasExplicitSatelliteUriSan = true;
+          const idPart = value.slice(prefix.length);
+          if (isValidSatelliteId(idPart)) {
+            uriSatIds.push(idPart.toLowerCase());
+          }
+        }
+      }
+    }
+  }
+
+  if (hasExplicitSatelliteUriSan) {
+    return uriSatIds.includes(normalizedSatId);
+  }
+  if (hasAnyIdentitySan) {
+    return dnsSans.includes(normalizedSatId);
+  }
+
+  // Fallback to Subject CN only when no DNS/URI SANs exist; reject multi-CN arrays.
+  const rawCn = peerCert.subject?.CN;
+  if (typeof rawCn !== 'string') return false;
+  const cn = rawCn.trim();
+  if (!cn || cn.includes('*') || !isValidSatelliteId(cn)) return false;
+  return cn.toLowerCase() === normalizedSatId;
+}
+
+export function isValidWireGuardPublicKey(value: unknown): value is string {
+  if (typeof value !== 'string') return false;
+  const trimmed = value.trim();
+  if (!/^[A-Za-z0-9+/]{42}[AEIMQUYcgkosw048]=$/.test(trimmed)) return false;
+  const buf = Buffer.from(trimmed, 'base64');
+  if (buf.length !== 32) return false;
+  return buf.some((b) => b !== 0);
+}
+
+export const HEADSCALE_REQUEST_COOLDOWN_MS = 60_000;
+
+export function createHeadscaleRequestLimiter(
+  cooldownMs = HEADSCALE_REQUEST_COOLDOWN_MS,
+  maxEntries = 2048
+) {
+  const lastRequestBySat = new Map<string, number>();
+
+  return {
+    allow(satId: string, nowMs = Date.now()): boolean {
+      const prev = lastRequestBySat.get(satId);
+      if (prev !== undefined && nowMs - prev < cooldownMs) {
+        return false;
+      }
+      if (lastRequestBySat.has(satId)) {
+        lastRequestBySat.delete(satId);
+      } else if (lastRequestBySat.size >= maxEntries) {
+        for (const [k, ts] of lastRequestBySat.entries()) {
+          if (nowMs - ts >= cooldownMs) lastRequestBySat.delete(k);
+        }
+        if (lastRequestBySat.size >= maxEntries) {
+          const oldest = lastRequestBySat.keys().next().value;
+          if (oldest !== undefined) lastRequestBySat.delete(oldest);
+        }
+      }
+      lastRequestBySat.set(satId, nowMs);
+      return true;
+    },
+    size(): number {
+      return lastRequestBySat.size;
+    },
+  };
+}
+
+export interface McpAuthFailureLimiterOptions {
+  maxFailuresPerWindow?: number;
+  auditBurstPerWindow?: number;
+  windowMs?: number;
+  maxTrackedIps?: number;
+}
+
+export function createMcpAuthFailureLimiter(opts: McpAuthFailureLimiterOptions = {}) {
+  const maxFailuresPerWindow = opts.maxFailuresPerWindow ?? 15;
+  const auditBurstPerWindow = opts.auditBurstPerWindow ?? 3;
+  const windowMs = opts.windowMs ?? 60_000;
+  const maxTrackedIps = opts.maxTrackedIps ?? 4096;
+
+  interface Bucket {
+    windowStart: number;
+    failures: number;
+    audited: number;
+    suppressedNoticeLogged: boolean;
+  }
+
+  const buckets = new Map<string, Bucket>();
+
+  const evictIfNeeded = (nowMs: number) => {
+    if (buckets.size < maxTrackedIps) return;
+    for (const [ip, b] of buckets.entries()) {
+      if (nowMs - b.windowStart >= windowMs) {
+        buckets.delete(ip);
+      }
+    }
+    while (buckets.size >= maxTrackedIps) {
+      const oldest = buckets.keys().next().value;
+      if (oldest === undefined) break;
+      buckets.delete(oldest);
+    }
+  };
+
+  return {
+    isBlocked(clientIp: string, nowMs = Date.now()): boolean {
+      const key = clientIp || 'unknown';
+      const bucket = buckets.get(key);
+      if (!bucket) return false;
+      if (nowMs - bucket.windowStart >= windowMs) {
+        buckets.delete(key);
+        return false;
+      }
+      return bucket.failures >= maxFailuresPerWindow;
+    },
+    recordFailure(
+      clientIp: string,
+      errorStatus: number,
+      nowMs = Date.now()
+    ): { blocked: boolean; shouldAudit: boolean; coalescedNotice: boolean } {
+      const key = clientIp || 'unknown';
+      // Do not fold an authenticated key's own 429 budget into unauthenticated IP lockout.
+      if (errorStatus !== 401 && errorStatus !== 403) {
+        return { blocked: false, shouldAudit: true, coalescedNotice: false };
+      }
+      let bucket = buckets.get(key);
+      if (!bucket || nowMs - bucket.windowStart >= windowMs) {
+        if (!bucket) evictIfNeeded(nowMs);
+        bucket = { windowStart: nowMs, failures: 0, audited: 0, suppressedNoticeLogged: false };
+      } else {
+        // Refresh insertion order for LRU eviction.
+        buckets.delete(key);
+      }
+      bucket.failures += 1;
+      const blocked = bucket.failures > maxFailuresPerWindow;
+      let shouldAudit = false;
+      let coalescedNotice = false;
+      if (bucket.audited < auditBurstPerWindow) {
+        bucket.audited += 1;
+        shouldAudit = true;
+      } else if (!bucket.suppressedNoticeLogged) {
+        bucket.suppressedNoticeLogged = true;
+        shouldAudit = true;
+        coalescedNotice = true;
+      }
+      buckets.set(key, bucket);
+      return { blocked, shouldAudit, coalescedNotice };
+    },
+    size(): number {
+      return buckets.size;
+    },
+  };
+}
+
+function statSignature(filePath: string): string {
+  try {
+    const st = fs.statSync(filePath, { bigint: true });
+    return `${st.ino}:${st.mtimeNs}:${st.size}`;
+  } catch {
+    return 'missing';
+  }
+}
+
+export function computeTlsFilesSignature(certPath: string, keyPath: string, caPath: string): string {
+  return `${statSignature(certPath)}|${statSignature(keyPath)}|${statSignature(caPath)}`;
+}
+
+function isValidPemCaBundle(caBuf: Buffer): boolean {
+  const text = caBuf.toString('utf8');
+  const matches = text.match(/-----BEGIN CERTIFICATE-----[\s\S]+?-----END CERTIFICATE-----/g);
+  if (!matches || matches.length === 0) return false;
+  try {
+    for (const block of matches) {
+      new crypto.X509Certificate(block);
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function refreshControllerTlsContext(
+  httpsServer: https.Server,
+  certPath: string,
+  keyPath: string,
+  caPath: string,
+  state: { lastSignature: string; hasFleetMtlsCa: boolean }
+): { reloaded: boolean; hasFleetMtlsCa: boolean } {
+  const nextSig = computeTlsFilesSignature(certPath, keyPath, caPath);
+  if (nextSig === state.lastSignature) {
+    return { reloaded: false, hasFleetMtlsCa: state.hasFleetMtlsCa };
+  }
+  try {
+    if (!fs.existsSync(certPath) || !fs.existsSync(keyPath)) {
+      return { reloaded: false, hasFleetMtlsCa: state.hasFleetMtlsCa };
+    }
+    const certBuf = fs.readFileSync(certPath);
+    const keyBuf = fs.readFileSync(keyPath);
+    if (certBuf.length === 0 || keyBuf.length === 0) {
+      return { reloaded: false, hasFleetMtlsCa: state.hasFleetMtlsCa };
+    }
+    if (certKeyPairBuffersMatch(certBuf, keyBuf) !== true) {
+      console.warn('[Axonwall Controller] Skipping runtime TLS reload: cert and key on disk do not match');
+      return { reloaded: false, hasFleetMtlsCa: state.hasFleetMtlsCa };
+    }
+
+    let caBuf: Buffer | undefined;
+    if (fs.existsSync(caPath)) {
+      const candidateCa = fs.readFileSync(caPath);
+      if (candidateCa.length === 0 || !isValidPemCaBundle(candidateCa)) {
+        console.warn('[Axonwall Controller] Skipping runtime TLS reload: ca.crt on disk is empty or invalid PEM');
+        return { reloaded: false, hasFleetMtlsCa: state.hasFleetMtlsCa };
+      }
+      caBuf = candidateCa;
+    }
+
+    httpsServer.setSecureContext({
+      cert: certBuf,
+      key: keyBuf,
+      ca: caBuf,
+    });
+    state.lastSignature = nextSig;
+    state.hasFleetMtlsCa = Boolean(caBuf);
+    console.log(`[Axonwall Controller] Reloaded TLS SecureContext from disk (mTLS CA active: ${state.hasFleetMtlsCa})`);
+    return { reloaded: true, hasFleetMtlsCa: state.hasFleetMtlsCa };
+  } catch (err: any) {
+    console.warn(`[Axonwall Controller] Runtime TLS SecureContext reload failed: ${err?.message || err}`);
+    return { reloaded: false, hasFleetMtlsCa: state.hasFleetMtlsCa };
+  }
+}
+
+export interface ControllerServerHandle {
+  port: number;
+  server: net.Server | http.Server;
+  mainServer: https.Server | http.Server;
+  wss: WebSocketServer;
+  getHasFleetMtlsCa: () => boolean;
+  reloadTlsContext: () => boolean;
+  close: () => Promise<void>;
+}
+
+export async function startControllerServer(opts?: {
+  port?: number;
+  host?: string;
+  uiPort?: number;
+}): Promise<ControllerServerHandle> {
   console.log('[Axonwall Controller] Starting Axonwall Control Plane Worker...');
   console.log('[Axonwall Controller] Monitoring config changes and apply pipeline.');
 
@@ -1266,6 +1626,7 @@ async function main() {
     arch?: string;
     wgPrivateKey?: string;
     wgPublicKey?: string;
+    mtlsVerified?: boolean;
     tunnelIp?: string;
     wireguard?: { tunnelIp: string };
     ws?: WebSocket;
@@ -1386,6 +1747,7 @@ async function main() {
         }
       },
       label: 'state.json',
+      mode: 0o600,
     });
   }
 
@@ -1554,7 +1916,6 @@ async function main() {
 
 // Prometheus Metrics Definition
 const prometheusRegistry = new promClient.Registry();
-promClient.collectDefaultMetrics({ register: prometheusRegistry });
 
 const satUptimeGauge = new promClient.Gauge({
   name: 'axonwall_satellite_uptime_seconds',
@@ -1607,6 +1968,8 @@ const satFlowsCounter = new promClient.Counter({
 
 // A local tracker to help track monotonic counters without errors when re-setting
 const lastRxTxBytes = new Map<string, {rx: number, tx: number}>();
+const headscaleRequestLimiter = createHeadscaleRequestLimiter();
+const mcpAuthFailureLimiter = createMcpAuthFailureLimiter();
 
 
   // Set up an HTTP server for WebSocket upgrades and REST queries
@@ -1617,12 +1980,18 @@ const lastRxTxBytes = new Map<string, {rx: number, tx: number}>();
   const keyPath = controllerDirs.keyPath;
   const caPath = controllerDirs.caPath;
 
-  const uiPort = parseInt(process.env.UI_PORT || '3000', 10);
-  const port = parseInt(process.env.CONTROLLER_PORT || '2966', 10);
+  const uiPort = opts?.uiPort ?? parseInt(process.env.UI_PORT || '3000', 10);
+  const port = opts?.port ?? parseInt(process.env.CONTROLLER_PORT || '2966', 10);
+  const listenHost = opts?.host ?? '0.0.0.0';
   const tlsConfig = ensureControllerTls(certPath, keyPath, caPath);
-  const hasFleetMtlsCa = Boolean(tlsConfig?.ca);
+  const tlsState = {
+    lastSignature: computeTlsFilesSignature(certPath, keyPath, caPath),
+    hasFleetMtlsCa: Boolean(tlsConfig?.ca),
+  };
   let server: net.Server | http.Server;
   let mainServer: https.Server | http.Server;
+  let reloadTlsContext = (): boolean => false;
+  let tlsRefreshTimer: NodeJS.Timeout | null = null;
   const requestHandler = (req: any, res: any) => {
     let pathname: string;
     try {
@@ -1636,7 +2005,7 @@ const lastRxTxBytes = new Map<string, {rx: number, tx: number}>();
     
     
     const verifyFleetAuth = (req: any, res: any): boolean => {
-      if (fs.existsSync(caPath)) {
+      if (tlsState.hasFleetMtlsCa) {
         const tlsSocket = req.socket as any;
         let peerCert: any = null;
         try { peerCert = tlsSocket?.getPeerCertificate?.(); } catch { peerCert = null; }
@@ -1703,7 +2072,7 @@ const lastRxTxBytes = new Map<string, {rx: number, tx: number}>();
       // require the fleet token or a client certificate verified against a
       // configured local fleet CA (never Node's default public root CA store).
       const tlsSocket = req.socket as any;
-      if (!isMetricsMtlsAuthorized(tlsSocket, hasFleetMtlsCa) && !verifyFleetAuth(req, res)) return;
+      if (!isMetricsMtlsAuthorized(tlsSocket, tlsState.hasFleetMtlsCa) && !verifyFleetAuth(req, res)) return;
       prometheusRegistry.metrics().then((metricsStr) => {
         res.writeHead(200, { 'Content-Type': prometheusRegistry.contentType });
         res.end(metricsStr);
@@ -2021,24 +2390,52 @@ const lastRxTxBytes = new Map<string, {rx: number, tx: number}>();
         : ((req.headers['x-axonwall-mcp-token'] as string) || '').trim();
       const clientIp = (req.socket?.remoteAddress || '127.0.0.1').replace(/^::ffff:/i, '');
 
-      const authRes = authenticateMcpToken(rawToken, clientIp, req);
-      if (!authRes.authenticated || !authRes.key) {
-        recordMcpAuditEntry({
-          keyId: authRes.key?.id ?? 'unauthenticated',
-          keyName: authRes.key?.name ?? 'unauthenticated',
-          agentType: authRes.key?.agentType ?? 'unknown',
-          clientIp,
-          toolName: `http:${req.method}:${pathname}`,
-          requiredScope: 'mcp:auth',
-          decision: 'denied',
-          denialReason: authRes.errorMessage || 'Authentication failed',
-          paramsSummary: { pathname, method: req.method },
+      if (mcpAuthFailureLimiter.isBlocked(clientIp)) {
+        res.writeHead(429, {
+          'Content-Type': 'application/json',
+          'Retry-After': '60',
         });
-        res.writeHead(authRes.errorStatus || 401, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({
           jsonrpc: '2.0',
           id: null,
-          error: { code: -32001, message: authRes.errorMessage || 'Unauthorized MCP request' },
+          error: { code: -32001, message: 'Too many failed MCP authentication attempts; rate limited' },
+        }));
+        return;
+      }
+
+      const authRes = authenticateMcpToken(rawToken, clientIp, req);
+      if (!authRes.authenticated || !authRes.key) {
+        const failureStatus = authRes.errorStatus || 401;
+        const limitOutcome = mcpAuthFailureLimiter.recordFailure(clientIp, failureStatus);
+        if (limitOutcome.shouldAudit) {
+          recordMcpAuditEntry({
+            keyId: authRes.key?.id ?? 'unauthenticated',
+            keyName: authRes.key?.name ?? 'unauthenticated',
+            agentType: authRes.key?.agentType ?? 'unknown',
+            clientIp,
+            toolName: `http:${req.method}:${pathname}`,
+            requiredScope: 'mcp:auth',
+            decision: 'denied',
+            denialReason: limitOutcome.coalescedNotice
+              ? `${authRes.errorMessage || 'Authentication failed'} (further unauthenticated failures from ${clientIp} coalesced/rate-limited)`
+              : authRes.errorMessage || 'Authentication failed',
+            paramsSummary: { pathname, method: req.method },
+          });
+        }
+        const statusToSend = limitOutcome.blocked ? 429 : failureStatus;
+        res.writeHead(statusToSend, {
+          'Content-Type': 'application/json',
+          ...(limitOutcome.blocked ? { 'Retry-After': '60' } : {}),
+        });
+        res.end(JSON.stringify({
+          jsonrpc: '2.0',
+          id: null,
+          error: {
+            code: -32001,
+            message: limitOutcome.blocked
+              ? 'Too many failed MCP authentication attempts; rate limited'
+              : authRes.errorMessage || 'Unauthorized MCP request',
+          },
         }));
         return;
       }
@@ -2232,10 +2629,20 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
       // client cert) and by satellites that only receive their cert
       // during ZTP provisioning, as well as MCP clients using mTLS
       // fingerprint pinning. Fleet paths verify instead: /ws/satellite
-      // requires socket.authorized when a CA exists, and the fleet HTTP
-      // API rejects presented-but-invalid certificates (verifyFleetAuth).
+      // requires socket.authorized + strict cert-to-satId binding when a CA
+      // exists, and the fleet HTTP API rejects presented-but-invalid
+      // certificates (verifyFleetAuth).
       rejectUnauthorized: false
     }, requestHandler);
+
+    reloadTlsContext = () => refreshControllerTlsContext(httpsServer, certPath, keyPath, caPath, tlsState).reloaded;
+    httpsServer.prependListener('connection', () => {
+      reloadTlsContext();
+    });
+    tlsRefreshTimer = setInterval(() => {
+      reloadTlsContext();
+    }, 30_000);
+    tlsRefreshTimer.unref?.();
 
     const redirectServer = createHttpRedirectServer(port);
     const tcpMultiplexer = createPortMultiplexer(httpsServer, redirectServer);
@@ -2476,7 +2883,7 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
       }
 
       // Validate satellite ID syntax to prevent Prometheus label cardinality explosion / injection
-      if (!/^[a-zA-Z0-9._-]{1,64}$/.test(satId)) {
+      if (!isValidSatelliteId(satId)) {
         console.log(`[Fleet Manager] Rejected connection: invalid satellite ID syntax: ${satId}`);
         socket.write('HTTP/1.1 400 Bad Request\r\n\r\n');
         socket.destroy();
@@ -2504,8 +2911,11 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
         return;
       }
 
-      // If a CA certificate is configured, enforce valid client certificate
-      if (fs.existsSync(caPath)) {
+      // If a CA certificate is active on the TLS context, enforce valid client certificate
+      // AND strict certificate-to-satId identity binding BEFORE upgrade, socket takeover,
+      // WireGuard key issuance, or HA PROMOTE.
+      let mtlsVerified = false;
+      if (tlsState.hasFleetMtlsCa) {
         const tlsSocket = socket as any;
         if (!tlsSocket.authorized) {
           console.log(`[Fleet Manager] Rejected connection: unauthorized client TLS certificate for ${satId}`);
@@ -2513,6 +2923,24 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
           socket.destroy();
           return;
         }
+        let peerCert: any = null;
+        try {
+          peerCert = tlsSocket.getPeerCertificate?.();
+        } catch {
+          peerCert = null;
+        }
+        if (!verifySatellitePeerCertIdentity(peerCert, satId)) {
+          console.log(`[Fleet Manager] Rejected connection: client TLS certificate identity mismatch for ${satId}`);
+          socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
+          socket.destroy();
+          return;
+        }
+        mtlsVerified = true;
+      } else if (activeSatellites.get(satId)?.mtlsVerified) {
+        console.log(`[Fleet Manager] Rejected connection: unverified claimant cannot replace mTLS-enrolled satellite ${satId}`);
+        socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
+        socket.destroy();
+        return;
       }
 
       // B-M1: fleet-cap eviction runs ONLY for authenticated
@@ -2564,7 +2992,7 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
       console.log(`[Fleet Manager] Satellite authenticated successfully: ${satId}`);
 
       wss.handleUpgrade(request, socket, head, (ws) => {
-        wss.emit('connection', ws, request, satId);
+        wss.emit('connection', ws, request, satId, mtlsVerified);
       });
     } else if (pathname === '/v1/virt/console/ws') {
       // W-H5: Proxy authenticated operator/admin VM/LXC console WebSockets
@@ -2648,7 +3076,7 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
       // for months — was broadcast forever, wasting handshakes and
       // risking traffic to a reassigned IP.
       const peers = allSats
-        .filter(p => p.id !== sat.id && p.ws && p.ws.readyState === WebSocket.OPEN)
+        .filter(p => p.id !== sat.id && p.ws && p.ws.readyState === WebSocket.OPEN && p.wgPublicKey && p.tunnelIp)
         .map(p => {
           const formattedIp = p.ip && p.ip.includes(':') && !p.ip.startsWith('[') ? `[${p.ip}]` : p.ip;
           return {
@@ -2664,13 +3092,16 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
       // COMMAND_ACK correlates to this send. The old raw ws.send
       // left the ack uncorrelatable and the pending-command sweep
       // unable to notice a missing ack.
-      sendToSatellite(sat, 'SYNC_WIREGUARD', {
+      const wgPayload: Record<string, unknown> = {
         interfaceName: 'wg-axon0',
         tunnelIp: sat.tunnelIp,
         listenPort: 51820,
-        privateKey: sat.wgPrivateKey,
         peers: peers,
-      });
+      };
+      if (sat.wgPrivateKey) {
+        wgPayload.privateKey = sat.wgPrivateKey;
+      }
+      sendToSatellite(sat, 'SYNC_WIREGUARD', wgPayload);
     }
   }
 
@@ -2754,11 +3185,12 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
   }, SATELLITE_HEARTBEAT_MS);
   heartbeatTimer.unref?.();
 
-  wss.on('connection', async (ws: WebSocket, request: http.IncomingMessage, satId: string) => {
+  wss.on('connection', async (ws: WebSocket, request: http.IncomingMessage, satId: string, mtlsVerified = false) => {
     const remoteIp = request.socket.remoteAddress || '127.0.0.1';
     console.log(`[Fleet Manager] Satellite Enrolled & Connected: ${satId} from ${remoteIp}`);
 
     const existing = activeSatellites.get(satId);
+    const hadOpenExisting = Boolean(existing?.ws && existing.ws !== ws && existing.ws.readyState === WebSocket.OPEN);
     if (existing?.ws && existing.ws !== ws) {
       try {
         existing.ws.terminate();
@@ -2768,9 +3200,19 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
       lastRxTxBytes.delete(satId);
     }
 
-    let wgPrivateKey = existing?.wgPrivateKey;
-    let wgPublicKey = existing?.wgPublicKey;
-    if (!wgPrivateKey || !wgPublicKey) {
+    const headerWgPubKey = Array.isArray(request.headers['x-axonwall-wg-public-key'])
+      ? request.headers['x-axonwall-wg-public-key'][0]
+      : request.headers['x-axonwall-wg-public-key'];
+    let wgPrivateKey: string | undefined;
+    let wgPublicKey: string | undefined;
+    if (isValidWireGuardPublicKey(headerWgPubKey)) {
+      wgPublicKey = headerWgPubKey.trim();
+      wgPrivateKey = undefined;
+    } else if (mtlsVerified && existing?.wgPrivateKey && existing?.wgPublicKey) {
+      wgPrivateKey = existing.wgPrivateKey;
+      wgPublicKey = existing.wgPublicKey;
+    } else {
+      // Do not reuse/disclose an already-enrolled satellite's wgPrivateKey to unverified/bootstrap claimants.
       const { publicKey, privateKey } = crypto.generateKeyPairSync('x25519');
       const rawPriv = privateKey.export({ type: 'pkcs8', format: 'der' }).subarray(-32);
       const rawPub = publicKey.export({ type: 'spki', format: 'der' }).subarray(-32);
@@ -2811,6 +3253,7 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
       arch: (request.headers['user-agent']?.includes('arm') ? 'arm64' : 'amd64'),
       wgPrivateKey,
       wgPublicKey,
+      mtlsVerified,
       tunnelIp,
       wireguard: { tunnelIp },
       ws: ws,
@@ -2852,11 +3295,22 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
         const text = message.toString();
         const parsed = JSON.parse(text);
         if (parsed.type === 'REQUEST_HEADSCALE') {
-          // B-H4: satellite-initiated re-provision (e.g. a satellite
-          // wiped/reimaged under the same ID, whose latched
-          // headscaleEnrolled flag would otherwise never re-send
-          // credentials). Runs even when the flag is latched.
-          void requestHeadscaleProvision();
+          if (!headscaleRequestLimiter.allow(satId)) {
+            console.warn(`[Fleet Manager] Rate-limited REQUEST_HEADSCALE from ${satId}`);
+          } else {
+            // B-H4: satellite-initiated re-provision (e.g. a satellite
+            // wiped/reimaged under the same ID, whose latched
+            // headscaleEnrolled flag would otherwise never re-send
+            // credentials). Runs even when the flag is latched.
+            void requestHeadscaleProvision();
+          }
+        } else if (parsed.type === 'REGISTER_WIREGUARD') {
+          const pubKey = parsed.payload?.publicKey;
+          if (isValidWireGuardPublicKey(pubKey)) {
+            state.wgPublicKey = pubKey.trim();
+            state.wgPrivateKey = undefined;
+            broadcastMeshTopology();
+          }
         } else if (parsed.type === 'COMMAND_ACK') {
           // B2-M1: the satellite acks every acted-on command
           // (success or failure). These used to fall through the
@@ -2926,47 +3380,58 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
             }
           }
           if (report.metrics) {
-            state.metrics = report.metrics;
-            // B-M5: telemetry is only a fallback signal for nodes with
-            // no configured fleet role (see deriveSatelliteRole). A
-            // configured role wins over telemetry, and when pid1Mode
-            // stops being reported the latched edge role is cleared
-            // instead of sticking forever.
-            const localState = readCachedDesiredStateBestEffort();
-            const fleetNode = localState?.fleet?.nodes?.find((n) => n.id === satId);
-            state.role = deriveSatelliteRole({
-              configuredRole: fleetNode?.role,
-              currentRole: state.role,
-              satelliteId: satId,
-              pid1ModeReported: Boolean(report.metrics.pid1Mode),
-            });
-            if (report.metrics?.skuProfile) {
-              state.skuProfile = report.metrics.skuProfile;
+            if (!isValidSatelliteId(satId)) {
+              return;
             }
-            console.log(
-              `[Fleet Manager] Telemetry from ${satId}: CPU ${Number(report.metrics?.cpuUsagePercent ?? 0).toFixed(1)}% | RAM ${Number(report.metrics?.memUsagePercent ?? 0).toFixed(1)}% | Active Conns: ${report.metrics?.activeConns}`
-            );
+            const sanitizedMetrics = sanitizeSatelliteMetrics(report.metrics);
+            if (!sanitizedMetrics) {
+              console.warn(`[Fleet Manager] Ignoring malformed telemetry metrics from ${satId}`);
+            } else {
+              if (report.metrics?.skuProfile !== undefined && !sanitizedMetrics.skuProfile) {
+                console.warn(`[Fleet Manager] Ignoring invalid skuProfile from ${satId}`);
+              }
+              state.metrics = sanitizedMetrics;
+              // B-M5: telemetry is only a fallback signal for nodes with
+              // no configured fleet role (see deriveSatelliteRole). A
+              // configured role wins over telemetry, and when pid1Mode
+              // stops being reported the latched edge role is cleared
+              // instead of sticking forever.
+              const localState = readCachedDesiredStateBestEffort();
+              const fleetNode = localState?.fleet?.nodes?.find((n) => n.id === satId);
+              state.role = deriveSatelliteRole({
+                configuredRole: fleetNode?.role,
+                currentRole: state.role,
+                satelliteId: satId,
+                pid1ModeReported: Boolean(sanitizedMetrics.pid1Mode),
+              });
+              if (sanitizedMetrics.skuProfile) {
+                state.skuProfile = sanitizedMetrics.skuProfile;
+              }
+              console.log(
+                `[Fleet Manager] Telemetry from ${satId}: CPU ${sanitizedMetrics.cpuUsagePercent.toFixed(1)}% | RAM ${sanitizedMetrics.memUsagePercent.toFixed(1)}% | Active Conns: ${sanitizedMetrics.activeConns}`
+              );
 
-            // Update Prometheus metrics
-            satUptimeGauge.set({ satellite_id: satId }, Number(report.metrics.uptimeSeconds) || 0);
-            satCpuGauge.set({ satellite_id: satId }, Number(report.metrics.cpuUsagePercent) || 0);
-            satMemGauge.set({ satellite_id: satId }, Number(report.metrics.memUsagePercent) || 0);
-            satConnsGauge.set({ satellite_id: satId }, Number(report.metrics.activeConns) || 0);
+              // Update Prometheus metrics with finite non-negative values
+              satUptimeGauge.set({ satellite_id: satId }, sanitizedMetrics.uptimeSeconds);
+              satCpuGauge.set({ satellite_id: satId }, sanitizedMetrics.cpuUsagePercent);
+              satMemGauge.set({ satellite_id: satId }, sanitizedMetrics.memUsagePercent);
+              satConnsGauge.set({ satellite_id: satId }, sanitizedMetrics.activeConns);
 
-            // Handle counter increments safely (including counter reset across satellite reboot)
-            const currentRx = Number(report.metrics.rxBytesTotal) || 0;
-            const currentTx = Number(report.metrics.txBytesTotal) || 0;
-            const last = lastRxTxBytes.get(satId) || { rx: 0, tx: 0 };
+              // Handle counter increments safely (including counter reset across satellite reboot)
+              const currentRx = sanitizedMetrics.rxBytesTotal;
+              const currentTx = sanitizedMetrics.txBytesTotal;
+              const last = lastRxTxBytes.get(satId) || { rx: 0, tx: 0 };
 
-            const rxDelta = currentRx >= last.rx ? currentRx - last.rx : currentRx;
-            const txDelta = currentTx >= last.tx ? currentTx - last.tx : currentTx;
-            if (rxDelta > 0) satRxBytesGauge.inc({ satellite_id: satId }, rxDelta);
-            if (txDelta > 0) satTxBytesGauge.inc({ satellite_id: satId }, txDelta);
+              const rxDelta = currentRx >= last.rx ? currentRx - last.rx : currentRx;
+              const txDelta = currentTx >= last.tx ? currentTx - last.tx : currentTx;
+              if (rxDelta > 0) satRxBytesGauge.inc({ satellite_id: satId }, rxDelta);
+              if (txDelta > 0) satTxBytesGauge.inc({ satellite_id: satId }, txDelta);
 
-            lastRxTxBytes.set(satId, { rx: currentRx, tx: currentTx });
+              lastRxTxBytes.set(satId, { rx: currentRx, tx: currentTx });
 
-            const satHost = fleetNode?.name || satId;
-            void bridgeSatelliteMetricsToVM(satId, satHost, report.metrics, { stateOverride: localState });
+              const satHost = fleetNode?.name || satId;
+              void bridgeSatelliteMetricsToVM(satId, satHost, sanitizedMetrics, { stateOverride: localState });
+            }
           } else {
             console.log(`[Fleet Manager] Telemetry from ${satId} without metrics; keeping last-known metrics.`);
           }
@@ -2975,22 +3440,53 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
             ws.send(JSON.stringify({ type: 'PING', payload: {} }));
           }
         } else if (parsed.type === 'EDGE_FLOW_BATCH') {
+          if (!isValidSatelliteId(satId)) {
+            return;
+          }
           const batch = typeof parsed.payload === 'string' ? JSON.parse(parsed.payload) : parsed.payload;
-          if (Array.isArray(batch?.flows)) {
-            state.edgeFlows = batch.flows.slice(0, 100);
-            satFlowsCounter.inc({ satellite_id: satId }, batch.flows.length);
-          }
-          if (Array.isArray(batch?.firewallLogs) && batch.firewallLogs.length > 0) {
-            const existingLogs = state.edgeFirewallLogs || [];
-            state.edgeFirewallLogs = [...batch.firewallLogs, ...existingLogs].slice(0, 100);
-            satFlowsCounter.inc({ satellite_id: satId }, batch.firewallLogs.length);
-          }
           const localState = readCachedDesiredStateBestEffort();
           const fleetNode = localState?.fleet?.nodes?.find((n) => n.id === satId);
           const satHost = fleetNode?.name || satId;
           const rawExporterIp = state.wireguard?.tunnelIp || state.tunnelIp || state.ip || '';
           const exporterIp = String(rawExporterIp).trim().split('/')[0] || '';
-          void bridgeSatelliteFlowsAndLogs(satId, satHost, exporterIp, batch, { stateOverride: localState });
+          const fallbackFlowEndMs =
+            typeof batch?.timestamp === 'number' && Number.isFinite(batch.timestamp) && batch.timestamp > 0
+              ? batch.timestamp > 1e12
+                ? Math.floor(batch.timestamp)
+                : Math.floor(batch.timestamp * 1000)
+              : Date.now();
+          let sanitizedFlows: Record<string, unknown>[] | undefined;
+          let sanitizedLogs: Record<string, unknown>[] | undefined;
+
+          if (Array.isArray(batch?.flows)) {
+            const flows: Record<string, unknown>[] = (batch.flows as unknown[])
+              .slice(0, 500)
+              .filter((f): f is Record<string, unknown> => Boolean(f) && typeof f === 'object' && !Array.isArray(f))
+              .map((f) => sanitizeSatelliteFlowRecord(f, exporterIp, satId, satHost, fallbackFlowEndMs));
+            sanitizedFlows = flows;
+            state.edgeFlows = flows.slice(0, 100);
+            if (flows.length > 0) {
+              satFlowsCounter.inc({ satellite_id: satId }, flows.length);
+            }
+          }
+          if (Array.isArray(batch?.firewallLogs) && batch.firewallLogs.length > 0) {
+            const logs: Record<string, unknown>[] = (batch.firewallLogs as unknown[])
+              .slice(0, 500)
+              .map((entry) => sanitizeSatelliteFirewallLog(entry, satId, satHost));
+            sanitizedLogs = logs;
+            const existingLogs = state.edgeFirewallLogs || [];
+            state.edgeFirewallLogs = [...logs, ...existingLogs].slice(0, 100);
+            if (logs.length > 0) {
+              satFlowsCounter.inc({ satellite_id: satId }, logs.length);
+            }
+          }
+          void bridgeSatelliteFlowsAndLogs(
+            satId,
+            satHost,
+            exporterIp,
+            { timestamp: batch?.timestamp, flows: sanitizedFlows, firewallLogs: sanitizedLogs },
+            { stateOverride: localState }
+          );
         }
       } catch {
         // Ping or non-JSON message
@@ -3107,11 +3603,15 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
     // superseded while it was disconnected. A DEMOTE to an edge
     // that was never promoted is a harmless standby no-op.
     if (activeHaEdgeId === satId) {
-      const vip = activeHaLanVip || loadLocalDesiredState()?.hostedEdge?.lan?.edgeAddress;
-      if (vip) {
-        sendHaTransition(state, 'PROMOTE', 'active', activeHaSharedWanMac, vip);
+      if (!mtlsVerified && hadOpenExisting) {
+        console.warn(`[Fleet Manager] Refusing unverified HA PROMOTE takeover for ${satId} while another socket was already open`);
       } else {
-        console.warn(`[Fleet Manager] Not re-asserting HA promotion for ${satId}: no LAN VIP recorded or configured`);
+        const vip = activeHaLanVip || loadLocalDesiredState()?.hostedEdge?.lan?.edgeAddress;
+        if (vip) {
+          sendHaTransition(state, 'PROMOTE', 'active', activeHaSharedWanMac, vip);
+        } else {
+          console.warn(`[Fleet Manager] Not re-asserting HA promotion for ${satId}: no LAN VIP recorded or configured`);
+        }
       }
     } else if (activeHaEdgeId && state.role === 'edge-ngfw') {
       // B-H4 (round 3): match on the derived role only, exactly
@@ -3132,9 +3632,61 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
     broadcastMeshTopology();
   });
 
-  server.listen(port, '0.0.0.0', () => {
-    console.log(`[Axonwall Controller] Fleet Manager listening on 0.0.0.0:${port}`);
+  await new Promise<void>((resolve, reject) => {
+    const onErr = (err: Error) => {
+      server.removeListener('listening', onListening);
+      reject(err);
+    };
+    const onListening = () => {
+      server.removeListener('error', onErr);
+      const addr = server.address();
+      const boundPort = addr && typeof addr === 'object' ? addr.port : port;
+      console.log(`[Axonwall Controller] Fleet Manager listening on ${listenHost}:${boundPort}`);
+      resolve();
+    };
+    server.once('error', onErr);
+    server.once('listening', onListening);
+    server.listen(port, listenHost);
   });
+
+  const addr = server.address();
+  const boundPort = addr && typeof addr === 'object' ? addr.port : port;
+
+  return {
+    port: boundPort,
+    server,
+    mainServer,
+    wss,
+    getHasFleetMtlsCa: () => tlsState.hasFleetMtlsCa,
+    reloadTlsContext,
+    close: async () => {
+      clearInterval(meshPruneTimer);
+      clearInterval(heartbeatTimer);
+      if (tlsRefreshTimer) {
+        clearInterval(tlsRefreshTimer);
+        tlsRefreshTimer = null;
+      }
+      for (const client of wss.clients) {
+        try { client.terminate(); } catch {}
+      }
+      await new Promise<void>((resolve) => {
+        wss.close(() => resolve());
+      });
+      if (typeof (server as any).closeAllConnections === 'function') {
+        (server as any).closeAllConnections();
+      }
+      if (typeof (mainServer as any).closeAllConnections === 'function') {
+        (mainServer as any).closeAllConnections();
+      }
+      await new Promise<void>((resolve) => {
+        server.close(() => resolve());
+      });
+    },
+  };
+}
+
+async function main() {
+  await startControllerServer();
 }
 
 export function isFleetPluginEnabledForController(state: DesiredState | null | undefined): boolean {
@@ -3156,9 +3708,14 @@ export {
   bridgeSatelliteFlowsAndLogs,
   bridgeSatelliteMetricsToVM,
   formatSatellitePromMetrics,
+  isDisallowedObservabilityIp,
+  isValidSatelliteId,
   normalizeFlowProtocol,
   readCachedDesiredStateBestEffort,
   resolveControllerObservabilityTargets,
+  sanitizeSatelliteFirewallLog,
+  sanitizeSatelliteFlowRecord,
+  validateObservabilityTargetUrl,
 } from './telemetry-bridge.js';
 
 const isDirectExecution = () => {

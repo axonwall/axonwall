@@ -102,7 +102,7 @@ ingress:
   enabled: true
   className: "traefik"
   annotations:
-    traefik.ingress.kubernetes.io/router.entrypoints: web,websecure
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
   hosts:
     - host: "vigil.{{DOMAIN}}"
       paths:

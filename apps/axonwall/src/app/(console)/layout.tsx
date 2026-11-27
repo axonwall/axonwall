@@ -28,7 +28,10 @@ export default async function ConsoleLayout({
       <ConsoleSidebar />
       <div className="flex-1 flex flex-col min-w-0">
         <ConsoleHeader
-          session={session}
+          session={{
+            displayName: session.displayName || session.username,
+            primaryRole: session.roles[0] || 'admin',
+          }}
           pendingConfirm={status.pendingConfirm}
           confirmDeadlineUnix={status.confirmDeadlineUnix}
           daemonDown={status.daemonDown}

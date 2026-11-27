@@ -22,10 +22,20 @@ spec:
         app.kubernetes.io/instance: {{ .Release.Name }}
         app.kubernetes.io/component: postgres
     spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 70
+        runAsGroup: 70
+        fsGroup: 70
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
       containers:
         - name: postgres
           image: "{{ .Values.postgres.image.repository }}:{{ .Values.postgres.image.tag }}"
-          imagePullPolicy: IfNotPresent
+          imagePullPolicy: {{ .Values.postgres.image.pullPolicy | default "IfNotPresent" }}
+          securityContext:
+            runAsNonRoot: true
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
           env:
             - name: POSTGRES_DB
               value: {{ .Values.postgres.database | quote }}
@@ -46,8 +56,12 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /var/lib/postgresql/data
+            - name: postgres-run
+              mountPath: /var/run/postgresql
       volumes:
         - name: data
+          emptyDir: {}
+        - name: postgres-run
           emptyDir: {}
 ---
 apiVersion: v1

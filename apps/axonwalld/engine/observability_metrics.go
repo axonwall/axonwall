@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/subtle"
+	"crypto/tls"
 	"fmt"
 	"io"
 	"log"
@@ -151,7 +153,7 @@ func (m *MetricsShipper) Start() {
 		mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
 			if scrapeToken != "" {
 				auth := strings.TrimSpace(r.Header.Get("Authorization"))
-				if auth != "Bearer "+scrapeToken {
+				if subtle.ConstantTimeCompare([]byte(auth), []byte("Bearer "+scrapeToken)) != 1 {
 					http.Error(w, "Unauthorized", http.StatusUnauthorized)
 					return
 				}
@@ -329,9 +331,14 @@ func (m *MetricsShipper) flushQueue(cfg *ObservabilityRuntimeBundle) {
 }
 
 func buildObservabilityHTTPClient(cfg *ObservabilityRuntimeBundle, targetURL string) (*http.Client, *http.Transport, error) {
-	tr := &http.Transport{}
+	return buildObservabilityHTTPClientWithOpts(cfg, targetURL, false)
+}
+
+func buildObservabilityHTTPClientWithOpts(cfg *ObservabilityRuntimeBundle, targetURL string, allowLoopback bool) (*http.Client, *http.Transport, error) {
+	var tlsCfg *tls.Config
 	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(targetURL)), "https://") {
-		tlsCfg, err := buildTLSConfigFromBundleParams(
+		var err error
+		tlsCfg, err = buildTLSConfigFromBundleParams(
 			cfg.Offload.UseHaMtls,
 			cfg.Offload.TLSCACert,
 			"", "", "",
@@ -342,9 +349,13 @@ func buildObservabilityHTTPClient(cfg *ObservabilityRuntimeBundle, targetURL str
 		if err != nil {
 			return nil, nil, fmt.Errorf("TLS config error for %s: %w", targetURL, err)
 		}
-		tr.TLSClientConfig = tlsCfg
 	}
-	return &http.Client{Timeout: 6 * time.Second, Transport: tr}, tr, nil
+	client, tr := newSafeHTTPClient(SafeHTTPClientOptions{
+		Timeout:         6 * time.Second,
+		AllowLoopback:   allowLoopback,
+		TLSClientConfig: tlsCfg,
+	})
+	return client, tr, nil
 }
 
 func (m *MetricsShipper) collectAllSamples(cfg *ObservabilityRuntimeBundle) []PromMetricSample {

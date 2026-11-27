@@ -9,6 +9,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -17,6 +18,52 @@ import (
 
 var validUsernameRegex = regexp.MustCompile(`^[a-z_][a-z0-9_-]{0,31}$`)
 var validGroupNameRegex = regexp.MustCompile(`^[a-z_][a-z0-9_-]{0,31}$`)
+
+var privilegedSystemGroups = map[string]bool{
+	"root":         true,
+	"shadow":       true,
+	"disk":         true,
+	"kmem":         true,
+	"axonwall-api": true,
+	"axonwall":     true,
+	"sudo":         true,
+	"wheel":        true,
+	"adm":          true,
+	"nogroup":      true,
+}
+
+func (m *UserManager) validateRequestedUserGroups(groups []string) ([]string, error) {
+	if len(groups) == 0 {
+		return nil, nil
+	}
+	sysGroups := make(map[string]bool)
+	if parsed, err := m.ParseGroups(); err == nil {
+		for _, g := range parsed {
+			if g.IsSystem {
+				sysGroups[g.Name] = true
+			}
+		}
+	}
+	var out []string
+	seen := make(map[string]bool, len(groups))
+	for _, raw := range groups {
+		g := strings.TrimSpace(raw)
+		if g == "" {
+			return nil, fmt.Errorf("invalid empty group name")
+		}
+		if !validGroupNameRegex.MatchString(g) {
+			return nil, fmt.Errorf("invalid group name: %s", g)
+		}
+		if privilegedSystemGroups[g] || sysGroups[g] {
+			return nil, fmt.Errorf("cannot assign privileged or system group %q", g)
+		}
+		if !seen[g] {
+			seen[g] = true
+			out = append(out, g)
+		}
+	}
+	return out, nil
+}
 
 var allowedLoginShells = map[string]bool{
 	"/bin/bash":                       true,
@@ -595,12 +642,13 @@ func (m *UserManager) CreateUser(req CreateUserRequest) error {
 	}
 
 	// Determine groups to attach
+	validatedReqGroups, err := m.validateRequestedUserGroups(req.Groups)
+	if err != nil {
+		return err
+	}
 	groupsToAttach := make(map[string]bool)
-	for _, g := range req.Groups {
-		g = strings.TrimSpace(g)
-		if g != "" {
-			groupsToAttach[g] = true
-		}
+	for _, g := range validatedReqGroups {
+		groupsToAttach[g] = true
 	}
 
 	// Add role groups
@@ -611,13 +659,15 @@ func (m *UserManager) CreateUser(req CreateUserRequest) error {
 	}
 
 	// Ensure all required groups exist on system
-	for g := range groupsToAttach {
-		_ = m.EnsureGroupExists(g)
-	}
-
 	var groupList []string
 	for g := range groupsToAttach {
 		groupList = append(groupList, g)
+	}
+	sort.Strings(groupList)
+	for _, g := range groupList {
+		if err := m.EnsureGroupExists(g); err != nil {
+			return fmt.Errorf("failed to ensure group %q exists: %w", g, err)
+		}
 	}
 
 	// Execute useradd (Debian standard)
@@ -691,7 +741,55 @@ func (m *UserManager) UpdateUser(username string, req UpdateUserRequest) error {
 			return err
 		}
 	}
+	var validatedReqGroups []string
+	if req.Groups != nil {
+		var err error
+		validatedReqGroups, err = m.validateRequestedUserGroups(*req.Groups)
+		if err != nil {
+			return err
+		}
+	}
 	if req.Comment != nil || req.Shell != nil || req.Groups != nil || req.ApplianceRole != nil {
+		var resolvedGroups []string
+		if req.Groups != nil || req.ApplianceRole != nil {
+			groupMap := make(map[string]bool)
+			if req.Groups != nil {
+				for _, g := range validatedReqGroups {
+					groupMap[g] = true
+				}
+			} else {
+				// Keep existing groups
+				groups, _ := m.ParseGroups()
+				for _, g := range groups {
+					for _, mem := range g.Members {
+						if mem == username && g.Name != "axonwall-admin" && g.Name != "axonwall-operator" && g.Name != "axonwall-readonly" && g.Name != "axonwall-vpn" {
+							groupMap[g.Name] = true
+						}
+					}
+				}
+			}
+
+			if req.ApplianceRole != nil {
+				// Remove other appliance roles
+				delete(groupMap, "axonwall-admin")
+				delete(groupMap, "axonwall-operator")
+				delete(groupMap, "axonwall-readonly")
+				delete(groupMap, "axonwall-vpn")
+				for _, g := range RoleToGroups(*req.ApplianceRole) {
+					groupMap[g] = true
+				}
+			}
+
+			for g := range groupMap {
+				resolvedGroups = append(resolvedGroups, g)
+			}
+			sort.Strings(resolvedGroups)
+			for _, g := range resolvedGroups {
+				if err := m.EnsureGroupExists(g); err != nil {
+					return fmt.Errorf("failed to ensure group %q exists: %w", g, err)
+				}
+			}
+		}
 		if usermodPath, err := exec.LookPath("usermod"); err == nil {
 			var args []string
 			if req.Comment != nil {
@@ -701,47 +799,7 @@ func (m *UserManager) UpdateUser(username string, req UpdateUserRequest) error {
 				args = append(args, "-s", strings.TrimSpace(*req.Shell))
 			}
 			if req.Groups != nil || req.ApplianceRole != nil {
-				// Collect groups
-				groupMap := make(map[string]bool)
-				if req.Groups != nil {
-					for _, g := range *req.Groups {
-						g = strings.TrimSpace(g)
-						if g != "" {
-							groupMap[g] = true
-						}
-					}
-				} else {
-					// Keep existing groups
-					groups, _ := m.ParseGroups()
-					for _, g := range groups {
-						for _, mem := range g.Members {
-							if mem == username && g.Name != "axonwall-admin" && g.Name != "axonwall-operator" && g.Name != "axonwall-readonly" && g.Name != "axonwall-vpn" {
-								groupMap[g.Name] = true
-							}
-						}
-					}
-				}
-
-				if req.ApplianceRole != nil {
-					// Remove other appliance roles
-					delete(groupMap, "axonwall-admin")
-					delete(groupMap, "axonwall-operator")
-					delete(groupMap, "axonwall-readonly")
-					delete(groupMap, "axonwall-vpn")
-					for _, g := range RoleToGroups(*req.ApplianceRole) {
-						groupMap[g] = true
-					}
-				}
-
-				for g := range groupMap {
-					_ = m.EnsureGroupExists(g)
-				}
-
-				var gList []string
-				for g := range groupMap {
-					gList = append(gList, g)
-				}
-				args = append(args, "-G", strings.Join(gList, ","))
+				args = append(args, "-G", strings.Join(resolvedGroups, ","))
 			}
 
 			if len(args) > 0 {

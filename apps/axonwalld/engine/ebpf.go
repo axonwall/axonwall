@@ -304,9 +304,9 @@ func (m *EBPFManager) initClickHouse() error {
 	if chUser == "" {
 		chUser = "admin"
 	}
-	chPass := os.Getenv("CLICKHOUSE_PASSWORD")
+	chPass := strings.TrimSpace(os.Getenv("CLICKHOUSE_PASSWORD"))
 	if chPass == "" {
-		chPass = "axonwallclickhouse"
+		return fmt.Errorf("CLICKHOUSE_PASSWORD is unset; skipping ClickHouse export")
 	}
 	conn, err := clickhouse.Open(&clickhouse.Options{
 		Addr: []string{chAddr},

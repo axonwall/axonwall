@@ -5,7 +5,7 @@ import * as http from 'node:http';
 import * as crypto from 'node:crypto';
 import * as zlib from 'node:zlib';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { detectHostOSFamily, readAgentToken, resolveControllerDirs } from './dev-paths.js';
+import { detectHostOSFamily, findWorkspaceRoot, readAgentToken, resolveControllerDirs } from './dev-paths.js';
 import {
   AXONWALL_YAML_DOMAINS,
   AXONWALL_YAML_FILENAMES,
@@ -1034,13 +1034,32 @@ async function cmdEdit(domainArg?: string, extraArgs: string[] = []) {
   await cmdApply(true);
 }
 
+function resolveExplicitNonRootDevPath(relPath: string): string | null {
+  if (typeof process.getuid === 'function' && process.getuid() === 0) {
+    return null;
+  }
+  const explicitDev =
+    process.env.AXONWALL_DEV === '1' ||
+    process.env.AXONWALL_DEV_MODE === '1' ||
+    Boolean(process.env.AXONWALL_DEV_DIR);
+  if (!explicitDev) {
+    return null;
+  }
+  const wsRoot = findWorkspaceRoot();
+  if (!wsRoot) {
+    return null;
+  }
+  return path.resolve(wsRoot, relPath);
+}
+
 async function cmdConfig(domainArg?: string) {
   ensureInitializedYamlFiles();
   const domain = (domainArg || 'firewall').replace(/\.ya?ml$/i, '').toLowerCase();
+  const devInitLua = resolveExplicitNonRootDevPath('packaging/iso/config/includes.chroot/etc/axonwall/nvim/init.lua');
   const initLocations = [
     process.env.AXONWALL_NVIM_INIT || '',
     '/etc/axonwall/nvim/init.lua',
-    path.resolve(process.cwd(), 'packaging/iso/config/includes.chroot/etc/axonwall/nvim/init.lua'),
+    devInitLua || '',
   ].filter(Boolean);
 
   const initLua = initLocations.find((p) => fs.existsSync(p));
@@ -3428,12 +3447,25 @@ async function cmdHarvester(args: string[]) {
     case 'export': {
       const raw = Boolean(flags.raw);
       const outPath = positionals[1] || 'axonwall-threat-corpus.tar.zst';
+      try {
+        if (fs.lstatSync(outPath).isSymbolicLink()) {
+          console.error(`${cRed}Refusing to write harvester export to symbolic link: ${outPath}${cReset}`);
+          process.exit(1);
+        }
+      } catch {
+        // File does not exist yet
+      }
       const bundle = await sendAgentSocketBuffer(
         `/v1/security/threat-harvester/export?anonymize=${raw ? 'false' : 'true'}`,
         'GET',
         60000,
       );
-      fs.writeFileSync(outPath, bundle);
+      fs.writeFileSync(outPath, bundle, { mode: 0o600 });
+      try {
+        if (fs.lstatSync(outPath).isFile()) {
+          fs.chmodSync(outPath, 0o600);
+        }
+      } catch {}
       console.log(
         `${cGreen}✓ Exported ${bundle.byteLength} bytes (${raw ? 'raw un-anonymized' : 'Crypto-PAn + HMAC anonymized'}) to ${outPath}${cReset}`,
       );
@@ -3926,11 +3958,12 @@ async function cmdImport(args: string[]) {
 }
 
 async function cmdKubeconfig(args: string[]) {
+  const devScriptPath = resolveExplicitNonRootDevPath('scripts/update-kubeconfig.sh');
   const scriptCandidates = [
     '/usr/local/bin/axonwall-kubeconfig',
     '/opt/axonwall/scripts/update-kubeconfig.sh',
-    path.join(process.cwd(), 'scripts/update-kubeconfig.sh'),
-  ];
+    devScriptPath || '',
+  ].filter(Boolean);
   const scriptPath = scriptCandidates.find((p) => fs.existsSync(p));
   if (scriptPath) {
     const res = spawnSync(scriptPath, args, { stdio: 'inherit' });

@@ -187,4 +187,34 @@ describe('Rosenpass Post-Quantum Hybrid Dual-KEM Plugin', () => {
     expect(parsed.rosenpass?.peers).toHaveLength(1);
     expect(parsed.rosenpass?.peers[0]?.name).toBe('gamma-node');
   });
+
+  it('confines Rosenpass peer keyOut paths strictly under /etc/rosenpass/ or /run/rosenpass/ without .. (SEC-L11)', () => {
+    const validCfg = RosenpassConfigSchema.parse({
+      enabled: true,
+      peers: [
+        {
+          name: 'peer-a',
+          wgPeerPublicKey: 'PeerAlphaCurve25519Base64PublicKeyHere00000=',
+          keyOut: '/run/rosenpass/peer-a.psk',
+          enabled: true,
+        },
+      ],
+    });
+    expect(compileRosenpass(validCfg).configToml).toContain('key_out = "/run/rosenpass/peer-a.psk"');
+
+    for (const badKeyOut of ['/etc/cron.d/pwn', '/etc/rosenpass/../shadow', '/tmp/psk']) {
+      const badCfg = RosenpassConfigSchema.parse({
+        enabled: true,
+        peers: [
+          {
+            name: 'peer-bad',
+            wgPeerPublicKey: 'PeerAlphaCurve25519Base64PublicKeyHere00000=',
+            keyOut: badKeyOut,
+            enabled: true,
+          },
+        ],
+      });
+      expect(() => compileRosenpass(badCfg)).toThrow(/Invalid Rosenpass keyOut path/);
+    }
+  });
 });

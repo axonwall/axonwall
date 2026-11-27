@@ -2,20 +2,38 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 
-const LOG_DIR_PATH = path.join(os.homedir(), '.config', 'vigilante');
-const LOG_FILE_PATH = path.join(LOG_DIR_PATH, 'vigilante.log');
-const FALLBACK_LOG_DIR_PATH = path.join(os.tmpdir(), `vigilante-logs-${typeof process.getuid === 'function' ? process.getuid() : process.pid}`);
-const FALLBACK_LOG_FILE_PATH = path.join(FALLBACK_LOG_DIR_PATH, 'vigilante.log');
+function getDefaultLogCandidates(uid) {
+  const logDirPath = path.join(os.homedir(), '.config', 'vigilante');
+  const logFilePath = path.join(logDirPath, 'vigilante.log');
+  const fallbackDirPath = path.join(os.tmpdir(), `vigilante-logs-${uid !== null ? uid : process.pid}`);
+  const fallbackFilePath = path.join(fallbackDirPath, 'vigilante.log');
+  return [
+    [logDirPath, logFilePath],
+    [fallbackDirPath, fallbackFilePath]
+  ];
+}
 
-function resolveSafeLogFile() {
-  for (const [dirPath, filePath] of [[LOG_DIR_PATH, LOG_FILE_PATH], [FALLBACK_LOG_DIR_PATH, FALLBACK_LOG_FILE_PATH]]) {
+export function resolveSafeLogFile(candidates = null, deps = {}) {
+  const getuidFn = deps.getuid ?? (typeof process.getuid === 'function' ? () => process.getuid() : null);
+  const uid = typeof getuidFn === 'function' ? getuidFn() : null;
+  const lstat = deps.lstatSync || fs.lstatSync;
+  const mkdir = deps.mkdirSync || fs.mkdirSync;
+  const targets = candidates || getDefaultLogCandidates(uid);
+
+  for (const [dirPath, filePath] of targets) {
     try {
-      fs.mkdirSync(dirPath, { recursive: true, mode: 0o700 });
-      const dirStat = fs.lstatSync(dirPath);
+      mkdir(dirPath, { recursive: true, mode: 0o700 });
+      const dirStat = lstat(dirPath);
       if (dirStat.isSymbolicLink() || !dirStat.isDirectory()) continue;
-      if (fs.existsSync(filePath)) {
-        const fileStat = fs.lstatSync(filePath);
+      if (uid !== null && dirStat.uid !== uid) continue;
+      if ((dirStat.mode & 0o077) !== 0) continue;
+
+      try {
+        const fileStat = lstat(filePath);
         if (fileStat.isSymbolicLink() || !fileStat.isFile()) continue;
+        if (uid !== null && fileStat.uid !== uid) continue;
+      } catch (err) {
+        if (!err || err.code !== 'ENOENT') continue;
       }
       return filePath;
     } catch {
@@ -56,8 +74,19 @@ export function writeDebugLog(level, tag, message, details = null) {
     const targetLogPath = resolveSafeLogFile();
     if (!targetLogPath) return;
 
-    // Synchronous append so logs are never lost on immediate exit or crash
-    fs.appendFileSync(targetLogPath, entry, { encoding: 'utf8', mode: 0o600 });
+    // Synchronous non-following append so logs are never lost or redirected via symlinks
+    const flags = fs.constants.O_WRONLY | fs.constants.O_APPEND | fs.constants.O_CREAT | (fs.constants.O_NOFOLLOW || 0);
+    const fd = fs.openSync(targetLogPath, flags, 0o600);
+    try {
+      const fdStat = fs.fstatSync(fd);
+      const uid = typeof process.getuid === 'function' ? process.getuid() : null;
+      if (!fdStat.isFile() || (uid !== null && fdStat.uid !== uid)) {
+        return;
+      }
+      fs.writeSync(fd, entry, null, 'utf8');
+    } finally {
+      fs.closeSync(fd);
+    }
   } catch {
     // Fail-safe: silently continue if logging fails
   }
@@ -68,5 +97,5 @@ export const logger = {
   info: (tag, message, details) => writeDebugLog('INFO', tag, message, details),
   warn: (tag, message, details) => writeDebugLog('WARN', tag, message, details),
   error: (tag, message, details) => writeDebugLog('ERROR', tag, message, details),
-  getLogPath: () => LOG_FILE_PATH
+  getLogPath: () => path.join(os.homedir(), '.config', 'vigilante', 'vigilante.log')
 };

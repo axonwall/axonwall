@@ -87,6 +87,19 @@ export async function middleware(request: NextRequest) {
     return NextResponse.next();
   }
 
+  // The session secret reaches this process via the environment:
+  // packaged units load /etc/axonwall/axonwall.env as an
+  // EnvironmentFile (which sets JWT_SECRET), and the Docker
+  // deployment requires it explicitly. Fail closed (503) in production
+  // whenever JWT_SECRET is absent.
+  const secret = process.env.JWT_SECRET;
+  if (!secret && process.env.NODE_ENV === 'production') {
+    return NextResponse.json(
+      { error: 'Authentication service misconfigured: JWT_SECRET is not set.' },
+      { status: 503 }
+    );
+  }
+
   let token = request.cookies.get(SESSION_COOKIE)?.value;
   if (!token) {
     const authHeader = request.headers.get('authorization');
@@ -100,14 +113,6 @@ export async function middleware(request: NextRequest) {
     return NextResponse.next();
   }
 
-  // The session secret reaches this process via the environment:
-  // packaged units load /etc/axonwall/axonwall.env as an
-  // EnvironmentFile (which sets JWT_SECRET), and the Docker
-  // deployment requires it explicitly. Without it no session can be
-  // verified here -- and none can be minted or verified by the
-  // routes either, since getJwtSecret() now fails closed -- so there
-  // is nothing extra to gate.
-  const secret = process.env.JWT_SECRET;
   if (!secret) {
     return NextResponse.next();
   }
@@ -118,7 +123,7 @@ export async function middleware(request: NextRequest) {
       new TextEncoder().encode(secret),
       { algorithms: ['HS256'] }
     );
-    if (payload.pwd_change_required === true && (isMutation || pathname === '/api/auth/gateway')) {
+    if (payload.pwd_change_required === true) {
       return NextResponse.json(
         {
           error:

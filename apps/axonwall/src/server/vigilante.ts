@@ -13,6 +13,7 @@ import { callAgentApi, callAgentApiResponse } from './agent-client';
 import { getSession } from './auth';
 import { assertActionPermitted } from './auth-guard';
 import { getDesiredStateInternal } from './desired-state-internal';
+import { assertPluginEnabled } from './plugin-guard';
 import { queryDataLakeMetrics, type DataLakeMetricsSnapshot } from './clickhouse';
 
 function validateIpOrCidr(raw: string): string {
@@ -116,6 +117,7 @@ const DEFAULT_MODULE_SPECS: Array<Omit<SecurityModuleStatus, 'enabled' | 'health
 export async function getVigilanteConfigAction(): Promise<VigilanteConfig> {
   const session = await getSession();
   assertActionPermitted(session);
+  await assertPluginEnabled('core-vigilante');
 
   const state = await getCurrentDesiredState();
   return state.vigilante ?? VigilanteConfigSchema.parse({ enabled: false });
@@ -129,6 +131,7 @@ export async function saveVigilanteConfigAction(
 ): Promise<{ success: boolean; message: string }> {
   const session = await getSession();
   assertActionPermitted(session, 'admin');
+  await assertPluginEnabled('core-vigilante');
 
   let state = await getCurrentDesiredState();
   const current = state.vigilante ?? VigilanteConfigSchema.parse({ enabled: true });
@@ -189,6 +192,7 @@ export async function soarBlockIPAction(
 ): Promise<{ success: boolean; message: string }> {
   const session = await getSession();
   assertActionPermitted(session, 'operator');
+  await assertPluginEnabled('core-vigilante');
   const validIp = validateIpOrCidr(ip);
 
   const res = await callAgentApiResponse<{ success: boolean; message: string }>(
@@ -205,6 +209,7 @@ export async function soarUnblockIPAction(
 ): Promise<{ success: boolean; message: string }> {
   const session = await getSession();
   assertActionPermitted(session, 'operator');
+  await assertPluginEnabled('core-vigilante');
   const validIp = validateIpOrCidr(ip);
 
   const res = await callAgentApiResponse<{ success: boolean; message: string }>(
@@ -219,6 +224,7 @@ export async function soarUnblockIPAction(
 export async function getSoarBlockedIPsAction(): Promise<SoarBlockedIP[]> {
   const session = await getSession();
   assertActionPermitted(session);
+  await assertPluginEnabled('core-vigilante');
 
   const res = await callAgentApi<{ blockedIPs: SoarBlockedIP[] }>(
     '/v1/vigilante/soar/blocked-ips',
@@ -240,6 +246,7 @@ export async function provisionEvidenceVaultAction(
 ): Promise<{ success: boolean; message: string }> {
   const session = await getSession();
   assertActionPermitted(session, 'admin');
+  await assertPluginEnabled('core-vigilante');
 
   if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(pool) || !/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(dataset)) {
     return { success: false, message: 'Invalid ZFS pool or dataset name' };
@@ -261,6 +268,7 @@ export async function createIncidentSnapshotAction(
 ): Promise<{ success: boolean; snapshot?: string; error?: string }> {
   const session = await getSession();
   assertActionPermitted(session, 'operator');
+  await assertPluginEnabled('core-vigilante');
 
   if (
     !/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(pool) ||
@@ -282,6 +290,7 @@ export async function createIncidentSnapshotAction(
 export async function listSecurityModulesAction(): Promise<SecurityModuleStatus[]> {
   const session = await getSession();
   assertActionPermitted(session);
+  await assertPluginEnabled('core-vigilante');
 
   const state = await getCurrentDesiredState();
   const configuredModules = state.vigilante?.modules ?? [];
@@ -313,6 +322,7 @@ export async function updateVigilanteDomainAction(
 ): Promise<{ success: boolean; message: string; domain?: string }> {
   const session = await getSession();
   assertActionPermitted(session, 'admin');
+  await assertPluginEnabled('core-vigilante');
 
   const trimmed = (domain || '').trim().toLowerCase();
   if (!trimmed || trimmed.length > 253 || !/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/.test(trimmed)) {
@@ -357,6 +367,7 @@ export async function toggleSecurityModuleAction(
 ): Promise<{ success: boolean; message: string }> {
   const session = await getSession();
   assertActionPermitted(session, 'admin');
+  await assertPluginEnabled('core-vigilante');
 
   let state = await getCurrentDesiredState();
   if (!state.vigilante) {
@@ -414,6 +425,7 @@ export async function getAttackGraphDataAction(): Promise<{
 }> {
   const session = await getSession();
   assertActionPermitted(session);
+  await assertPluginEnabled('core-vigilante');
 
   return {
     nodes: [],
@@ -429,6 +441,7 @@ export async function getDeceptionMeshStatusAction(): Promise<{
 }> {
   const session = await getSession();
   assertActionPermitted(session);
+  await assertPluginEnabled('core-vigilante');
 
   return {
     canaries: [],
@@ -444,6 +457,7 @@ export async function getPurpleTeamMatrixAction(): Promise<{
 }> {
   const session = await getSession();
   assertActionPermitted(session);
+  await assertPluginEnabled('core-vigilante');
 
   return {
     techniques: [],
@@ -455,6 +469,7 @@ export async function getPurpleTeamMatrixAction(): Promise<{
 export async function getDataLakeMetricsAction(): Promise<DataLakeMetricsSnapshot> {
   const session = await getSession();
   assertActionPermitted(session);
+  await assertPluginEnabled('core-vigilante');
 
   const state = await getDesiredStateInternal().catch(() => null);
   return queryDataLakeMetrics(state?.observability?.clickhouse);

@@ -1154,12 +1154,12 @@ export type SnmpV3User = z.infer<typeof SnmpV3UserSchema>;
 
 export const SnmpPluginConfigSchema = z.object({
   enabled: z.boolean().default(false),
-  version: z.enum(['v2c', 'v3']).default('v2c').optional(),
-  community: z.string().default('public'),
+  version: z.enum(['v2c', 'v3']).default('v3').optional(),
+  community: z.string().default(''),
   sysLocation: z.string().default('Axonwall Gateway'),
   sysContact: z.string().default('admin@local'),
   listenPort: z.number().int().default(161),
-  bindAddresses: z.array(z.string()).default([]).optional(),
+  bindAddresses: z.array(z.string()).default(['127.0.0.1']).optional(),
   v3Users: z.array(SnmpV3UserSchema).default([]).optional(),
 });
 export type SnmpPluginConfig = z.infer<typeof SnmpPluginConfigSchema>;
@@ -1515,8 +1515,16 @@ export const AiConfigSchema = z.object({
 });
 export type AiConfig = z.infer<typeof AiConfigSchema>;
 
+export const SATELLITE_SKU_PROFILES = [
+  'sku-vm-virtio',
+  'sku-x86-intel-n100-i226',
+  'sku-x86-enterprise-10g-25g',
+  'sku-arm64-router',
+  'generic-edge',
+] as const;
+
 export const SatelliteNodeSchema = z.object({
-  id: z.string(),
+  id: z.string().regex(/^[a-zA-Z0-9._-]{1,64}$/, 'Invalid satellite node ID'),
   name: z.string(),
   role: z.enum(['satellite', 'edge-ngfw']).default('satellite').optional(),
   edgePlacement: z.enum(['hosted', 'dedicated']).default('hosted').optional(),
@@ -1546,13 +1554,7 @@ export const SatelliteNodeSchema = z.object({
     isolateClients: z.boolean().default(false).optional(),
     allowInternet: z.boolean().default(true).optional(),
   })).optional(),
-  skuProfile: z.enum([
-    'sku-vm-virtio',
-    'sku-x86-intel-n100-i226',
-    'sku-x86-enterprise-10g-25g',
-    'sku-arm64-router',
-    'generic-edge',
-  ]).default('sku-vm-virtio').optional(),
+  skuProfile: z.enum(SATELLITE_SKU_PROFILES).default('sku-vm-virtio').optional(),
   fastpathOffload: z.boolean().default(true).optional(),
   wanInterface: z.string().default('eth0').optional(),
   lanInterface: z.string().default('eth1').optional(),
@@ -1598,7 +1600,7 @@ export const SatelliteNodeSchema = z.object({
     txBytesTotal: z.number().int().default(0),
     pid1Mode: z.boolean().optional(),
     kernelVersion: z.string().optional(),
-    skuProfile: z.string().optional(),
+    skuProfile: z.enum(SATELLITE_SKU_PROFILES).optional(),
   }).optional(),
   activePolicyVersion: z.number().int().default(1),
 });
@@ -1822,17 +1824,22 @@ export const SmbShareSchema = z.object({
 });
 export type SmbShare = z.infer<typeof SmbShareSchema>;
 
-export const NfsExportSchema = z.object({
-  id: z.string().optional(),
-  path: z.string().min(1),
-  allowedNetworks: z.array(z.string()).default(['192.168.1.0/24']),
-  readOnly: z.boolean().default(false),
-  mapRootUser: z.enum(['root', 'nobody']).default('root'),
-  secFlavor: z.enum(['sys', 'krb5', 'krb5i', 'krb5p']).default('sys').optional(),
-  async: z.boolean().default(false),
-  enabled: z.boolean().default(true),
-  description: z.string().max(255).default(''),
-});
+export const NfsExportSchema = z
+  .object({
+    id: z.string().optional(),
+    path: z.string().min(1),
+    allowedNetworks: z.array(z.string().min(1)).default(['192.168.1.0/24']),
+    readOnly: z.boolean().default(false),
+    mapRootUser: z.enum(['root', 'nobody']).default('nobody'),
+    secFlavor: z.enum(['sys', 'krb5', 'krb5i', 'krb5p']).default('sys').optional(),
+    async: z.boolean().default(false),
+    enabled: z.boolean().default(true),
+    description: z.string().max(255).default(''),
+  })
+  .refine((exp) => !exp.enabled || exp.allowedNetworks.length > 0, {
+    message: 'Enabled NFS export must specify at least one allowed network CIDR',
+    path: ['allowedNetworks'],
+  });
 export type NfsExport = z.infer<typeof NfsExportSchema>;
 
 export const CloudSyncTaskSchema = z.object({
@@ -1863,7 +1870,16 @@ export type SmartSchedule = z.infer<typeof SmartScheduleSchema>;
 
 export const IscsiLunSchema = z.object({
   lunId: z.number().int().min(0).default(0),
-  zvolPath: z.string().min(1),
+  zvolPath: z
+    .string()
+    .min(1)
+    .regex(
+      /^\/dev\/zvol\/[a-zA-Z0-9._-]+\/[a-zA-Z0-9._/-]+$/,
+      'iSCSI LUN zvolPath must reside under /dev/zvol/<pool>/...',
+    )
+    .refine((v) => !v.includes('..'), {
+      message: 'iSCSI LUN zvolPath must not contain path traversal (..)',
+    }),
   blockSize: z.enum(['512', '4096']).default('4096'),
   readOnly: z.boolean().default(false),
 });
@@ -2142,7 +2158,7 @@ export const VowConfigSchema = z.object({
   localTlsMkcert: z.boolean().default(true),
   syncUnboundDns: z.boolean().default(true),
   authzEnabled: z.boolean().default(true),
-  defaultRole: z.enum(['owner', 'admin', 'operator', 'viewer', 'webhook']).default('admin'),
+  defaultRole: z.enum(['owner', 'admin', 'operator', 'viewer', 'webhook']).default('viewer'),
   ldapAuth: VowLdapAuthSchema.default({
     enabled: true,
     autoBindLocalLdap: true,
@@ -2177,7 +2193,16 @@ export const VmDiskSchema = z.object({
   id: z.string().optional(),
   name: z.string().default('disk0'),
   pool: z.string().default('tank'),
-  zvol: z.string().optional(),
+  zvol: z
+    .string()
+    .regex(
+      /^\/dev\/zvol\/[a-zA-Z0-9._-]+\/[a-zA-Z0-9._/-]+$/,
+      'VM disk zvol must reside under /dev/zvol/<pool>/...',
+    )
+    .refine((v) => !v.includes('..'), {
+      message: 'VM disk zvol must not contain path traversal (..)',
+    })
+    .optional(),
   sizeGb: z.number().int().min(1).default(32),
   bus: VmDiskBusSchema.default('virtio'),
   cache: VmDiskCacheSchema.default('none'),
@@ -2197,7 +2222,10 @@ export const VirtioFsShareSchema = z.object({
   tag: z.string().min(1).max(36).regex(/^[a-zA-Z0-9_-]+$/, 'Invalid VirtioFS mount tag'),
   hostPath: z
     .string()
-    .regex(/^\/(?:mnt|tank|rpool|var\/lib\/axonwall)\/[a-zA-Z0-9._/-]+$/, 'VirtioFS hostPath must reside under /mnt, /tank, /rpool, or /var/lib/axonwall'),
+    .regex(/^\/mnt\/[a-zA-Z0-9._-]+\/[a-zA-Z0-9._/-]+$/, 'VirtioFS hostPath must reside strictly under /mnt/<pool>/...')
+    .refine((v) => !v.includes('..'), {
+      message: 'VirtioFS hostPath must not contain path traversal (..)',
+    }),
   cacheMode: z.enum(['auto', 'always', 'none']).default('auto'),
   readOnly: z.boolean().default(false),
 });
@@ -2275,13 +2303,57 @@ export const VirtualMachineSchema = z.object({
   disks: z.array(VmDiskSchema).default([]),
   virtioFsShares: z.array(VirtioFsShareSchema).default([]).optional(),
   diskless: z.boolean().default(false).optional(),
-  kernelPath: z.string().optional(),
-  initrdPath: z.string().optional(),
+  kernelPath: z
+    .string()
+    .regex(
+      /^\/(?:var\/lib\/axonwall\/kernels|boot)\/[a-zA-Z0-9._/-]+$/,
+      'VM kernelPath must reside under /var/lib/axonwall/kernels/ or /boot/',
+    )
+    .refine((v) => !v.includes('..'), {
+      message: 'VM kernelPath must not contain path traversal (..)',
+    })
+    .optional(),
+  initrdPath: z
+    .string()
+    .regex(
+      /^\/(?:var\/lib\/axonwall\/kernels|boot)\/[a-zA-Z0-9._/-]+$/,
+      'VM initrdPath must reside under /var/lib/axonwall/kernels/ or /boot/',
+    )
+    .refine((v) => !v.includes('..'), {
+      message: 'VM initrdPath must not contain path traversal (..)',
+    })
+    .optional(),
   kernelArgs: z.string().optional(),
-  fwCfg: z.array(z.object({ name: z.string(), file: z.string() })).optional(),
+  fwCfg: z
+    .array(
+      z.object({
+        name: z
+          .string()
+          .min(1)
+          .regex(/^[a-zA-Z0-9_./-]+$/, 'Invalid fwCfg name')
+          .refine((v) => !v.includes('..'), { message: 'fwCfg name must not contain ..' }),
+        file: z
+          .string()
+          .regex(
+            /^\/(?:var\/lib\/axonwall\/fwcfg|run\/axonwall\/fwcfg)\/[a-zA-Z0-9._/-]+$/,
+            'VM fwCfg file must reside under /var/lib/axonwall/fwcfg/ or /run/axonwall/fwcfg/',
+          )
+          .refine((v) => !v.includes('..'), { message: 'VM fwCfg file must not contain ..' }),
+      }),
+    )
+    .optional(),
   watchdog: z.enum(['none', 'i6300esb', 'ib700']).default('none').optional(),
   nics: z.array(VmNicSchema).default([]),
-  iso: z.string().optional(),
+  iso: z
+    .string()
+    .regex(
+      /^\/(?:var\/lib\/axonwall\/isos|mnt)\/[a-zA-Z0-9._/-]+$/,
+      'VM iso path must reside under /var/lib/axonwall/isos/ or /mnt/',
+    )
+    .refine((v) => !v.includes('..'), {
+      message: 'VM iso path must not contain path traversal (..)',
+    })
+    .optional(),
   cloudInit: CloudInitConfigSchema.optional(),
   pciPassthrough: z.array(z.string()).default([]),
   usbPassthrough: z.array(z.string()).default([]),

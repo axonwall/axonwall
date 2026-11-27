@@ -22,6 +22,8 @@ import {
 import { getCurrentDesiredState, getK3sClusterPulseAction } from '@/server/agent';
 import { executePluginAction } from '@/server/plugins';
 import { useDesiredStateApply } from '@/lib/use-desired-state-apply';
+import { safeHttpHref } from '@/lib/safe-href';
+import { isValidHostname } from '@/lib/shell-quote';
 import { VowConfigSchema, type DesiredState, type VowConfig, type VowCdRunner } from '@axonwall/lib/schemas';
 import type { K3sClusterPulse } from '@/components/k3s/types';
 import { K3sVowVisuals } from '@/components/k3s/K3sVowVisuals';
@@ -395,9 +397,21 @@ export default function VigilantOctoWafflePage() {
                 prev ? { ...prev, vow: { ...(prev.vow ?? vowConfig), domain: val } } : prev
               );
             }}
-            onBlur={() =>
-              saveVowConfig((cfg) => ({ ...cfg, domain: vowConfig.domain || 'vow.axonwall.local' }))
-            }
+            onBlur={() => {
+              const trimmed = vowConfig.domain.trim();
+              if (!trimmed) {
+                saveVowConfig((cfg) => ({ ...cfg, domain: 'vow.axonwall.local' }));
+                return;
+              }
+              if (!isValidHostname(trimmed)) {
+                setBanner({
+                  type: 'error',
+                  text: 'Platform Ingress Domain must be a valid RFC hostname (no @, spaces, or URL schemes).',
+                });
+                return;
+              }
+              saveVowConfig((cfg) => ({ ...cfg, domain: trimmed.toLowerCase() }));
+            }}
             className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-800 text-xs font-mono text-white focus:border-emerald-500 focus:outline-none"
           />
         </div>
@@ -549,7 +563,15 @@ export default function VigilantOctoWafflePage() {
               const isExplicit = (vowConfig.enabledApps ?? []).includes(app.id);
               const isAutoDep = autoAddedDependencies.includes(app.id);
               const isActive = isExplicit || isAutoDep;
-              const fqdn = app.subdomain ? `https://${app.subdomain}.${vowConfig.domain}` : null;
+              const cleanDomain = vowConfig.domain.trim();
+              const domainValid = isValidHostname(cleanDomain);
+              const candidateHost =
+                app.subdomain && domainValid ? `${app.subdomain}.${cleanDomain}` : '';
+              const fqdn =
+                candidateHost && isValidHostname(candidateHost)
+                  ? safeHttpHref(`https://${candidateHost}`, '#')
+                  : '#';
+              const safeFqdn = fqdn !== '#' ? fqdn : null;
 
               return (
                 <div
@@ -598,18 +620,18 @@ export default function VigilantOctoWafflePage() {
 
                   <div className="pt-3 border-t border-slate-800/80 flex items-center justify-between gap-2">
                     <div className="truncate text-[11px] font-mono text-slate-400">
-                      {fqdn ? (
+                      {safeFqdn ? (
                         <a
-                          href={fqdn}
+                          href={safeFqdn}
                           target="_blank"
-                          rel="noreferrer"
+                          rel="noopener noreferrer"
                           className="hover:text-emerald-400 flex items-center gap-1 truncate"
                         >
                           <ExternalLink className="w-3 h-3 shrink-0" />
-                          {app.subdomain}.{vowConfig.domain}
+                          {app.subdomain}.{cleanDomain}
                         </a>
                       ) : (
-                        <span>cluster-internal</span>
+                        <span>{app.subdomain ? 'invalid domain' : 'cluster-internal'}</span>
                       )}
                     </div>
 

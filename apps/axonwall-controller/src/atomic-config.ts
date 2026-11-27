@@ -57,6 +57,8 @@ export interface CanonicalConfigRead<T> {
   parse: (raw: string) => T | null;
   /** Human label for log lines, e.g. 'mcp-keys.json'. */
   label: string;
+  /** File permissions used when adopting a mirror into canonicalPath (defaults to 0o600). */
+  mode?: number;
 }
 
 /**
@@ -104,8 +106,9 @@ export function readCanonicalConfig<T>(opts: CanonicalConfigRead<T>): T | null {
     `[Config] ${label}: canonical file ${canonicalPath} is missing; adopting the newest mirror copy (${newest.source}) as the canonical file. ` +
       `Mirror copies are migration-only from here on: all reads and writes go through the canonical path.`
   );
+  const adoptMode = opts.mode ?? 0o600;
   try {
-    writeFileAtomicSync(canonicalPath, newest.raw, 0o660);
+    writeFileAtomicSync(canonicalPath, newest.raw, adoptMode);
   } catch (err: any) {
     console.error(
       `[Config] ${label}: could not adopt mirror ${newest.source} into canonical path ${canonicalPath} (${err?.message || err}); ` +

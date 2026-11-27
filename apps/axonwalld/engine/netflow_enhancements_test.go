@@ -667,6 +667,7 @@ func TestNetFlowFederationAndPrometheusMetrics(t *testing.T) {
 	// Initialize TopologyManager with mock peer + 1 unreachable peer
 	topoDir := t.TempDir()
 	topoMgr := NewTopologyManager(topoDir, nil, nil, nil, nil, nil)
+	topoMgr.SetAllowLoopbackForTest(true)
 	topoBundle := TopologyRuntimeBundle{
 		Enabled: true,
 		Config: TopologyConfigPayload{

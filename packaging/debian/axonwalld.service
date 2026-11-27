@@ -19,6 +19,7 @@ ExecStart=/usr/sbin/axonwalld --socket /run/axonwall/agent.sock --boot-apply
 Restart=always
 RestartSec=3s
 KillMode=process
+LimitCORE=0
 
 # Privilege Separation & Sandboxing
 User=root
@@ -29,13 +30,18 @@ RuntimeDirectoryPreserve=yes
 LogsDirectory=axonwall
 
 # Sandboxing
+# Note: axonwalld manages /etc, /boot, /home (user homes), /mnt (ZFS/VM ISOs),
+# /var/lib/* (K3s manifests, LXC, OpenLDAP, apt/dpkg plugin installs), kernel
+# modules (modprobe), sysctls (/proc/sys), eBPF, and setgid config trees, so
+# ProtectSystem=false, ProtectHome=false, ProtectKernel*=false, and
+# RestrictSUIDSGID/NoNewPrivileges/CapabilityBoundingSet cannot be enabled here.
 ProtectSystem=false
-ReadWritePaths=/etc /var/lib/axonwall /var/log/axonwall /run /home /usr/share/axonwall /boot
 ProtectHome=false
 PrivateTmp=true
 ProtectKernelTunables=false
 ProtectKernelModules=false
 ProtectControlGroups=true
+LockPersonality=true
 
 [Install]
 WantedBy=multi-user.target

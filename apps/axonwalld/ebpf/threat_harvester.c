@@ -108,6 +108,36 @@ struct harvester_watch_entry {
 	__u32 pad;
 };
 
+struct harvester_exe_id {
+	__u64 dev;
+	__u64 ino;
+};
+
+/* Minimal CO-RE kernel structures for task->mm->exe_file->f_inode identity */
+struct super_block {
+	unsigned int s_dev;
+} __attribute__((preserve_access_index));
+
+struct inode {
+	unsigned long i_ino;
+	struct super_block *i_sb;
+} __attribute__((preserve_access_index));
+
+struct file {
+	struct inode *f_inode;
+} __attribute__((preserve_access_index));
+
+struct mm_struct {
+	struct file *exe_file;
+} __attribute__((preserve_access_index));
+
+struct task_struct {
+	struct mm_struct *mm;
+} __attribute__((preserve_access_index));
+
+static __u64 (*const bpf_get_current_task)(void) =
+	(void *)BPF_FUNC_get_current_task;
+
 struct harvester_ring_event {
 	__u64 ts_ns;
 	__u64 socket_cookie;
@@ -115,6 +145,8 @@ struct harvester_ring_event {
 	__u64 byte_count;
 	__u32 ifindex;
 	__u32 pid;
+	__u32 tid;
+	__u32 pad_tid;
 	__u32 uid;
 	__u32 src_v4;
 	__u32 dst_v4;
@@ -222,6 +254,43 @@ struct {
 	__type(key, __u32);
 	__type(value, __u64);
 } harvester_suspicious_pids SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, 256);
+	__type(key, struct harvester_exe_id);
+	__type(value, __u8);
+} harvester_uprobe_allowlist SEC(".maps");
+
+static __always_inline int read_current_harvester_exe_id(struct harvester_exe_id *out_id)
+{
+	struct task_struct *task = (struct task_struct *)bpf_get_current_task();
+	struct mm_struct *mm = NULL;
+	struct file *exe_file = NULL;
+	struct inode *f_inode = NULL;
+	struct super_block *i_sb = NULL;
+	unsigned long ino = 0;
+	unsigned int s_dev = 0;
+
+	if (!task)
+		return -1;
+	if (bpf_probe_read_kernel(&mm, sizeof(mm), __builtin_preserve_access_index(&task->mm)) < 0 || !mm)
+		return -1;
+	if (bpf_probe_read_kernel(&exe_file, sizeof(exe_file), __builtin_preserve_access_index(&mm->exe_file)) < 0 || !exe_file)
+		return -1;
+	if (bpf_probe_read_kernel(&f_inode, sizeof(f_inode), __builtin_preserve_access_index(&exe_file->f_inode)) < 0 || !f_inode)
+		return -1;
+	if (bpf_probe_read_kernel(&ino, sizeof(ino), __builtin_preserve_access_index(&f_inode->i_ino)) < 0)
+		return -1;
+	if (bpf_probe_read_kernel(&i_sb, sizeof(i_sb), __builtin_preserve_access_index(&f_inode->i_sb)) < 0 || !i_sb)
+		return -1;
+	if (bpf_probe_read_kernel(&s_dev, sizeof(s_dev), __builtin_preserve_access_index(&i_sb->s_dev)) < 0)
+		return -1;
+
+	out_id->dev = (__u64)s_dev;
+	out_id->ino = (__u64)ino;
+	return 0;
+}
 
 /* Emit zero-initialized ringbuf record safely */
 static __always_inline struct harvester_ring_event *reserve_harvester_event(struct harvester_counters_val *cnt)
@@ -511,6 +580,8 @@ static __always_inline int process_tc_packet(struct __sk_buff *skb, __u8 directi
 	ev->byte_count = fval->byte_count;
 	ev->ifindex = skb->ifindex;
 	ev->pid = 0;
+	ev->tid = 0;
+	ev->pad_tid = 0;
 	ev->uid = 0;
 	ev->src_v4 = iph.saddr;
 	ev->dst_v4 = iph.daddr;
@@ -595,6 +666,8 @@ int tp_harvester_exec(void *ctx)
 	ev->byte_count = 0;
 	ev->ifindex = 0;
 	ev->pid = tgid;
+	ev->tid = (__u32)pid_tgid;
+	ev->pad_tid = 0;
 	ev->uid = (__u32)bpf_get_current_uid_gid();
 	ev->src_v4 = 0;
 	ev->dst_v4 = 0;
@@ -648,6 +721,8 @@ int tp_harvester_memfd(void *ctx)
 	ev->byte_count = 0;
 	ev->ifindex = 0;
 	ev->pid = tgid;
+	ev->tid = (__u32)pid_tgid;
+	ev->pad_tid = 0;
 	ev->uid = (__u32)bpf_get_current_uid_gid();
 	ev->src_v4 = 0;
 	ev->dst_v4 = 0;
@@ -678,6 +753,13 @@ int uprobe_harvester_ssl_write(struct harvester_pt_regs *ctx)
 	if (!cfg || !cfg->enabled || cfg->drop_tier1_backpressure)
 		return 0;
 
+	/* Enforce in-kernel (s_dev, i_ino) allowlist even if attached to a shared library */
+	struct harvester_exe_id exe_id = {};
+	if (read_current_harvester_exe_id(&exe_id) < 0)
+		return 0;
+	if (!bpf_map_lookup_elem(&harvester_uprobe_allowlist, &exe_id))
+		return 0;
+
 	struct harvester_counters_val *cnt = bpf_map_lookup_elem(&harvester_counters, &zero);
 	if (cnt)
 		__sync_fetch_and_add(&cnt->tls_uprobe_events, 1);
@@ -705,6 +787,8 @@ int uprobe_harvester_ssl_write(struct harvester_pt_regs *ctx)
 	ev->byte_count = write_len;
 	ev->ifindex = 0;
 	ev->pid = (__u32)(pid_tgid >> 32);
+	ev->tid = (__u32)pid_tgid;
+	ev->pad_tid = 0;
 	ev->uid = (__u32)bpf_get_current_uid_gid();
 	ev->src_v4 = 0;
 	ev->dst_v4 = 0;

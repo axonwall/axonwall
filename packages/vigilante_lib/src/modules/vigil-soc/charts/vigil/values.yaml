@@ -351,6 +351,11 @@ redis:
     repository: redis
     tag: "7-alpine"
     pullPolicy: IfNotPresent
+  auth:
+    enabled: true
+    existingSecret: ""
+    existingSecretPasswordKey: REDIS_PASSWORD
+    password: ""
   service:
     port: 6379
   persistence:
@@ -642,6 +647,7 @@ secrets:
 
   # Multi-provider LLM (issue #88 / post-merge additions)
   openaiApiKey: ""
+  geminiApiKey: ""
 
 # -----------------------------------------------------------------------------
 # Non-secret config (rendered into a ConfigMap)
@@ -649,7 +655,6 @@ secrets:
 config:
   # Development Mode — MUST be false in production.
   DEV_MODE: "false"
-  VIGIL_COOKIE_SECURE: "true"
 
   # Secrets / auth policy
   SECRETS_BACKEND: "dotenv"
@@ -686,7 +691,7 @@ config:
 
   # CSRF
   VIGIL_CSRF_ENABLED: "true"
-  VIGIL_CSRF_REPORT_ONLY: "true"
+  VIGIL_CSRF_REPORT_ONLY: "false"
   # Added to the always-exempt set (webhooks, ingestion, the /mcp surface,
   # the agent layer's /internal endpoints) rather than replacing it.
   # App-root relative; the API prefixes each entry with VIGIL_CONTEXT_PATH.
@@ -745,7 +750,7 @@ config:
   DAEMON_BATCH_SIZE: "10"
   DAEMON_AUTO_RESPONSE: "true"
   DAEMON_CONFIDENCE_THRESHOLD: "0.90"
-  DAEMON_FORCE_APPROVAL: "false"
+  DAEMON_FORCE_APPROVAL: "true"
   DAEMON_DRY_RUN: "false"
   DAEMON_ESCALATION_ENABLED: "true"
   DAEMON_ESCALATE_SEVERITIES: "critical,high"
@@ -886,12 +891,20 @@ observability:
 # Off by default — flipping to true on an existing cluster may break traffic
 # that was previously implicitly allowed. Plan the rollout.
 networkPolicies:
-  enabled: false
+  enabled: true
   # Namespace selector used to allow ingress traffic from the ingress
   # controller's namespace. Defaults match a common nginx-ingress install;
   # adjust if your controller runs elsewhere or lives in the same namespace.
   ingressControllerNamespaceSelector:
     kubernetes.io/metadata.name: ingress-nginx
+  allowPrivateEgress: false
+  egressExceptCidrs:
+    - 169.254.169.254/32
+    - 10.0.0.0/8
+    - 172.16.0.0/12
+    - 192.168.0.0/16
+    - 100.64.0.0/10
+    - 127.0.0.0/8
   daemon:
     # CIDRs allowed to POST to the daemon's webhook port. Empty list means
     # cluster-internal only. Add your SIEM/EDR outbound IPs here to let them
@@ -902,12 +915,7 @@ networkPolicies:
     # port. Ingress rules are OR'd, so allowing probes from any namespace also
     # opens that port to every pod in the cluster — leaving the bearer token as
     # the only gate (ADR 0014).
-    #
-    # True by default because a kubelet probe comes from the node, not a pod, and
-    # whether a CNI lets that past a pod-selector rule varies; a probe blocked by
-    # policy takes the Deployment down. Set false on Calico or Cilium, which
-    # permit node-sourced health checks — then only the backend can reach it.
-    allowProbesFromAnyNamespace: true
+    allowProbesFromAnyNamespace: false
 
 # -----------------------------------------------------------------------------
 # Development utilities (issue #117) — off by default, not for production
@@ -916,12 +924,12 @@ splunk:
   enabled: false
   image:
     repository: splunk/splunk
-    tag: "latest"
+    tag: "9.2.2-rhel9"
     pullPolicy: IfNotPresent
   auth:
     # Pre-created Secret with key SPLUNK_PASSWORD — overrides .password
     existingSecret: ""
-    password: "changeme123"
+    password: ""
   # Optional HEC token (empty = Splunk generates one)
   hecToken: ""
   persistence:
@@ -939,12 +947,12 @@ pgadmin:
   enabled: false
   image:
     repository: dpage/pgadmin4
-    tag: "latest"
+    tag: "9.12.0"
     pullPolicy: IfNotPresent
   auth:
     email: "admin@vigil.local"
     existingSecret: ""
-    password: "admin"
+    password: ""
   resources:
     requests:
       cpu: 100m

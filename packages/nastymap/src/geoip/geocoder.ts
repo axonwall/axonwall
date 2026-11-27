@@ -340,18 +340,151 @@ const KNOWN_GEO_PREFIXES: GeoRecord[] = [
   },
 ];
 
+function parseIpv4Int(ip: string): number | null {
+  const parts = ip.split('.');
+  if (parts.length !== 4) return null;
+  let val = 0;
+  for (const part of parts) {
+    if (!/^\d+$/.test(part)) return null;
+    if (part.length > 1 && part.startsWith('0')) return null;
+    const octet = Number(part);
+    if (!Number.isInteger(octet) || octet < 0 || octet > 255) return null;
+    val = ((val << 8) | octet) >>> 0;
+  }
+  return val;
+}
+
+function isPrivateIpv4Int(v4: number): boolean {
+  const a = (v4 >>> 24) & 0xff;
+  const b = (v4 >>> 16) & 0xff;
+  const c = (v4 >>> 8) & 0xff;
+
+  if (a === 0) return true; // 0.0.0.0/8 ("This host on this network")
+  if (a === 10) return true; // 10.0.0.0/8 (RFC 1918)
+  if (a === 100 && b >= 64 && b <= 127) return true; // 100.64.0.0/10 (CGNAT RFC 6598)
+  if (a === 127) return true; // 127.0.0.0/8 (Loopback)
+  if (a === 169 && b === 254) return true; // 169.254.0.0/16 (Link-local / IMDS)
+  if (a === 172 && b >= 16 && b <= 31) return true; // 172.16.0.0/12 (RFC 1918)
+  if (a === 192 && b === 0 && c === 0) return true; // 192.0.0.0/24 (IETF Protocol Assignments)
+  if (a === 192 && b === 168) return true; // 192.168.0.0/16 (RFC 1918)
+  if (a === 198 && (b === 18 || b === 19)) return true; // 198.18.0.0/15 (Benchmarking)
+  if (a >= 224) return true; // 224.0.0.0/4 Multicast & 240.0.0.0/4 Reserved / Broadcast
+  return false;
+}
+
+function parseIpv6BigInt(ip: string): bigint | null {
+  let clean = ip.trim().replace(/^\[|\]$/g, '').split('%')[0].toLowerCase();
+  if (!clean || !clean.includes(':')) return null;
+
+  if (clean.includes('.')) {
+    const lastColon = clean.lastIndexOf(':');
+    if (lastColon === -1) return null;
+    const v4Int = parseIpv4Int(clean.slice(lastColon + 1));
+    if (v4Int === null) return null;
+    const hi = ((v4Int >>> 16) & 0xffff).toString(16);
+    const lo = (v4Int & 0xffff).toString(16);
+    clean = `${clean.slice(0, lastColon)}:${hi}:${lo}`;
+  }
+
+  const halves = clean.split('::');
+  if (halves.length > 2) return null;
+
+  const left = halves[0] ? halves[0].split(':') : [];
+  const right = halves.length === 2 && halves[1] ? halves[1].split(':') : [];
+  const missing = halves.length === 2 ? 8 - (left.length + right.length) : 0;
+  if (halves.length === 2 && missing < 1) return null;
+  if (halves.length === 1 && left.length !== 8) return null;
+
+  const groups = halves.length === 2
+    ? [...left, ...Array(missing).fill('0'), ...right]
+    : left;
+  if (groups.length !== 8) return null;
+
+  let val = 0n;
+  for (const g of groups) {
+    if (!/^[0-9a-f]{1,4}$/.test(g)) return null;
+    val = (val << 16n) | BigInt(parseInt(g, 16));
+  }
+  return val;
+}
+
+function isPrivateIpv6BigInt(v6: bigint): boolean {
+  if (v6 === 0n) return true; // :: (unspecified)
+  if (v6 === 1n) return true; // ::1 (loopback)
+
+  // Unwrap IPv4-mapped IPv6 (::ffff:0:0/96)
+  if ((v6 >> 32n) === 0xffffn) {
+    return isPrivateIpv4Int(Number(v6 & 0xffffffffn));
+  }
+
+  // Unwrap IPv4-translated SIIT (::ffff:0:0:0/96)
+  if ((v6 >> 32n) === 0xffff0000n) {
+    return isPrivateIpv4Int(Number(v6 & 0xffffffffn));
+  }
+
+  // Unwrap deprecated IPv4-compatible IPv6 (::/96)
+  if ((v6 >> 32n) === 0n && v6 > 1n) {
+    return isPrivateIpv4Int(Number(v6 & 0xffffffffn));
+  }
+
+  // Unwrap NAT64 Well-Known Prefix (64:ff9b::/96)
+  if ((v6 >> 32n) === 0x0064ff9b0000000000000000n) {
+    return isPrivateIpv4Int(Number(v6 & 0xffffffffn));
+  }
+
+  // NAT64 Local-Use Prefix (64:ff9b:1::/48)
+  if ((v6 >> 80n) === 0x0064ff9b0001n) return true;
+
+  // 6to4 transition range (2002::/16)
+  if ((v6 >> 112n) === 0x2002n) return true;
+
+  // Teredo transition range (2001::/32)
+  if ((v6 >> 96n) === 0x20010000n) return true;
+
+  // Benchmarking (2001:2::/48) and ORCHIDv2 (2001:20::/28)
+  if ((v6 >> 80n) === 0x200100020000n) return true;
+  if ((v6 >> 100n) === 0x2001002n) return true;
+
+  // Discard-only (100::/64)
+  if ((v6 >> 64n) === 0x0100000000000000n) return true;
+
+  // Unique Local Addresses (fc00::/7, including fd12:, etc.)
+  if ((v6 >> 121n) === 0x7en) return true;
+
+  // Link-Local (fe80::/10)
+  if ((v6 >> 118n) === 0x3fan) return true;
+
+  // Deprecated Site-Local (fec0::/10)
+  if ((v6 >> 118n) === 0x3fbn) return true;
+
+  // Multicast (ff00::/8)
+  if ((v6 >> 120n) === 0xffn) return true;
+
+  return false;
+}
+
 /**
- * Check if an IP is in RFC1918 private space, loopback, or link-local.
+ * Check if an IP is in non-public space (RFC 1918, loopback, link-local, CGNAT,
+ * 0.0.0.0/8, ULA, IPv4-mapped IPv6, NAT64/6to4/Teredo transition, multicast/reserved).
+ * Fails closed (returns true) for empty or unparseable inputs so non-public addresses
+ * are never sent to external GeoIP APIs.
  */
 export function isPrivateIp(ip: string): boolean {
-  if (!ip) return true;
-  if (ip === '127.0.0.1' || ip === 'localhost' || ip === '::1') return true;
-  if (ip.startsWith('10.')) return true;
-  if (ip.startsWith('192.168.')) return true;
-  if (ip.startsWith('169.254.')) return true; // Link-local
-  if (/^172\.(1[6-9]|2[0-9]|3[0-1])\./.test(ip)) return true; // 172.16.0.0 - 172.31.255.255
-  if (ip.startsWith('fc00:') || ip.startsWith('fd00:') || ip.startsWith('fe80:')) return true;
-  return false;
+  if (!ip || typeof ip !== 'string') return true;
+  const trimmed = ip.trim();
+  if (!trimmed) return true;
+  const lower = trimmed.toLowerCase();
+  if (lower === 'localhost' || lower.endsWith('.localhost')) return true;
+
+  if (!trimmed.includes(':')) {
+    const v4 = parseIpv4Int(trimmed);
+    if (v4 === null) return true;
+    return isPrivateIpv4Int(v4);
+  }
+
+  const v6 = parseIpv6BigInt(trimmed);
+  if (v6 === null) return true;
+  return isPrivateIpv6BigInt(v6);
 }
 
 /**
@@ -375,7 +508,9 @@ function getDeterministicPrivateLocation(ip: string): NmapGeoLocation {
   const lat = Number((centerLat + Math.sin(angle) * radiusOffset).toFixed(4));
   const lng = Number((centerLng + Math.cos(angle) * radiusOffset).toFixed(4));
 
-  const subnetPart = ip.split('.').slice(0, 3).join('.');
+  const subnetOrg = ip.includes(':')
+    ? `Subnet ${ip}`
+    : `Subnet ${ip.split('.').slice(0, 3).join('.')}.0/24`;
 
   return {
     ip,
@@ -387,7 +522,7 @@ function getDeterministicPrivateLocation(ip: string): NmapGeoLocation {
     longitude: lng,
     isp: 'Enterprise Intranet',
     asn: 'RFC-1918 Private',
-    org: `Subnet ${subnetPart}.0/24`,
+    org: subnetOrg,
     timezone: 'UTC',
     isPrivate: true,
   };
@@ -397,7 +532,7 @@ function getDeterministicPrivateLocation(ip: string): NmapGeoLocation {
  * Geocode an IP address to geographic coordinates, country, and organization.
  */
 export function geocodeIp(ip: string): NmapGeoLocation {
-  if (!ip) {
+  if (!ip || typeof ip !== 'string' || !ip.trim()) {
     return {
       ip: '0.0.0.0',
       latitude: 0,
@@ -408,15 +543,17 @@ export function geocodeIp(ip: string): NmapGeoLocation {
     };
   }
 
-  if (isPrivateIp(ip)) {
-    return getDeterministicPrivateLocation(ip);
+  const normalizedIp = ip.trim().replace(/^\[|\]$/g, '').split('%')[0];
+
+  if (isPrivateIp(normalizedIp)) {
+    return getDeterministicPrivateLocation(normalizedIp);
   }
 
   // Check known prefixes first
   for (const rec of KNOWN_GEO_PREFIXES) {
-    if (ip.startsWith(rec.prefix)) {
+    if (normalizedIp.startsWith(rec.prefix)) {
       return {
-        ip,
+        ip: normalizedIp,
         city: rec.city,
         region: rec.region,
         country: rec.country,
@@ -433,10 +570,20 @@ export function geocodeIp(ip: string): NmapGeoLocation {
   }
 
   // Fallback for general public IPs: Deterministic Global Placement based on IP octets
-  const octets = ip.split('.').map((o) => parseInt(o, 10) || 0);
-  const o1 = octets[0] || 0;
-  const o2 = octets[1] || 0;
-  const o3 = octets[2] || 0;
+  let o1 = 0;
+  let o2 = 0;
+  let o3 = 0;
+  if (normalizedIp.includes(':')) {
+    const hexParts = normalizedIp.split(':').filter(Boolean).map((p) => parseInt(p, 16) || 0);
+    o1 = (hexParts[0] || 0) & 0xff;
+    o2 = (hexParts[1] || 0) & 0xff;
+    o3 = (hexParts[hexParts.length - 1] || 0) & 0xff;
+  } else {
+    const octets = normalizedIp.split('.').map((o) => parseInt(o, 10) || 0);
+    o1 = octets[0] || 0;
+    o2 = octets[1] || 0;
+    o3 = octets[2] || 0;
+  }
 
   // Distribute over major world continents
   const globalRegions = [
@@ -458,7 +605,7 @@ export function geocodeIp(ip: string): NmapGeoLocation {
   const jitterLng = (((o2 + o3) % 20) - 10) * 0.08;
 
   return {
-    ip,
+    ip: normalizedIp,
     city: reg.city,
     region: reg.region,
     country: reg.country,

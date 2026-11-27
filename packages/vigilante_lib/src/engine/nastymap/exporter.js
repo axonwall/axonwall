@@ -13,6 +13,37 @@ function escapeXml(unsafe) {
     .replace(/'/g, '&#39;');
 }
 
+function coerceSvgNumber(value, fallback) {
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? value : fallback;
+  }
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (!trimmed) return fallback;
+    const parsed = Number(trimmed);
+    return Number.isFinite(parsed) ? parsed : fallback;
+  }
+  return fallback;
+}
+
+function coercePositiveSvgNumber(value, fallback) {
+  const num = coerceSvgNumber(value, fallback);
+  return num > 0 ? num : fallback;
+}
+
+function sanitizeSvgColor(value, fallback) {
+  if (typeof value !== 'string') return fallback;
+  const trimmed = value.trim();
+  if (
+    /^#[0-9a-f]{3,8}$/i.test(trimmed) ||
+    /^[a-z]{1,24}$/i.test(trimmed) ||
+    /^(rgb|hsl)a?\(\s*[0-9.%\s,]+\)$/i.test(trimmed)
+  ) {
+    return escapeXml(trimmed);
+  }
+  return fallback;
+}
+
 /**
  * Generates an SVG string representation of a TopologyGraph without requiring a DOM.
  * @param {Object} graph TopologyGraph { nodes: [], links: [] }
@@ -20,15 +51,18 @@ function escapeXml(unsafe) {
  * @returns {string} SVG XML content
  */
 export function generateHeadlessSvg(graph, options = {}) {
-  const width = options.width || 1200;
-  const height = options.height || 800;
-  const title = escapeXml(options.title || 'Nmap Network Topology Map');
+  const opts = options ?? {};
+  const width = coercePositiveSvgNumber(opts.width, 1200);
+  const height = coercePositiveSvgNumber(opts.height, 800);
+  const title = escapeXml(opts.title || 'Nmap Network Topology Map');
+  const nodes = Array.isArray(graph?.nodes) ? graph.nodes : [];
+  const links = Array.isArray(graph?.links) ? graph.links : [];
 
   const nodeMap = new Map();
-  for (const n of graph.nodes || []) nodeMap.set(n.id, n);
+  for (const n of nodes) nodeMap.set(n.id, n);
 
   let linksSvg = '';
-  for (const link of graph.links || []) {
+  for (const link of links) {
     const sId = typeof link.source === 'string' ? link.source : link.source?.id;
     const tId = typeof link.target === 'string' ? link.target : link.target?.id;
     const s = nodeMap.get(sId);
@@ -45,41 +79,75 @@ export function generateHeadlessSvg(graph, options = {}) {
       strokeDash = 'stroke-dasharray="6,3"';
     }
 
+    const sx = coerceSvgNumber(s.x, 0);
+    const sy = coerceSvgNumber(s.y, 0);
+    const tx = coerceSvgNumber(t.x, 0);
+    const ty = coerceSvgNumber(t.y, 0);
+    const safeStrokeWidth = coercePositiveSvgNumber(strokeWidth, 1.5);
+    const safeOpacity = coerceSvgNumber(0.8, 0.8);
+
     linksSvg += `
-      <line x1="${s.x}" y1="${s.y}" x2="${t.x}" y2="${t.y}" stroke="${strokeColor}" stroke-width="${strokeWidth}" ${strokeDash} opacity="0.8" />
+      <line x1="${escapeXml(sx)}" y1="${escapeXml(sy)}" x2="${escapeXml(tx)}" y2="${escapeXml(ty)}" stroke="${escapeXml(strokeColor)}" stroke-width="${escapeXml(safeStrokeWidth)}" ${strokeDash} opacity="${escapeXml(safeOpacity)}" />
     `;
 
     if (link.label) {
-      const midX = (s.x + t.x) / 2;
-      const midY = (s.y + t.y) / 2;
+      const midX = coerceSvgNumber((sx + tx) / 2, 0);
+      const midY = coerceSvgNumber((sy + ty) / 2, 0);
+      const labelY = coerceSvgNumber(midY - 4, -4);
+      const linkFontSize = coercePositiveSvgNumber(10, 10);
       const labelColor = link.type === 'lateral-attack-path' ? '#f87171' : '#94a3b8';
       linksSvg += `
-        <text x="${midX}" y="${midY - 4}" fill="${labelColor}" font-size="10" font-family="monospace" font-weight="${link.type === 'lateral-attack-path' ? 'bold' : 'normal'}" text-anchor="middle">${escapeXml(link.label)}</text>
+        <text x="${escapeXml(midX)}" y="${escapeXml(labelY)}" fill="${escapeXml(labelColor)}" font-size="${escapeXml(linkFontSize)}" font-family="monospace" font-weight="${escapeXml(link.type === 'lateral-attack-path' ? 'bold' : 'normal')}" text-anchor="middle">${escapeXml(link.label)}</text>
       `;
     }
   }
 
   let nodesSvg = '';
-  for (const node of graph.nodes || []) {
+  for (const node of nodes) {
     const isScanner = node.nodeType === 'scanner';
-    const fill = node.color || '#3b82f6';
-    const stroke = isScanner ? '#a855f7' : node.riskTier === 'CRITICAL' ? '#ef4444' : node.status === 'up' ? '#22c55e' : '#ef4444';
-    const riskBadge = typeof node.riskScore === 'number'
-      ? `<text y="${node.radius + 38}" fill="${node.riskTier === 'CRITICAL' ? '#f87171' : node.riskTier === 'HIGH' ? '#fbbf24' : '#22c55e'}" font-size="9" font-family="monospace" font-weight="bold" text-anchor="middle">RISK: ${node.riskScore}/100 [${escapeXml(node.riskTier || 'CLEAN')}]</text>`
+    const fill = sanitizeSvgColor(node.color, '#3b82f6');
+    const stroke = escapeXml(isScanner ? '#a855f7' : node.riskTier === 'CRITICAL' ? '#ef4444' : node.status === 'up' ? '#22c55e' : '#ef4444');
+    const nx = coerceSvgNumber(node.x, 0);
+    const ny = coerceSvgNumber(node.y, 0);
+    const r = coercePositiveSvgNumber(node.radius, 10);
+    const nodeStrokeWidth = coercePositiveSvgNumber(node.riskTier === 'CRITICAL' ? 3.5 : 2.5, 2.5);
+    const labelY = coerceSvgNumber(r + 14, 24);
+    const ipY = coerceSvgNumber(r + 26, 36);
+    const riskY = coerceSvgNumber(r + 38, 48);
+    const labelFontSize = coercePositiveSvgNumber(11, 11);
+    const ipFontSize = coercePositiveSvgNumber(9, 9);
+    const riskFontSize = coercePositiveSvgNumber(9, 9);
+
+    const hasRiskScore = typeof node.riskScore === 'number' && Number.isFinite(node.riskScore);
+    const riskScoreVal = hasRiskScore ? coerceSvgNumber(node.riskScore, 0) : 0;
+    const riskColor = node.riskTier === 'CRITICAL' ? '#f87171' : node.riskTier === 'HIGH' ? '#fbbf24' : '#22c55e';
+    const riskBadge = hasRiskScore
+      ? `<text y="${escapeXml(riskY)}" fill="${escapeXml(riskColor)}" font-size="${escapeXml(riskFontSize)}" font-family="monospace" font-weight="bold" text-anchor="middle">RISK: ${escapeXml(riskScoreVal)}/100 [${escapeXml(node.riskTier || 'CLEAN')}]</text>`
       : '';
 
     nodesSvg += `
-      <g transform="translate(${node.x}, ${node.y})">
-        <circle r="${node.radius}" fill="${escapeXml(fill)}" stroke="${stroke}" stroke-width="${node.riskTier === 'CRITICAL' ? '3.5' : '2.5'}" />
-        <text y="${node.radius + 14}" fill="#f8fafc" font-size="11" font-family="system-ui, sans-serif" font-weight="600" text-anchor="middle">${escapeXml(node.label)}</text>
-        <text y="${node.radius + 26}" fill="#94a3b8" font-size="9" font-family="monospace" text-anchor="middle">${escapeXml(node.ip)}</text>
+      <g transform="translate(${escapeXml(nx)}, ${escapeXml(ny)})">
+        <circle r="${escapeXml(r)}" fill="${fill}" stroke="${stroke}" stroke-width="${escapeXml(nodeStrokeWidth)}" />
+        <text y="${escapeXml(labelY)}" fill="#f8fafc" font-size="${escapeXml(labelFontSize)}" font-family="system-ui, sans-serif" font-weight="600" text-anchor="middle">${escapeXml(node.label)}</text>
+        <text y="${escapeXml(ipY)}" fill="#94a3b8" font-size="${escapeXml(ipFontSize)}" font-family="monospace" text-anchor="middle">${escapeXml(node.ip)}</text>
         ${riskBadge}
       </g>
     `;
   }
 
+  const bgCx = coerceSvgNumber(width / 2, 600);
+  const bgCy = coerceSvgNumber(height / 2, 400);
+  const bgR = coercePositiveSvgNumber(Math.min(width, height) * 0.45, 360);
+  const titleX = coerceSvgNumber(24, 24);
+  const titleY = coerceSvgNumber(36, 36);
+  const titleFontSize = coercePositiveSvgNumber(18, 18);
+  const subtitleY = coerceSvgNumber(56, 56);
+  const subtitleFontSize = coercePositiveSvgNumber(12, 12);
+  const nodeCount = coerceSvgNumber(nodes.length, 0);
+  const linkCount = coerceSvgNumber(links.length, 0);
+
   return `<?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${width} ${height}" width="${width}" height="${height}" style="background-color: #0b0f19;">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${escapeXml(width)} ${escapeXml(height)}" width="${escapeXml(width)}" height="${escapeXml(height)}" style="background-color: #0b0f19;">
   <defs>
     <radialGradient id="bgGlow" cx="50%" cy="50%" r="50%">
       <stop offset="0%" stop-color="#1e1b4b" stop-opacity="0.5" />
@@ -87,10 +155,10 @@ export function generateHeadlessSvg(graph, options = {}) {
     </radialGradient>
   </defs>
   <rect width="100%" height="100%" fill="#0b0f19" />
-  <circle cx="${width / 2}" cy="${height / 2}" r="${Math.min(width, height) * 0.45}" fill="url(#bgGlow)" />
+  <circle cx="${escapeXml(bgCx)}" cy="${escapeXml(bgCy)}" r="${escapeXml(bgR)}" fill="url(#bgGlow)" />
   
-  <text x="24" y="36" fill="#f8fafc" font-size="18" font-family="system-ui, sans-serif" font-weight="bold">${title}</text>
-  <text x="24" y="56" fill="#64748b" font-size="12" font-family="monospace">Generated with NastyMap · ${graph.nodes?.length || 0} nodes · ${graph.links?.length || 0} links</text>
+  <text x="${escapeXml(titleX)}" y="${escapeXml(titleY)}" fill="#f8fafc" font-size="${escapeXml(titleFontSize)}" font-family="system-ui, sans-serif" font-weight="bold">${title}</text>
+  <text x="${escapeXml(titleX)}" y="${escapeXml(subtitleY)}" fill="#64748b" font-size="${escapeXml(subtitleFontSize)}" font-family="monospace">Generated with NastyMap · ${escapeXml(nodeCount)} nodes · ${escapeXml(linkCount)} links</text>
 
   <g id="links">
     ${linksSvg}
@@ -131,8 +199,9 @@ export function generateHtmlReport(scan, graph) {
         })
         .join(', ');
 
-      const vulnBadge = h.vulnerabilitiesCount && h.vulnerabilitiesCount > 0
-        ? `<span style="color:#ef4444; font-weight:bold;">⚠️ ${Number(h.vulnerabilitiesCount)} CVE/Vuln</span>`
+      const vulnCount = coerceSvgNumber(h.vulnerabilitiesCount, 0);
+      const vulnBadge = vulnCount > 0
+        ? `<span style="color:#ef4444; font-weight:bold;">⚠️ ${escapeXml(vulnCount)} CVE/Vuln</span>`
         : '<span style="color:#64748b;">-</span>';
 
       return `
@@ -269,19 +338,19 @@ export function generateHtmlReport(scan, graph) {
 
     <div class="stats-grid">
       <div class="stat-card">
-        <div class="stat-val">${scan.hosts?.length || 0}</div>
+        <div class="stat-val">${escapeXml(coerceSvgNumber(scan?.hosts?.length, 0))}</div>
         <div class="stat-label">Total Hosts Discovered</div>
       </div>
       <div class="stat-card">
-        <div class="stat-val" style="color: #22c55e;">${scan.hosts?.filter(h => h.isUp || h.status?.state === 'up').length || 0}</div>
+        <div class="stat-val" style="color: #22c55e;">${escapeXml(coerceSvgNumber(scan?.hosts?.filter(h => h.isUp || h.status?.state === 'up').length, 0))}</div>
         <div class="stat-label">Live Hosts (Up)</div>
       </div>
       <div class="stat-card">
-        <div class="stat-val" style="color: #f59e0b;">${(scan.hosts || []).reduce((acc, h) => acc + (h.openPortsCount || 0), 0)}</div>
+        <div class="stat-val" style="color: #f59e0b;">${escapeXml((scan?.hosts || []).reduce((acc, h) => acc + coerceSvgNumber(h.openPortsCount, 0), 0))}</div>
         <div class="stat-label">Open Network Ports</div>
       </div>
       <div class="stat-card">
-        <div class="stat-val" style="color: #ec4899;">${graph.subnets?.length || 1}</div>
+        <div class="stat-val" style="color: #ec4899;">${escapeXml(coerceSvgNumber(graph?.subnets?.length, 1))}</div>
         <div class="stat-label">Subnets Mapped</div>
       </div>
     </div>

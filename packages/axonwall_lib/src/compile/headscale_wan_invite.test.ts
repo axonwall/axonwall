@@ -80,6 +80,7 @@ describe('Headscale WAN Invite Access & Port Knocking compilation', () => {
     expect(cfg).toContain('http-request silent-drop if bad_traversal or bad_encoded_dot or bad_encoded_slash');
     expect(cfg).toContain('acl allow_path_0 path_beg /invite/');
     expect(cfg).toContain('acl allow_path_5 path /api/v1/vpn/mesh/invites/preview');
+    expect(cfg).toContain('acl allow_method_5 method POST');
     expect(cfg).toContain('acl allow_path_6 path /api/v1/vpn/mesh/invites/redeem');
     expect(cfg).toContain('http-request silent-drop unless { var(txn.path_allowed) -m int eq 1 }');
     expect(cfg).not.toContain('default_backend be_axonwall_invite_ui');

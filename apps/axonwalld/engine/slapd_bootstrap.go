@@ -571,15 +571,22 @@ func hasRequiredDITOUs(baseDN string) bool {
 	return true
 }
 
+var slapdAxonwallStateDir = "/var/lib/axonwall"
+
+func ensureAxonwallBaseDirPermissions(dir string) error {
+	return os.Chmod(dir, 0775|os.ModeSetgid|os.ModeSticky)
+}
+
 func EnsureOpenLDAPBootstrapped(domain string, serverID int, policy PasswordPolicyConfig) (string, error) {
 	if _, err := exec.LookPath("slapd"); err != nil {
 		return "", fmt.Errorf("slapd binary not installed: %w", err)
 	}
 
 	// Ensure /var/lib/axonwall is traversable by openldap and SSSD/SSH users while keeping group write for axonwall-api.
+	// Preserve the sticky bit alongside setgid so group-writable members cannot unlink/rename sibling root-owned files.
 	// LDAPBaseDir stays 0755 so unprivileged AuthorizedKeysCommandUser (nobody) can read 0644 BASE_DN, while
 	// sensitive slapd config/data/log/backup subdirectories remain 0750.
-	_ = os.Chmod("/var/lib/axonwall", 0775|os.ModeSetgid)
+	_ = ensureAxonwallBaseDirPermissions(slapdAxonwallStateDir)
 	if err := os.MkdirAll(LDAPBaseDir, 0755); err != nil {
 		return "", fmt.Errorf("failed to create %s: %w", LDAPBaseDir, err)
 	}

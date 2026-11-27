@@ -2,7 +2,7 @@
 
 import { execFileSync } from 'node:child_process';
 import { getSession } from './auth';
-import { assertActionPermitted } from './auth-guard';
+import { assertActionPermitted, assertInteractiveSession } from './auth-guard';
 import { assertPluginEnabled } from './plugin-guard';
 import { DesiredStateSchema, type DesiredState } from '@axonwall/lib/schemas';
 import {
@@ -105,6 +105,7 @@ export async function saveEtckeeperConfig(
   config: Partial<EtckeeperConfig>
 ): Promise<{ success: boolean; message: string; config?: EtckeeperConfig }> {
   const session = await getSession();
+  assertInteractiveSession(session);
   assertActionPermitted(session, 'admin');
   await assertPluginEnabled('etckeeper-audit');
   const resp = await callAgentApiResponse<{

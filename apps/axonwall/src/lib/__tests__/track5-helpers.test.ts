@@ -100,7 +100,7 @@ describe('fleet satellite deep-merge preservation', () => {
           rxBytesTotal: 123456,
           txBytesTotal: 654321,
           kernelVersion: '6.12.0',
-          skuProfile: 'sku-vm-virtio',
+          skuProfile: 'sku-vm-virtio' as const,
         },
         activePolicyVersion: 3,
       },

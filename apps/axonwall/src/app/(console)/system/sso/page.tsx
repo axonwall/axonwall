@@ -157,6 +157,7 @@ function SsoSettingsPageContent() {
           <a
             href="/api/auth/sso/login"
             target="_blank"
+            rel="noopener noreferrer"
             className="bg-slate-800 hover:bg-slate-700 border border-slate-700 text-white text-sm font-medium px-4 py-2 rounded-lg transition cursor-pointer flex items-center gap-2 shadow-sm"
           >
             <ExternalLink className="w-4 h-4" />

@@ -280,23 +280,35 @@ func (m *NetFlowManager) GenerateAndSaveReport(req NetFlowReportRequest) (NetFlo
 
 	if strings.HasPrefix(webhook, "http://") || strings.HasPrefix(webhook, "https://") {
 		go func(u string, r NetFlowReportResponse) {
-			payload, _ := json.Marshal(map[string]any{
-				"source": "axonwall-netflow-report",
-				"report": r,
-			})
-			reqHTTP, err := http.NewRequest(http.MethodPost, u, bytes.NewReader(payload))
-			if err != nil {
-				return
-			}
-			reqHTTP.Header.Set("Content-Type", "application/json")
-			client := &http.Client{Timeout: 5 * time.Second}
-			resp, err := client.Do(reqHTTP)
-			if err == nil {
-				_ = resp.Body.Close()
-			}
+			client, tr := newSafeHTTPClient(SafeHTTPClientOptions{Timeout: 5 * time.Second})
+			defer tr.CloseIdleConnections()
+			postNetflowReportWebhookWithClient(u, r, client)
 		}(webhook, rep)
 	}
 	return rep, savedPath, nil
+}
+
+func postNetflowReportWebhookWithClient(u string, r NetFlowReportResponse, client *http.Client) error {
+	payload, _ := json.Marshal(map[string]any{
+		"source": "axonwall-netflow-report",
+		"report": r,
+	})
+	reqHTTP, err := http.NewRequest(http.MethodPost, u, bytes.NewReader(payload))
+	if err != nil {
+		return err
+	}
+	reqHTTP.Header.Set("Content-Type", "application/json")
+	if client == nil {
+		var tr *http.Transport
+		client, tr = newSafeHTTPClient(SafeHTTPClientOptions{Timeout: 5 * time.Second})
+		defer tr.CloseIdleConnections()
+	}
+	resp, err := client.Do(reqHTTP)
+	if err != nil {
+		return err
+	}
+	_ = resp.Body.Close()
+	return nil
 }
 
 func listSavedReportSnapshots(dir string) []string {

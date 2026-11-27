@@ -1,4 +1,7 @@
 import { NextResponse } from 'next/server';
+import { getSession } from '@/server/auth';
+import { assertActionPermitted } from '@/server/auth-guard';
+import { checkPluginApiGuard } from '@/server/plugin-guard';
 import {
   getNasDisksInventory,
   getNasPoolsRuntime,
@@ -14,6 +17,11 @@ import {
 
 export async function GET() {
   try {
+    const session = await getSession();
+    assertActionPermitted(session);
+    const guard = await checkPluginApiGuard('core-nas');
+    if (guard) return guard;
+
     const [diskData, pools, snapshots] = await Promise.all([
       getNasDisksInventory(),
       getNasPoolsRuntime(),
@@ -37,6 +45,11 @@ export async function GET() {
 
 export async function POST(req: Request) {
   try {
+    const session = await getSession();
+    assertActionPermitted(session, 'admin');
+    const guard = await checkPluginApiGuard('core-nas');
+    if (guard) return guard;
+
     const body = await req.json();
     if (body.action === 'snapshot') {
       const res = await createNasSnapshotAction(body.dataset, body.label);

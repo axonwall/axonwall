@@ -276,15 +276,27 @@ describe('Phase 4: Plugin Compilers', () => {
     };
 
     const output = compileFreeRadiusClients(config);
-    expect(output).toContain('client localhost');
+    expect(output).not.toContain('client localhost');
+    expect(output).not.toContain('testing123');
     expect(output).toContain('client ap_office_1');
     expect(output).toContain('ipaddr = 192.168.100.200');
     expect(output).toContain('secret = "radiussecret123"');
+    expect(output).toContain('require_message_authenticator = yes');
+    expect(output).toContain('limit_proxy_state = yes');
+
+    const withLocalhost = compileFreeRadiusClients({
+      ...config,
+      localhostSecret: 'local-gen-secret-999',
+    } as FreeRadiusPluginConfig);
+    expect(withLocalhost).toContain('client localhost');
+    expect(withLocalhost).toContain('secret = "local-gen-secret-999"');
+    expect(withLocalhost).toContain('require_message_authenticator = yes');
   });
 
   it('compiles Net-SNMP snmpd configuration', () => {
     const config: SnmpPluginConfig = {
       enabled: true,
+      version: 'v2c',
       community: 'secureReadOnly',
       sysLocation: 'Datacenter Rack 4',
       sysContact: 'ops@example.com',
@@ -292,6 +304,7 @@ describe('Phase 4: Plugin Compilers', () => {
     };
 
     const output = compileSnmpd(config);
+    expect(output).toContain('agentAddress udp:127.0.0.1:161,udp6:[::1]:161');
     expect(output).toContain('rocommunity secureReadOnly default');
     expect(output).toContain('sysLocation Datacenter Rack 4');
     expect(output).toContain('sysContact ops@example.com');

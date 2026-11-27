@@ -19,6 +19,8 @@ spec:
       serviceAccountName: {{ include "falco.fullname" . }}
       hostNetwork: true
       hostPID: true
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
       tolerations:
         - effect: NoSchedule
           key: node-role.kubernetes.io/master
@@ -28,10 +30,19 @@ spec:
           operator: Exists
       containers:
         - name: falco
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}{{- if .Values.image.digest }}@{{ .Values.image.digest }}{{- end }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           securityContext:
-            privileged: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+              add:
+                - BPF
+                - PERFMON
+                - SYS_PTRACE
+                - SYS_RESOURCE
+                - DAC_READ_SEARCH
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
           volumeMounts:
@@ -52,10 +63,13 @@ spec:
               readOnly: true
             - mountPath: /dev
               name: dev-fs
+              readOnly: true
             - mountPath: /sys/kernel/debug
               name: debug-fs
+              readOnly: true
             - mountPath: /sys/kernel/tracing
               name: trace-fs
+              readOnly: true
             - mountPath: /etc/falco/falco.yaml
               name: falco-config
               subPath: falco.yaml

@@ -335,6 +335,7 @@ describe('Track 4 API Routes & Server Actions Hardening', () => {
       await expect(getSystemPartitionsTelemetry()).rejects.toThrow(/Forbidden/);
 
       hoisted.sessionRef.current = makeSession('admin');
+      seedState((s) => enablePluginWithDependencies('cli-diagnostics-nastymap', s).state);
       const prevPath = process.env.PATH;
       process.env.PATH = '';
       try {
@@ -361,6 +362,7 @@ describe('Track 4 API Routes & Server Actions Hardening', () => {
     });
 
     it('uses subdomain vigil and returns no hardcoded compromise fixtures in vigilante', async () => {
+      seedState((s) => enablePluginWithDependencies('core-vigilante', s).state);
       const modules = await listSecurityModulesAction();
       const vigilSoc = modules.find((m) => m.id === 'vigil-soc');
       expect(vigilSoc?.subdomain).toBe('vigil');
@@ -374,6 +376,7 @@ describe('Track 4 API Routes & Server Actions Hardening', () => {
     });
 
     it('sends empty body on fleet sync, normalizes syncedSatellites, and sets isMac: true for MAC targets', async () => {
+      seedState((s) => enablePluginWithDependencies('fleet-controller', s).state);
       const requests: Array<{ path: string; body: string; contentType?: string }> = [];
       const srv = http.createServer((req, res) => {
         let raw = '';
@@ -528,9 +531,7 @@ describe('Track 4 API Routes & Server Actions Hardening', () => {
       );
 
       const selfDisabledRes = await selfMeshGet(new NextRequest('http://localhost/api/v1/vpn/mesh/self'));
-      expect(selfDisabledRes.status).toBe(200);
-      const selfBody = await selfDisabledRes.json();
-      expect(selfBody.data.network.wanInvite).toBeUndefined();
+      expect(selfDisabledRes.status).toBe(403);
 
       const keyDisabledRes = await selfKeysPost(
         new NextRequest('http://localhost/api/v1/vpn/mesh/self/keys', {
@@ -559,13 +560,31 @@ describe('Track 4 API Routes & Server Actions Hardening', () => {
       // Enable Headscale but keep allowSelfRegistration false.
       seedState((s) =>
         DesiredStateSchema.parse({
-          ...s,
+          ...enablePluginWithDependencies('headscale', s).state,
           headscale: {
             enabled: true,
             allowSelfRegistration: false,
+            wanInvite: {
+              enabled: true,
+              bindPort: 8443,
+              autoWindow: true,
+              requirePin: false,
+              portKnocking: {
+                enabled: true,
+                protocol: 'udp',
+                sequence: [41001, 42002],
+                stepTimeoutSec: 10,
+                openDurationSec: 60,
+              },
+            },
           },
         })
       );
+
+      const selfEnabledRes = await selfMeshGet(new NextRequest('http://localhost/api/v1/vpn/mesh/self'));
+      expect(selfEnabledRes.status).toBe(200);
+      const selfBody = await selfEnabledRes.json();
+      expect(selfBody.data.network.wanInvite).toBeUndefined();
 
       const keySelfRegOff = await selfKeysPost(
         new NextRequest('http://localhost/api/v1/vpn/mesh/self/keys', {

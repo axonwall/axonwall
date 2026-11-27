@@ -10,10 +10,19 @@ services:
     environment:
       - AXONWALL_SOCKET_GROUP=1001
       - AXONWALL_AGENT_TOKEN=${AXONWALL_AGENT_TOKEN:?AXONWALL_AGENT_TOKEN must be set}
+    cap_drop:
+      - ALL
     cap_add:
       - NET_ADMIN
       - NET_RAW
-      - SYS_ADMIN
+      - BPF
+      - PERFMON
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /run
     volumes:
       - /run/axonwalld:/run/axonwalld
       - /var/lib/axonwall:/var/lib/axonwall
@@ -26,7 +35,15 @@ services:
     container_name: axonwall-ui
     restart: unless-stopped
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /run
     environment:
       - NODE_ENV=production
       # Required: the UI refuses to sign/verify sessions without a real
@@ -34,12 +51,11 @@ services:
       #   JWT_SECRET=$(openssl rand -hex 32)
       - JWT_SECRET=${JWT_SECRET:?JWT_SECRET must be set (see comment above)}
       - AXONWALL_AGENT_TOKEN=${AXONWALL_AGENT_TOKEN:?AXONWALL_AGENT_TOKEN must be set}
-      - AXONWALL_ZTP_TOKEN=${AXONWALL_ZTP_TOKEN:?AXONWALL_ZTP_TOKEN must be set}
       - LOCAL_ADMIN_USER=${LOCAL_ADMIN_USER:-admin}
       - LOCAL_ADMIN_PASSWORD=${LOCAL_ADMIN_PASSWORD:?LOCAL_ADMIN_PASSWORD must be set}
       - AGENT_SOCKET=/run/axonwalld/agent.sock
       - AGENT_API_SOCKET=/run/axonwalld/agent-api.sock
-      - LDAP_URL=ldap://openldap:389
+      - LDAP_URL=ldaps://openldap:636
       - LDAP_BASE_DN=dc=axonwall,dc=internal
       - LDAP_BIND_DN=cn=admin,dc=axonwall,dc=internal
       - LDAP_BIND_PASSWORD=${LDAP_ADMIN_PASSWORD:?LDAP_ADMIN_PASSWORD must be set}
@@ -70,10 +86,17 @@ services:
     restart: unless-stopped
     ports:
       - "2966:2966"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /run
     environment:
       - NODE_ENV=production
       - CONTROLLER_PORT=2966
-      - JWT_SECRET=${JWT_SECRET:?JWT_SECRET must be set}
       - AXONWALL_FLEET_ENABLED=1
       - AXONWALL_AGENT_TOKEN=${AXONWALL_AGENT_TOKEN:?AXONWALL_AGENT_TOKEN must be set}
       - AXONWALL_AGENT_API_SOCK=/run/axonwalld/agent-api.sock
@@ -91,11 +114,14 @@ services:
     image: osixia/openldap:1.5.0@sha256:18742e9c449c9c1afe129d3f2f3ee15fb34cc43e5f940a20f3399728f41d7c28
     container_name: axonwall-ldap
     restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
     ports:
-      - "127.0.0.1:389:389"
+      - "127.0.0.1:636:636"
     environment:
       - LDAP_ORGANISATION=Axonwall
       - LDAP_DOMAIN=axonwall.internal
+      - LDAP_TLS=true
       - LDAP_ADMIN_PASSWORD=${LDAP_ADMIN_PASSWORD:?LDAP_ADMIN_PASSWORD must be set}
     volumes:
       - ../ldap/bootstrap.ldif:/container/service/slapd/assets/config/bootstrap/ldif/custom/50-bootstrap.ldif:ro
@@ -106,6 +132,8 @@ services:
     image: supabase/postgres:17.12.0.000@sha256:8630950b489ecc70563300180287a98c192a4a48f5ae00b4febdaeea1abe85de
     container_name: axonwall-supabase
     restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
     ports:
       - "127.0.0.1:5432:5432"
     environment:
@@ -115,9 +143,11 @@ services:
       - supabase_data:/var/lib/postgresql/data
 
   clickhouse:
-    image: clickhouse/clickhouse-server:24.8-alpine
+    image: clickhouse/clickhouse-server:24.8-alpine@sha256:b002e56ed5c16e224c312527f6fcba7e77216fec5d7a88a7828f59efc614feb5
     container_name: axonwall-clickhouse
     restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
     ports:
       - "127.0.0.1:8123:8123"
     environment:
@@ -132,6 +162,10 @@ services:
     image: victoriametrics/victoria-metrics:v1.156.0@sha256:da8a90ac0912f16589be2b96a6441a2fca4bca415c83783d972d92e3b5b66970
     container_name: axonwall-vm
     restart: unless-stopped
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     ports:
       - "127.0.0.1:8428:8428"
     command:
@@ -144,6 +178,10 @@ services:
     image: victoriametrics/victoria-logs:v1.24.0-victorialogs@sha256:1ec31ddccc39dc9ead2607cddbf2829be1eb5ad39890e72bba26b359be20801d
     container_name: axonwall-vl
     restart: unless-stopped
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     ports:
       - "127.0.0.1:9428:9428"
     command:

@@ -1,6 +1,171 @@
 import { XMLParser } from 'fast-xml-parser';
 import { geocodeIp } from './geoip.js';
 
+export const MAX_NMAP_XML_BYTES = 25 * 1024 * 1024;
+export const MAX_NMAP_XML_DEPTH = 128;
+
+const FORBIDDEN_ELEMENT_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+
+function getUtf8ByteLength(input) {
+  if (typeof Buffer !== 'undefined' && typeof Buffer.byteLength === 'function') {
+    return Buffer.byteLength(input, 'utf8');
+  }
+  let bytes = 0;
+  for (let i = 0; i < input.length; i++) {
+    const code = input.charCodeAt(i);
+    if (code <= 0x7f) {
+      bytes += 1;
+    } else if (code <= 0x7ff) {
+      bytes += 2;
+    } else if (code >= 0xd800 && code <= 0xdbff) {
+      if (i + 1 < input.length) {
+        const next = input.charCodeAt(i + 1);
+        if (next >= 0xdc00 && next <= 0xdfff) {
+          bytes += 4;
+          i += 1;
+          continue;
+        }
+      }
+      bytes += 3;
+    } else {
+      bytes += 3;
+    }
+  }
+  return bytes;
+}
+
+function assertSafeXmlNesting(xml, maxDepth = MAX_NMAP_XML_DEPTH) {
+  let depth = 0;
+  const len = xml.length;
+  let i = 0;
+
+  while (i < len) {
+    const lt = xml.indexOf('<', i);
+    if (lt === -1) break;
+
+    if (xml.startsWith('<!--', lt)) {
+      const end = xml.indexOf('-->', lt + 4);
+      if (end === -1) return 'Unterminated XML comment.';
+      i = end + 3;
+      continue;
+    }
+
+    if (xml.startsWith('<![CDATA[', lt)) {
+      const end = xml.indexOf(']]>', lt + 9);
+      if (end === -1) return 'Unterminated XML CDATA section.';
+      i = end + 3;
+      continue;
+    }
+
+    if (xml.startsWith('<?', lt)) {
+      const end = xml.indexOf('?>', lt + 2);
+      if (end === -1) return 'Unterminated XML processing instruction.';
+      i = end + 2;
+      continue;
+    }
+
+    if (xml.startsWith('<!', lt)) {
+      let j = lt + 2;
+      let quote = 0;
+      let bracketDepth = 0;
+      while (j < len) {
+        const ch = xml.charCodeAt(j);
+        if (quote !== 0) {
+          if (ch === quote) quote = 0;
+        } else if (ch === 34 || ch === 39) {
+          quote = ch;
+        } else if (ch === 91) {
+          bracketDepth++;
+        } else if (ch === 93 && bracketDepth > 0) {
+          bracketDepth--;
+        } else if (ch === 62 && bracketDepth === 0) {
+          break;
+        }
+        j++;
+      }
+      if (j >= len) return 'Unterminated XML declaration.';
+      const decl = xml.slice(lt, j + 1);
+      if (/<!ENTITY\b/i.test(decl)) {
+        return 'XML entity declarations are not permitted.';
+      }
+      i = j + 1;
+      continue;
+    }
+
+    const isClosing = xml.charCodeAt(lt + 1) === 47;
+    let j = lt + 1;
+    let quote = 0;
+    let lastNonSpace = 0;
+    while (j < len) {
+      const ch = xml.charCodeAt(j);
+      if (quote !== 0) {
+        if (ch === quote) quote = 0;
+      } else if (ch === 34 || ch === 39) {
+        quote = ch;
+        lastNonSpace = ch;
+      } else if (ch === 62) {
+        break;
+      } else if (ch > 32) {
+        lastNonSpace = ch;
+      }
+      j++;
+    }
+    if (j >= len) break;
+
+    if (isClosing) {
+      if (depth > 0) depth--;
+    } else if (lastNonSpace !== 47) {
+      const firstChar = xml.charCodeAt(lt + 1);
+      if (
+        (firstChar >= 65 && firstChar <= 90) ||
+        (firstChar >= 97 && firstChar <= 122) ||
+        firstChar === 95 ||
+        firstChar === 58
+      ) {
+        depth++;
+        if (depth > maxDepth) {
+          return `XML nesting depth exceeds maximum allowed limit (${maxDepth}).`;
+        }
+      }
+    }
+
+    i = j + 1;
+  }
+
+  return null;
+}
+
+function validateXmlPayloadSafety(xmlString) {
+  if (
+    xmlString.length > MAX_NMAP_XML_BYTES ||
+    (xmlString.length * 3 > MAX_NMAP_XML_BYTES && getUtf8ByteLength(xmlString) > MAX_NMAP_XML_BYTES)
+  ) {
+    return `XML payload exceeds maximum allowed size of ${MAX_NMAP_XML_BYTES} bytes (25 MB).`;
+  }
+  return assertSafeXmlNesting(xmlString, MAX_NMAP_XML_DEPTH);
+}
+
+function buildInvalidParseResult(error, filename = '') {
+  return {
+    isValid: false,
+    error,
+    filename,
+    scanner: 'nmap',
+    args: '',
+    start: 0,
+    startstr: '',
+    version: '0.0',
+    hosts: [],
+    scanInfo: [],
+    runStats: {
+      finished: { time: 0, timestr: '', elapsed: 0, summary: '', exit: 'error' },
+      hosts: { up: 0, down: 0, total: 0 }
+    },
+    verbose: 0,
+    debugging: 0
+  };
+}
+
 const arrayTags = new Set([
   'host',
   'address',
@@ -40,7 +205,8 @@ function parseScriptElement(rawScript) {
   if (rawScript.elem) {
     const rawElems = ensureArray(rawScript.elem);
     for (const elem of rawElems) {
-      const key = elem['@_key'] || 'val';
+      const key = String(elem['@_key'] || 'val');
+      if (FORBIDDEN_ELEMENT_KEYS.has(key)) continue;
       elements[key] = String(elem['#text'] || elem || '');
     }
   }
@@ -337,25 +503,13 @@ function parseHostElement(rawHost) {
  * @returns {Object} Structured NmapRun
  */
 export function parseNmapXml(xmlString, filename = '') {
-  if (!xmlString || typeof xmlString !== 'string') {
-    return {
-      isValid: false,
-      error: 'Empty XML input',
-      filename,
-      scanner: 'nmap',
-      args: '',
-      start: 0,
-      startstr: '',
-      version: '0.0',
-      hosts: [],
-      scanInfo: [],
-      runStats: {
-        finished: { time: 0, timestr: '', elapsed: 0, summary: '', exit: 'error' },
-        hosts: { up: 0, down: 0, total: 0 }
-      },
-      verbose: 0,
-      debugging: 0
-    };
+  if (!xmlString || typeof xmlString !== 'string' || !xmlString.trim()) {
+    return buildInvalidParseResult('Empty XML input', filename);
+  }
+
+  const safetyError = validateXmlPayloadSafety(xmlString);
+  if (safetyError) {
+    return buildInvalidParseResult(safetyError, filename);
   }
 
   const parser = new XMLParser(xmlParserOptions);
@@ -363,46 +517,12 @@ export function parseNmapXml(xmlString, filename = '') {
   try {
     parsed = parser.parse(xmlString);
   } catch (err) {
-    return {
-      isValid: false,
-      error: `XML Parsing Error: ${err.message}`,
-      filename,
-      scanner: 'nmap',
-      args: '',
-      start: 0,
-      startstr: '',
-      version: '0.0',
-      hosts: [],
-      scanInfo: [],
-      runStats: {
-        finished: { time: 0, timestr: '', elapsed: 0, summary: '', exit: 'error' },
-        hosts: { up: 0, down: 0, total: 0 }
-      },
-      verbose: 0,
-      debugging: 0
-    };
+    return buildInvalidParseResult(`XML Parsing Error: ${err.message}`, filename);
   }
 
   const nmaprun = parsed.nmaprun;
   if (!nmaprun) {
-    return {
-      isValid: false,
-      error: 'Root <nmaprun> element not found in XML',
-      filename,
-      scanner: 'nmap',
-      args: '',
-      start: 0,
-      startstr: '',
-      version: '0.0',
-      hosts: [],
-      scanInfo: [],
-      runStats: {
-        finished: { time: 0, timestr: '', elapsed: 0, summary: '', exit: 'error' },
-        hosts: { up: 0, down: 0, total: 0 }
-      },
-      verbose: 0,
-      debugging: 0
-    };
+    return buildInvalidParseResult('Root <nmaprun> element not found in XML', filename);
   }
 
   const scanner = nmaprun['@_scanner'] || 'nmap';

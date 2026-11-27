@@ -51,10 +51,12 @@
 #define POLICY_IDX_ALLOW_BPF_TOKENS      3
 #define POLICY_IDX_AUDIT_BPF_TOKENS      4
 #define POLICY_IDX_TOKEN_SAFE_PROGS_LO   5
+#define POLICY_IDX_TOKEN_SAFE_PROGS_HI   6
 
 /*
  * Safe networking BPF program types permitted for delegated UserNS BPF_TOKEN
- * containers (zero arbitrary kernel memory read helpers):
+ * containers (zero arbitrary kernel memory read helpers; aligned 1:1 with
+ * kernelSafeBpfProgBits in engine/bpf_token.go):
  *   - BPF_PROG_TYPE_SOCKET_FILTER (1)
  *   - BPF_PROG_TYPE_SCHED_CLS (3)
  *   - BPF_PROG_TYPE_SCHED_ACT (4)
@@ -64,11 +66,16 @@
  *   - BPF_PROG_TYPE_LWT_IN..LWT_XMIT (10..12)
  *   - BPF_PROG_TYPE_SOCK_OPS (13)
  *   - BPF_PROG_TYPE_SK_SKB (14)
+ *   - BPF_PROG_TYPE_CGROUP_DEVICE (15)
  *   - BPF_PROG_TYPE_SK_MSG (17)
  *   - BPF_PROG_TYPE_CGROUP_SOCK_ADDR (18)
+ *   - BPF_PROG_TYPE_LWT_SEG6LOCAL (19)
  *   - BPF_PROG_TYPE_SK_REUSEPORT (21)
+ *   - BPF_PROG_TYPE_FLOW_DISSECTOR (22)
+ *   - BPF_PROG_TYPE_CGROUP_SYSCTL (23)
  *   - BPF_PROG_TYPE_CGROUP_SOCKOPT (25)
  *   - BPF_PROG_TYPE_SK_LOOKUP (30)
+ *   - BPF_PROG_TYPE_NETFILTER (32)
  */
 #define DEFAULT_SAFE_TOKEN_PROG_MASK ( \
 	(1ULL << BPF_PROG_TYPE_SOCKET_FILTER) | \
@@ -77,14 +84,115 @@
 	(1ULL << BPF_PROG_TYPE_XDP) | \
 	(1ULL << BPF_PROG_TYPE_CGROUP_SKB) | \
 	(1ULL << BPF_PROG_TYPE_CGROUP_SOCK) | \
+	(1ULL << BPF_PROG_TYPE_LWT_IN) | \
+	(1ULL << BPF_PROG_TYPE_LWT_OUT) | \
+	(1ULL << BPF_PROG_TYPE_LWT_XMIT) | \
 	(1ULL << BPF_PROG_TYPE_SOCK_OPS) | \
 	(1ULL << BPF_PROG_TYPE_SK_SKB) | \
+	(1ULL << BPF_PROG_TYPE_CGROUP_DEVICE) | \
 	(1ULL << BPF_PROG_TYPE_SK_MSG) | \
 	(1ULL << BPF_PROG_TYPE_CGROUP_SOCK_ADDR) | \
+	(1ULL << BPF_PROG_TYPE_LWT_SEG6LOCAL) | \
 	(1ULL << BPF_PROG_TYPE_SK_REUSEPORT) | \
+	(1ULL << BPF_PROG_TYPE_FLOW_DISSECTOR) | \
+	(1ULL << BPF_PROG_TYPE_CGROUP_SYSCTL) | \
 	(1ULL << BPF_PROG_TYPE_CGROUP_SOCKOPT) | \
 	(1ULL << 30) | \
 	(1ULL << 32) \
+)
+
+/*
+ * Safe networking BPF_TOKEN bitmasks for allowed_cmds, allowed_maps, and
+ * allowed_attachs (aligned 1:1 with engine/bpf_token.go). Rejects host-global
+ * introspection cmds (PROG_GET_NEXT_ID, TASK_FD_QUERY, ITER_CREATE), tracing
+ * maps (PERF_EVENT_ARRAY, STACK_TRACE, STRUCT_OPS, ARENA), and tracing/LSM
+ * attach types (fentry, fexit, kprobe_multi, lsm_mac, struct_ops, uprobe).
+ */
+#define SAFE_TOKEN_CMD_MASK ( \
+	(1ULL << 0)  | /* map_create */ \
+	(1ULL << 1)  | /* map_lookup_elem */ \
+	(1ULL << 2)  | /* map_update_elem */ \
+	(1ULL << 3)  | /* map_delete_elem */ \
+	(1ULL << 4)  | /* map_get_next_key */ \
+	(1ULL << 5)  | /* prog_load */ \
+	(1ULL << 6)  | /* obj_pin */ \
+	(1ULL << 7)  | /* obj_get */ \
+	(1ULL << 8)  | /* prog_attach */ \
+	(1ULL << 9)  | /* prog_detach */ \
+	(1ULL << 10) | /* prog_test_run */ \
+	(1ULL << 18) | /* btf_load */ \
+	(1ULL << 21) | /* map_lookup_and_delete_elem */ \
+	(1ULL << 22) | /* map_freeze */ \
+	(1ULL << 24) | /* map_lookup_batch */ \
+	(1ULL << 25) | /* map_lookup_and_delete_batch */ \
+	(1ULL << 26) | /* map_update_batch */ \
+	(1ULL << 27) | /* map_delete_batch */ \
+	(1ULL << 28) | /* link_create */ \
+	(1ULL << 29) | /* link_update */ \
+	(1ULL << 34) | /* link_detach */ \
+	(1ULL << 35) | /* prog_bind_map */ \
+	(1ULL << 36)   /* token_create */ \
+)
+
+#define SAFE_TOKEN_MAP_MASK ( \
+	(1ULL << 1)  | /* hash */ \
+	(1ULL << 2)  | /* array */ \
+	(1ULL << 3)  | /* prog_array */ \
+	(1ULL << 5)  | /* percpu_hash */ \
+	(1ULL << 6)  | /* percpu_array */ \
+	(1ULL << 8)  | /* cgroup_array */ \
+	(1ULL << 9)  | /* lru_hash */ \
+	(1ULL << 10) | /* lru_percpu_hash */ \
+	(1ULL << 11) | /* lpm_trie */ \
+	(1ULL << 12) | /* array_of_maps */ \
+	(1ULL << 13) | /* hash_of_maps */ \
+	(1ULL << 14) | /* devmap */ \
+	(1ULL << 15) | /* sockmap */ \
+	(1ULL << 16) | /* cpumap */ \
+	(1ULL << 17) | /* xskmap */ \
+	(1ULL << 18) | /* sockhash */ \
+	(1ULL << 19) | /* cgroup_storage */ \
+	(1ULL << 22) | /* queue */ \
+	(1ULL << 23) | /* stack */ \
+	(1ULL << 24) | /* sk_storage */ \
+	(1ULL << 25) | /* devmap_hash */ \
+	(1ULL << 27) | /* ringbuf */ \
+	(1ULL << 28) | /* inode_storage */ \
+	(1ULL << 29) | /* task_storage */ \
+	(1ULL << 30) | /* bloom_filter */ \
+	(1ULL << 31) | /* user_ringbuf */ \
+	(1ULL << 32)   /* cgrp_storage */ \
+)
+
+#define SAFE_TOKEN_ATTACH_MASK ( \
+	(1ULL << 0)  | /* cgroup_inet_ingress */ \
+	(1ULL << 1)  | /* cgroup_inet_egress */ \
+	(1ULL << 2)  | /* cgroup_inet_sock_create */ \
+	(1ULL << 3)  | /* cgroup_sock_ops */ \
+	(1ULL << 4)  | /* sk_skb_stream_parser */ \
+	(1ULL << 5)  | /* sk_skb_stream_verdict */ \
+	(1ULL << 6)  | /* cgroup_device */ \
+	(1ULL << 7)  | /* sk_msg_verdict */ \
+	(1ULL << 8)  | /* cgroup_inet4_bind */ \
+	(1ULL << 9)  | /* cgroup_inet6_bind */ \
+	(1ULL << 10) | /* cgroup_inet4_connect */ \
+	(1ULL << 11) | /* cgroup_inet6_connect */ \
+	(1ULL << 12) | /* cgroup_inet4_post_bind */ \
+	(1ULL << 13) | /* cgroup_inet6_post_bind */ \
+	(1ULL << 14) | /* cgroup_udp4_sendmsg */ \
+	(1ULL << 15) | /* cgroup_udp6_sendmsg */ \
+	(1ULL << 17) | /* flow_dissector */ \
+	(1ULL << 18) | /* cgroup_sysctl */ \
+	(1ULL << 19) | /* cgroup_udp4_recvmsg */ \
+	(1ULL << 20) | /* cgroup_udp6_recvmsg */ \
+	(1ULL << 21) | /* cgroup_getsockopt */ \
+	(1ULL << 22) | /* cgroup_setsockopt */ \
+	(1ULL << 34) | /* cgroup_inet_sock_release */ \
+	(1ULL << 36) | /* sk_lookup */ \
+	(1ULL << 37) | /* xdp */ \
+	(1ULL << 45) | /* netfilter */ \
+	(1ULL << 46) | /* tcx_ingress */ \
+	(1ULL << 47)   /* tcx_egress */ \
 )
 
 /*
@@ -237,11 +345,43 @@ static __always_inline int is_policy_enabled(__u32 policy_idx, int default_val)
 
 static __always_inline __u64 get_safe_token_prog_mask(void)
 {
-	__u32 idx = POLICY_IDX_TOKEN_SAFE_PROGS_LO;
-	__u32 *custom_lo = bpf_map_lookup_elem(&policy_config, &idx);
-	if (custom_lo && *custom_lo != 0)
-		return ((__u64)(*custom_lo)) & ~FORBIDDEN_RING0_TOKEN_PROG_MASK;
+	__u32 idx_lo = POLICY_IDX_TOKEN_SAFE_PROGS_LO;
+	__u32 idx_hi = POLICY_IDX_TOKEN_SAFE_PROGS_HI;
+	__u32 *custom_lo = bpf_map_lookup_elem(&policy_config, &idx_lo);
+	__u32 *custom_hi = bpf_map_lookup_elem(&policy_config, &idx_hi);
+	__u64 lo = custom_lo ? (__u64)(*custom_lo) : 0;
+	__u64 hi = custom_hi ? (__u64)(*custom_hi) : 0;
+	__u64 custom = (hi << 32) | lo;
+	if (custom != 0)
+		return custom & DEFAULT_SAFE_TOKEN_PROG_MASK & ~FORBIDDEN_RING0_TOKEN_PROG_MASK;
 	return DEFAULT_SAFE_TOKEN_PROG_MASK;
+}
+
+static __always_inline int validate_bpf_token_masks(const struct bpf_token *token)
+{
+	if (!token)
+		return -1;
+
+	__u64 allowed_progs = BPF_CORE_READ(token, allowed_progs);
+	__u64 allowed_cmds = BPF_CORE_READ(token, allowed_cmds);
+	__u64 allowed_maps = BPF_CORE_READ(token, allowed_maps);
+	__u64 allowed_attachs = BPF_CORE_READ(token, allowed_attachs);
+	int ns_level = BPF_CORE_READ(token, userns, level);
+
+	if (ns_level <= 0)
+		return -1;
+
+	__u64 safe_progs = get_safe_token_prog_mask();
+	if ((allowed_progs & FORBIDDEN_RING0_TOKEN_PROG_MASK) != 0 ||
+	    (allowed_progs & ~safe_progs) != 0)
+		return -2;
+
+	if ((allowed_cmds & ~SAFE_TOKEN_CMD_MASK) != 0 ||
+	    (allowed_maps & ~SAFE_TOKEN_MAP_MASK) != 0 ||
+	    (allowed_attachs & ~SAFE_TOKEN_ATTACH_MASK) != 0)
+		return -3;
+
+	return 0;
 }
 
 static __always_inline void emit_lsm_event(__u32 hook_id, __u32 blocked,
@@ -320,14 +460,18 @@ long BPF_PROG(copyfail_guard, struct socket *sock, struct sockaddr *address, int
 	int enforce = is_policy_enabled(POLICY_IDX_ENFORCE_COPYFAIL, 1);
 	emit_lsm_event(HOOK_ID_SOCKET_BIND_AEAD, enforce ? 1 : 0, &id, alg.name, 1);
 
-	return enforce ? -EPERM : 0;
+	asm volatile("" : "+r"(enforce));
+	if (enforce)
+		return -EPERM;
+	return 0;
 }
 
 /*
  * 2. BPF_PROG_LOAD Lockdown + Linux 6.9+ Delegated BPF_TOKEN Mediation:
  * Permits host (s_dev, i_ino) allowlisted loaders (axonwalld, bpftool) AND
  * unprivileged User-Namespaced containers (user_ns->level > 0) holding a
- * delegated BPF_TOKEN (prog_token_fd > 0) for safe networking program types.
+ * delegated BPF_TOKEN (prog_flags & BPF_F_TOKEN_FD && prog_token_fd > 0) for
+ * safe networking program types.
  * Strictly blocks Ring-0 tracing/rootkit program types regardless of token.
  */
 SEC("lsm/bpf")
@@ -344,11 +488,20 @@ long BPF_PROG(restrict_bpf_load, int cmd, union bpf_attr *attr, unsigned int siz
 	if (current_exe_has_flag(ALLOW_FLAG_BPF_LOAD, &id))
 		return 0;
 
-	/* Inspect prog_type and prog_token_fd for Linux 6.9+ BPF_TOKEN delegation */
+	/* Inspect prog_type, prog_flags, and prog_token_fd for Linux 6.9+ BPF_TOKEN delegation */
 	__u32 prog_type = 0;
+	__u32 prog_flags = 0;
 	__s32 prog_token_fd = 0;
 	if (attr) {
-		bpf_probe_read_kernel(&prog_type, sizeof(prog_type), attr);
+		if (size >= sizeof(prog_type))
+			bpf_probe_read_kernel(&prog_type, sizeof(prog_type), attr);
+		if (size >= __builtin_offsetof(union bpf_attr, prog_flags) + sizeof(__u32)) {
+			bpf_probe_read_kernel(
+				&prog_flags,
+				sizeof(prog_flags),
+				(const char *)attr + __builtin_offsetof(union bpf_attr, prog_flags)
+			);
+		}
 		if (size >= __builtin_offsetof(union bpf_attr, prog_token_fd) + sizeof(__s32)) {
 			bpf_probe_read_kernel(
 				&prog_token_fd,
@@ -358,7 +511,7 @@ long BPF_PROG(restrict_bpf_load, int cmd, union bpf_attr *attr, unsigned int siz
 		}
 	}
 
-	if (prog_token_fd > 0 && is_policy_enabled(POLICY_IDX_ALLOW_BPF_TOKENS, 1)) {
+	if ((prog_flags & BPF_F_TOKEN_FD) != 0 && prog_token_fd > 0 && is_policy_enabled(POLICY_IDX_ALLOW_BPF_TOKENS, 1)) {
 		int userns_level = read_current_userns_level();
 		__u64 prog_bit = (prog_type < 64) ? (1ULL << prog_type) : 0;
 		__u64 safe_mask = get_safe_token_prog_mask();
@@ -376,14 +529,20 @@ long BPF_PROG(restrict_bpf_load, int cmd, union bpf_attr *attr, unsigned int siz
 		const char tok_deny[SALG_NAME_LEN] = "BPF_TOKEN_FORBIDDEN_RING0_PROG";
 		int enforce_tok = is_policy_enabled(POLICY_IDX_ENFORCE_BPF_LOAD, 1);
 		emit_lsm_event(HOOK_ID_BPF_TOKEN_BLOCKED, enforce_tok ? 1 : 0, &id, tok_deny, 1);
-		return enforce_tok ? -EPERM : 0;
+		asm volatile("" : "+r"(enforce_tok));
+		if (enforce_tok)
+			return -EPERM;
+		return 0;
 	}
 
 	const char detail[SALG_NAME_LEN] = "BPF_PROG_LOAD";
 	int enforce = is_policy_enabled(POLICY_IDX_ENFORCE_BPF_LOAD, 1);
 	emit_lsm_event(HOOK_ID_BPF_PROG_LOAD, enforce ? 1 : 0, &id, detail, 1);
 
-	return enforce ? -EPERM : 0;
+	asm volatile("" : "+r"(enforce));
+	if (enforce)
+		return -EPERM;
+	return 0;
 }
 
 /*
@@ -403,14 +562,17 @@ long BPF_PROG(block_uring_sqpoll, int ret)
 	int enforce = is_policy_enabled(POLICY_IDX_ENFORCE_URING_SQPOLL, 1);
 	emit_lsm_event(HOOK_ID_URING_SQPOLL, enforce ? 1 : 0, &id, detail, 1);
 
-	return enforce ? -EPERM : 0;
+	asm volatile("" : "+r"(enforce));
+	if (enforce)
+		return -EPERM;
+	return 0;
 }
 
 /*
  * 4. Linux 6.9+ BPF_TOKEN_CREATE Superblock Bitmask Guard:
- * Inspects token->allowed_progs and token->userns->level via CO-RE when a
- * container calls bpf(BPF_TOKEN_CREATE). Blocks minting tokens whose bpffs
- * mount accidentally delegated Ring-0 tracing/LSM program types or init_user_ns.
+ * Inspects token->allowed_{progs,cmds,maps,attachs} and token->userns->level
+ * via CO-RE when a container calls bpf(BPF_TOKEN_CREATE). Blocks minting
+ * tokens that delegate outside safe networking allowlists or init_user_ns.
  */
 SEC("lsm/bpf_token_create")
 long BPF_PROG(guard_bpf_token_create, struct bpf_token *token, union bpf_attr *attr,
@@ -429,18 +591,20 @@ long BPF_PROG(guard_bpf_token_create, struct bpf_token *token, union bpf_attr *a
 		return -EPERM;
 	}
 
-	__u64 allowed_progs = BPF_CORE_READ(token, allowed_progs);
-	int ns_level = BPF_CORE_READ(token, userns, level);
-
-	if (ns_level <= 0) {
+	int tok_rc = validate_bpf_token_masks(token);
+	if (tok_rc == -1) {
 		const char ns_detail[SALG_NAME_LEN] = "BPF_TOKEN_CREATE_INIT_USERNS_DENIED";
 		emit_lsm_event(HOOK_ID_BPF_TOKEN_BLOCKED, 1, &id, ns_detail, 1);
 		return -EPERM;
 	}
-
-	if ((allowed_progs & FORBIDDEN_RING0_TOKEN_PROG_MASK) != 0) {
+	if (tok_rc == -2) {
 		const char unsafe_detail[SALG_NAME_LEN] = "BPF_TOKEN_CREATE_UNSAFE_TRACING_MASK";
 		emit_lsm_event(HOOK_ID_BPF_TOKEN_BLOCKED, 1, &id, unsafe_detail, 1);
+		return -EPERM;
+	}
+	if (tok_rc != 0) {
+		const char mask_detail[SALG_NAME_LEN] = "BPF_TOKEN_CREATE_UNSAFE_DELEGATION_MASK";
+		emit_lsm_event(HOOK_ID_BPF_TOKEN_BLOCKED, 1, &id, mask_detail, 1);
 		return -EPERM;
 	}
 
@@ -454,8 +618,8 @@ long BPF_PROG(guard_bpf_token_create, struct bpf_token *token, union bpf_attr *a
 
 /*
  * 5. Linux 6.9+ BPF_TOKEN Command Mediator:
- * Verifies every token-backed bpf() command at execution time against
- * FORBIDDEN_RING0_TOKEN_PROG_MASK and active token delegation policy.
+ * Verifies every token-backed bpf() command at execution time against safe
+ * networking allowlist masks (progs, cmds, maps, attachs) and active policy.
  */
 SEC("lsm/bpf_token_cmd")
 long BPF_PROG(audit_bpf_token_cmd, const struct bpf_token *token, enum bpf_cmd cmd, int ret)
@@ -472,11 +636,18 @@ long BPF_PROG(audit_bpf_token_cmd, const struct bpf_token *token, enum bpf_cmd c
 		return -EPERM;
 	}
 
-	__u64 allowed_progs = BPF_CORE_READ(token, allowed_progs);
-	if ((allowed_progs & FORBIDDEN_RING0_TOKEN_PROG_MASK) != 0) {
+	int tok_rc = validate_bpf_token_masks(token);
+	if (tok_rc != 0) {
 		read_current_exe_id(&id);
 		const char unsafe_detail[SALG_NAME_LEN] = "BPF_TOKEN_CMD_UNSAFE_PROGS";
 		emit_lsm_event(HOOK_ID_BPF_TOKEN_BLOCKED, 1, &id, unsafe_detail, 1);
+		return -EPERM;
+	}
+
+	if (cmd < 0 || cmd >= 64 || (((1ULL << (__u32)cmd) & SAFE_TOKEN_CMD_MASK) == 0)) {
+		read_current_exe_id(&id);
+		const char cmd_detail[SALG_NAME_LEN] = "BPF_TOKEN_CMD_UNSAFE_CMD";
+		emit_lsm_event(HOOK_ID_BPF_TOKEN_BLOCKED, 1, &id, cmd_detail, 1);
 		return -EPERM;
 	}
 

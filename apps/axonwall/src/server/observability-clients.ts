@@ -238,9 +238,14 @@ export async function queryVictoriaMetricsRange(
     };
   }
 
-  const safeStep = Math.max(5, Math.floor(stepSec || 60));
+  const MAX_VM_RANGE_SPAN_SEC = 90 * 86400;
+  const MAX_VM_RANGE_POINTS = 10_000;
+  const rawStep = Math.max(5, Math.floor(stepSec || 60));
   const safeEnd = Math.floor(endSec || Date.now() / 1000);
-  const safeStart = Math.min(safeEnd - safeStep, Math.floor(startSec || safeEnd - 3600));
+  const rawStart = Math.min(safeEnd - rawStep, Math.floor(startSec || safeEnd - 3600));
+  const safeStart = Math.max(rawStart, safeEnd - MAX_VM_RANGE_SPAN_SEC);
+  const spanSec = Math.max(rawStep, safeEnd - safeStart);
+  const safeStep = Math.max(rawStep, Math.ceil(spanSec / MAX_VM_RANGE_POINTS));
 
   const params = new URLSearchParams({
     query: trimmed,

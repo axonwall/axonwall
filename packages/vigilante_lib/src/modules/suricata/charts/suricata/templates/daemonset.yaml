@@ -1,3 +1,11 @@
+{{- $iface := required "interface is required" .Values.interface -}}
+{{- if not (regexMatch "^[a-zA-Z0-9_.:-]+$" $iface) -}}
+{{- fail (printf "invalid network interface name %q" $iface) -}}
+{{- end -}}
+{{- $runMode := required "runMode is required" .Values.runMode -}}
+{{- if not (regexMatch "^(workers|autofp|single)$" $runMode) -}}
+{{- fail (printf "invalid suricata runMode %q" $runMode) -}}
+{{- end -}}
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
@@ -16,26 +24,51 @@ spec:
         app.kubernetes.io/name: {{ include "suricata.name" . }}
         app.kubernetes.io/instance: {{ .Release.Name }}
     spec:
+      automountServiceAccountToken: false
       hostNetwork: true
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
       containers:
         - name: suricata
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           securityContext:
+            allowPrivilegeEscalation: false
             capabilities:
+              drop:
+                - ALL
               add:
                 - NET_ADMIN
                 - NET_RAW
-                - SYS_NICE
+          command:
+            - suricata
+          args:
+            - -i
+            - {{ $iface | quote }}
+            - --runmode
+            - {{ $runMode | quote }}
+            - -l
+            - /var/log/suricata
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - mountPath: /var/log/suricata
+              name: var-log-suricata
+        {{- if .Values.pcapSpool.enabled }}
+        - name: pcap-spooler
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
           command:
             - /bin/sh
             - -c
             - |
-              echo "[suricata] Starting in mirrored mode on {{ .Values.interface }}..."
-              {{- if .Values.pcapSpool.enabled }}
               mkdir -p /var/log/suricata /pcap-spool
-              # Background watcher to replay PCAPs dropped into spool directory
-              (while true; do
+              while true; do
                 for f in /pcap-spool/*.pcap /pcap-spool/*.pcapng; do
                   if [ -f "$f" ]; then
                     echo "[suricata:pcap] Replaying $f..."
@@ -44,18 +77,20 @@ spec:
                   fi
                 done
                 sleep 2
-              done) &
-              {{- end }}
-              exec suricata -i {{ .Values.interface }} --runmode {{ .Values.runMode }} -l /var/log/suricata
+              done
           resources:
-            {{- toYaml .Values.resources | nindent 12 }}
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
           volumeMounts:
             - mountPath: /var/log/suricata
               name: var-log-suricata
-            {{- if .Values.pcapSpool.enabled }}
             - mountPath: /pcap-spool
               name: pcap-spool
-            {{- end }}
+        {{- end }}
       volumes:
         - name: var-log-suricata
           emptyDir: {}

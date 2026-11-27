@@ -4,6 +4,7 @@ import { useActionState, useEffect, useState } from 'react';
 import { Shield, Lock, User, AlertCircle, Key, Building2 } from 'lucide-react';
 import { loginAction } from '../../../server/auth';
 import { Logo } from '../../../components/Logo';
+import { resolveLoginQueryError } from '../../../lib/login-errors';
 
 export default function LoginPage() {
   const [state, formAction, isPending] = useActionState(loginAction, null);
@@ -12,13 +13,13 @@ export default function LoginPage() {
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
-    const err = params.get('error');
-    if (err) {
-      setQueryError(err);
+    const mappedErr = resolveLoginQueryError(params.get('error'));
+    if (mappedErr) {
+      setQueryError(mappedErr);
     }
     const u = params.get('username');
     if (u && u.trim()) {
-      setUsername(u.trim());
+      setUsername(u.trim().slice(0, 128));
     }
   }, []);
 

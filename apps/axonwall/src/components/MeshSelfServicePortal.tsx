@@ -24,6 +24,7 @@ import {
   Trash2,
   X,
 } from 'lucide-react';
+import { buildTailscaleConnectCommand, sanitizeHttpUrl } from '@/lib/shell-quote';
 
 interface SelfDevice {
   id: string | number;
@@ -73,21 +74,12 @@ interface SelfPayload {
 type ClientOsTab = 'linux' | 'macos' | 'windows' | 'mobile' | 'docker';
 type WizardTab = 'authkey' | 'approve';
 
-const WELCOME_STORAGE_KEY = 'axonwall_mesh_welcome';
-
 export function MeshSelfServicePortal() {
   const [data, setData] = useState<SelfPayload | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
-
-  // Welcome starter key from invite redemption
-  const [welcomeBanner, setWelcomeBanner] = useState<{
-    starterKey: { id: string | number; key: string; expiration?: string } | null;
-    serverUrl: string;
-    magicDnsDomain: string;
-  } | null>(null);
 
   // Add Device modal
   const [isAddDeviceOpen, setIsAddDeviceOpen] = useState(false);
@@ -141,27 +133,15 @@ export function MeshSelfServicePortal() {
 
   useEffect(() => {
     void loadSelf();
-    try {
-      const raw = sessionStorage.getItem(WELCOME_STORAGE_KEY);
-      if (raw) {
-        const parsed = JSON.parse(raw);
-        setWelcomeBanner(parsed);
-        if (parsed?.starterKey?.key) {
-          setGeneratedKey(parsed.starterKey.key);
-        }
-        sessionStorage.removeItem(WELCOME_STORAGE_KEY);
-      }
-    } catch {}
   }, [loadSelf]);
 
   const effectiveServerUrl = useMemo(() => {
-    const u = data?.network?.serverUrl?.trim() || welcomeBanner?.serverUrl?.trim() || '';
-    return u;
-  }, [data?.network?.serverUrl, welcomeBanner?.serverUrl]);
+    return sanitizeHttpUrl(data?.network?.serverUrl) ?? '';
+  }, [data?.network?.serverUrl]);
 
   useEffect(() => {
     let active = true;
-    if (!effectiveServerUrl || (!isAddDeviceOpen && !welcomeBanner)) {
+    if (!effectiveServerUrl || !isAddDeviceOpen) {
       return;
     }
     import('qrcode')
@@ -175,7 +155,7 @@ export function MeshSelfServicePortal() {
     return () => {
       active = false;
     };
-  }, [effectiveServerUrl, isAddDeviceOpen, welcomeBanner]);
+  }, [effectiveServerUrl, isAddDeviceOpen]);
 
   const handleCopy = async (text: string, id: string) => {
     try {
@@ -336,21 +316,20 @@ export function MeshSelfServicePortal() {
   };
 
   const loginArg = effectiveServerUrl || '<YOUR_HEADSCALE_URL>';
-  const keyArg = generatedKey || '<YOUR_AUTH_KEY>';
   const commandByOs: Record<ClientOsTab, { label: string; command: string; hint: string }> = {
     linux: {
       label: 'Linux',
-      command: `sudo tailscale up --login-server=${loginArg} --authkey=${keyArg}`,
+      command: buildTailscaleConnectCommand('linux', effectiveServerUrl, generatedKey),
       hint: 'Install Tailscale if missing: curl -fsSL https://tailscale.com/install.sh | sh',
     },
     macos: {
       label: 'macOS',
-      command: `tailscale up --login-server=${loginArg} --authkey=${keyArg}`,
+      command: buildTailscaleConnectCommand('macos', effectiveServerUrl, generatedKey),
       hint: 'Or in the Tailscale menu bar app, hold Option while clicking Log In and set the custom server URL.',
     },
     windows: {
       label: 'Windows',
-      command: `& "C:\\Program Files\\Tailscale\\tailscale.exe" up --login-server=${loginArg} --authkey=${keyArg}`,
+      command: buildTailscaleConnectCommand('windows', effectiveServerUrl, generatedKey),
       hint: 'Run inside an elevated PowerShell prompt after installing the Tailscale Windows client.',
     },
     mobile: {
@@ -360,7 +339,7 @@ export function MeshSelfServicePortal() {
     },
     docker: {
       label: 'Docker',
-      command: `docker run -d --name=tailscale --restart=unless-stopped -e TS_AUTHKEY=${keyArg} -e TS_EXTRA_ARGS="--login-server=${loginArg}" ghcr.io/tailscale/tailscale:latest`,
+      command: buildTailscaleConnectCommand('docker', effectiveServerUrl, generatedKey),
       hint: 'Mounts minimal ephemeral or volume-backed container identity using the same Tailscale binary.',
     },
   };
@@ -522,50 +501,6 @@ export function MeshSelfServicePortal() {
           >
             <X className="w-3.5 h-3.5" />
           </button>
-        </div>
-      )}
-
-      {/* Invite Welcome Starter Key Banner */}
-      {welcomeBanner?.starterKey?.key && (
-        <div className="bg-emerald-950/40 border border-emerald-500/40 rounded-xl p-5 space-y-3">
-          <div className="flex items-start justify-between gap-4">
-            <div className="space-y-1">
-              <h2 className="text-base font-semibold text-white flex items-center gap-2">
-                <CheckCircle2 className="w-4 h-4 text-emerald-400" />
-                Account Activated — Ready to Connect Your First Device
-              </h2>
-              <p className="text-xs text-emerald-100/80">
-                Save or run this single-use starter key now. Once closed, generate another key anytime with <strong>Add Device</strong>.
-              </p>
-            </div>
-            <button
-              type="button"
-              onClick={() => setWelcomeBanner(null)}
-              className="text-emerald-300/80 hover:text-white cursor-pointer"
-              aria-label="Close welcome banner"
-            >
-              <X className="w-4 h-4" />
-            </button>
-          </div>
-
-          <div className="bg-slate-950/90 border border-slate-800 rounded-lg p-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-            <code className="text-xs text-emerald-300 font-mono break-all">
-              {`sudo tailscale up --login-server=${loginArg} --authkey=${welcomeBanner.starterKey.key}`}
-            </code>
-            <button
-              type="button"
-              onClick={() =>
-                handleCopy(
-                  `sudo tailscale up --login-server=${loginArg} --authkey=${welcomeBanner.starterKey?.key}`,
-                  'welcome-cmd'
-                )
-              }
-              className="shrink-0 px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded text-xs font-medium flex items-center gap-1.5 cursor-pointer"
-            >
-              {copiedId === 'welcome-cmd' ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
-              <span>{copiedId === 'welcome-cmd' ? 'Copied' : 'Copy Command'}</span>
-            </button>
-          </div>
         </div>
       )}
 

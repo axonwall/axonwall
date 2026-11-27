@@ -21,9 +21,20 @@ spec:
         app.kubernetes.io/instance: {{ .Release.Name }}
         app.kubernetes.io/component: sidekick
     spec:
+      automountServiceAccountToken: false
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
       containers:
         - name: falcosidekick
           image: "{{ .Values.falcosidekick.image.repository }}:{{ .Values.falcosidekick.image.tag }}"
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1234
+            runAsGroup: 1234
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
           ports:
             - containerPort: 2801
               name: sidekick
@@ -35,12 +46,25 @@ spec:
         {{- if .Values.falcosidekick.ui.enabled }}
         - name: falcosidekick-ui
           image: "{{ .Values.falcosidekick.ui.image.repository }}:{{ .Values.falcosidekick.ui.image.tag }}"
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1234
+            runAsGroup: 1234
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
           ports:
             - containerPort: 2802
               name: sidekick-ui
         - name: falcosidekick-redis
           image: "{{ .Values.falcosidekick.redis.image.repository }}:{{ .Values.falcosidekick.redis.image.tag }}"
           imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
           ports:
             - containerPort: 6379
               name: redis

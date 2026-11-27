@@ -408,4 +408,81 @@ describe('Virt / Hypervisor Compilers', () => {
     const k3sCompiled = compileK3s(k3sState);
     expect(k3sCompiled.k3sConfigYaml).toContain('UserNamespacesSupport=true');
   });
+
+  it('enforces SEC-H18 and SEC-L11 path confinement, VXLAN flag safety, and explicit Hosted Edge ZTP token', async () => {
+    const { VirtioFsShareSchema, VirtualMachineSchema } = await import('../../schemas/index.js');
+    // VirtioFS restricted strictly to /mnt/<pool>/... without ..
+    expect(() => VirtioFsShareSchema.parse({ tag: 's1', hostPath: '/var/lib/axonwall/secrets' })).toThrow();
+    expect(() => VirtioFsShareSchema.parse({ tag: 's1', hostPath: '/tank/data' })).toThrow();
+    expect(() => VirtioFsShareSchema.parse({ tag: 's1', hostPath: '/mnt/tank/../etc' })).toThrow();
+    expect(() => VirtioFsShareSchema.parse({ tag: 's1', hostPath: '/mnt/tank/shared' })).not.toThrow();
+
+    // VirtualMachineSchema rejects out-of-bounds kernelPath, fwCfg, iso, and zvol
+    expect(() =>
+      VirtualMachineSchema.parse({ ...sampleVm, iso: '/etc/passwd' }),
+    ).toThrow();
+    expect(() =>
+      VirtualMachineSchema.parse({ ...sampleVm, iso: '/var/lib/axonwall/isos/../secrets/state.json' }),
+    ).toThrow();
+    expect(() =>
+      VirtualMachineSchema.parse({
+        ...sampleVm,
+        fwCfg: [{ name: 'opt/test', file: '/etc/shadow' }],
+      }),
+    ).toThrow();
+    expect(() =>
+      VirtualMachineSchema.parse({ ...sampleVm, kernelPath: '/tmp/evil-kernel' }),
+    ).toThrow();
+    expect(() =>
+      VirtualMachineSchema.parse({
+        ...sampleVm,
+        disks: [{ ...sampleVm.disks[0]!, zvol: '/dev/sda' }],
+      }),
+    ).toThrow();
+
+    // compileVmProcess & compileLibvirtDomainXml reject disallowed paths directly too
+    const { compileLibvirtDomainXml } = await import('./index.js');
+    for (const badVm of [
+      { ...sampleVm, iso: '/var/lib/axonwall/secrets/key.iso' },
+      { ...sampleVm, fwCfg: [{ name: 'opt/k', file: '/var/lib/axonwall/state.json' }] },
+      { ...sampleVm, kernelPath: '/usr/lib/axonwall/edge/slot-A/axonwall-edge-sku-vm-virtio.efi' },
+      { ...sampleVm, initrdPath: '/var/lib/axonwall/isos/initrd.img' },
+      { ...sampleVm, disks: [{ ...sampleVm.disks[0]!, zvol: '/dev/nvme0n1' }] },
+      { ...sampleVm, virtioFsShares: [{ tag: 'bad', hostPath: '/var/lib/axonwall/secrets', cacheMode: 'auto', readOnly: true }] },
+    ]) {
+      expect(() => compileVmProcess(badVm)).toThrow();
+      expect(() => compileLibvirtDomainXml(badVm)).toThrow();
+    }
+
+    // Valid confined paths succeed
+    const confinedVm: VirtualMachine = {
+      ...sampleVm,
+      iso: '/var/lib/axonwall/isos/debian-12.iso',
+      kernelPath: '/var/lib/axonwall/kernels/vmlinuz',
+      initrdPath: '/boot/initrd.img-6.12',
+      fwCfg: [{ name: 'opt/org.axonwall/meta', file: '/run/axonwall/fwcfg/vm-101.cfg' }],
+      virtioFsShares: [{ tag: 'share0', hostPath: '/mnt/tank/shared', cacheMode: 'auto', readOnly: false }],
+    };
+    expect(() => compileVmProcess(confinedVm)).not.toThrow();
+
+    // VXLAN rejects leading '-'
+    expect(() =>
+      compileVxlan([
+        {
+          name: '-badflag',
+          vni: 100,
+          peers: [],
+          underlayInterface: 'lan',
+          port: 4789,
+          mtu: 1450,
+          enabled: true,
+          description: '',
+        },
+      ]),
+    ).toThrow();
+
+    // compileHostedEdge requires explicit ztpToken
+    const edgeState = DesiredStateSchema.parse({ hostedEdge: { enabled: true } });
+    expect(() => compileHostedEdge(edgeState)).toThrow(/ztpToken/);
+  });
 });

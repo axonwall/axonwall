@@ -34,7 +34,7 @@ import { compileNetFlowBundle, resolveNetFlowConfig } from '../netflow/index.js'
 import { compileObservabilityBundle } from '../observability/index.js';
 import { compileHaProxy, sanitizeHaProxyHostname } from '../haproxy/index.js';
 import { compileFreeRadiusClients } from '../freeradius/index.js';
-import { compileSnmpd } from '../snmp/index.js';
+import { compileSnmpd, compileSnmpdPersistentUsers } from '../snmp/index.js';
 import { compileNutUps } from '../nut/index.js';
 import { compileTrafficShaper } from '../tc/index.js';
 import { compileIpsec } from '../ipsec/index.js';
@@ -1278,7 +1278,7 @@ export function compileNftables(state: DesiredState): CompileResult {
             {
               matchType: 'exact',
               path: '/api/v1/vpn/mesh/invites/preview',
-              methods: ['GET', 'HEAD'],
+              methods: ['POST'],
               backend: 'be_axonwall_invite_ui',
             },
             {
@@ -1367,11 +1367,24 @@ export function compileNftables(state: DesiredState): CompileResult {
 
   // Emit Net-SNMP snmpd configuration when enabled
   if (state.snmp?.enabled) {
+    const lanAddrs = state.interfaces
+      .filter((i) => i.enabled && inferInterfaceRole(i) === 'lan' && i.ipv4Address)
+      .map((i) => i.ipv4Address!.split('/')[0]!.trim())
+      .filter((ip) => isValidIPv4(ip) || isValidIPv6(ip));
+    const defaultBind = Array.from(new Set(['127.0.0.1', ...lanAddrs]));
     files.push({
       path: '/etc/snmp/snmpd.conf',
-      content: compileSnmpd(state.snmp),
+      content: compileSnmpd(state.snmp, defaultBind),
       fileMode: 0o640,
     });
+    const persistentUsersConf = compileSnmpdPersistentUsers(state.snmp);
+    if (persistentUsersConf) {
+      files.push({
+        path: '/var/lib/snmp/snmpd.conf',
+        content: persistentUsersConf,
+        fileMode: 0o600,
+      });
+    }
     reloadServices.push('snmpd');
   }
 
@@ -2789,13 +2802,16 @@ export function compileSatelliteNftables(node: any): CompileResult {
     comment?: string;
   }> = Array.isArray(node?.ipv6Allow) ? node.ipv6Allow : [];
 
+  const safeNodeId = String(node?.id ?? 'unknown').replace(/[^a-zA-Z0-9._-]/g, '_');
+  const safeSkuProfile = String(node?.skuProfile || 'generic').replace(/[^a-zA-Z0-9._-]/g, '_');
+
   lines.push('#!/usr/sbin/nft -f');
   lines.push(
     isEdgeNgfw
       ? `# Axonwall Auto-Generated Super-Slim Edge NGFW (PID 1 UKI) nftables configuration`
       : '# Axonwall Auto-Generated Satellite nftables configuration',
   );
-  lines.push(`# Node: ${node.id} | Role: ${isEdgeNgfw ? 'edge-ngfw' : 'satellite'} | SKU: ${node.skuProfile || 'generic'} | Generated: ${new Date().toISOString()}`);
+  lines.push(`# Node: ${safeNodeId} | Role: ${isEdgeNgfw ? 'edge-ngfw' : 'satellite'} | SKU: ${safeSkuProfile} | Generated: ${new Date().toISOString()}`);
   lines.push('');
   lines.push('flush ruleset');
   lines.push('table inet axonwall {');

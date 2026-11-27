@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { importPfsenseConfig } from './index.js';
 import { compileNftables } from '../../compile/nft/index.js';
+import { DesiredStateSchema } from '../../schemas/index.js';
 
 const SAMPLE_PFSENSE_XML = `<?xml version="1.0"?>
 <pfsense>
@@ -194,5 +195,107 @@ describe('pfSense XML Importer', () => {
     const { nftScript } = compileNftables(report.state);
     expect(nftScript).toContain('table inet axonwall');
     expect(nftScript).toContain('192.168.10.25');
+    expect(() => DesiredStateSchema.parse(report.state)).not.toThrow();
+  });
+
+  it('fails closed on unknown/non-pass rule types and skips match rules [SEC-H20]', () => {
+    const xml = `<?xml version="1.0"?>
+<pfsense>
+  <filter>
+    <rule>
+      <type>match</type>
+      <interface>wan</interface>
+      <protocol>tcp</protocol>
+      <source><any/></source>
+      <destination><any/><port>443</port></destination>
+      <descr>Traffic shaper match rule</descr>
+    </rule>
+    <rule>
+      <type>bogus_action</type>
+      <interface>wan</interface>
+      <protocol>tcp</protocol>
+      <source><any/></source>
+      <destination><any/><port>22</port></destination>
+      <descr>Unknown type rule</descr>
+    </rule>
+    <rule>
+      <interface>wan</interface>
+      <protocol>tcp</protocol>
+      <source><any/></source>
+      <destination><any/><port>23</port></destination>
+      <descr>Missing type rule</descr>
+    </rule>
+  </filter>
+</pfsense>`;
+    const report = importPfsenseConfig(xml);
+    expect(report.rulesCount).toBe(2);
+    expect(report.state.rules.every((r) => r.action === 'block' && r.enabled === false)).toBe(true);
+    expect(report.reviewItems?.length).toBe(2);
+    expect(report.warnings.some((w) => w.includes('match'))).toBe(true);
+
+    const { nftScript } = compileNftables(report.state);
+    expect(nftScript).not.toContain('dport 443');
+    expect(nftScript).not.toContain('dport 22');
+    expect(nftScript).not.toContain('dport 23');
+    expect(() => DesiredStateSchema.parse(report.state)).not.toThrow();
+  });
+
+  it('preserves DNAT source/destination filters and disables negated DNAT rules [SEC-H20]', () => {
+    const xml = `<?xml version="1.0"?>
+<pfsense>
+  <aliases>
+    <alias>
+      <name>Partner_Net</name>
+      <type>network</type>
+      <address>203.0.113.0/24</address>
+    </alias>
+  </aliases>
+  <nat>
+    <rule>
+      <interface>wan</interface>
+      <protocol>tcp</protocol>
+      <source><address>Partner_Net</address><port>1024:65535</port></source>
+      <destination><address>198.51.100.10</address><port>8443</port></destination>
+      <target>192.168.10.25</target>
+      <local-port>443</local-port>
+      <descr>Restricted Partner Forward</descr>
+    </rule>
+    <rule>
+      <interface>wan</interface>
+      <protocol>tcp</protocol>
+      <source><not/><address>198.51.100.99</address></source>
+      <destination><port>80</port></destination>
+      <target>192.168.10.26</target>
+      <local-port>80</local-port>
+      <descr>Negated DNAT source</descr>
+    </rule>
+  </nat>
+</pfsense>`;
+    const report = importPfsenseConfig(xml);
+    expect(report.natRulesCount).toBe(2);
+    expect(report.state.nat[0]!.source).toBe('$Partner_Net');
+    expect(report.state.nat[0]!.sourcePort).toBe('1024-65535');
+    expect(report.state.nat[0]!.destination).toBe('198.51.100.10');
+    expect(report.state.nat[0]!.destinationPort).toBe('8443');
+    expect(report.state.nat[0]!.targetIp).toBe('192.168.10.25');
+    expect(report.state.nat[0]!.targetPort).toBe('443');
+    expect(report.state.nat[0]!.enabled).toBe(true);
+
+    expect(report.state.nat[1]!.enabled).toBe(false);
+    expect(() => DesiredStateSchema.parse(report.state)).not.toThrow();
+  });
+
+  it('disables XML entity expansion against XXE / Billion Laughs [SEC-L10]', () => {
+    const xxeXml = `<?xml version="1.0"?>
+<!DOCTYPE foo [
+  <!ENTITY secret "EXPANDED_ENTITY_VALUE">
+]>
+<pfsense>
+  <system>
+    <hostname>&secret;</hostname>
+  </system>
+</pfsense>`;
+    const report = importPfsenseConfig(xxeXml);
+    expect(report.state.system.hostname).not.toBe('EXPANDED_ENTITY_VALUE');
   });
 });

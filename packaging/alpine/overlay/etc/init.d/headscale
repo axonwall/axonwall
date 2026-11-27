@@ -5,19 +5,24 @@ description="Headscale WireGuard Mesh Coordination Server"
 supervisor="supervise-daemon"
 command="/usr/sbin/headscale"
 command_args="serve -c /etc/headscale/config.yaml"
-command_user="axonwall-headscale:axonwall-api"
+command_user="axonwall-headscale:axonwall-headscale"
 pidfile="/run/headscale.pid"
 output_log="/var/log/axonwall/headscale.log"
 error_log="/var/log/axonwall/headscale.log"
 respawn_delay=5
 respawn_max=0
+rc_ulimit="-c 0"
 
 depend() {
     after axonwall-firstboot axonwalld
 }
 
 start_pre() {
-    checkpath -d -m 0770 -o axonwall-headscale:axonwall-api /run/headscale
-    checkpath -d -m 0770 -o axonwall-headscale:axonwall-headscale /var/lib/axonwall/headscale
+    checkpath -d -m 0770 -o axonwall-headscale:axonwall-headscale /run/headscale
+    checkpath -d -m 0700 -o axonwall-headscale:axonwall-headscale /var/lib/axonwall/headscale
     checkpath -d -m 0770 -o axonwall:axonwall-api /var/log/axonwall
+    if [ -f /etc/headscale/config.yaml ]; then
+        chown root:axonwall-headscale /etc/headscale/config.yaml 2>/dev/null || true
+        chmod 0640 /etc/headscale/config.yaml 2>/dev/null || true
+    fi
 }

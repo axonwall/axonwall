@@ -218,4 +218,52 @@ describe('NetFlow / IPFIX / sFlow Collector Compiler & FQL', () => {
     expect(nft.nftScript).not.toContain('comment "netflow-');
     expect(nft.files.some((f) => f.path === '/etc/axonwall/managed/netflow_config.json')).toBe(true);
   });
+
+  it('neutralizes CSV formula payloads in buildFlowExportCsv and rejects non-IPs in buildTcpdumpFilter (SEC-M19)', () => {
+    const csv = buildFlowExportCsv([
+      {
+        id: 'f-evil',
+        timestamp: '2026-11-23T12:00:00Z',
+        version: 'ipfix',
+        exporterIp: '10.80.0.1',
+        srcIp: '10.80.0.25',
+        dstIp: '1.1.1.1',
+        srcPort: 54321,
+        dstPort: 443,
+        protocol: 6,
+        protocolName: 'TCP',
+        appName: '=CMD("calc")',
+        direction: '+SUM(A1:A2)',
+        inIfName: ' -1+1',
+        outIfName: '@evil',
+        bytes: 4096,
+        packets: 12,
+        bps: 32768,
+        threatMatch: '\t=HYPERLINK("http://evil")',
+      },
+    ]);
+    expect(csv).toContain("'=CMD(\"\"calc\"\")");
+    expect(csv).toContain("'+SUM(A1:A2)");
+    expect(csv).toContain("' -1+1");
+    expect(csv).toContain("'@evil");
+    expect(csv).toContain("'\t=HYPERLINK");
+
+    expect(() =>
+      buildTcpdumpFilter({
+        id: 'f-bad-ip',
+        timestamp: '2026-11-23T12:00:00Z',
+        version: 'ipfix',
+        exporterIp: '10.80.0.1',
+        srcIp: '10.0.0.1 && rm -rf /',
+        dstIp: '1.1.1.1',
+        srcPort: 1000,
+        dstPort: 443,
+        protocol: 6,
+        protocolName: 'TCP',
+        bytes: 100,
+        packets: 1,
+        bps: 100,
+      }),
+    ).toThrow(/Invalid source IP/);
+  });
 });

@@ -489,12 +489,25 @@ spec:
       labels:
         app.kubernetes.io/name: kctf-portal
     spec:
-      serviceAccountName: kctf-controller
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 101
+        runAsGroup: 101
+        fsGroup: 101
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: web
-          image: nginx:alpine
+          image: nginxinc/nginx-unprivileged:1.27.4-alpine
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
           ports:
-            - containerPort: 80
+            - containerPort: 8080
               name: http
           volumeMounts:
             - name: html-volume
@@ -522,7 +535,7 @@ spec:
   type: ClusterIP
   ports:
     - port: 80
-      targetPort: 80
+      targetPort: 8080
       name: http
   selector:
     app.kubernetes.io/name: kctf-portal

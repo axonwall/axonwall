@@ -24,6 +24,12 @@ type ThreatHarvesterHarvesterCountersVal struct {
 	TlsUprobeEvents    uint64
 }
 
+type ThreatHarvesterHarvesterExeId struct {
+	_   structs.HostLayout
+	Dev uint64
+	Ino uint64
+}
+
 type ThreatHarvesterHarvesterFlowKey struct {
 	_       structs.HostLayout
 	SrcV4   uint32
@@ -67,6 +73,8 @@ type ThreatHarvesterHarvesterRingEvent struct {
 	ByteCount    uint64
 	Ifindex      uint32
 	Pid          uint32
+	Tid          uint32
+	PadTid       uint32
 	Uid          uint32
 	SrcV4        uint32
 	DstV4        uint32
@@ -117,6 +125,7 @@ const (
 	ThreatHarvesterMapHarvesterEvents          = "harvester_events"
 	ThreatHarvesterMapHarvesterFlowState       = "harvester_flow_state"
 	ThreatHarvesterMapHarvesterSuspiciousPids  = "harvester_suspicious_pids"
+	ThreatHarvesterMapHarvesterUprobeAllowlist = "harvester_uprobe_allowlist"
 	ThreatHarvesterMapHarvesterWatchlistV4     = "harvester_watchlist_v4"
 	ThreatHarvesterProgTcHarvesterEgress       = "tc_harvester_egress"
 	ThreatHarvesterProgTcHarvesterIngress      = "tc_harvester_ingress"
@@ -179,13 +188,14 @@ type ThreatHarvesterProgramSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type ThreatHarvesterMapSpecs struct {
-	HarvesterCfgMap         *ebpf.MapSpec `ebpf:"harvester_cfg_map"`
-	HarvesterCounters       *ebpf.MapSpec `ebpf:"harvester_counters"`
-	HarvesterDarkPorts      *ebpf.MapSpec `ebpf:"harvester_dark_ports"`
-	HarvesterEvents         *ebpf.MapSpec `ebpf:"harvester_events"`
-	HarvesterFlowState      *ebpf.MapSpec `ebpf:"harvester_flow_state"`
-	HarvesterSuspiciousPids *ebpf.MapSpec `ebpf:"harvester_suspicious_pids"`
-	HarvesterWatchlistV4    *ebpf.MapSpec `ebpf:"harvester_watchlist_v4"`
+	HarvesterCfgMap          *ebpf.MapSpec `ebpf:"harvester_cfg_map"`
+	HarvesterCounters        *ebpf.MapSpec `ebpf:"harvester_counters"`
+	HarvesterDarkPorts       *ebpf.MapSpec `ebpf:"harvester_dark_ports"`
+	HarvesterEvents          *ebpf.MapSpec `ebpf:"harvester_events"`
+	HarvesterFlowState       *ebpf.MapSpec `ebpf:"harvester_flow_state"`
+	HarvesterSuspiciousPids  *ebpf.MapSpec `ebpf:"harvester_suspicious_pids"`
+	HarvesterUprobeAllowlist *ebpf.MapSpec `ebpf:"harvester_uprobe_allowlist"`
+	HarvesterWatchlistV4     *ebpf.MapSpec `ebpf:"harvester_watchlist_v4"`
 }
 
 // ThreatHarvesterVariableSpecs contains global variables before they are loaded into the kernel.
@@ -215,13 +225,14 @@ func (o *ThreatHarvesterObjects) Close() error {
 //
 // It can be passed to LoadThreatHarvesterObjects or ebpf.CollectionSpec.LoadAndAssign.
 type ThreatHarvesterMaps struct {
-	HarvesterCfgMap         *ebpf.Map `ebpf:"harvester_cfg_map"`
-	HarvesterCounters       *ebpf.Map `ebpf:"harvester_counters"`
-	HarvesterDarkPorts      *ebpf.Map `ebpf:"harvester_dark_ports"`
-	HarvesterEvents         *ebpf.Map `ebpf:"harvester_events"`
-	HarvesterFlowState      *ebpf.Map `ebpf:"harvester_flow_state"`
-	HarvesterSuspiciousPids *ebpf.Map `ebpf:"harvester_suspicious_pids"`
-	HarvesterWatchlistV4    *ebpf.Map `ebpf:"harvester_watchlist_v4"`
+	HarvesterCfgMap          *ebpf.Map `ebpf:"harvester_cfg_map"`
+	HarvesterCounters        *ebpf.Map `ebpf:"harvester_counters"`
+	HarvesterDarkPorts       *ebpf.Map `ebpf:"harvester_dark_ports"`
+	HarvesterEvents          *ebpf.Map `ebpf:"harvester_events"`
+	HarvesterFlowState       *ebpf.Map `ebpf:"harvester_flow_state"`
+	HarvesterSuspiciousPids  *ebpf.Map `ebpf:"harvester_suspicious_pids"`
+	HarvesterUprobeAllowlist *ebpf.Map `ebpf:"harvester_uprobe_allowlist"`
+	HarvesterWatchlistV4     *ebpf.Map `ebpf:"harvester_watchlist_v4"`
 }
 
 func (m *ThreatHarvesterMaps) Close() error {
@@ -232,6 +243,7 @@ func (m *ThreatHarvesterMaps) Close() error {
 		m.HarvesterEvents,
 		m.HarvesterFlowState,
 		m.HarvesterSuspiciousPids,
+		m.HarvesterUprobeAllowlist,
 		m.HarvesterWatchlistV4,
 	)
 }

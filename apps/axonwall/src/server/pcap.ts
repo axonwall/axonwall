@@ -1,11 +1,11 @@
 import { getSession } from './auth';
-import { isPasswordChangeEnforced } from './auth-guard';
+import { assertActionPermitted } from './auth-guard';
 import { callAgentApi } from './agent-client';
+import { getStateDir } from './dev-paths';
 import { assertPluginEnabled } from './plugin-guard';
 import fs from 'fs';
 import path from 'path';
 import { spawn } from 'child_process';
-import os from 'os';
 
 export interface CapturedPacket {
   index: number;
@@ -33,21 +33,33 @@ export interface CaptureResult {
 // In-memory cache for recent capture summaries
 const recentCaptures = new Map<string, CaptureResult>();
 
+function getCaptureCandidateDirs(): string[] {
+  return [
+    '/var/lib/axonwall/captures',
+    '/var/log/axonwall/captures',
+    '/run/axonwall/captures',
+    path.join(getStateDir(), 'captures'),
+  ];
+}
+
 function getCaptureDir(): string {
-  for (const prodDir of ['/var/lib/axonwall/captures', '/var/log/axonwall/captures']) {
+  for (const dir of getCaptureCandidateDirs()) {
     try {
-      if (!fs.existsSync(prodDir)) {
-        fs.mkdirSync(prodDir, { recursive: true, mode: 0o775 });
+      if (!fs.existsSync(dir)) {
+        fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
       }
-      fs.accessSync(prodDir, fs.constants.W_OK);
-      return prodDir;
+      const st = fs.lstatSync(dir);
+      if (st.isSymbolicLink() || !st.isDirectory()) {
+        continue;
+      }
+      try {
+        fs.chmodSync(dir, 0o700);
+      } catch {}
+      fs.accessSync(dir, fs.constants.W_OK);
+      return dir;
     } catch {}
   }
-  const tmpDir = path.join(os.tmpdir(), 'axonwall-captures');
-  if (!fs.existsSync(tmpDir)) {
-    fs.mkdirSync(tmpDir, { recursive: true, mode: 0o775 });
-  }
-  return tmpDir;
+  throw new Error('Unable to initialize a private packet capture directory');
 }
 
 /**
@@ -157,12 +169,7 @@ export async function runLivePacketCapture({
   count?: number;
 }): Promise<CaptureResult> {
   const session = await getSession();
-  if (!session || !session.roles.includes('admin')) {
-    throw new Error('Unauthorized: Admin credentials required');
-  }
-  if (isPasswordChangeEnforced(session)) {
-    throw new Error('Password change required before performing this action');
-  }
+  assertActionPermitted(session, 'admin');
   await assertPluginEnabled('packet-diagnostics');
 
   // Sanitize interface
@@ -435,23 +442,37 @@ export function getCaptureFile(id: string): { filePath: string; exists: boolean 
   if (!sanitizedId || sanitizedId !== id) {
     return { filePath: '', exists: false };
   }
-  const candidateDirs = [
-    getCaptureDir(),
-    '/var/lib/axonwall/captures',
-    '/var/log/axonwall/captures',
-    path.join(os.tmpdir(), 'axonwall-captures'),
-  ];
+  const candidateDirs = [getCaptureDir(), ...getCaptureCandidateDirs()];
   for (const dir of candidateDirs) {
-    const resolvedDir = path.resolve(dir);
+    let dirStat: fs.Stats;
+    try {
+      dirStat = fs.lstatSync(dir);
+    } catch {
+      continue;
+    }
+    if (dirStat.isSymbolicLink() || !dirStat.isDirectory()) {
+      continue;
+    }
+    const realDir = fs.realpathSync(dir);
     for (const candidateName of [`${sanitizedId}.pcap`, `${sanitizedId.replace(/\./g, '_')}.pcap`]) {
-      const candidatePath = path.resolve(resolvedDir, candidateName);
-      if (candidatePath.startsWith(resolvedDir) && fs.existsSync(candidatePath)) {
-        return { filePath: candidatePath, exists: true };
+      const candidatePath = path.join(realDir, candidateName);
+      let fileStat: fs.Stats;
+      try {
+        fileStat = fs.lstatSync(candidatePath);
+      } catch {
+        continue;
+      }
+      if (fileStat.isSymbolicLink() || !fileStat.isFile()) {
+        continue;
+      }
+      const realFile = fs.realpathSync(candidatePath);
+      if (realFile.startsWith(realDir + path.sep)) {
+        return { filePath: realFile, exists: true };
       }
     }
   }
-  const captureDir = getCaptureDir();
-  const filePath = path.resolve(captureDir, `${sanitizedId}.pcap`);
+  const captureDir = fs.realpathSync(getCaptureDir());
+  const filePath = path.join(captureDir, `${sanitizedId}.pcap`);
   return {
     filePath,
     exists: false,

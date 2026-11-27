@@ -1,0 +1,161 @@
+{{- if .Values.networkPolicy.enabled }}
+{{- $ns := include "wazuh.namespace" . -}}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "wazuh.fullname" . }}-default-deny
+  namespace: {{ $ns }}
+  labels:
+    {{- include "wazuh.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: wazuh
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  policyTypes:
+    - Ingress
+    - Egress
+  egress:
+    # Allow DNS resolution via kube-system CoreDNS
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # Allow in-namespace Wazuh pod-to-pod communication
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: wazuh
+              app.kubernetes.io/instance: {{ .Release.Name }}
+    {{- if .Values.networkPolicy.allowExternalEgress }}
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              {{- range .Values.networkPolicy.egressExceptCidrs }}
+              - {{ . | quote }}
+              {{- end }}
+    {{- end }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "wazuh.fullname" . }}-indexer
+  namespace: {{ $ns }}
+  labels:
+    {{- include "wazuh.labels" . | nindent 4 }}
+    app.kubernetes.io/component: indexer
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: wazuh
+      app.kubernetes.io/component: indexer
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: wazuh
+              app.kubernetes.io/instance: {{ .Release.Name }}
+              app.kubernetes.io/component: dashboard
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: wazuh
+              app.kubernetes.io/instance: {{ .Release.Name }}
+              app.kubernetes.io/component: manager
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: wazuh
+              app.kubernetes.io/instance: {{ .Release.Name }}
+              app.kubernetes.io/component: indexer
+      ports:
+        - protocol: TCP
+          port: 9200
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "wazuh.fullname" . }}-manager
+  namespace: {{ $ns }}
+  labels:
+    {{- include "wazuh.labels" . | nindent 4 }}
+    app.kubernetes.io/component: manager
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: wazuh
+      app.kubernetes.io/component: manager
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: wazuh
+              app.kubernetes.io/instance: {{ .Release.Name }}
+              app.kubernetes.io/component: dashboard
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: wazuh
+              app.kubernetes.io/instance: {{ .Release.Name }}
+              app.kubernetes.io/component: manager
+      ports:
+        - protocol: TCP
+          port: 55000
+    - from:
+        - podSelector: {}
+        {{- with .Values.networkPolicy.agentAllowFrom }}
+        {{- range . }}
+        - ipBlock:
+            cidr: {{ . | quote }}
+        {{- end }}
+        {{- end }}
+      ports:
+        - protocol: TCP
+          port: 1514
+        - protocol: UDP
+          port: 1514
+        - protocol: TCP
+          port: 1515
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "wazuh.fullname" . }}-dashboard
+  namespace: {{ $ns }}
+  labels:
+    {{- include "wazuh.labels" . | nindent 4 }}
+    app.kubernetes.io/component: dashboard
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: wazuh
+      app.kubernetes.io/component: dashboard
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector: {}
+      ports:
+        - protocol: TCP
+          port: 5601
+    {{- if and .Values.ingress.enabled .Values.networkPolicy.ingressControllerNamespaceSelector }}
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.ingressControllerNamespaceSelector | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: 5601
+    {{- end }}
+{{- end }}

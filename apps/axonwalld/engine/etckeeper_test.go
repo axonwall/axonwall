@@ -1,7 +1,9 @@
 package engine
 
 import (
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -110,5 +112,84 @@ func TestEtckeeperManagerExecution(t *testing.T) {
 	}
 	if len(updatedCfg.CustomIgnorePatterns) != 2 {
 		t.Errorf("expected 2 custom ignore patterns, got %v", updatedCfg.CustomIgnorePatterns)
+	}
+}
+
+func TestEtckeeperHardenedValidation(t *testing.T) {
+	tempDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(tempDir, ".git"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	mgr := NewEtckeeperManager(tempDir)
+	mgr.execCmd = func(name string, args ...string) *exec.Cmd {
+		if name == "git" {
+			for _, a := range args {
+				if a == "remote" {
+					return exec.Command("printf", "origin\nbackup\n")
+				}
+			}
+		}
+		return exec.Command("true")
+	}
+
+	baseCfg := EtckeeperConfig{
+		VCS:                     "git",
+		HighlevelPackageManager: "apt",
+		LowlevelPackageManager:  "dpkg",
+	}
+
+	badRemotes := []string{
+		"origin --upload-pack=evil",
+		"https://evil.com/repo.git",
+		"ext::sh -c id",
+		"-evil",
+		"origin/sub",
+		"origin:sub",
+		"a..b",
+		"nonexistent-remote",
+	}
+	for _, r := range badRemotes {
+		cfg := baseCfg
+		cfg.PushRemote = r
+		if _, err := mgr.UpdateConfig(cfg); err == nil {
+			t.Fatalf("expected PushRemote %q to be rejected", r)
+		}
+	}
+
+	badGitOpts := []string{
+		"--quiet -c core.fsmonitor=evil",
+		"--exec=id",
+		"--amend",
+		"--no-verify",
+		"-F /etc/shadow",
+		"--quiet;id",
+		"-c",
+	}
+	for _, opts := range badGitOpts {
+		cfg := baseCfg
+		cfg.GitCommitOptions = opts
+		if _, err := mgr.UpdateConfig(cfg); err == nil {
+			t.Fatalf("expected GitCommitOptions %q to be rejected", opts)
+		}
+	}
+
+	for _, good := range []struct {
+		remote string
+		opts   string
+	}{
+		{"", ""},
+		{"origin", "--quiet"},
+		{"backup", "-q --no-status"},
+	} {
+		cfg := baseCfg
+		cfg.PushRemote = good.remote
+		cfg.GitCommitOptions = good.opts
+		out, err := mgr.UpdateConfig(cfg)
+		if err != nil {
+			t.Fatalf("expected remote=%q opts=%q to succeed, got: %v", good.remote, good.opts, err)
+		}
+		if out.PushRemote != good.remote {
+			t.Fatalf("expected PushRemote %q, got %q", good.remote, out.PushRemote)
+		}
 	}
 }

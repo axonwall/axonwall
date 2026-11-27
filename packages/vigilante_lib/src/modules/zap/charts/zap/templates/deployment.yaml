@@ -1,3 +1,12 @@
+{{- $secretName := .Values.existingSecret | default (printf "%s-secret" (include "zap.fullname" .)) -}}
+{{- if and (not .Values.existingSecret) (not .Values.secret.create) -}}
+{{- $_ := required "existingSecret is required when secret.create is false" .Values.existingSecret -}}
+{{- end -}}
+{{- $defaultAllowedAddrs := printf "^(localhost|127\\.0\\.0\\.1|%s(\\.%s(\\.svc(\\.cluster\\.local)?)?)?)$" (include "zap.fullname" .) (include "zap.namespace" .) -}}
+{{- $allowedAddrs := .Values.api.allowedAddrs | default $defaultAllowedAddrs -}}
+{{- if eq $allowedAddrs ".*" -}}
+{{- fail "api.allowedAddrs must not be wildcard '.*'" -}}
+{{- end -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -17,21 +26,33 @@ spec:
         app.kubernetes.io/name: {{ include "zap.name" . }}
         app.kubernetes.io/instance: {{ .Release.Name }}
     spec:
+      automountServiceAccountToken: false
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
       containers:
         - name: zap
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}{{- if .Values.image.digest }}@{{ .Values.image.digest }}{{- end }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          env:
+            - name: ZAP_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretName }}
+                  key: ZAP_API_KEY
           command:
             - zap.sh
+          args:
             - -daemon
             - -host
             - "0.0.0.0"
             - -port
             - "8080"
             - -config
-            - api.disablekey=true
+            - api.key=$(ZAP_API_KEY)
             - -config
-            - api.addrs.addr.name=.*
+            - {{ printf "api.addrs.addr.name=%s" $allowedAddrs | quote }}
             - -config
             - api.addrs.addr.regex=true
           ports:

@@ -1,11 +1,14 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { DesiredStateSchema } from '@axonwall/lib/schemas';
+import { enablePluginWithDependencies } from '@axonwall/lib/plugins';
 
 // R4-C-H1 / R4-C-M2: daemon-down paths of the UI server actions must
 // surface "daemon unavailable" explicitly — never a fabricated healthy
 // node, and never an empty snapshot list standing in for "unknown".
 
-const { mockCallAgentApi } = vi.hoisted(() => ({
+const { mockCallAgentApi, mockGetDesiredStateInternal } = vi.hoisted(() => ({
   mockCallAgentApi: vi.fn(),
+  mockGetDesiredStateInternal: vi.fn(),
 }));
 
 vi.mock('../agent-client', () => ({
@@ -13,6 +16,14 @@ vi.mock('../agent-client', () => ({
   callAgentApiDetailed: vi.fn(),
   callAgentApiResponse: vi.fn(),
 }));
+
+vi.mock('../desired-state-internal', async () => {
+  const actual = await vi.importActual<typeof import('../desired-state-internal')>('../desired-state-internal');
+  return {
+    ...actual,
+    getDesiredStateInternal: () => mockGetDesiredStateInternal(),
+  };
+});
 
 // Admin session so the real assertActionPermitted passes. (NODE_ENV is
 // 'test' under vitest, so isDevRuntime() is false and the production
@@ -95,6 +106,14 @@ describe('getAgentStatus daemon-down (R4-C-H1)', () => {
 describe('getNasSnapshotsRuntime daemon-down (R4-C-M2)', () => {
   beforeEach(() => {
     mockCallAgentApi.mockReset();
+    mockGetDesiredStateInternal.mockResolvedValue(
+      enablePluginWithDependencies('core-nas', DesiredStateSchema.parse({ version: 1 })).state
+    );
+  });
+
+  it('fails closed when core-nas plugin is disabled', async () => {
+    mockGetDesiredStateInternal.mockResolvedValueOnce(DesiredStateSchema.parse({ version: 1 }));
+    await expect(getNasSnapshotsRuntime()).rejects.toThrow(/Forbidden: Plugin 'core-nas'/);
   });
 
   it('throws instead of returning an empty list when the daemon does not answer', async () => {

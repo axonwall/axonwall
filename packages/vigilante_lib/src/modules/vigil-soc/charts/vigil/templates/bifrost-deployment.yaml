@@ -1,4 +1,6 @@
 {{- if .Values.bifrost.enabled }}
+{{- $secretName := include "vigil.secret.fullname" . -}}
+{{- $configMapName := include "vigil.configmap.fullname" . -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -30,13 +32,37 @@ spec:
         - name: bifrost
           image: "{{ .Values.bifrost.image.repository }}:{{ .Values.bifrost.image.tag }}"
           imagePullPolicy: {{ .Values.bifrost.image.pullPolicy | default "IfNotPresent" }}
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
           ports:
             - name: http
               containerPort: {{ .Values.bifrost.service.port | default 8080 }}
               protocol: TCP
-          envFrom:
-            {{- include "vigil.envFrom" . | nindent 12 }}
           env:
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretName }}
+                  key: ANTHROPIC_API_KEY
+                  optional: true
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretName }}
+                  key: OPENAI_API_KEY
+                  optional: true
+            - name: GEMINI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretName }}
+                  key: GEMINI_API_KEY
+                  optional: true
+            - name: OLLAMA_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ $configMapName }}
+                  key: OLLAMA_URL
+                  optional: true
             {{- with .Values.bifrost.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

@@ -51,12 +51,19 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import net from 'node:net';
+import dns from 'node:dns';
 import { execSync, execFileSync, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { getSession } from './auth';
-import { assertActionPermitted, isPasswordChangeEnforced } from './auth-guard';
+import { assertActionPermitted, assertInteractiveSession, isPasswordChangeEnforced } from './auth-guard';
 import { assertPluginEnabled } from './plugin-guard';
-import { assertSafeOutboundUrl, ssrfSafeFetch } from './ssrf-guard';
+import {
+  assertSafeOutboundUrl,
+  createPinnedLookup,
+  isDisallowedSsrfIp,
+  isLoopbackSsrfIp,
+  ssrfSafeFetch,
+} from './ssrf-guard';
 import type { UserSession } from '@axonwall/lib/rbac';
 import { headers } from 'next/headers';
 import {
@@ -332,12 +339,92 @@ export async function getAgentStatus(): Promise<AgentStatus> {
   };
 }
 
+const REDACT_MASK = '********';
+const RECURSIVE_SECRET_KEY_PATTERN =
+  /(?:password|passphrase|secret|token|salt|apiKey|accessKey|accessKeyId|presharedKey|psk|privateKey|encryptionKey|hmacKey|secretKey|mtlsKey|serverKey|caKey|tlsAuthKey|authKey|authPass|privPass|cryptoPass|webhookUrl|customUpdateUrl|externalDatastoreEndpoint)(?:Base64|Pem)?$/i;
+const SENSITIVE_URI_PARAM_PATTERN =
+  /^(?:token|secret|password|pass|apikey|api_key|access_key|secret_key|key|sig|signature|auth)$/i;
+const NON_REDACT_KEY_NAMES = new Set([
+  'keyPreview',
+  'publicKey',
+  'sshPublicKey',
+  'peerPublicKey',
+  'passwordPolicy',
+  'tokenType',
+  'saltLength',
+  'keyType',
+  'keySize',
+]);
+
+function redactCredentialUri(value: string): string {
+  if (!value.includes('://')) {
+    return value;
+  }
+  try {
+    const parsed = new URL(value);
+    if (parsed.username || parsed.password) {
+      return REDACT_MASK;
+    }
+    let changed = false;
+    for (const [k] of parsed.searchParams.entries()) {
+      if (SENSITIVE_URI_PARAM_PATTERN.test(k)) {
+        parsed.searchParams.set(k, REDACT_MASK);
+        changed = true;
+      }
+    }
+    return changed ? parsed.toString() : value;
+  } catch {
+    if (/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^/@\s]+@/.test(value)) {
+      return REDACT_MASK;
+    }
+    return value;
+  }
+}
+
+function redactSecretsRecursively(node: unknown, visited = new Set<object>()): void {
+  if (!node || typeof node !== 'object') {
+    return;
+  }
+  if (visited.has(node)) {
+    return;
+  }
+  visited.add(node);
+
+  if (Array.isArray(node)) {
+    for (let i = 0; i < node.length; i++) {
+      const item = node[i];
+      if (typeof item === 'string' && item !== REDACT_MASK) {
+        node[i] = redactCredentialUri(item);
+      } else if (item && typeof item === 'object') {
+        redactSecretsRecursively(item, visited);
+      }
+    }
+    return;
+  }
+
+  const record = node as Record<string, unknown>;
+  for (const [key, val] of Object.entries(record)) {
+    if (typeof val === 'string') {
+      if (val.length === 0 || val === REDACT_MASK) {
+        continue;
+      }
+      if (!NON_REDACT_KEY_NAMES.has(key) && RECURSIVE_SECRET_KEY_PATTERN.test(key)) {
+        record[key] = REDACT_MASK;
+      } else {
+        record[key] = redactCredentialUri(val);
+      }
+    } else if (val && typeof val === 'object') {
+      redactSecretsRecursively(val, visited);
+    }
+  }
+}
+
 function redactDesiredStateForSession(state: DesiredState, session: UserSession): DesiredState {
   if (isAdminSession(session)) {
     return state;
   }
   const redacted: any = structuredClone(state);
-  const MASK = '********';
+  const MASK = REDACT_MASK;
 
   if (redacted.vpn?.wireguard) {
     if (redacted.vpn.wireguard.privateKey) {
@@ -386,6 +473,9 @@ function redactDesiredStateForSession(state: DesiredState, session: UserSession)
     }
     if (redacted.ha.sqliteSync?.authToken) {
       redacted.ha.sqliteSync.authToken = MASK;
+    }
+    if (redacted.ha.stateSync?.litestreamAccessKeyId) {
+      redacted.ha.stateSync.litestreamAccessKeyId = MASK;
     }
     if (redacted.ha.stateSync?.litestreamSecretAccessKey) {
       redacted.ha.stateSync.litestreamSecretAccessKey = MASK;
@@ -495,6 +585,9 @@ function redactDesiredStateForSession(state: DesiredState, session: UserSession)
         if (v?.authPassword) v.authPassword = MASK;
       }
     }
+    if (redacted.ha.sqliteSync?.litestreamAccessKeyId) {
+      redacted.ha.sqliteSync.litestreamAccessKeyId = MASK;
+    }
     if (redacted.ha.sqliteSync?.litestreamSecretAccessKey) {
       redacted.ha.sqliteSync.litestreamSecretAccessKey = MASK;
     }
@@ -505,12 +598,17 @@ function redactDesiredStateForSession(state: DesiredState, session: UserSession)
     }
   }
   if (redacted.nas) {
+    if (redacted.nas.s3?.accessKey) redacted.nas.s3.accessKey = MASK;
     if (redacted.nas.s3?.secretKey) redacted.nas.s3.secretKey = MASK;
     if (Array.isArray(redacted.nas.iscsiTargets)) {
       for (const t of redacted.nas.iscsiTargets) {
         if (t?.chapSecret) t.chapSecret = MASK;
       }
     }
+  }
+  if (redacted.k3s) {
+    if (redacted.k3s.externalDatastoreEndpoint) redacted.k3s.externalDatastoreEndpoint = MASK;
+    if (redacted.k3s.token) redacted.k3s.token = MASK;
   }
   if (redacted.sso?.clientSecret) {
     redacted.sso.clientSecret = MASK;
@@ -613,6 +711,9 @@ function redactDesiredStateForSession(state: DesiredState, session: UserSession)
     if (redacted.threatHarvester.teacherLlm?.apiKey) {
       redacted.threatHarvester.teacherLlm.apiKey = MASK;
     }
+    if (redacted.threatHarvester.fleetShipper?.accessKey) {
+      redacted.threatHarvester.fleetShipper.accessKey = MASK;
+    }
     if (redacted.threatHarvester.fleetShipper?.secretKey) {
       redacted.threatHarvester.fleetShipper.secretKey = MASK;
     }
@@ -659,6 +760,7 @@ function redactDesiredStateForSession(state: DesiredState, session: UserSession)
     }
   }
 
+  redactSecretsRecursively(redacted);
   return redacted as DesiredState;
 }
 
@@ -982,6 +1084,7 @@ export async function exportCloudInitConfigAction(
   options: CloudInitExportOptions = {}
 ): Promise<CloudInitExportSnapshot> {
   const session = await getSession();
+  assertInteractiveSession(session);
   assertActionPermitted(session, 'admin');
 
   const data = await collectHostIntrospectionData();
@@ -1069,6 +1172,14 @@ export async function applyDesiredState(
       )
     ) ||
     normalizedState.threatHarvester?.anonymizationSalt === '********' ||
+    normalizedState.threatHarvester?.teacherLlm?.apiKey === '********' ||
+    normalizedState.threatHarvester?.fleetShipper?.accessKey === '********' ||
+    normalizedState.threatHarvester?.fleetShipper?.secretKey === '********' ||
+    normalizedState.k3s?.externalDatastoreEndpoint === '********' ||
+    normalizedState.ha?.sqliteSync?.litestreamAccessKeyId === '********' ||
+    normalizedState.ha?.sqliteSync?.litestreamSecretAccessKey === '********' ||
+    normalizedState.nas?.s3?.accessKey === '********' ||
+    normalizedState.nas?.s3?.secretKey === '********' ||
     normalizedState.netflow?.storage?.clickhouse?.password === '********' ||
     normalizedState.netflow?.reporting?.webhookUrl === '********' ||
     normalizedState.netflow?.enrichment?.geoipCityDownloadUrl === '********' ||
@@ -1184,12 +1295,52 @@ export async function applyDesiredState(
         };
       });
     }
+    if (normalizedState.threatHarvester) {
+      if (normalizedState.threatHarvester.anonymizationSalt === '********') {
+        normalizedState.threatHarvester.anonymizationSalt =
+          existing?.threatHarvester?.anonymizationSalt;
+      }
+      if (
+        normalizedState.threatHarvester.teacherLlm &&
+        normalizedState.threatHarvester.teacherLlm.apiKey === '********'
+      ) {
+        normalizedState.threatHarvester.teacherLlm.apiKey =
+          existing?.threatHarvester?.teacherLlm?.apiKey;
+      }
+      if (normalizedState.threatHarvester.fleetShipper) {
+        if (normalizedState.threatHarvester.fleetShipper.accessKey === '********') {
+          normalizedState.threatHarvester.fleetShipper.accessKey =
+            existing?.threatHarvester?.fleetShipper?.accessKey;
+        }
+        if (normalizedState.threatHarvester.fleetShipper.secretKey === '********') {
+          normalizedState.threatHarvester.fleetShipper.secretKey =
+            existing?.threatHarvester?.fleetShipper?.secretKey;
+        }
+      }
+    }
     if (
-      normalizedState.threatHarvester &&
-      normalizedState.threatHarvester.anonymizationSalt === '********'
+      normalizedState.k3s &&
+      normalizedState.k3s.externalDatastoreEndpoint === '********'
     ) {
-      normalizedState.threatHarvester.anonymizationSalt =
-        existing?.threatHarvester?.anonymizationSalt;
+      normalizedState.k3s.externalDatastoreEndpoint = existing?.k3s?.externalDatastoreEndpoint;
+    }
+    if (normalizedState.ha?.sqliteSync) {
+      if (normalizedState.ha.sqliteSync.litestreamAccessKeyId === '********') {
+        normalizedState.ha.sqliteSync.litestreamAccessKeyId =
+          existing?.ha?.sqliteSync?.litestreamAccessKeyId;
+      }
+      if (normalizedState.ha.sqliteSync.litestreamSecretAccessKey === '********') {
+        normalizedState.ha.sqliteSync.litestreamSecretAccessKey =
+          existing?.ha?.sqliteSync?.litestreamSecretAccessKey;
+      }
+    }
+    if (normalizedState.nas?.s3) {
+      if (normalizedState.nas.s3.accessKey === '********' && existing?.nas?.s3?.accessKey !== undefined) {
+        normalizedState.nas.s3.accessKey = existing.nas.s3.accessKey;
+      }
+      if (normalizedState.nas.s3.secretKey === '********' && existing?.nas?.s3?.secretKey !== undefined) {
+        normalizedState.nas.s3.secretKey = existing.nas.s3.secretKey;
+      }
     }
     if (normalizedState.netflow) {
       if (normalizedState.netflow.storage?.clickhouse?.password === '********') {
@@ -1366,9 +1517,57 @@ export async function runDiagnostic(
   }
 
   if (type === 'port_probe') {
+    if (!Number.isInteger(port) || port < 1 || port > 65535) {
+      return { success: false, output: 'Invalid port number' };
+    }
+    const lowerTarget = cleanTarget.toLowerCase();
+    if (
+      lowerTarget === 'localhost' ||
+      lowerTarget.endsWith('.localhost') ||
+      lowerTarget === 'metadata.google.internal' ||
+      lowerTarget === 'metadata.goog' ||
+      lowerTarget === 'metadata' ||
+      lowerTarget === 'instance-data'
+    ) {
+      return {
+        success: false,
+        output: `Port probe blocked for ${cleanTarget}: loopback and cloud metadata hosts are disallowed`,
+      };
+    }
+
+    let resolvedAddrs: Array<{ address: string; family: number }>;
+    const ipFamily = net.isIP(cleanTarget);
+    if (ipFamily !== 0) {
+      resolvedAddrs = [{ address: cleanTarget, family: ipFamily }];
+    } else {
+      try {
+        const lookedUp = await dns.promises.lookup(cleanTarget, { all: true, verbatim: true });
+        resolvedAddrs = Array.isArray(lookedUp) ? lookedUp : [lookedUp];
+      } catch (err: any) {
+        return {
+          success: false,
+          output: `Port probe DNS lookup failed for ${cleanTarget}: ${err?.message || 'lookup failed'}`,
+        };
+      }
+    }
+    if (!resolvedAddrs.length) {
+      return { success: false, output: `Port probe DNS lookup returned no addresses for ${cleanTarget}` };
+    }
+    for (const addr of resolvedAddrs) {
+      if (isDisallowedSsrfIp(addr.address, { allowPrivate: true }) || isLoopbackSsrfIp(addr.address)) {
+        return {
+          success: false,
+          output: `Port probe blocked for ${cleanTarget}: target resolves to disallowed loopback, link-local, or metadata address`,
+        };
+      }
+    }
+
+    const pinnedLookup = createPinnedLookup(resolvedAddrs);
     return new Promise((resolve) => {
       const start = Date.now();
-      const socket = net.createConnection({ host: cleanTarget, port, timeout: 3000 }, () => {
+      const socket = net.createConnection(
+        { host: cleanTarget, port, timeout: 3000, lookup: pinnedLookup as any },
+        () => {
         const latency = Date.now() - start;
         socket.destroy();
         resolve({
@@ -1559,6 +1758,7 @@ export interface UpsStatus {
 export async function getUpsStatus(): Promise<UpsStatus> {
   const session = await getSession();
   assertActionPermitted(session);
+  await assertPluginEnabled('nut-ups');
 
   let isVirtual = false;
   try {
@@ -1842,47 +2042,6 @@ export async function getSystemServicesStatus(): Promise<SystemServiceInfo[]> {
   return results;
 }
 
-export async function getServiceJournalLogs(unit: string): Promise<string> {
-  const session = await getSession();
-  assertActionPermitted(session);
-
-  const trimmed = unit.trim();
-  if (!trimmed || trimmed.startsWith('-') || !/^[a-zA-Z0-9_@.-]+$/.test(trimmed)) {
-    throw new Error('Invalid service unit name');
-  }
-  const safeUnit = trimmed;
-  try {
-    const logs = execFileSync('journalctl', ['-u', safeUnit, '-n', '50', '--no-pager'], {
-      encoding: 'utf8',
-      timeout: 1500,
-      stdio: ['ignore', 'pipe', 'ignore'],
-    });
-    if (logs.trim()) return logs.trim();
-  } catch {}
-
-  const svcBase = safeUnit.replace(/\.service$/, '');
-  for (const logPath of [`/var/log/axonwall/${svcBase}.log`, `/var/log/${svcBase}.log`, '/var/log/messages']) {
-    try {
-      if (fs.existsSync(logPath)) {
-        const raw = execFileSync('tail', ['-n', '50', logPath], { encoding: 'utf8', timeout: 1000 });
-        if (raw.trim()) {
-          // C-B15: fallback log sources used to be returned bare, so
-          // the last 50 lines of the global /var/log/messages were
-          // presented as the unit's own "Journal Logs". Every fallback
-          // is now labelled with its source; the global log is
-          // explicitly flagged as NOT this unit's logs.
-          if (logPath === '/var/log/messages') {
-            return `-- Source: /var/log/messages (system-wide log — no logs found for ${safeUnit}; entries below are NOT this unit's logs) --\n${raw.trim()}`;
-          }
-          return `-- Source: ${logPath} (service log file, not the journal) --\n${raw.trim()}`;
-        }
-      }
-    } catch {}
-  }
-
-  return `-- No service logs found for ${safeUnit} --`;
-}
-
 // C3: real service control for the Service Supervisor page. The buttons
 // used to be a setTimeout that reported success without executing
 // anything. This runs the actual systemctl action against an allowlist
@@ -1934,6 +2093,56 @@ const CONTROLLABLE_SERVICE_UNITS = [
   'rtslib-fb-targetctl.service',
   'target.service',
 ];
+
+const ALLOWED_SERVICE_JOURNAL_UNITS = new Set<string>([
+  ...CONTROLLABLE_SERVICE_UNITS,
+  ...Object.values(SERVICE_UNIT_ALIASES).flat(),
+]);
+
+export async function getServiceJournalLogs(unit: string): Promise<string> {
+  const session = await getSession();
+  assertActionPermitted(session);
+
+  const trimmed = unit.trim();
+  if (!trimmed || trimmed.startsWith('-') || !/^[a-zA-Z0-9_@.-]+$/.test(trimmed)) {
+    throw new Error('Invalid service unit name');
+  }
+  const normalizedUnit = trimmed.endsWith('.service') ? trimmed : `${trimmed}.service`;
+  if (!ALLOWED_SERVICE_JOURNAL_UNITS.has(trimmed) && !ALLOWED_SERVICE_JOURNAL_UNITS.has(normalizedUnit)) {
+    throw new Error(`Forbidden: Service unit '${trimmed}' is not in the managed appliance allowlist`);
+  }
+  const safeUnit = ALLOWED_SERVICE_JOURNAL_UNITS.has(trimmed) ? trimmed : normalizedUnit;
+  try {
+    const logs = execFileSync('journalctl', ['-u', safeUnit, '-n', '50', '--no-pager'], {
+      encoding: 'utf8',
+      timeout: 1500,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    if (logs.trim()) return logs.trim();
+  } catch {}
+
+  const svcBase = safeUnit.replace(/\.service$/, '');
+  for (const logPath of [`/var/log/axonwall/${svcBase}.log`, `/var/log/${svcBase}.log`, '/var/log/messages']) {
+    try {
+      if (fs.existsSync(logPath)) {
+        const raw = execFileSync('tail', ['-n', '50', logPath], { encoding: 'utf8', timeout: 1000 });
+        if (raw.trim()) {
+          // C-B15: fallback log sources used to be returned bare, so
+          // the last 50 lines of the global /var/log/messages were
+          // presented as the unit's own "Journal Logs". Every fallback
+          // is now labelled with its source; the global log is
+          // explicitly flagged as NOT this unit's logs.
+          if (logPath === '/var/log/messages') {
+            return `-- Source: /var/log/messages (system-wide log — no logs found for ${safeUnit}; entries below are NOT this unit's logs) --\n${raw.trim()}`;
+          }
+          return `-- Source: ${logPath} (service log file, not the journal) --\n${raw.trim()}`;
+        }
+      }
+    } catch {}
+  }
+
+  return `-- No service logs found for ${safeUnit} --`;
+}
 
 const CRITICAL_NO_STOP_UNITS = new Set([
   'axonwalld.service',
@@ -3043,6 +3252,7 @@ export interface ThreatAlert {
 export async function getRecentThreatAlerts(): Promise<ThreatAlert[]> {
   const session = await getSession();
   assertActionPermitted(session);
+  await assertPluginEnabled('suricata-ids');
   const evePath = '/var/log/suricata/eve.json';
   if (!fs.existsSync(evePath)) {
     return [];
@@ -3831,27 +4041,35 @@ function writeAndMirrorAbGrubEnv(
       if (!fs.existsSync(slotADev)) {
         return `${actionLabel}, but the Slot A mirror could not be made (device ${slotADev} not found)`;
       }
-      const mntDir = '/tmp/axonwall-grubenv-slot-a';
-      fs.mkdirSync(mntDir, { recursive: true });
+      const runParent = isDevRuntime() ? path.join(getStateDir(), 'run') : '/run/axonwall';
+      fs.mkdirSync(runParent, { recursive: true, mode: 0o700 });
+      const mntDir = fs.mkdtempSync(path.join(runParent, 'grubenv-slot-a-'));
+      let mounted = false;
       try {
-        execFileSync('mount', [slotADev, mntDir], { stdio: 'ignore', timeout: 5000 });
-      } catch (mountErr: any) {
-        return `${actionLabel}, but Slot A could not be mounted to mirror it (${mountErr?.message || 'mount failed'})`;
-      }
-      try {
-        execFileSync('grub-editenv', [`${mntDir}/boot/grub/grubenv`, 'set', ...args], {
-          stdio: 'ignore',
-          timeout: 1500,
-        });
-      } catch (mirrorErr: any) {
         try {
-          execFileSync('umount', [mntDir], { stdio: 'ignore', timeout: 5000 });
+          execFileSync('mount', [slotADev, mntDir], { stdio: 'ignore', timeout: 5000 });
+          mounted = true;
+        } catch (mountErr: any) {
+          return `${actionLabel}, but Slot A could not be mounted to mirror it (${mountErr?.message || 'mount failed'})`;
+        }
+        try {
+          execFileSync('grub-editenv', [`${mntDir}/boot/grub/grubenv`, 'set', ...args], {
+            stdio: 'ignore',
+            timeout: 1500,
+          });
+        } catch (mirrorErr: any) {
+          return `${actionLabel}, but the Slot A grubenv mirror failed (${mirrorErr?.message || 'grub-editenv failed'})`;
+        }
+      } finally {
+        if (mounted) {
+          try {
+            execFileSync('umount', [mntDir], { stdio: 'ignore', timeout: 5000 });
+          } catch {}
+        }
+        try {
+          fs.rmdirSync(mntDir);
         } catch {}
-        return `${actionLabel}, but the Slot A grubenv mirror failed (${mirrorErr?.message || 'grub-editenv failed'})`;
       }
-      try {
-        execFileSync('umount', [mntDir], { stdio: 'ignore', timeout: 5000 });
-      } catch {}
     }
   } catch (err: any) {
     return `Failed to mirror the GRUB environment to Slot A: ${err?.message || 'mirror failed'}`;
@@ -3984,8 +4202,9 @@ export async function applySystemFirmwareUpdate(targetSlot: 'A' | 'B'): Promise<
     };
   }
   const cleanSlot: 'A' | 'B' = targetSlot;
+  const session = await getSession();
+  assertInteractiveSession(session);
   try {
-    const session = await getSession();
     if (!isAdminSession(session)) {
       return {
         success: false,
@@ -4331,6 +4550,7 @@ export interface PowerActionResult {
 
 export async function rebootSystemAction(slot?: 'A' | 'B'): Promise<PowerActionResult> {
   const session = await getSession();
+  assertInteractiveSession(session);
   if (!isAdminSession(session)) {
     return {
       success: false,
@@ -4421,6 +4641,7 @@ export async function rebootSystemAction(slot?: 'A' | 'B'): Promise<PowerActionR
 
 export async function poweroffSystemAction(): Promise<PowerActionResult> {
   const session = await getSession();
+  assertInteractiveSession(session);
   if (!isAdminSession(session)) {
     return {
       success: false,
@@ -4534,6 +4755,7 @@ export async function getHardwareTelemetry(): Promise<HardwareTelemetry> {
 
 export async function executeTerminalCommand(command: string): Promise<TerminalExecResponse> {
   const session = await getSession();
+  assertInteractiveSession(session);
   await enforceRateLimit(30, 60000);
   assertActionPermitted(session, 'admin');
   await assertPluginEnabled('web-terminal');
@@ -4677,6 +4899,7 @@ export async function getNasDisksInventory(): Promise<{
 }> {
   const session = await getSession();
   assertActionPermitted(session);
+  await assertPluginEnabled('core-nas');
 
   const daemonResp = await callAgentApi<any>('/v1/nas/disks');
   if (daemonResp && Array.isArray(daemonResp.disks)) {
@@ -4712,6 +4935,7 @@ export async function getNasDisksInventory(): Promise<{
 export async function getNasPoolsRuntime(): Promise<NasPoolStatus[]> {
   const session = await getSession();
   assertActionPermitted(session);
+  await assertPluginEnabled('core-nas');
 
   const daemonResp = await callAgentApi<any>('/v1/nas/pools');
   if (daemonResp && Array.isArray(daemonResp.pools)) {
@@ -4742,6 +4966,7 @@ export async function getNasPoolsRuntime(): Promise<NasPoolStatus[]> {
 export async function getNasSnapshotsRuntime(): Promise<NasSnapshotItem[]> {
   const session = await getSession();
   assertActionPermitted(session);
+  await assertPluginEnabled('core-nas');
 
   const daemonResp = await callAgentApi<any>('/v1/nas/snapshots');
   if (daemonResp && Array.isArray(daemonResp.snapshots)) {
@@ -4769,6 +4994,7 @@ export async function createNasSnapshotAction(
   if (!isAdminSession(session)) {
     throw new Error('Unauthorized: Admin privileges required');
   }
+  await assertPluginEnabled('core-nas');
 
   if (!/^[a-zA-Z0-9][a-zA-Z0-9_./-]*$/.test(dataset) || dataset.includes('..')) {
     throw new Error('Invalid ZFS dataset name');
@@ -4798,6 +5024,7 @@ export async function scrubNasPoolAction(poolName: string): Promise<{ success: b
   if (!isAdminSession(session)) {
     throw new Error('Unauthorized: Admin privileges required');
   }
+  await assertPluginEnabled('core-nas');
 
   if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(poolName)) {
     throw new Error('Invalid ZFS pool name');
@@ -4824,6 +5051,7 @@ export async function rollbackNasSnapshotAction(
   if (!isAdminSession(session)) {
     throw new Error('Unauthorized: Admin privileges required');
   }
+  await assertPluginEnabled('core-nas');
   if (!/^[a-zA-Z0-9][a-zA-Z0-9_./-]*@[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(snapshot) || snapshot.includes('..')) {
     throw new Error('Invalid ZFS snapshot identifier (expected dataset@label)');
   }
@@ -4855,6 +5083,7 @@ export async function deleteNasSnapshotAction(
   if (!isAdminSession(session)) {
     throw new Error('Unauthorized: Admin privileges required');
   }
+  await assertPluginEnabled('core-nas');
   if (!/^[a-zA-Z0-9][a-zA-Z0-9_./-]*@[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(snapshot) || snapshot.includes('..')) {
     throw new Error('Invalid ZFS snapshot identifier (expected dataset@label)');
   }
@@ -4883,6 +5112,7 @@ export async function trimNasPoolAction(
   if (!isAdminSession(session)) {
     throw new Error('Unauthorized: Admin privileges required');
   }
+  await assertPluginEnabled('core-nas');
   if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(poolName)) {
     throw new Error('Invalid ZFS pool name');
   }
@@ -4907,6 +5137,7 @@ export async function checkpointNasPoolAction(
   if (!isAdminSession(session)) {
     throw new Error('Unauthorized: Admin privileges required');
   }
+  await assertPluginEnabled('core-nas');
   if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(poolName)) {
     throw new Error('Invalid ZFS pool name');
   }
@@ -4943,6 +5174,7 @@ export async function manageNasDatasetEncryptionAction(
   if (!isAdminSession(session)) {
     throw new Error('Unauthorized: Admin privileges required');
   }
+  await assertPluginEnabled('core-nas');
   if (!/^[a-zA-Z0-9][a-zA-Z0-9_./-]*$/.test(dataset) || dataset.includes('..')) {
     throw new Error('Invalid ZFS dataset name');
   }
@@ -4976,6 +5208,7 @@ export async function runNasSmartTestAction(
   if (!isAdminSession(session)) {
     throw new Error('Unauthorized: Admin privileges required');
   }
+  await assertPluginEnabled('core-nas');
   if (!/^\/dev\/[a-zA-Z0-9/_-]+$/.test(device) || device.includes('..')) {
     throw new Error('Invalid block device path');
   }
@@ -5011,6 +5244,7 @@ export async function runNasCloudSyncAction(
   if (!isAdminSession(session)) {
     throw new Error('Unauthorized: Admin privileges required');
   }
+  await assertPluginEnabled('core-nas');
   if (!/^[a-zA-Z0-9_-]{1,64}$/.test(taskName)) {
     throw new Error('Invalid Cloud Sync task name');
   }
@@ -5072,6 +5306,7 @@ export interface K3sEtcdSnapshotItem {
 export async function getK3sEtcdSnapshotsAction(): Promise<K3sEtcdSnapshotItem[]> {
   const session = await getSession();
   assertActionPermitted(session);
+  await assertPluginEnabled('core-k3s');
   const daemonResp = await callAgentApi<{ snapshots?: K3sEtcdSnapshotItem[] }>('/v1/k3s/etcd-snapshots');
   if (!daemonResp && !isDevModeRuntime()) {
     throw new Error('Daemon unavailable: could not load K3s etcd snapshots from axonwalld.');
@@ -5087,6 +5322,7 @@ export async function manageK3sEtcdSnapshotAction(
   if (!isAdminSession(session)) {
     throw new Error('Unauthorized: Admin privileges required');
   }
+  await assertPluginEnabled('core-k3s');
   if (name && !/^[a-zA-Z0-9_.-]{1,128}$/.test(name)) {
     throw new Error('Invalid etcd snapshot name');
   }
@@ -5114,6 +5350,7 @@ export async function manageK3sEtcdSnapshotAction(
 export async function getK3sRuntimeStatus(): Promise<K3sRuntimeStatus> {
   const session = await getSession();
   assertActionPermitted(session);
+  await assertPluginEnabled('core-k3s');
 
   const daemonResp = await callAgentApi<any>('/v1/k3s/status');
   if (daemonResp) {
@@ -5174,6 +5411,7 @@ export async function updateK3sNodeSchedulingAction(
   if (!isAdminSession(session)) {
     throw new Error('Unauthorized: Admin privileges required');
   }
+  await assertPluginEnabled('core-k3s');
   const nodeName = (payload.nodeName || '').trim();
   if (!/^[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?$/.test(nodeName)) {
     throw new Error(`Invalid Kubernetes node name: ${payload.nodeName}`);
@@ -5207,6 +5445,7 @@ export async function triggerK3sHaAutoJoin(): Promise<{ success: boolean; messag
   if (!isAdminSession(session)) {
     throw new Error('Unauthorized: Admin privileges required');
   }
+  await assertPluginEnabled('core-k3s');
 
   const state = await getCurrentDesiredState();
   const peerIp = state.ha?.peerIp || state.ha?.peerAddress || '';
@@ -5462,24 +5701,31 @@ export async function runNmapScan(params: {
   const session = await getSession();
   await enforceRateLimit(10, 60000);
   assertActionPermitted(session, 'admin');
+  await assertPluginEnabled('cli-diagnostics-nastymap');
 
   const cleanTarget = params.target.trim();
-  if (!cleanTarget || cleanTarget.startsWith('-') || !/^[a-zA-Z0-9.:/_-]+$/.test(cleanTarget)) {
-    return {
-      success: false,
-      command: '',
-      mode: 'simulated',
-      durationMs: 0,
-      error: 'Invalid scan target. Specify a valid IPv4/IPv6 address, CIDR subnet, or hostname.',
-    };
+  const invalidTargetResp = {
+    success: false,
+    command: '',
+    mode: 'simulated' as const,
+    durationMs: 0,
+    error: 'Invalid scan target. Specify a valid IPv4/IPv6 address, narrow CIDR subnet, or hostname.',
+  };
+  if (!cleanTarget || cleanTarget.startsWith('-')) {
+    return invalidTargetResp;
   }
 
-  // Prevent denial of service from scanning broad CIDR blocks (e.g. /0 or /8)
+  // Prevent denial of service from scanning broad CIDR blocks or hyphenated IP ranges (e.g. 192.168.1.1-254)
   if (cleanTarget.includes('/')) {
     const parts = cleanTarget.split('/');
-    const prefix = parseInt(parts[1] || '', 10);
-    const isIpv6 = cleanTarget.includes(':');
-    if (isNaN(prefix) || (isIpv6 ? prefix < 120 : prefix < 24)) {
+    const ipPart = parts[0] || '';
+    const prefixStr = parts[1] || '';
+    const ipFamily = net.isIP(ipPart);
+    if (parts.length !== 2 || ipFamily === 0 || !/^\d+$/.test(prefixStr)) {
+      return invalidTargetResp;
+    }
+    const prefix = parseInt(prefixStr, 10);
+    if (ipFamily === 6 ? prefix < 120 || prefix > 128 : prefix < 24 || prefix > 32) {
       return {
         success: false,
         command: '',
@@ -5487,6 +5733,17 @@ export async function runNmapScan(params: {
         durationMs: 0,
         error: 'Subnet scan range is too broad. Minimum allowed prefix is /24 for IPv4 and /120 for IPv6.',
       };
+    }
+  } else if (net.isIP(cleanTarget) === 0) {
+    const isValidHostname =
+      cleanTarget.length <= 253 &&
+      /^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$/.test(
+        cleanTarget
+      ) &&
+      /[a-zA-Z]/.test(cleanTarget) &&
+      !/(?:^|\.)\d+-\d+(?:\.|$)/.test(cleanTarget);
+    if (!isValidHostname) {
+      return invalidTargetResp;
     }
   }
 
@@ -5805,7 +6062,7 @@ function getMcpKeysStoragePath(): string {
       fs.accessSync(primaryFile, fs.constants.R_OK);
       return primaryFile;
     }
-    fs.mkdirSync(primary, { recursive: true, mode: 0o775 });
+    fs.mkdirSync(primary, { recursive: true, mode: 0o700 });
     fs.accessSync(primary, fs.constants.W_OK);
     return primaryFile;
   } catch {
@@ -5815,8 +6072,8 @@ function getMcpKeysStoragePath(): string {
     ]) {
       if (fs.existsSync(candidate)) return candidate;
     }
-    const fallback = isDevRuntime() ? path.join(getStateDir(), 'tmp') : '/tmp/axonwall';
-    fs.mkdirSync(fallback, { recursive: true, mode: 0o775 });
+    const fallback = isDevRuntime() ? path.join(getStateDir(), 'run') : '/run/axonwall';
+    fs.mkdirSync(fallback, { recursive: true, mode: 0o700 });
     return path.join(fallback, 'mcp-keys.json');
   }
 }
@@ -5824,8 +6081,8 @@ function getMcpKeysStoragePath(): string {
 function getMcpAuditStoragePath(): string {
   if (process.env.AXONWALL_MCP_AUDIT_PATH) return process.env.AXONWALL_MCP_AUDIT_PATH;
   const dirs = isDevRuntime()
-    ? [getStateDir(), path.join(getStateDir(), 'log')]
-    : [getStateDir(), '/var/log/axonwall'];
+    ? [getStateDir(), path.join(getStateDir(), 'log'), path.join(getStateDir(), 'run')]
+    : [getStateDir(), '/var/log/axonwall', '/run/axonwall'];
   for (const dir of dirs) {
     const file = path.join(dir, 'mcp-audit.jsonl');
     try {
@@ -5833,14 +6090,12 @@ function getMcpAuditStoragePath(): string {
         fs.accessSync(file, fs.constants.R_OK);
         return file;
       }
-      fs.mkdirSync(dir, { recursive: true, mode: 0o775 });
+      fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
       fs.accessSync(dir, fs.constants.W_OK);
       return file;
     } catch {}
   }
-  const fallback = isDevRuntime() ? path.join(getStateDir(), 'tmp') : '/tmp/axonwall';
-  fs.mkdirSync(fallback, { recursive: true, mode: 0o775 });
-  return path.join(fallback, 'mcp-audit.jsonl');
+  throw new Error('Unable to initialize a private MCP audit storage directory');
 }
 
 function readStoredMcpKeys(): McpApiKey[] {
@@ -6042,6 +6297,7 @@ export async function createMcpApiKeyAction(input: {
   expiresInDays?: number;
 }): Promise<{ success: boolean; rawToken?: string; key?: McpApiKeyPublic; error?: string }> {
   const session = await getSession();
+  assertInteractiveSession(session);
   assertActionPermitted(session, 'admin');
   await assertPluginEnabled('mcp-ai-control');
 
@@ -6104,6 +6360,7 @@ export async function createMcpApiKeyAction(input: {
 
 export async function revokeMcpApiKeyAction(keyId: string): Promise<{ success: boolean; error?: string }> {
   const session = await getSession();
+  assertInteractiveSession(session);
   assertActionPermitted(session, 'admin');
   await assertPluginEnabled('mcp-ai-control');
 
@@ -6122,6 +6379,7 @@ export async function toggleMcpApiKeyAction(
   enabled: boolean
 ): Promise<{ success: boolean; error?: string }> {
   const session = await getSession();
+  assertInteractiveSession(session);
   assertActionPermitted(session, 'admin');
   await assertPluginEnabled('mcp-ai-control');
 
@@ -6186,6 +6444,7 @@ export async function toggleMcpServerMasterSwitchAction(
   reason?: string
 ): Promise<{ success: boolean; status: McpServerStatus; error?: string }> {
   const session = await getSession();
+  assertInteractiveSession(session);
   assertActionPermitted(session, 'admin');
   await assertPluginEnabled('mcp-ai-control');
 
@@ -6282,6 +6541,7 @@ export interface RosenpassLiveStatus {
 export async function getRosenpassStatusAction(wgDevice = 'wg0'): Promise<RosenpassLiveStatus> {
   const session = await getSession();
   assertActionPermitted(session);
+  await assertPluginEnabled('rosenpass');
 
   const safeDev = /^[a-zA-Z0-9_.-]{1,15}$/.test(wgDevice) ? wgDevice : 'wg0';
   const res = await callAgentApi<RosenpassLiveStatus>(
@@ -6325,6 +6585,7 @@ export async function generateRosenpassKeypairAction(
 ): Promise<{ success: boolean; publicKeyPath?: string; sizeBytes?: number; sha256?: string; error?: string }> {
   const session = await getSession();
   assertActionPermitted(session, 'admin');
+  await assertPluginEnabled('rosenpass');
 
   const res = await callAgentApiResponse<any>('/v1/vpn/rosenpass/keygen', 'POST', { force: Boolean(force) }, 30000);
   if (res && res.success) {
@@ -6368,6 +6629,7 @@ export async function exportRosenpassPublicKeyAction(): Promise<{
 }> {
   const session = await getSession();
   assertActionPermitted(session);
+  await assertPluginEnabled('rosenpass');
 
   const res = await callAgentApiResponse<any>('/v1/vpn/rosenpass/pubkey', 'GET', undefined, 10000);
   if (res && res.success && res.publicKeyBase64) {
@@ -6390,6 +6652,7 @@ export async function uploadRosenpassPeerPublicKeyAction(
 ): Promise<{ success: boolean; path?: string; sha256?: string; sizeBytes?: number; error?: string }> {
   const session = await getSession();
   assertActionPermitted(session, 'admin');
+  await assertPluginEnabled('rosenpass');
 
   const cleanName = peerName.trim();
   if (!/^[a-zA-Z0-9_-]{1,64}$/.test(cleanName)) {
@@ -7057,6 +7320,9 @@ export async function getThreatHarvesterStatus(): Promise<ThreatHarvesterStatusS
       if (cloned.config?.teacherLlm?.apiKey) {
         cloned.config.teacherLlm.apiKey = '********';
       }
+      if (cloned.config?.fleetShipper?.accessKey) {
+        cloned.config.fleetShipper.accessKey = '********';
+      }
       if (cloned.config?.fleetShipper?.secretKey) {
         cloned.config.fleetShipper.secretKey = '********';
       }
@@ -7067,6 +7333,12 @@ export async function getThreatHarvesterStatus(): Promise<ThreatHarvesterStatusS
 
   const state = await getCurrentDesiredState().catch(() => null);
   const cfg = ThreatHarvesterConfigSchema.parse(state?.threatHarvester ?? {});
+  if (!isAdminSession(session)) {
+    if (cfg.anonymizationSalt) cfg.anonymizationSalt = '********';
+    if (cfg.teacherLlm?.apiKey) cfg.teacherLlm.apiKey = '********';
+    if (cfg.fleetShipper?.accessKey) cfg.fleetShipper.accessKey = '********';
+    if (cfg.fleetShipper?.secretKey) cfg.fleetShipper.secretKey = '********';
+  }
   return {
     daemonDown: true,
     config: cfg,
@@ -7339,6 +7611,7 @@ function emptyK3sClusterPulse(error: string): K3sClusterPulse {
 export async function getK3sClusterPulseAction(): Promise<K3sClusterPulse> {
   const session = await getSession();
   assertActionPermitted(session);
+  await assertPluginEnabled('core-k3s');
 
   const res = await callAgentApiDetailed<K3sClusterPulse>('/v1/k3s/pulse', 'GET', undefined, 15_000);
   if (res.kind === 'ok') {
@@ -7357,6 +7630,7 @@ export async function getK3sClusterPulseAction(): Promise<K3sClusterPulse> {
 export async function getK3sApiResourcesAction(): Promise<K3sAPIResource[]> {
   const session = await getSession();
   assertActionPermitted(session);
+  await assertPluginEnabled('core-k3s');
 
   const res = await callAgentApiDetailed<{ resources?: K3sAPIResource[]; error?: string }>(
     '/v1/k3s/api-resources',
@@ -7373,6 +7647,7 @@ export async function getK3sApiResourcesAction(): Promise<K3sAPIResource[]> {
 export async function getK3sNamespacesAction(): Promise<K3sNamespaceSummary[]> {
   const session = await getSession();
   assertActionPermitted(session);
+  await assertPluginEnabled('core-k3s');
 
   const res = await callAgentApiDetailed<{ namespaces?: K3sNamespaceSummary[]; error?: string }>(
     '/v1/k3s/namespaces',
@@ -7393,6 +7668,7 @@ export async function listK3sResourcesAction(params: {
 }): Promise<K3sResourceListResponse> {
   const session = await getSession();
   assertActionPermitted(session);
+  await assertPluginEnabled('core-k3s');
 
   const qs = new URLSearchParams();
   qs.set('resource', (params.resource || 'pods').trim());
@@ -7436,6 +7712,7 @@ export async function inspectK3sResourceAction(params: {
 }): Promise<K3sResourceInspectResponse> {
   const session = await getSession();
   assertActionPermitted(session);
+  await assertPluginEnabled('core-k3s');
   if (params.decodeSecret) {
     assertActionPermitted(session, 'admin');
   }
@@ -7492,6 +7769,7 @@ export async function getK3sPodLogsAction(params: {
 }): Promise<K3sLogsResponse> {
   const session = await getSession();
   assertActionPermitted(session);
+  await assertPluginEnabled('core-k3s');
 
   const qs = new URLSearchParams();
   qs.set('namespace', (params.namespace || 'default').trim());
@@ -7531,6 +7809,7 @@ export async function getK3sPodLogsAction(params: {
 export async function executeK3sAction(payload: K3sActionRequest): Promise<K3sActionResponse> {
   const session = await getSession();
   assertActionPermitted(session, 'admin');
+  await assertPluginEnabled('core-k3s');
 
   const timeoutMs = payload.action === 'drain' ? 90_000 : 30_000;
   const res = await callAgentApiDetailed<K3sActionResponse>('/v1/k3s/action', 'POST', payload, timeoutMs);
@@ -9242,6 +9521,7 @@ export async function getNetFlowNodesAction(): Promise<
 > {
   const session = await getSession();
   assertActionPermitted(session);
+  await assertPluginEnabled('netflow-collector');
   const res = await callAgentApiDetailed<{
     nodes?: Array<{ nodeId: string; nodeName: string; exporterIp: string; flowsCount: number; lastSeenMs: number }>;
   }>('/v1/netflow/nodes', 'GET', undefined, 5_000);

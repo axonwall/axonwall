@@ -4,6 +4,14 @@ import path from 'node:path';
 import { logger } from '../utils/logger.js';
 import { getVigilanteConfigDir, resolveCtfFlagSecret, requireCtfFlagSecret } from './config.js';
 
+function timingSafeEqualString(a, b) {
+  if (typeof a !== 'string' || typeof b !== 'string') return false;
+  const bufA = Buffer.from(a, 'utf8');
+  const bufB = Buffer.from(b, 'utf8');
+  if (bufA.length !== bufB.length) return false;
+  return crypto.timingSafeEqual(bufA, bufB);
+}
+
 function escapeXml(value) {
   return String(value ?? '')
     .replace(/&/g, '&amp;')
@@ -225,10 +233,14 @@ export class TournamentEngine {
    */
   getTeam(identifier) {
     if (this.teams.has(identifier)) return this.teams.get(identifier);
+    if (typeof identifier !== 'string' || identifier.length === 0) return null;
+    let matched = null;
     for (const team of this.teams.values()) {
-      if (team.token === identifier) return team;
+      if (timingSafeEqualString(team.token, identifier)) {
+        matched = team;
+      }
     }
-    return null;
+    return matched;
   }
 
   /**
@@ -367,7 +379,7 @@ export class TournamentEngine {
           challengeId,
           secretKey: this.secretKey
         });
-        if (cleanFlag === otherFlag) {
+        if (timingSafeEqualString(cleanFlag, otherFlag)) {
           this.submissions.push({
             teamId,
             challengeId,
@@ -403,7 +415,9 @@ export class TournamentEngine {
     // Only the expected flag counts. For dynamic-flag challenges the static
     // defaultFlag must NOT also be accepted: it is a shared, guessable value
     // (default `VIGILANTE{<id>_solve}`) that would bypass per-team flags.
-    const isCorrect = cleanFlag === expectedFlag;
+    const isCorrect = typeof expectedFlag === 'string' &&
+      expectedFlag.length > 0 &&
+      timingSafeEqualString(cleanFlag, expectedFlag);
 
     const submissionRecord = {
       teamId,

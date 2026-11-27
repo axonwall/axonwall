@@ -13,7 +13,92 @@ import {
 import { autoSignIfConfigured } from './gpg.js';
 import { saveEvidenceFile } from './evidence.js';
 import { detectNetworkSubnets } from './nmap.js';
+import { assertSafeOutboundTarget, assertSafeScanTarget } from './ssrf.js';
 import { logger } from '../utils/logger.js';
+
+const REDACTED_SECRET = '[REDACTED]';
+
+export function maskOobSecretValue(val) {
+  if (val === undefined || val === null || val === '') return '';
+  return REDACTED_SECRET;
+}
+
+export function maskOobCredentialsInRecord(record) {
+  if (!record || typeof record !== 'object') return record;
+  const clone = { ...record };
+  if (clone.password) clone.password = REDACTED_SECRET;
+  if (clone.pass) clone.pass = REDACTED_SECRET;
+
+  const maskCredEntry = (entry) => {
+    if (!entry || typeof entry !== 'object') return entry;
+    const copy = { ...entry };
+    if (copy.password) copy.password = REDACTED_SECRET;
+    if (copy.pass) copy.pass = REDACTED_SECRET;
+    return copy;
+  };
+
+  for (const field of ['creds', 'credential', 'credentials']) {
+    if (Array.isArray(clone[field])) {
+      clone[field] = clone[field].map(maskCredEntry);
+    } else if (clone[field] && typeof clone[field] === 'object') {
+      clone[field] = maskCredEntry(clone[field]);
+    }
+  }
+  return clone;
+}
+
+function collectOobSecretValues(record, secretsSet) {
+  if (!record || typeof record !== 'object') return;
+  for (const k of ['password', 'pass']) {
+    if (typeof record[k] === 'string' && record[k] && record[k] !== REDACTED_SECRET) {
+      secretsSet.add(record[k]);
+    }
+  }
+  for (const field of ['creds', 'credential', 'credentials']) {
+    const val = record[field];
+    const items = Array.isArray(val) ? val : (val && typeof val === 'object' ? [val] : []);
+    for (const item of items) {
+      if (item && typeof item === 'object') {
+        for (const k of ['password', 'pass']) {
+          if (typeof item[k] === 'string' && item[k] && item[k] !== REDACTED_SECRET) {
+            secretsSet.add(item[k]);
+          }
+        }
+      }
+    }
+  }
+}
+
+export function redactOobJsonlContent(content) {
+  if (!content || typeof content !== 'string') {
+    return { maskedContent: content || '', secrets: [] };
+  }
+  const secretsSet = new Set();
+  const lines = content.split('\n');
+  const maskedLines = lines.map((line) => {
+    const trimmed = line.trim();
+    if (!trimmed) return line;
+    if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+      try {
+        const parsed = JSON.parse(trimmed);
+        collectOobSecretValues(parsed, secretsSet);
+        return JSON.stringify(maskOobCredentialsInRecord(parsed));
+      } catch {
+        // Fall through to text redaction
+      }
+    }
+    return line;
+  });
+
+  let maskedContent = maskedLines.join('\n');
+  const secrets = Array.from(secretsSet).sort((a, b) => b.length - a.length);
+  for (const sec of secrets) {
+    if (sec.length >= 3) {
+      maskedContent = maskedContent.split(sec).join(REDACTED_SECRET);
+    }
+  }
+  return { maskedContent, secrets };
+}
 
 export const OOB_SCAN_PROFILES = [
   {
@@ -229,7 +314,9 @@ export function parseOobReportContent(content, filename = '') {
 
   for (const line of lines) {
     try {
-      const record = JSON.parse(line);
+      const parsedLine = JSON.parse(line);
+      const hasPlaintextCred = Boolean(parsedLine.username && (parsedLine.password || parsedLine.pass));
+      const record = maskOobCredentialsInRecord(parsedLine);
       rawRecords.push(record);
 
       const host = record.host || record.ip || record.target || 'unknown-host';
@@ -340,12 +427,12 @@ export function parseOobReportContent(content, filename = '') {
         }
       }
 
-      // Discovered Weak / Default Credentials
-      if (record.type === 'credential' || record.creds || record.credential || record.credentials) {
-        if (record.type === 'credential' || (record.username && record.password && !record.creds && !record.credential && !record.credentials)) {
+      // Discovered Weak / Default Credentials (plaintext passwords masked)
+      if (record.type === 'credential' || record.creds || record.credential || record.credentials || hasPlaintextCred) {
+        if (record.type === 'credential' || (hasPlaintextCred && !record.creds && !record.credential && !record.credentials)) {
           existing.creds.push({
             user: record.username || record.user,
-            pass: record.password || record.pass,
+            pass: maskOobSecretValue(record.password || record.pass),
             protocol: record.service || record.protocol || 'ipmi',
             status: record.valid !== false ? 'valid' : 'invalid'
           });
@@ -357,7 +444,7 @@ export function parseOobReportContent(content, filename = '') {
           for (const c of credsList) {
             existing.creds.push({
               user: c.user || c.username,
-              pass: c.pass || c.password,
+              pass: maskOobSecretValue(c.pass || c.password),
               protocol: c.protocol || c.service || 'ipmi',
               status: c.status || (c.valid !== false ? 'valid' : 'invalid')
             });
@@ -445,12 +532,14 @@ const ALLOWED_OOBSCAN_VALUE_FLAGS = new Map([
   ['-rate', /^\d{1,6}$/],
   ['-ports', /^[0-9,-]+$/],
   ['-p', /^[0-9,-]+$/],
-  ['-c', /^\d{1,4}$/],
-  ['-t', /^[a-zA-Z0-9._:/%,-]+$/],
-  ['-targets', /^[a-zA-Z0-9._:/%,-]+$/]
+  ['-c', /^\d{1,4}$/]
+]);
+const DISALLOWED_OOBSCAN_OVERRIDE_FLAGS = new Set([
+  '-t', '--t', '-target', '--target', '-targets', '--targets',
+  '-list', '--list', '-l', '--l', '-il', '-o', '--o', '-output', '--output', '-f', '--f', '-file', '--file'
 ]);
 
-function sanitizeOobCustomArgs(customArgs) {
+export function sanitizeOobCustomArgs(customArgs) {
   const tokens = Array.isArray(customArgs)
     ? customArgs.map(a => String(a).trim()).filter(Boolean)
     : String(customArgs || '').trim().split(/\s+/).filter(Boolean);
@@ -467,6 +556,9 @@ function sanitizeOobCustomArgs(customArgs) {
     }
     const eqIdx = token.indexOf('=');
     const flagName = eqIdx >= 0 ? token.slice(0, eqIdx) : token;
+    if (DISALLOWED_OOBSCAN_OVERRIDE_FLAGS.has(flagName.toLowerCase())) {
+      throw new Error(`Disallowed target or file override flag '${flagName}' in oobscan customArgs`);
+    }
     const valuePattern = ALLOWED_OOBSCAN_VALUE_FLAGS.get(flagName);
     if (!valuePattern) {
       throw new Error(`Unsupported or disallowed oobscan custom argument '${token}'`);
@@ -497,23 +589,53 @@ export async function runOobScan({
   customArgs = [],
   disableLogins = false,
   ipmiFull = false,
-  onLog = null
+  onLog = null,
+  allowPrivate = true,
+  allowLoopback = true,
+  dnsLookup,
+  failOnDnsError
 } = {}) {
+  const cleanTarget = assertCliTarget((target || '127.0.0.1').trim(), 'oobscan target');
+  const scanCheck = await assertSafeScanTarget(cleanTarget, {
+    label: 'oobscan target',
+    allowPrivate,
+    allowLoopback,
+    allowMetadata: false,
+    allowLinkLocalMulticast: true,
+    dnsLookup,
+    failOnDnsError
+  });
+  // Direct SSRF guard on single targets (non-CIDR, non-range, non-multicast)
+  if (!scanCheck.isRange && !/^ff02::1(?:%|$)/i.test(cleanTarget)) {
+    await assertSafeOutboundTarget(cleanTarget, {
+      label: 'oobscan target',
+      allowBareHost: true,
+      allowPrivate,
+      allowLoopback,
+      allowMetadata: false,
+      dnsLookup,
+      failOnDnsError
+    });
+  }
+
+  const profileDef = OOB_SCAN_PROFILES.find(p => p.id === profile) || OOB_SCAN_PROFILES[0];
+  const safeCustomArgs = profile === 'custom' ? sanitizeOobCustomArgs(customArgs) : null;
+
   await ensureVigilanteConfig();
   const oobscansDir = getVigilanteOobscansDir();
+  await fs.mkdir(oobscansDir, { recursive: true, mode: 0o700 });
+  await fs.chmod(oobscansDir, 0o700).catch(() => {});
+
   const check = await checkOobscanInstalled();
   if (!check.installed) {
     throw new Error(check.error);
   }
 
-  const cleanTarget = assertCliTarget((target || '127.0.0.1').trim(), 'oobscan target');
   const safeTargetName = cleanTarget.replace(/[/:]/g, '_').replace(/[^a-zA-Z0-9._-]/g, '');
   const timestamp = Date.now();
   const baseName = `oobscan-${safeTargetName}-${timestamp}`;
   const jsonlFilePath = path.join(oobscansDir, `${baseName}.jsonl`);
   const hashcatFilePath = path.join(oobscansDir, `${baseName}.hashcat`);
-
-  const profileDef = OOB_SCAN_PROFILES.find(p => p.id === profile) || OOB_SCAN_PROFILES[0];
 
   // Each profile's buildArgs is the single source of truth for its argv:
   // it owns the subcommand, the -targets flag, and the profile's
@@ -522,7 +644,6 @@ export async function runOobScan({
   // dropping -targets entirely and letting the two flag spellings drift.
   let args;
   if (profile === 'custom') {
-    const safeCustomArgs = sanitizeOobCustomArgs(customArgs);
     args = [...safeCustomArgs, '-o', jsonlFilePath, '-v'];
     if (disableLogins && !args.includes('-no-logins')) args.push('-no-logins');
     if (ipmiFull && !args.includes('-ipmi-full')) args.push('-ipmi-full');
@@ -550,6 +671,10 @@ export async function runOobScan({
   let fullOutput = '';
 
   try {
+    // Pre-create report file with strict 0600 permissions before tool execution
+    await fs.writeFile(jsonlFilePath, '', { encoding: 'utf8', mode: 0o600 });
+    await fs.chmod(jsonlFilePath, 0o600).catch(() => {});
+
     const subprocess = execa('oobscan', args);
 
     if (subprocess.stdout) {
@@ -586,24 +711,36 @@ export async function runOobScan({
 
     logger.info('OOBSCAN:SUCCESS', `Scan completed for ${cleanTarget} in ${durationMs}ms`);
 
-    // Auto-sign scan reports if GPG is configured
+    // Read resulting NDJSON file, mask plaintext BMC passwords BEFORE persisting/signing/vaulting
+    let rawFileContent = '';
+    try {
+      rawFileContent = await fs.readFile(jsonlFilePath, 'utf8');
+    } catch {
+      rawFileContent = fullOutput;
+    }
+
+    const { maskedContent: maskedJsonl, secrets } = redactOobJsonlContent(rawFileContent);
+    const { maskedContent: maskedFullOutput } = redactOobJsonlContent(fullOutput);
+    let scrubbedOutput = maskedFullOutput;
+    for (const sec of secrets) {
+      if (sec.length >= 3) {
+        scrubbedOutput = scrubbedOutput.split(sec).join(REDACTED_SECRET);
+      }
+    }
+
+    await fs.writeFile(jsonlFilePath, maskedJsonl, { encoding: 'utf8', mode: 0o600 });
+    await fs.chmod(jsonlFilePath, 0o600).catch(() => {});
+
+    // Auto-sign redacted scan reports if GPG is configured
     try {
       await autoSignIfConfigured(jsonlFilePath);
     } catch (err) {
       logger.warn('OOBSCAN:GPG', `Failed to auto-sign scan outputs: ${err.message}`);
     }
 
-    // Read and parse resulting NDJSON file
-    let fileContent = '';
-    try {
-      fileContent = await fs.readFile(jsonlFilePath, 'utf8');
-    } catch {
-      fileContent = fullOutput;
-    }
+    const parsed = parseOobReportContent(maskedJsonl, `${baseName}.jsonl`);
 
-    const parsed = parseOobReportContent(fileContent, `${baseName}.jsonl`);
-
-    // Export any RAKP hashcat lines to sibling .hashcat file
+    // Export any RAKP hashcat lines to sibling .hashcat file (0600)
     const hashcatLines = [];
     for (const b of parsed.bmcs) {
       for (const r of b.rakp) {
@@ -615,7 +752,8 @@ export async function runOobScan({
 
     let hasHashes = false;
     if (hashcatLines.length > 0) {
-      await fs.writeFile(hashcatFilePath, hashcatLines.join('\n') + '\n', 'utf8');
+      await fs.writeFile(hashcatFilePath, hashcatLines.join('\n') + '\n', { encoding: 'utf8', mode: 0o600 });
+      await fs.chmod(hashcatFilePath, 0o600).catch(() => {});
       hasHashes = true;
       try {
         await autoSignIfConfigured(hashcatFilePath);
@@ -627,15 +765,19 @@ export async function runOobScan({
       }
     }
 
-    // Copy to host evidence directory if applicable
+    // Copy masked report to host evidence directory (0700 dir / 0600 file)
     if (!cleanTarget.includes('/') && !cleanTarget.startsWith('ff02')) {
       try {
-        await saveEvidenceFile(
+        const evRes = await saveEvidenceFile(
           'out-of-band',
           cleanTarget,
           `${baseName}.jsonl`,
-          fileContent
+          maskedJsonl
         );
+        if (evRes?.filePath) {
+          await fs.chmod(path.dirname(evRes.filePath), 0o700).catch(() => {});
+          await fs.chmod(evRes.filePath, 0o600).catch(() => {});
+        }
       } catch (err) {
         logger.warn('OOBSCAN:EVIDENCE', `Failed to save host evidence: ${err.message}`);
       }
@@ -649,7 +791,7 @@ export async function runOobScan({
       jsonlFilePath,
       hashcatFilePath: hasHashes ? hashcatFilePath : null,
       durationMs,
-      output: fullOutput,
+      output: scrubbedOutput,
       parsed
     };
   } catch (err) {
@@ -665,6 +807,8 @@ export async function runOobScan({
 export async function listSavedOobScans() {
   await ensureVigilanteConfig();
   const oobscansDir = getVigilanteOobscansDir();
+  await fs.mkdir(oobscansDir, { recursive: true, mode: 0o700 });
+  await fs.chmod(oobscansDir, 0o700).catch(() => {});
   const scans = [];
 
   try {
@@ -760,6 +904,8 @@ export async function deleteSavedOobScan(filePathOrFilename) {
 export async function exportRakpHashes(filePathOrOutPath = null, maybeOutPath = null) {
   await ensureVigilanteConfig();
   const oobscansDir = getVigilanteOobscansDir();
+  await fs.mkdir(oobscansDir, { recursive: true, mode: 0o700 });
+  await fs.chmod(oobscansDir, 0o700).catch(() => {});
   let targetScan = null;
   let destination = null;
 
@@ -810,7 +956,8 @@ export async function exportRakpHashes(filePathOrOutPath = null, maybeOutPath = 
   }
 
   if (hashes.length > 0) {
-    await fs.writeFile(destination, hashes.join('\n') + '\n', 'utf8');
+    await fs.writeFile(destination, hashes.join('\n') + '\n', { encoding: 'utf8', mode: 0o600 });
+    await fs.chmod(destination, 0o600).catch(() => {});
     try {
       await autoSignIfConfigured(destination);
     } catch {

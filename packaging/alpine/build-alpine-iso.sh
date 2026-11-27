@@ -56,19 +56,27 @@ case "${EDITION}" in
     ;;
 esac
 
-# If not running inside Alpine Linux, automatically delegate to alpine:3.21 Docker container
+# If not running inside Alpine Linux, automatically delegate to digest-pinned Alpine 3.21 Docker container (SEC-M36).
+# Override ALPINE_BUILDER_IMAGE only when using a pre-cached offline or custom local Alpine image.
+ALPINE_BUILDER_IMAGE="${ALPINE_BUILDER_IMAGE:-alpine:3.21@sha256:ce64758a109eb420d874a118f87920e625e12d3634e03b4a5573fd9f6e5d3507}"
 if [[ "$IN_CONTAINER" -eq 0 ]] && [[ ! -f /etc/alpine-release ]]; then
-  echo "[+] Host is not Alpine Linux. Launching isolated alpine:3.21 build container..."
+  echo "[+] Host is not Alpine Linux. Launching isolated ${ALPINE_BUILDER_IMAGE} build container..."
   exec docker run --rm \
+    ${K3S_VERSION:+-e K3S_VERSION} \
+    ${K3S_SHA256:+-e K3S_SHA256} \
+    ${AXONWALL_EDITION:+-e AXONWALL_EDITION} \
+    ${ALPINE_ISO_VERSION:+-e ALPINE_ISO_VERSION} \
     -v "${REPO_ROOT}:/repo" \
     -w /repo \
-    alpine:3.21 \
+    "${ALPINE_BUILDER_IMAGE}" \
     /bin/sh -c 'apk add --no-cache bash >/dev/null && exec /bin/bash /repo/packaging/alpine/build-alpine-iso.sh --in-container "$@"' -- "${ARGS[@]}"
 fi
 
 ALPINE_BRANCH="v3.21"
 ALPINE_MIRROR="https://dl-cdn.alpinelinux.org/alpine/${ALPINE_BRANCH}"
-WORK_DIR="/tmp/axonwall-alpine-build"
+WORK_DIR="$(mktemp -d /tmp/axonwall-alpine-build.XXXXXX)"
+chmod 0700 "${WORK_DIR}"
+trap 'rm -rf "${WORK_DIR}"' EXIT INT TERM
 OUTPUT_DIR="${REPO_ROOT}/packaging/alpine/output"
 if [[ "${EDITION}" == "k3s-storage" ]]; then
   ISO_NAME="axonwall-k3s-storage-alpine-${PROFILE}-amd64.iso"
@@ -102,7 +110,6 @@ apk add --no-cache \
   abuild \
   cpio
 
-rm -rf "${WORK_DIR}"
 mkdir -p "${WORK_DIR}/iso/boot/grub" \
          "${WORK_DIR}/iso/boot/syslinux" \
          "${WORK_DIR}/iso/apks/x86_64" \
@@ -146,7 +153,7 @@ case "${ISO_FILE}" in
     exit 1 ;;
 esac
 
-curl -fsSL -o "${WORK_DIR}/base.iso" "${ALPINE_MIRROR}/releases/x86_64/${ISO_FILE}"
+curl -fsSL --proto '=https' --tlsv1.2 -o "${WORK_DIR}/base.iso" "${ALPINE_MIRROR}/releases/x86_64/${ISO_FILE}"
 echo "${EXPECTED_ISO_SHA256}  ${WORK_DIR}/base.iso" | sha256sum -c -
 xorriso -osirrox on -indev "${WORK_DIR}/base.iso" -extract / "${WORK_DIR}/iso" 2>/dev/null
 chmod -R u+w "${WORK_DIR}/iso"
@@ -488,6 +495,15 @@ grep -v '^UsePAM ' "${REPO_ROOT}/packaging/iso/config/includes.chroot/etc/ssh/ss
 cp "${REPO_ROOT}/packaging/iso/config/includes.chroot/etc/sudoers.d/axonwall" "${OVL}/etc/sudoers.d/axonwall"
 chmod 0440 "${OVL}/etc/sudoers.d/axonwall"
 
+# Install kernel hardening sysctl profile across all Alpine editions (SEC-M31)
+if [[ -f "${REPO_ROOT}/packaging/iso/config/includes.chroot/etc/sysctl.d/95-axonwall-kernel-hardening.conf" ]]; then
+  cp "${REPO_ROOT}/packaging/iso/config/includes.chroot/etc/sysctl.d/95-axonwall-kernel-hardening.conf" "${OVL}/etc/sysctl.d/95-axonwall-kernel-hardening.conf"
+  chmod 0644 "${OVL}/etc/sysctl.d/95-axonwall-kernel-hardening.conf"
+else
+  echo "[!] ERROR: packaging/iso/config/includes.chroot/etc/sysctl.d/95-axonwall-kernel-hardening.conf is missing; refusing to build Alpine ISO without kernel hardening sysctl profile." >&2
+  exit 1
+fi
+
 if [[ "${EDITION}" == "k3s-storage" ]]; then
   # Strip NGFW-only OpenRC init scripts and stage Barebones K3s + OpenZFS Storage Host configs
   rm -f "${OVL}/etc/init.d/axonwalld" \
@@ -734,25 +750,26 @@ write_core_k3s_bundled_json() {
 }
 
 if [[ "${EDITION}" == "k3s-storage" ]]; then
-  K3S_VERSION="${K3S_VERSION:-v1.32.3+k3s1}"
-  K3S_URL_VERSION="${K3S_VERSION//+/%2B}"
-  case "${K3S_VERSION}" in
-    v1.31.5+k3s1) K3S_SHA256="${K3S_SHA256:-399b87b432ce55013fa81adad572a8e4ecf56e0df97369cf02d4b8a41f039091}" ;;
-    v1.32.3+k3s1) K3S_SHA256="${K3S_SHA256:-b19216803650b567bf980888dec39035edaf664339c55bc4462f7a003edbef83}" ;;
-    *) K3S_SHA256="${K3S_SHA256:-}" ;;
-  esac
-  echo "[+] Fetching K3s ${K3S_VERSION} for Alpine k3s-storage overlay..."
-  mkdir -p "${OVL}/var/lib/axonwall/core-k3s/bin"
-  curl -fsSL -o "${OVL}/var/lib/axonwall/core-k3s/bin/k3s" "https://github.com/k3s-io/k3s/releases/download/${K3S_URL_VERSION}/k3s"
-  if [[ -z "${K3S_SHA256}" ]]; then
-    K3S_SHA256="$(curl -fsSL "https://github.com/k3s-io/k3s/releases/download/${K3S_URL_VERSION}/sha256sum-amd64.txt" | awk '$2 == "k3s" {print $1; exit}')"
-  fi
-  if [[ -z "${K3S_SHA256}" ]]; then
-    echo "[!] ERROR: Unable to determine SHA-256 checksum for K3s ${K3S_VERSION}" >&2
+  DEFAULT_K3S_VERSION="v1.32.3+k3s1"
+  DEFAULT_K3S_SHA256="b19216803650b567bf980888dec39035edaf664339c55bc4462f7a003edbef83"
+  if [[ -n "${K3S_VERSION:-}" && "${K3S_VERSION}" != "${DEFAULT_K3S_VERSION}" && -z "${K3S_SHA256:-}" ]]; then
+    echo "[!] ERROR: K3S_VERSION overridden to '${K3S_VERSION}' without explicit K3S_SHA256; refusing TOFU checksum fetch." >&2
     exit 1
   fi
-  echo "${K3S_SHA256}  ${OVL}/var/lib/axonwall/core-k3s/bin/k3s" | sha256sum -c -
-  chmod 0755 "${OVL}/var/lib/axonwall/core-k3s/bin/k3s"
+  K3S_VERSION="${K3S_VERSION:-${DEFAULT_K3S_VERSION}}"
+  K3S_SHA256="${K3S_SHA256:-${DEFAULT_K3S_SHA256}}"
+  if [[ ! "${K3S_SHA256}" =~ ^[0-9a-fA-F]{64}$ ]]; then
+    echo "[!] ERROR: Invalid K3S_SHA256 '${K3S_SHA256}' (expected 64-character hex SHA-256)." >&2
+    exit 1
+  fi
+  K3S_URL_VERSION="${K3S_VERSION//+/%2B}"
+  echo "[+] Fetching K3s ${K3S_VERSION} for Alpine k3s-storage overlay..."
+  mkdir -p "${OVL}/var/lib/axonwall/core-k3s/bin"
+  K3S_TMP="$(mktemp "${WORK_DIR}/k3s.XXXXXX")"
+  curl -fsSL --proto '=https' --tlsv1.2 -o "${K3S_TMP}" "https://github.com/k3s-io/k3s/releases/download/${K3S_URL_VERSION}/k3s"
+  echo "${K3S_SHA256}  ${K3S_TMP}" | sha256sum -c -
+  chmod 0755 "${K3S_TMP}"
+  mv -f "${K3S_TMP}" "${OVL}/var/lib/axonwall/core-k3s/bin/k3s"
   # k3s multicall symlinks in the plugin bin dir (kubectl, crictl,
   # ctr -> k3s). The daemon recreates them on core-k3s reconfigure
   # if they are ever deleted; nothing is linked into /usr/local/bin.
@@ -762,21 +779,21 @@ if [[ "${EDITION}" == "k3s-storage" ]]; then
 elif [[ "${EDITION}" == "axonwall" ]]; then
   HEADSCALE_VERSION="0.29.4"
   HEADSCALE_SHA256="212ed0a884c0d3541e094c4bebbe94397df6f4e01bd3d7f059c520cb55e0d757"
+  HEADSCALE_TMP="$(mktemp "${WORK_DIR}/headscale.XXXXXX")"
   if [[ -f "${REPO_ROOT}/packaging/iso/config/includes.chroot/usr/sbin/headscale" ]]; then
-    cp "${REPO_ROOT}/packaging/iso/config/includes.chroot/usr/sbin/headscale" "${OVL}/usr/sbin/headscale"
-    strip "${OVL}/usr/sbin/headscale" 2>/dev/null || true
-    # headscale serves as the dedicated axonwall-headscale user, so the
-    # binary must be world-executable: chmod +x alone preserves whatever
-    # mode the source file had (0750 under a restrictive build umask),
-    # which supervise-daemon then cannot exec as that user.
-    chmod 0755 "${OVL}/usr/sbin/headscale"
-  elif [[ ! -f "${OVL}/usr/sbin/headscale" ]]; then
+    cp "${REPO_ROOT}/packaging/iso/config/includes.chroot/usr/sbin/headscale" "${HEADSCALE_TMP}"
+    echo "${HEADSCALE_SHA256}  ${HEADSCALE_TMP}" | sha256sum -c -
+  else
     echo "[+] Fetching Headscale v${HEADSCALE_VERSION} for Alpine overlay..."
-    curl -fsSL -o "${OVL}/usr/sbin/headscale" "https://github.com/juanfont/headscale/releases/download/v${HEADSCALE_VERSION}/headscale_${HEADSCALE_VERSION}_linux_amd64"
-    echo "${HEADSCALE_SHA256}  ${OVL}/usr/sbin/headscale" | sha256sum -c -
-    strip "${OVL}/usr/sbin/headscale" 2>/dev/null || true
-    chmod 0755 "${OVL}/usr/sbin/headscale"
+    curl -fsSL --proto '=https' --tlsv1.2 -o "${HEADSCALE_TMP}" "https://github.com/juanfont/headscale/releases/download/v${HEADSCALE_VERSION}/headscale_${HEADSCALE_VERSION}_linux_amd64"
+    echo "${HEADSCALE_SHA256}  ${HEADSCALE_TMP}" | sha256sum -c -
   fi
+  strip "${HEADSCALE_TMP}" 2>/dev/null || true
+  # headscale serves as the dedicated axonwall-headscale user, so the
+  # binary must be world-executable: chmod 0755 prevents restrictive umask
+  # from locking supervise-daemon out.
+  chmod 0755 "${HEADSCALE_TMP}"
+  mv -f "${HEADSCALE_TMP}" "${OVL}/usr/sbin/headscale"
 fi
 
 # Bundle statically-linked K9s v0.51.0 binary in k3s-storage Alpine edition
@@ -786,8 +803,8 @@ if [[ "${EDITION}" == "k3s-storage" ]]; then
   K9S_SHA256="c3752ad51a5a4015a113819c4eeb6e55a4d0e4b8e652494797532f6fc8161dd7"
   mkdir -p "${OVL}/var/lib/axonwall/core-k3s/bin"
   echo "[+] Fetching K9s v${K9S_VERSION} for Alpine overlay..."
-  K9S_TAR="$(mktemp -t k9s-XXXXXX)"
-  curl -fsSL -o "${K9S_TAR}" "https://github.com/derailed/k9s/releases/download/v${K9S_VERSION}/k9s_Linux_amd64.tar.gz"
+  K9S_TAR="$(mktemp "${WORK_DIR}/k9s.XXXXXX")"
+  curl -fsSL --proto '=https' --tlsv1.2 -o "${K9S_TAR}" "https://github.com/derailed/k9s/releases/download/v${K9S_VERSION}/k9s_Linux_amd64.tar.gz"
   echo "${K9S_SHA256}  ${K9S_TAR}" | sha256sum -c -
   tar -xzf "${K9S_TAR}" -C "${OVL}/var/lib/axonwall/core-k3s/bin/" k9s
   chmod 0755 "${OVL}/var/lib/axonwall/core-k3s/bin/k9s"
@@ -805,15 +822,24 @@ ZBM_KVER="linux6.12"
 ZBM_SHA256="131d55c7b385df8cd319d267b6aa15d97f8c32c94f5149bd906556715fadf4e7"
 ZBM_CACHE="${REPO_ROOT}/packaging/iso/build/cache/zfsbootmenu-release-x86_64-v${ZBM_VERSION}-${ZBM_KVER}.EFI"
 mkdir -p "${OVL}/usr/lib/zfsbootmenu" "${OVL}/usr/lib/axonwall" "${OVL}/etc/zfsbootmenu/hooks/early-setup.d" "${OVL}/etc/zfsbootmenu/hooks/setup.d" "${OVL}/etc/zfsbootmenu/dracut.conf.d"
-RAW_ZBM="/tmp/zbm-raw-${ZBM_VERSION}.efi"
-if [[ -f "${REPO_ROOT}/packaging/iso/config/includes.chroot/usr/lib/zfsbootmenu/vmlinuz.efi" ]]; then
-  cp -f "${REPO_ROOT}/packaging/iso/config/includes.chroot/usr/lib/zfsbootmenu/vmlinuz.efi" "${OVL}/usr/lib/zfsbootmenu/vmlinuz.efi"
-elif [[ -f "${ZBM_CACHE}" ]]; then
+RAW_ZBM="${WORK_DIR}/zbm-raw-${ZBM_VERSION}.efi"
+LOCAL_ZBM="${REPO_ROOT}/packaging/iso/config/includes.chroot/usr/lib/zfsbootmenu/vmlinuz.efi"
+if [[ -f "${ZBM_CACHE}" ]]; then
   echo "${ZBM_SHA256}  ${ZBM_CACHE}" | sha256sum -c -
   cp -f "${ZBM_CACHE}" "$RAW_ZBM"
+elif [[ -f "${LOCAL_ZBM}" ]]; then
+  cp -f "${LOCAL_ZBM}" "$RAW_ZBM"
+  if echo "${ZBM_SHA256}  $RAW_ZBM" | sha256sum -c - >/dev/null 2>&1; then
+    echo "[+] Verified local ZFSBootMenu UKI matches ZBM_SHA256"
+  else
+    echo "[i] Local ${LOCAL_ZBM} does not match upstream ZBM_SHA256 (e.g. themed); fetching verified upstream ZFSBootMenu..."
+    rm -f "$RAW_ZBM"
+    curl -fsSL --proto '=https' --tlsv1.2 -o "$RAW_ZBM" "https://github.com/zbm-dev/zfsbootmenu/releases/download/v${ZBM_VERSION}/zfsbootmenu-release-x86_64-v${ZBM_VERSION}-${ZBM_KVER}.EFI"
+    echo "${ZBM_SHA256}  $RAW_ZBM" | sha256sum -c -
+  fi
 else
   echo "[+] Fetching ZFSBootMenu v${ZBM_VERSION} (${ZBM_KVER}) UKI for Alpine overlay..."
-  curl -fsSL -o "$RAW_ZBM" "https://github.com/zbm-dev/zfsbootmenu/releases/download/v${ZBM_VERSION}/zfsbootmenu-release-x86_64-v${ZBM_VERSION}-${ZBM_KVER}.EFI"
+  curl -fsSL --proto '=https' --tlsv1.2 -o "$RAW_ZBM" "https://github.com/zbm-dev/zfsbootmenu/releases/download/v${ZBM_VERSION}/zfsbootmenu-release-x86_64-v${ZBM_VERSION}-${ZBM_KVER}.EFI"
   echo "${ZBM_SHA256}  $RAW_ZBM" | sha256sum -c -
 fi
 

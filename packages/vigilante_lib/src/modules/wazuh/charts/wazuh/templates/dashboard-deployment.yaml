@@ -1,3 +1,4 @@
+{{- $secretName := .Values.existingSecret | default (printf "%s-secrets" (include "wazuh.fullname" .)) -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -22,10 +23,22 @@ spec:
       annotations:
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
     spec:
+      automountServiceAccountToken: false
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
       initContainers:
         - name: wait-for-indexer
           image: {{ .Values.images.busybox }}
           imagePullPolicy: {{ .Values.imagePullPolicy }}
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65534
+            runAsGroup: 65534
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
           command: ["/bin/sh", "-c"]
           args:
             - |
@@ -44,21 +57,35 @@ spec:
           image: {{ .Values.images.dashboard }}
           imagePullPolicy: {{ .Values.imagePullPolicy }}
           securityContext:
+            runAsNonRoot: true
             runAsUser: 1000
             runAsGroup: 1000
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
           env:
             - name: INDEXER_USERNAME
               value: {{ .Values.credentials.indexerUsername | quote }}
             - name: INDEXER_PASSWORD
-              value: {{ .Values.credentials.indexerPassword | quote }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretName }}
+                  key: INDEXER_PASSWORD
             - name: DASHBOARD_USERNAME
               value: {{ .Values.credentials.dashboardUsername | quote }}
             - name: DASHBOARD_PASSWORD
-              value: {{ .Values.credentials.dashboardPassword | quote }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretName }}
+                  key: DASHBOARD_PASSWORD
             - name: API_USERNAME
               value: {{ .Values.credentials.apiUsername | quote }}
             - name: API_PASSWORD
-              value: {{ .Values.credentials.apiPassword | quote }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretName }}
+                  key: API_PASSWORD
             - name: WAZUH_API_URL
               value: https://wazuh-manager
             - name: API_PORT

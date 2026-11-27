@@ -7,8 +7,12 @@
 #   ./scripts/release-tagger.sh minor      # e.g. 0.1.8 -> 0.2.0 (prompts for confirmation)
 #   ./scripts/release-tagger.sh major      # e.g. 0.1.8 -> 1.0.0 (prompts for confirmation)
 #   ./scripts/release-tagger.sh 0.1.9      # Explicit version
-#   ./scripts/release-tagger.sh --push     # Also push commits and tags to origin
+#   ./scripts/release-tagger.sh --push     # Also push axonwall.com, commits and tags to origin
 #   ./scripts/release-tagger.sh -y         # Skip confirmation prompt for minor/major
+#   ./scripts/release-tagger.sh --notes-file FILE   # Read website release notes from Markdown/text
+#   ./scripts/release-tagger.sh --highlight "Text"  # Add website highlight bullet (repeatable)
+#   ./scripts/release-tagger.sh --edit-notes        # Open $EDITOR for website release notes
+#   ./scripts/release-tagger.sh --skip-site         # Skip automatic axonwall.com submodule sync
 # ==============================================================================
 
 set -euo pipefail
@@ -18,8 +22,8 @@ pnpm test
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${REPO_ROOT}"
 
-if [ -n "$(git status --porcelain)" ]; then
-  echo "Error: Working tree has uncommitted changes. Commit or stash them before running release-tagger.sh." >&2
+if [ -n "$(git status --porcelain -- ':!axonwall.com')" ]; then
+  echo "Error: Working tree has uncommitted changes outside axonwall.com. Commit or stash them before running release-tagger.sh." >&2
   exit 1
 fi
 
@@ -35,15 +39,50 @@ fi
 TARGET_ARG="patch"
 PUSH_FLAG=false
 YES_FLAG=false
+NOTES_FILE=""
+HIGHLIGHTS=()
+EDIT_NOTES=false
+SKIP_SITE=false
 
-for arg in "$@"; do
-  if [ "$arg" == "--push" ] || [ "$arg" == "-p" ]; then
-    PUSH_FLAG=true
-  elif [ "$arg" == "--yes" ] || [ "$arg" == "-y" ]; then
-    YES_FLAG=true
-  else
-    TARGET_ARG="$arg"
-  fi
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --push|-p)
+      PUSH_FLAG=true
+      shift
+      ;;
+    --yes|-y)
+      YES_FLAG=true
+      shift
+      ;;
+    --notes-file|-n)
+      if [ $# -lt 2 ]; then
+        echo "Error: $1 requires a file path." >&2
+        exit 1
+      fi
+      NOTES_FILE="$2"
+      shift 2
+      ;;
+    --highlight)
+      if [ $# -lt 2 ]; then
+        echo "Error: --highlight requires text." >&2
+        exit 1
+      fi
+      HIGHLIGHTS+=("$2")
+      shift 2
+      ;;
+    --edit-notes)
+      EDIT_NOTES=true
+      shift
+      ;;
+    --skip-site)
+      SKIP_SITE=true
+      shift
+      ;;
+    *)
+      TARGET_ARG="$1"
+      shift
+      ;;
+  esac
 done
 
 IFS="." read -r MAJOR MINOR PATCH <<< "${CURRENT_VERSION}"
@@ -66,15 +105,20 @@ case "${TARGET_ARG}" in
     NEW_VERSION="${TARGET_ARG#v}"
     ;;
   *)
-    if [[ "${TARGET_ARG}" =~ ^[0-9]+\.[0-9]+\.[0-9]+.*$ ]]; then
+    if [[ "${TARGET_ARG}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
       NEW_VERSION="${TARGET_ARG}"
     else
-      echo "Error: Unknown argument \"${TARGET_ARG}\"."
-      echo "Usage: $0 [patch|minor|major|<version>] [--push] [--yes]"
+      echo "Error: Unknown argument \"${TARGET_ARG}\"." >&2
+      echo "Usage: $0 [patch|minor|major|<version>] [--push] [--yes]" >&2
       exit 1
     fi
     ;;
 esac
+
+if [[ ! "${NEW_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+  echo "Error: Invalid version \"${NEW_VERSION}\" (expected X.Y.Z semver)." >&2
+  exit 1
+fi
 
 IFS="." read -r NEW_MAJ NEW_MIN NEW_PAT <<< "${NEW_VERSION}"
 NEW_PAT="${NEW_PAT%%-*}"
@@ -119,13 +163,13 @@ echo "${NEW_VERSION}" > "${VERSION_FILE}"
 echo ">> Updating package.json files..."
 for pkg in package.json            apps/axonwall/package.json            apps/axonwall-controller/package.json            packages/axonwall_lib/package.json; do
   if [ -f "${pkg}" ]; then
-    node -e "
-      const fs = require('fs');
-      const p = '${pkg}';
-      const json = JSON.parse(fs.readFileSync(p, 'utf8'));
-      json.version = '${NEW_VERSION}';
-      fs.writeFileSync(p, JSON.stringify(json, null, 2) + '\n');
-    "
+    node -e '
+      const fs = require("fs");
+      const [p, ver] = process.argv.slice(1);
+      const json = JSON.parse(fs.readFileSync(p, "utf8"));
+      json.version = ver;
+      fs.writeFileSync(p, JSON.stringify(json, null, 2) + "\n");
+    ' -- "${pkg}" "${NEW_VERSION}"
   fi
 done
 
@@ -202,23 +246,23 @@ if [ -f deploy/k8s/helm/axonwall-analytics/Chart.yaml ]; then
 fi
 
 if [ -f deploy/k8s/helm/axonwall-analytics/values.yaml ]; then
-  node -e "
-    const fs = require('fs');
-    const p = 'deploy/k8s/helm/axonwall-analytics/values.yaml';
-    const lines = fs.readFileSync(p, 'utf8').split('\n');
+  node -e '
+    const fs = require("fs");
+    const [p, tagName] = process.argv.slice(1);
+    const lines = fs.readFileSync(p, "utf8").split("\n");
     let inAxonwallRepo = false;
     for (let i = 0; i < lines.length; i++) {
       if (/repository:\s*ghcr\.io\/axonwall\//.test(lines[i])) {
         inAxonwallRepo = true;
       } else if (/repository:/.test(lines[i])) {
         inAxonwallRepo = false;
-      } else if (inAxonwallRepo && /\btag:\s*\"?v[0-9]+\.[0-9]+\.[0-9]+\"?/.test(lines[i])) {
-        lines[i] = lines[i].replace(/tag:\s*\"?v[0-9]+\.[0-9]+\.[0-9]+\"?/, 'tag: \"${TAG_NAME}\"');
+      } else if (inAxonwallRepo && /\btag:\s*"?v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?"?/.test(lines[i])) {
+        lines[i] = lines[i].replace(/tag:\s*"?v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?"?/, () => `tag: "${tagName}"`);
         inAxonwallRepo = false;
       }
     }
-    fs.writeFileSync(p, lines.join('\n'));
-  "
+    fs.writeFileSync(p, lines.join("\n"));
+  ' -- "deploy/k8s/helm/axonwall-analytics/values.yaml" "${TAG_NAME}"
 fi
 
 if [ -f packaging/k3s-storage/02-axonwall-analytics-helmchart.yaml.example ]; then
@@ -227,6 +271,40 @@ fi
 
 if [ -f packaging/k3s-storage/axonwall-k3s-firstboot ]; then
   sed -i -E "s/^([[:space:]]*version: \")[0-9]+\.[0-9]+\.[0-9]+(\")/\1${NEW_VERSION}\2/" packaging/k3s-storage/axonwall-k3s-firstboot
+fi
+
+SITE_SYNCED=false
+if [ "${SKIP_SITE}" != true ]; then
+  if [ -e "${REPO_ROOT}/axonwall.com/.git" ]; then
+    echo ">> Syncing axonwall.com submodule for ${TAG_NAME}..."
+    SYNC_ARGS=(--version "${NEW_VERSION}" --type "${RELEASE_TYPE}" --repo-dir "${REPO_ROOT}" --site-dir "${REPO_ROOT}/axonwall.com")
+    if [ -n "${NOTES_FILE}" ]; then
+      SYNC_ARGS+=(--notes-file "${NOTES_FILE}")
+    fi
+    if [ "${#HIGHLIGHTS[@]}" -gt 0 ]; then
+      for hl in "${HIGHLIGHTS[@]}"; do
+        SYNC_ARGS+=(--highlight "${hl}")
+      done
+    fi
+    if [ "${EDIT_NOTES}" = true ]; then
+      SYNC_ARGS+=(--edit)
+    fi
+    node "${REPO_ROOT}/scripts/sync-website-release.mjs" "${SYNC_ARGS[@]}"
+
+    if [ -x "${REPO_ROOT}/axonwall.com/node_modules/.bin/tsc" ]; then
+      echo ">> Verifying axonwall.com TypeScript check..."
+      (cd "${REPO_ROOT}/axonwall.com" && ./node_modules/.bin/tsc --noEmit)
+    fi
+
+    if [ -n "$(git -C "${REPO_ROOT}/axonwall.com" status --porcelain)" ]; then
+      echo ">> Committing axonwall.com release update..."
+      git -C "${REPO_ROOT}/axonwall.com" add -A
+      git -C "${REPO_ROOT}/axonwall.com" commit -m "chore(release): prepare axonwall.com docs and release notes for ${TAG_NAME}"
+    fi
+    SITE_SYNCED=true
+  else
+    echo "⚠️  Warning: axonwall.com submodule not initialized; skipping website sync."
+  fi
 fi
 
 echo ">> Staging and creating git commit..."
@@ -259,6 +337,9 @@ for cand in \
     STAGE_FILES+=("${cand}")
   fi
 done
+if [ "${SITE_SYNCED}" = true ]; then
+  STAGE_FILES+=("axonwall.com")
+fi
 git add -- "${STAGE_FILES[@]}"
 
 git commit -m "chore(release): bump version to ${NEW_VERSION}"
@@ -273,6 +354,10 @@ echo " Tag:    ${TAG_NAME}"
 echo "============================================================"
 
 if [ "${PUSH_FLAG}" = true ]; then
+  if [ "${SITE_SYNCED}" = true ]; then
+    echo ">> Pushing axonwall.com submodule to origin..."
+    git -C "${REPO_ROOT}/axonwall.com" push origin HEAD
+  fi
   echo ">> Pushing HEAD and tag to origin..."
   git push origin HEAD
   git push origin "${TAG_NAME}"

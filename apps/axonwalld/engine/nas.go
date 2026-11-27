@@ -1337,34 +1337,250 @@ func validateLioSaveconfigJSON(raw string) error {
 	return nil
 }
 
+var minioAllowedEnvKeys = map[string]bool{
+	"MINIO_ROOT_USER":     true,
+	"MINIO_ROOT_PASSWORD": true,
+	"MINIO_VOLUMES":       true,
+	"MINIO_OPTS":          true,
+	"MINIO_BROWSER":       true,
+	"MINIO_DOMAIN":        true,
+	"MINIO_REGION_NAME":   true,
+	"MINIO_SITE_NAME":     true,
+	"MINIO_SITE_REGION":   true,
+}
+
+var minioSafeTokenRe = regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
+var minioHostRe = regexp.MustCompile(`^[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?$`)
+var minioSafeUserRe = regexp.MustCompile(`^[a-zA-Z0-9._@-]+$`)
+
+func unquoteMinioEnvVal(val string) (string, bool, error) {
+	if len(val) >= 2 && val[0] == '"' && val[len(val)-1] == '"' {
+		inner := val[1 : len(val)-1]
+		var b strings.Builder
+		for i := 0; i < len(inner); i++ {
+			if inner[i] == '\\' {
+				if i+1 >= len(inner) {
+					return "", true, fmt.Errorf("dangling backslash escape")
+				}
+				next := inner[i+1]
+				if next == '\\' || next == '"' || next == '$' || next == '`' {
+					b.WriteByte(next)
+					i++
+					continue
+				}
+				return "", true, fmt.Errorf("unsupported escape sequence \\%c", next)
+			}
+			if inner[i] == '"' {
+				return "", true, fmt.Errorf("unescaped double quote in value")
+			}
+			b.WriteByte(inner[i])
+		}
+		return b.String(), true, nil
+	}
+	if len(val) >= 2 && val[0] == '\'' && val[len(val)-1] == '\'' {
+		inner := val[1 : len(val)-1]
+		if strings.ContainsRune(inner, '\'') {
+			return "", true, fmt.Errorf("unescaped single quote in value")
+		}
+		return inner, true, nil
+	}
+	if strings.ContainsAny(val, `"'`) {
+		return "", false, fmt.Errorf("mismatched or unclosed quotes")
+	}
+	return val, false, nil
+}
+
+func validateMinioHostPort(addr string) error {
+	if addr == "" {
+		return fmt.Errorf("empty host:port")
+	}
+	if strings.ContainsAny(addr, " \t\r\n\x00/?#@\\;&|$()`'\"<>") {
+		return fmt.Errorf("address %q contains disallowed characters", addr)
+	}
+	colon := strings.LastIndexByte(addr, ':')
+	if colon < 0 {
+		return fmt.Errorf("address %q must be host:port or :port", addr)
+	}
+	hostPart := addr[:colon]
+	portPart := addr[colon+1:]
+	if portPart == "" {
+		return fmt.Errorf("address %q missing port", addr)
+	}
+	for i := 0; i < len(portPart); i++ {
+		if portPart[i] < '0' || portPart[i] > '9' {
+			return fmt.Errorf("address %q has non-numeric port", addr)
+		}
+	}
+	port, err := strconv.Atoi(portPart)
+	if err != nil || port < 1 || port > 65535 {
+		return fmt.Errorf("address %q port out of range (1-65535)", addr)
+	}
+	if hostPart != "" {
+		if strings.HasPrefix(hostPart, "[") && strings.HasSuffix(hostPart, "]") {
+			inner := hostPart[1 : len(hostPart)-1]
+			if inner == "" || !strings.Contains(inner, ":") {
+				return fmt.Errorf("invalid bracketed IPv6 host in %q", addr)
+			}
+			for i := 0; i < len(inner); i++ {
+				c := inner[i]
+				if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F') || c == ':' || c == '.') {
+					return fmt.Errorf("invalid IPv6 host character in %q", addr)
+				}
+			}
+		} else {
+			if strings.ContainsAny(hostPart, ":[]") || strings.Contains(hostPart, "..") || !minioHostRe.MatchString(hostPart) {
+				return fmt.Errorf("invalid host %q in address %q", hostPart, addr)
+			}
+		}
+	}
+	parsed, err := url.Parse("http://" + addr)
+	if err != nil || parsed.Port() != portPart || parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "" || parsed.User != nil {
+		return fmt.Errorf("malformed host:port %q", addr)
+	}
+	return nil
+}
+
+func validateMinioOpts(opts string) error {
+	if strings.ContainsAny(opts, "\r\n\x00;&|`$()<>\\'\"") {
+		return fmt.Errorf("MINIO_OPTS %q contains disallowed shell metacharacters or control characters", opts)
+	}
+	tokens := strings.Fields(opts)
+	seenFlags := make(map[string]bool)
+	for i := 0; i < len(tokens); i++ {
+		tok := tokens[i]
+		var flagName, flagVal string
+		if eq := strings.IndexByte(tok, '='); eq >= 0 {
+			flagName = tok[:eq]
+			flagVal = tok[eq+1:]
+		} else {
+			flagName = tok
+			if i+1 >= len(tokens) {
+				return fmt.Errorf("MINIO_OPTS flag %q is missing its value", flagName)
+			}
+			i++
+			flagVal = tokens[i]
+		}
+		if flagName != "--address" && flagName != "--console-address" {
+			return fmt.Errorf("MINIO_OPTS flag %q is not permitted (only --address and --console-address are allowed)", flagName)
+		}
+		if seenFlags[flagName] {
+			return fmt.Errorf("MINIO_OPTS duplicate flag %q", flagName)
+		}
+		seenFlags[flagName] = true
+		if err := validateMinioHostPort(flagVal); err != nil {
+			return fmt.Errorf("MINIO_OPTS %s: %w", flagName, err)
+		}
+	}
+	return nil
+}
+
 func validateMinioEnvConf(raw string) error {
 	if strings.ContainsRune(raw, '\x00') {
 		return fmt.Errorf("minio env config contains NUL byte")
 	}
-	for lineNo, line := range strings.Split(raw, "\n") {
-		trimmed := strings.TrimSpace(line)
+	for lineNo, rawLine := range strings.Split(raw, "\n") {
+		if strings.ContainsRune(rawLine, '\r') {
+			return fmt.Errorf("minio env line %d: carriage return is not permitted", lineNo+1)
+		}
+		trimmed := strings.TrimSpace(rawLine)
 		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
 			continue
+		}
+		if strings.HasSuffix(strings.TrimRight(rawLine, " \t"), `\`) {
+			return fmt.Errorf("minio env line %d: backslash line continuations are not permitted", lineNo+1)
 		}
 		eq := strings.IndexByte(trimmed, '=')
 		if eq < 1 {
 			return fmt.Errorf("minio env line %d: expected MINIO_*=VALUE", lineNo+1)
 		}
 		key := strings.TrimSpace(trimmed[:eq])
-		val := strings.TrimSpace(trimmed[eq+1:])
+		rawVal := strings.TrimSpace(trimmed[eq+1:])
 		if !validMinioEnvKeyRe.MatchString(key) {
 			return fmt.Errorf("minio env line %d: variable %q is not permitted (MINIO_* only)", lineNo+1, key)
 		}
-		if key == "MINIO_VOLUMES" {
-			unquoted := strings.Trim(val, `"'`)
-			if strings.Contains(unquoted, "..") {
-				return fmt.Errorf("minio env line %d: MINIO_VOLUMES %q contains '..'", lineNo+1, unquoted)
+		if !minioAllowedEnvKeys[key] {
+			return fmt.Errorf("minio env line %d: variable %q is not on the permitted MinIO allowlist", lineNo+1, key)
+		}
+		val, quoted, err := unquoteMinioEnvVal(rawVal)
+		if err != nil {
+			return fmt.Errorf("minio env line %d (%s): %w", lineNo+1, key, err)
+		}
+		for _, r := range val {
+			if r < 0x20 || r == 0x7f {
+				return fmt.Errorf("minio env line %d (%s): control characters are not permitted", lineNo+1, key)
 			}
-			for _, tok := range strings.Fields(unquoted) {
+		}
+		switch key {
+		case "MINIO_VOLUMES":
+			if strings.ContainsAny(val, ";&|`$()<>\\'\"") {
+				return fmt.Errorf("minio env line %d: MINIO_VOLUMES %q contains disallowed characters", lineNo+1, val)
+			}
+			if strings.Contains(val, "..") {
+				return fmt.Errorf("minio env line %d: MINIO_VOLUMES %q contains '..'", lineNo+1, val)
+			}
+			tokens := strings.Fields(val)
+			if len(tokens) == 0 {
+				return fmt.Errorf("minio env line %d: MINIO_VOLUMES cannot be empty", lineNo+1)
+			}
+			for _, tok := range tokens {
+				if !strings.HasPrefix(tok, "/") {
+					return fmt.Errorf("minio env line %d: MINIO_VOLUMES path %q must be absolute", lineNo+1, tok)
+				}
 				clean := filepath.Clean(tok)
-				if !strings.HasPrefix(clean, "/mnt/") {
+				if !strings.HasPrefix(clean, "/mnt/") || len(clean) <= len("/mnt/") {
 					return fmt.Errorf("minio env line %d: MINIO_VOLUMES path %q is outside /mnt/", lineNo+1, tok)
 				}
+			}
+		case "MINIO_OPTS":
+			if err := validateMinioOpts(val); err != nil {
+				return fmt.Errorf("minio env line %d: %w", lineNo+1, err)
+			}
+		case "MINIO_ROOT_USER":
+			if val == "" || !minioSafeUserRe.MatchString(val) {
+				return fmt.Errorf("minio env line %d: MINIO_ROOT_USER contains invalid characters", lineNo+1)
+			}
+		case "MINIO_ROOT_PASSWORD":
+			if val == "" {
+				return fmt.Errorf("minio env line %d: MINIO_ROOT_PASSWORD cannot be empty", lineNo+1)
+			}
+			if !quoted {
+				if strings.ContainsAny(val, ";&|`$()<>\\") {
+					return fmt.Errorf("minio env line %d: unquoted MINIO_ROOT_PASSWORD contains disallowed characters", lineNo+1)
+				}
+			} else if rawVal[0] == '\'' {
+				if strings.ContainsAny(val, "$`") {
+					return fmt.Errorf("minio env line %d: MINIO_ROOT_PASSWORD contains disallowed shell expansion characters", lineNo+1)
+				}
+			} else {
+				inner := rawVal[1 : len(rawVal)-1]
+				for i := 0; i < len(inner); i++ {
+					if inner[i] == '\\' {
+						i++
+						continue
+					}
+					if inner[i] == '$' || inner[i] == '`' {
+						return fmt.Errorf("minio env line %d: MINIO_ROOT_PASSWORD contains unescaped shell expansion character %q", lineNo+1, inner[i])
+					}
+				}
+			}
+		case "MINIO_BROWSER":
+			lower := strings.ToLower(val)
+			if lower != "on" && lower != "off" && lower != "true" && lower != "false" {
+				return fmt.Errorf("minio env line %d: MINIO_BROWSER %q must be on/off/true/false", lineNo+1, val)
+			}
+		case "MINIO_DOMAIN":
+			if val == "" {
+				return fmt.Errorf("minio env line %d: MINIO_DOMAIN cannot be empty", lineNo+1)
+			}
+			for _, host := range strings.Split(val, ",") {
+				host = strings.TrimSpace(host)
+				if host == "" || !minioHostRe.MatchString(host) || strings.Contains(host, "..") {
+					return fmt.Errorf("minio env line %d: MINIO_DOMAIN entry %q is invalid", lineNo+1, host)
+				}
+			}
+		case "MINIO_REGION_NAME", "MINIO_SITE_NAME", "MINIO_SITE_REGION":
+			if !minioSafeTokenRe.MatchString(val) {
+				return fmt.Errorf("minio env line %d: %s value %q contains invalid characters", lineNo+1, key, val)
 			}
 		}
 	}

@@ -3,6 +3,7 @@ package engine
 import (
 	"math/bits"
 	"net"
+	"strings"
 	"testing"
 	"time"
 )
@@ -110,5 +111,17 @@ func TestEBPF_ManagerBlocklistExpiry(t *testing.T) {
 	}
 	if len(mgr.blockedUntil) != 0 {
 		t.Errorf("expected empty blockedUntil map, got %d", len(mgr.blockedUntil))
+	}
+}
+
+func TestEBPFClickHouseFailsClosedWithoutPassword(t *testing.T) {
+	t.Setenv("CLICKHOUSE_PASSWORD", "")
+	mgr := NewEBPFManager()
+	err := mgr.initClickHouse()
+	if err == nil || !strings.Contains(err.Error(), "CLICKHOUSE_PASSWORD") {
+		t.Fatalf("expected initClickHouse to fail closed when CLICKHOUSE_PASSWORD is unset, got: %v", err)
+	}
+	if mgr.ch != nil {
+		t.Fatal("expected mgr.ch to remain nil when CLICKHOUSE_PASSWORD is unset")
 	}
 }

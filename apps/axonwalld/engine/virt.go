@@ -11,6 +11,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"os/exec"
@@ -109,6 +110,8 @@ type VirtManager struct {
 	// failed starts and StopVM clean them up safely.
 	swtpmMu   sync.Mutex
 	swtpmPids map[int]int
+
+	allowedMigrationPeers []netip.Addr
 }
 
 // liveMigratePollInterval / liveMigrateTimeout bound how long
@@ -118,6 +121,8 @@ var (
 	liveMigratePollInterval = 2 * time.Second
 	liveMigrateTimeout      = 10 * time.Minute
 	procRootDir             = "/proc"
+	virtPeerStatePaths      = []string{"/etc/axonwall/state.json", "/var/lib/axonwall/state.json"}
+	virtTopologyConfigPaths = []string{"/etc/axonwall/topology/config.json", "/var/lib/axonwall/topology/config.json"}
 )
 
 type VirtioFsShareSpec struct {
@@ -309,26 +314,77 @@ func normalizeQemuFlag(raw string) (string, string, bool) {
 	return flag, inlineVal, hasInline
 }
 
+var (
+	qemuSocketNameRe = regexp.MustCompile(`^vm-([0-9]+)(?:-[A-Za-z0-9_-]+)?\.sock$`)
+	qemuPidfileRe    = regexp.MustCompile(`^vm-([0-9]+)\.pid$`)
+	lxcMountNumRe    = regexp.MustCompile(`^[0-9]+$`)
+)
+
+// resolvePathWithExistingAncestor canonicalizes an absolute path by resolving
+// symlinks on its deepest existing ancestor directory and re-attaching any
+// not-yet-created trailing path components.
+func resolvePathWithExistingAncestor(rawPath string) (string, error) {
+	trimmed := strings.TrimSpace(rawPath)
+	if trimmed == "" || strings.ContainsRune(trimmed, '\x00') || strings.Contains(trimmed, "..") {
+		return "", fmt.Errorf("invalid path %q", rawPath)
+	}
+	clean := filepath.Clean(trimmed)
+	if !filepath.IsAbs(clean) {
+		return "", fmt.Errorf("path %q must be absolute", rawPath)
+	}
+
+	curr := clean
+	var tail []string
+	for {
+		resolved, err := filepath.EvalSymlinks(curr)
+		if err == nil {
+			parts := make([]string, 0, 1+len(tail))
+			parts = append(parts, resolved)
+			for i := len(tail) - 1; i >= 0; i-- {
+				parts = append(parts, tail[i])
+			}
+			return filepath.Clean(filepath.Join(parts...)), nil
+		}
+		if !os.IsNotExist(err) {
+			return "", fmt.Errorf("cannot resolve symlinks for %q: %w", rawPath, err)
+		}
+		parent := filepath.Dir(curr)
+		if parent == curr {
+			return clean, nil
+		}
+		tail = append(tail, filepath.Base(curr))
+		curr = parent
+	}
+}
+
+func pathMatchesResolvedPrefix(resolvedPath string, rawPrefix string) bool {
+	resolvedPrefix, err := resolvePathWithExistingAncestor(rawPrefix)
+	if err != nil {
+		resolvedPrefix = filepath.Clean(rawPrefix)
+	}
+	resolvedPrefix = strings.TrimSuffix(resolvedPrefix, "/")
+	return resolvedPath == resolvedPrefix || strings.HasPrefix(resolvedPath, resolvedPrefix+"/")
+}
+
 func isAllowedQemuDrivePath(rawPath string) bool {
-	if strings.TrimSpace(rawPath) == "" || strings.Contains(rawPath, "..") {
+	if strings.TrimSpace(rawPath) == "" || strings.Contains(rawPath, "..") || strings.Contains(rawPath, ":") {
 		return false
 	}
-	// Disallow non-local URI prefixes (e.g. nbd:, exec:) or weird schemes
-	if strings.Contains(rawPath, ":") {
+	resolved, err := resolvePathWithExistingAncestor(rawPath)
+	if err != nil {
 		return false
 	}
-	clean := filepath.Clean(strings.TrimSpace(rawPath))
 	for _, prefix := range []string{
 		"/dev/zvol/",
-		"/var/lib/axonwall/",
+		"/var/lib/axonwall/vms/",
+		"/var/lib/axonwall/isos/",
+		"/var/lib/axonwall/cloudinit/",
+		"/var/lib/axonwall/nvram/",
 		"/var/lib/vz/",
 		"/mnt/",
 		"/usr/share/OVMF/",
-		"/run/axonwall/fwcfg/",
-		"/run/axonwall/edge/",
-		"/run/axonwall/cloudinit/",
 	} {
-		if strings.HasPrefix(clean, prefix) {
+		if pathMatchesResolvedPrefix(resolved, prefix) {
 			return true
 		}
 	}
@@ -339,7 +395,10 @@ func isAllowedQemuFwCfgPath(rawPath string) bool {
 	if strings.TrimSpace(rawPath) == "" || strings.Contains(rawPath, "..") {
 		return false
 	}
-	clean := filepath.Clean(strings.TrimSpace(rawPath))
+	resolved, err := resolvePathWithExistingAncestor(rawPath)
+	if err != nil {
+		return false
+	}
 	for _, prefix := range []string{
 		"/run/axonwall/fwcfg/",
 		"/run/axonwall/edge/",
@@ -347,7 +406,7 @@ func isAllowedQemuFwCfgPath(rawPath string) bool {
 		"/var/lib/axonwall/cloudinit/",
 		"/var/lib/axonwall/edge/",
 	} {
-		if strings.HasPrefix(clean, prefix) {
+		if pathMatchesResolvedPrefix(resolved, prefix) {
 			return true
 		}
 	}
@@ -372,12 +431,54 @@ func (m *VirtManager) getDefaultPool() string {
 }
 
 func isAllowedQemuSocketPath(rawPath string) bool {
+	return isAllowedQemuSocketPathForVM(rawPath, 0, "")
+}
+
+func isAllowedQemuSocketPathForVM(rawPath string, vmid int, requiredSubdir string) bool {
 	trimmed := strings.TrimSpace(rawPath)
 	if trimmed == "" || strings.Contains(trimmed, "..") || strings.Contains(trimmed, ":") {
 		return false
 	}
-	clean := filepath.Clean(trimmed)
-	return strings.HasPrefix(clean, "/run/axonwall/")
+	resolved, err := resolvePathWithExistingAncestor(trimmed)
+	if err != nil {
+		return false
+	}
+	allowedSubdirs := []string{
+		"qmp",
+		"serial",
+		"virtiofs",
+		"tpm",
+		"swtpm",
+		"qga",
+		"vnc",
+	}
+	if requiredSubdir != "" {
+		allowedSubdirs = []string{requiredSubdir}
+	}
+	dir := filepath.Dir(resolved)
+	base := filepath.Base(resolved)
+	matchedDir := false
+	for _, sub := range allowedSubdirs {
+		wantDir, derr := resolvePathWithExistingAncestor(filepath.Join("/run/axonwall", sub))
+		if derr == nil && dir == wantDir {
+			matchedDir = true
+			break
+		}
+	}
+	if !matchedDir {
+		return false
+	}
+	m := qemuSocketNameRe.FindStringSubmatch(base)
+	if m == nil {
+		return false
+	}
+	if vmid > 0 {
+		parsedID, convErr := strconv.Atoi(m[1])
+		if convErr != nil || parsedID != vmid {
+			return false
+		}
+	}
+	return true
 }
 
 func isAllowedQemuMemPath(rawPath string) bool {
@@ -385,8 +486,11 @@ func isAllowedQemuMemPath(rawPath string) bool {
 	if trimmed == "" || strings.Contains(trimmed, "..") || strings.Contains(trimmed, ":") {
 		return false
 	}
-	clean := filepath.Clean(trimmed)
-	return clean == "/dev/hugepages" || strings.HasPrefix(clean, "/dev/hugepages/") || strings.HasPrefix(clean, "/run/axonwall/")
+	resolved, err := resolvePathWithExistingAncestor(trimmed)
+	if err != nil {
+		return false
+	}
+	return pathMatchesResolvedPrefix(resolved, "/dev/hugepages/")
 }
 
 func isAllowedQemuKernelOrBiosPath(rawPath string) bool {
@@ -394,19 +498,25 @@ func isAllowedQemuKernelOrBiosPath(rawPath string) bool {
 	if trimmed == "" || strings.Contains(trimmed, "..") || strings.Contains(trimmed, ":") || strings.Contains(trimmed, ",") {
 		return false
 	}
-	clean := filepath.Clean(trimmed)
+	resolved, err := resolvePathWithExistingAncestor(trimmed)
+	if err != nil {
+		return false
+	}
 	for _, prefix := range []string{
 		"/usr/lib/axonwall/",
-		"/var/lib/axonwall/",
+		"/var/lib/axonwall/vms/",
+		"/var/lib/axonwall/isos/",
+		"/var/lib/axonwall/edge/",
+		"/var/lib/axonwall/nvram/",
 		"/var/lib/vz/",
 		"/mnt/",
 		"/boot/",
 		"/usr/share/OVMF/",
 		"/usr/share/qemu/",
 		"/usr/share/seabios/",
-		"/run/axonwall/",
+		"/run/axonwall/edge/",
 	} {
-		if strings.HasPrefix(clean, prefix) {
+		if pathMatchesResolvedPrefix(resolved, prefix) {
 			return true
 		}
 	}
@@ -415,6 +525,76 @@ func isAllowedQemuKernelOrBiosPath(rawPath string) bool {
 
 func isQemuKeyMatch(k, suffix string) bool {
 	return k == suffix || strings.HasSuffix(k, "."+suffix)
+}
+
+func isAllowedLxcStoragePath(rawPath string) bool {
+	resolved, err := resolvePathWithExistingAncestor(rawPath)
+	if err != nil {
+		return false
+	}
+	for _, prefix := range []string{"/mnt/", "/var/lib/axonwall/vms/", "/var/lib/axonwall/isos/"} {
+		if pathMatchesResolvedPrefix(resolved, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func validateBpffsMountOptions(rawOpts string) error {
+	trimmed := strings.TrimSpace(rawOpts)
+	if trimmed == "" {
+		return fmt.Errorf("empty bpffs mount options")
+	}
+	baseAllowed := map[string]bool{
+		"defaults":   true,
+		"rw":         true,
+		"ro":         true,
+		"nosuid":     true,
+		"nodev":      true,
+		"noexec":     true,
+		"relatime":   true,
+		"noatime":    true,
+		"create=dir": true,
+	}
+	for _, rawOpt := range strings.Split(trimmed, ",") {
+		opt := strings.TrimSpace(rawOpt)
+		if opt == "" {
+			return fmt.Errorf("empty option in bpffs mount entry")
+		}
+		if baseAllowed[opt] {
+			continue
+		}
+		k, v, hasEq := strings.Cut(opt, "=")
+		if !hasEq || strings.TrimSpace(v) == "" {
+			return fmt.Errorf("disallowed bpffs mount option %q", opt)
+		}
+		k = strings.TrimSpace(k)
+		v = strings.TrimSpace(v)
+		if strings.EqualFold(v, "none") {
+			return fmt.Errorf("disallowed empty delegation value %q for %s", v, k)
+		}
+		switch k {
+		case "delegate_cmds":
+			if _, err := compileSymbolMask(v, kernelBpfCmdBits, nil, "delegate_cmds"); err != nil {
+				return err
+			}
+		case "delegate_progs":
+			if _, err := compileSymbolMask(v, kernelSafeBpfProgBits, ForbiddenBpfProgReasons, "delegate_progs"); err != nil {
+				return err
+			}
+		case "delegate_maps":
+			if _, err := compileSymbolMask(v, kernelBpfMapBits, nil, "delegate_maps"); err != nil {
+				return err
+			}
+		case "delegate_attachs":
+			if _, err := compileSymbolMask(v, kernelBpfAttachBits, nil, "delegate_attachs"); err != nil {
+				return err
+			}
+		default:
+			return fmt.Errorf("disallowed bpffs mount option %q", opt)
+		}
+	}
+	return nil
 }
 
 func validateLxcConfig(content string) error {
@@ -460,9 +640,8 @@ func validateLxcConfig(content string) error {
 				}
 			} else {
 				rootfs := strings.TrimPrefix(val, "dir:")
-				cleanRoot := filepath.Clean(rootfs)
-				if !strings.HasPrefix(cleanRoot, "/mnt/") && !strings.HasPrefix(cleanRoot, "/var/lib/axonwall/") && !strings.HasPrefix(cleanRoot, "/var/lib/lxc/") {
-					return fmt.Errorf("lxc.conf line %d: lxc.rootfs.path %q is outside permitted paths", lineNo+1, val)
+				if !isAllowedLxcStoragePath(rootfs) {
+					return fmt.Errorf("lxc.conf line %d: lxc.rootfs.path %q is outside permitted paths (/mnt/, /var/lib/axonwall/{vms,isos})", lineNo+1, val)
 				}
 			}
 		case key == "lxc.include":
@@ -478,16 +657,32 @@ func validateLxcConfig(content string) error {
 			}
 		case key == "lxc.mount.entry":
 			fields := strings.Fields(val)
-			if len(fields) < 3 {
+			if len(fields) < 4 || len(fields) > 6 {
 				return fmt.Errorf("lxc.conf line %d: malformed lxc.mount.entry", lineNo+1)
 			}
-			src, dst, fsType := fields[0], fields[1], fields[2]
-			if fsType == "bpf" && src == "bpffs" && dst == "sys/fs/bpf" {
+			src, dst, fsType, optsField := fields[0], fields[1], fields[2], fields[3]
+			for _, numField := range fields[4:] {
+				if !lxcMountNumRe.MatchString(numField) {
+					return fmt.Errorf("lxc.conf line %d: invalid lxc.mount.entry dump/pass field %q", lineNo+1, numField)
+				}
+			}
+			if fsType == "bpf" {
+				if src != "bpffs" || dst != "sys/fs/bpf" {
+					return fmt.Errorf("lxc.conf line %d: disallowed bpffs mount source/target %q -> %q", lineNo+1, src, dst)
+				}
+				if err := validateBpffsMountOptions(optsField); err != nil {
+					return fmt.Errorf("lxc.conf line %d: %w", lineNo+1, err)
+				}
 				continue
 			}
-			cleanSrc := filepath.Clean(src)
-			if strings.Contains(src, "..") || strings.Contains(dst, "..") || (!strings.HasPrefix(cleanSrc, "/mnt/") && !strings.HasPrefix(cleanSrc, "/var/lib/axonwall/")) {
-				return fmt.Errorf("lxc.conf line %d: lxc.mount.entry source %q is outside permitted paths (/mnt/, /var/lib/axonwall/)", lineNo+1, src)
+			if strings.Contains(src, "..") || strings.Contains(dst, "..") || dst == "" || strings.HasPrefix(dst, "/") || !isAllowedLxcStoragePath(src) {
+				return fmt.Errorf("lxc.conf line %d: lxc.mount.entry source %q is outside permitted paths (/mnt/, /var/lib/axonwall/{vms,isos})", lineNo+1, src)
+			}
+			for _, rawOpt := range strings.Split(optsField, ",") {
+				opt := strings.ToLower(strings.TrimSpace(rawOpt))
+				if opt == "suid" || opt == "dev" {
+					return fmt.Errorf("lxc.conf line %d: disallowed mount option %q", lineNo+1, rawOpt)
+				}
 			}
 		case key == "lxc.idmap":
 			if !lxcIdmapRe.MatchString(val) {
@@ -527,6 +722,10 @@ func validateLxcConfig(content string) error {
 }
 
 func validateQemuKVParts(flag, rawSpec string) error {
+	return validateQemuKVPartsForVM(flag, rawSpec, 0)
+}
+
+func validateQemuKVPartsForVM(flag, rawSpec string, vmid int) error {
 	parts := strings.Split(rawSpec, ",")
 	objBackend := ""
 	if flag == "-object" && len(parts) > 0 {
@@ -595,7 +794,7 @@ func validateQemuKVParts(flag, rawSpec string) error {
 			}
 		}
 		if isQemuKeyMatch(k, "path") {
-			if !isAllowedQemuSocketPath(v) {
+			if !isAllowedQemuSocketPathForVM(v, vmid, "") {
 				return fmt.Errorf("disallowed QEMU %s path: %s", flag, v)
 			}
 		}
@@ -619,6 +818,10 @@ func validateQemuKVParts(flag, rawSpec string) error {
 }
 
 func validateSafeQemuArgs(args []string) error {
+	return validateSafeQemuArgsForVM(args, 0)
+}
+
+func validateSafeQemuArgsForVM(args []string, vmid int) error {
 	standaloneFlags := map[string]bool{
 		"-enable-kvm":    true,
 		"-daemonize":     true,
@@ -701,9 +904,17 @@ func validateSafeQemuArgs(args []string) error {
 
 		switch flag {
 		case "-pidfile":
-			pf := filepath.Clean(val)
-			if strings.Contains(val, "..") || !strings.HasPrefix(pf, "/run/axonwall/pids/vm-") || !strings.HasSuffix(pf, ".pid") {
-				return fmt.Errorf("disallowed QEMU -pidfile path: %s", pf)
+			pf, err := resolvePathWithExistingAncestor(val)
+			wantDir, derr := resolvePathWithExistingAncestor(virtPidDir)
+			m := qemuPidfileRe.FindStringSubmatch(filepath.Base(pf))
+			if err != nil || derr != nil || filepath.Dir(pf) != wantDir || m == nil {
+				return fmt.Errorf("disallowed QEMU -pidfile path: %s", val)
+			}
+			if vmid > 0 {
+				parsedID, convErr := strconv.Atoi(m[1])
+				if convErr != nil || parsedID != vmid {
+					return fmt.Errorf("disallowed QEMU -pidfile path for VM %d: %s", vmid, val)
+				}
 			}
 			continue
 		case "-kernel", "-initrd", "-bios":
@@ -764,7 +975,7 @@ func validateSafeQemuArgs(args []string) error {
 			if !strings.HasPrefix(val, "chardev:") {
 				unixTarget := strings.TrimPrefix(val, "unix:")
 				pathOnly := strings.SplitN(unixTarget, ",", 2)[0]
-				if !strings.HasPrefix(val, "unix:") || strings.Contains(pathOnly, "..") || !strings.HasPrefix(filepath.Clean(pathOnly), "/run/axonwall/qmp/") {
+				if !strings.HasPrefix(val, "unix:") || !isAllowedQemuSocketPathForVM(pathOnly, vmid, "qmp") {
 					return fmt.Errorf("disallowed QEMU -qmp target: %s", val)
 				}
 			}
@@ -772,7 +983,7 @@ func validateSafeQemuArgs(args []string) error {
 			if val != "none" && val != "null" && !strings.HasPrefix(val, "chardev:") {
 				unixTarget := strings.TrimPrefix(val, "unix:")
 				pathOnly := strings.SplitN(unixTarget, ",", 2)[0]
-				if !strings.HasPrefix(val, "unix:") || strings.Contains(pathOnly, "..") || !strings.HasPrefix(filepath.Clean(pathOnly), "/run/axonwall/serial/") {
+				if !strings.HasPrefix(val, "unix:") || !isAllowedQemuSocketPathForVM(pathOnly, vmid, "serial") {
 					return fmt.Errorf("disallowed QEMU -serial target: %s", val)
 				}
 			}
@@ -780,7 +991,7 @@ func validateSafeQemuArgs(args []string) error {
 			if val != "none" && !strings.HasPrefix(val, "127.0.0.1:") && !strings.HasPrefix(val, "[::1]:") {
 				unixTarget := strings.TrimPrefix(val, "unix:")
 				pathOnly := strings.SplitN(unixTarget, ",", 2)[0]
-				if !strings.HasPrefix(val, "unix:") || strings.Contains(pathOnly, "..") || !strings.HasPrefix(filepath.Clean(pathOnly), "/run/axonwall/vnc/") {
+				if !strings.HasPrefix(val, "unix:") || !isAllowedQemuSocketPathForVM(pathOnly, vmid, "vnc") {
 					return fmt.Errorf("disallowed QEMU -vnc target: %s", val)
 				}
 			}
@@ -806,7 +1017,7 @@ func validateSafeQemuArgs(args []string) error {
 			}
 		}
 
-		if err := validateQemuKVParts(flag, val); err != nil {
+		if err := validateQemuKVPartsForVM(flag, val, vmid); err != nil {
 			return err
 		}
 	}
@@ -822,7 +1033,7 @@ func validateAndNormalizeVMSpec(spec CompiledVmSpec) (CompiledVmSpec, error) {
 	default:
 		return CompiledVmSpec{}, fmt.Errorf("unsupported QEMU binary %q", spec.Binary)
 	}
-	if err := validateSafeQemuArgs(spec.Args); err != nil {
+	if err := validateSafeQemuArgsForVM(spec.Args, spec.VMID); err != nil {
 		return CompiledVmSpec{}, err
 	}
 	for _, disk := range spec.Disks {
@@ -831,6 +1042,12 @@ func validateAndNormalizeVMSpec(spec CompiledVmSpec) (CompiledVmSpec, error) {
 		}
 		if disk.Zvol != "" && !validZfsPath(disk.Zvol, true) {
 			return CompiledVmSpec{}, fmt.Errorf("invalid ZFS zvol path %q for disk %q", disk.Zvol, disk.Name)
+		}
+	}
+	for _, sh := range spec.VirtioFsShares {
+		resolvedHost, err := resolvePathWithExistingAncestor(sh.HostPath)
+		if err != nil || !pathMatchesResolvedPrefix(resolvedHost, virtMntRoot+"/") {
+			return CompiledVmSpec{}, fmt.Errorf("virtiofs hostPath %q must reside under %s", sh.HostPath, virtMntRoot)
 		}
 	}
 	for rawPath := range spec.FwCfg {
@@ -918,6 +1135,9 @@ func (m *VirtManager) ApplyVirtBundleJSON(rawJSON []byte) error {
 	for _, ct := range payload.Containers {
 		if ct.RootfsPool != "" && !validZfsPoolName(ct.RootfsPool) {
 			return fmt.Errorf("CT %d spec rejected: invalid rootfsPool %q", ct.CTID, ct.RootfsPool)
+		}
+		if ct.RootfsPath != "" && !isAllowedLxcStoragePath(ct.RootfsPath) {
+			return fmt.Errorf("CT %d spec rejected: rootfsPath %q is outside permitted paths", ct.CTID, ct.RootfsPath)
 		}
 		if ct.LxcConfig != "" {
 			if err := validateLxcConfig(ct.LxcConfig); err != nil {
@@ -1202,7 +1422,28 @@ func SendQMPCommand(socketPath string, command string, args map[string]any) (map
 	return nil, fmt.Errorf("qmp command read exceeded event limit")
 }
 
-// StartVM provisions required ZVOLs, Cloud-Init ISO, and launches QEMU process
+func resolveSafeVirtioFsHostPath(rawHostPath string) (string, error) {
+	trimmed := strings.TrimSpace(rawHostPath)
+	if trimmed == "" || strings.Contains(trimmed, "..") || strings.ContainsRune(trimmed, '\x00') {
+		return "", fmt.Errorf("invalid virtiofs hostPath %q", rawHostPath)
+	}
+	resolved, err := filepath.EvalSymlinks(trimmed)
+	if err != nil {
+		return "", fmt.Errorf("virtiofs hostPath %q cannot be resolved: %w", rawHostPath, err)
+	}
+	if virtMntRoot == "/mnt" {
+		if !underMnt(resolved) {
+			return "", fmt.Errorf("virtiofs hostPath %q (resolved %q) must reside under /mnt", rawHostPath, resolved)
+		}
+	} else if !pathMatchesResolvedPrefix(resolved, virtMntRoot+"/") {
+		return "", fmt.Errorf("virtiofs hostPath %q (resolved %q) must reside under %s", rawHostPath, resolved, virtMntRoot)
+	}
+	info, err := os.Stat(resolved)
+	if err != nil || !info.IsDir() {
+		return "", fmt.Errorf("virtiofs hostPath %q is not an existing directory", resolved)
+	}
+	return resolved, nil
+}
 func (m *VirtManager) StartVM(vmid int, user string) (string, error) {
 	m.mu.Lock()
 	spec, exists := m.vmSpecs[vmid]
@@ -1410,9 +1651,9 @@ func (m *VirtManager) StartVM(vmid int, user string) (string, error) {
 			if vfsBin, lookErr := exec.LookPath("virtiofsd"); lookErr == nil {
 				_ = os.MkdirAll("/run/axonwall/virtiofs", 0755)
 				for _, sh := range spec.VirtioFsShares {
-					cleanHost := filepath.Clean(strings.TrimSpace(sh.HostPath))
-					if !underMnt(cleanHost) {
-						return fmt.Errorf("virtiofs hostPath %q must reside under /mnt", cleanHost)
+					resolvedHost, hostErr := resolveSafeVirtioFsHostPath(sh.HostPath)
+					if hostErr != nil {
+						return hostErr
 					}
 					safeTag := strings.Map(func(r rune) rune {
 						if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' || r == '-' {
@@ -1422,7 +1663,7 @@ func (m *VirtManager) StartVM(vmid int, user string) (string, error) {
 					}, sh.Tag)
 					vfsSock := fmt.Sprintf("/run/axonwall/virtiofs/vm-%d-%s.sock", vmid, safeTag)
 					_ = os.Remove(vfsSock)
-					vfsArgs := []string{"--socket-path=" + vfsSock, "--shared-dir=" + cleanHost, "--sandbox=namespace"}
+					vfsArgs := []string{"--socket-path=" + vfsSock, "--shared-dir=" + resolvedHost, "--sandbox=namespace"}
 					if sh.ReadOnly {
 						vfsArgs = append(vfsArgs, "--readonly")
 					}
@@ -1454,7 +1695,7 @@ func (m *VirtManager) StartVM(vmid int, user string) (string, error) {
 			return fmt.Errorf("disallowed QEMU binary: %s", binary)
 		}
 
-		if err := validateSafeQemuArgs(spec.Args); err != nil {
+		if err := validateSafeQemuArgsForVM(spec.Args, vmid); err != nil {
 			return err
 		}
 		qemuArgs := ensurePidFileArg(ensureDaemonizeArg(spec.Args), pidFile)
@@ -2826,13 +3067,144 @@ func pollMigrationCompletion(qmpSock string, logger func(format string, args ...
 	}
 }
 
+var cgnatMigrationPrefix = netip.MustParsePrefix("100.64.0.0/10")
+
+// SetAllowedMigrationPeers explicitly sets allowed target peer IPs for VM live migration.
+func (m *VirtManager) SetAllowedMigrationPeers(peers []string) {
+	var parsed []netip.Addr
+	for _, raw := range peers {
+		if addr, ok := parseMigrationPeerIP(raw); ok {
+			parsed = append(parsed, addr)
+		}
+	}
+	m.mu.Lock()
+	m.allowedMigrationPeers = parsed
+	m.mu.Unlock()
+}
+
+func parseMigrationPeerIP(raw string) (netip.Addr, bool) {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return netip.Addr{}, false
+	}
+	if idx := strings.IndexByte(s, '/'); idx >= 0 {
+		s = s[:idx]
+	}
+	if h, _, err := net.SplitHostPort(s); err == nil {
+		s = h
+	}
+	s = strings.Trim(s, "[]")
+	addr, err := netip.ParseAddr(s)
+	if err != nil {
+		return netip.Addr{}, false
+	}
+	addr = addr.Unmap()
+	if !addr.IsValid() || addr.IsLoopback() || addr.IsUnspecified() || addr.IsMulticast() || addr.IsLinkLocalUnicast() || addr.IsLinkLocalMulticast() {
+		return netip.Addr{}, false
+	}
+	if addr.Is4() && addr.As4()[0] == 0 {
+		return netip.Addr{}, false
+	}
+	return addr, true
+}
+
+func (m *VirtManager) collectConfiguredMigrationPeers() []netip.Addr {
+	m.mu.RLock()
+	explicit := append([]netip.Addr(nil), m.allowedMigrationPeers...)
+	m.mu.RUnlock()
+
+	seen := make(map[netip.Addr]bool)
+	var peers []netip.Addr
+	add := func(addr netip.Addr) {
+		if addr.IsValid() && !seen[addr] {
+			seen[addr] = true
+			peers = append(peers, addr)
+		}
+	}
+	for _, a := range explicit {
+		add(a)
+	}
+
+	for _, sp := range virtPeerStatePaths {
+		raw, err := os.ReadFile(sp)
+		if err != nil {
+			continue
+		}
+		var state struct {
+			HA struct {
+				PeerIP        string `json:"peerIp"`
+				PeerAddress   string `json:"peerAddress"`
+				ConntrackSync struct {
+					PeerAddress string `json:"peerAddress"`
+				} `json:"conntrackSync"`
+			} `json:"ha"`
+		}
+		if json.Unmarshal(raw, &state) == nil {
+			for _, candidate := range []string{state.HA.PeerIP, state.HA.PeerAddress, state.HA.ConntrackSync.PeerAddress} {
+				if addr, ok := parseMigrationPeerIP(candidate); ok {
+					add(addr)
+				}
+			}
+		}
+	}
+
+	for _, tp := range virtTopologyConfigPaths {
+		raw, err := os.ReadFile(tp)
+		if err != nil {
+			continue
+		}
+		var topo struct {
+			Config struct {
+				Peers []struct {
+					Enabled bool   `json:"enabled"`
+					APIURL  string `json:"apiUrl"`
+				} `json:"peers"`
+			} `json:"config"`
+		}
+		if json.Unmarshal(raw, &topo) == nil {
+			for _, p := range topo.Config.Peers {
+				if !p.Enabled || strings.TrimSpace(p.APIURL) == "" {
+					continue
+				}
+				if u, uerr := url.Parse(strings.TrimSpace(p.APIURL)); uerr == nil {
+					if addr, ok := parseMigrationPeerIP(u.Hostname()); ok {
+						add(addr)
+					}
+				}
+			}
+		}
+	}
+
+	return peers
+}
+
+func (m *VirtManager) validateMigrationTargetIP(targetPeerIP string) (netip.Addr, error) {
+	addr, ok := parseMigrationPeerIP(targetPeerIP)
+	if !ok {
+		return netip.Addr{}, fmt.Errorf("invalid target peer IP %q for live migration", targetPeerIP)
+	}
+	configured := m.collectConfiguredMigrationPeers()
+	if len(configured) > 0 {
+		for _, allowed := range configured {
+			if allowed == addr {
+				return addr, nil
+			}
+		}
+		return netip.Addr{}, fmt.Errorf("target peer IP %q is not an authorized HA or topology peer", addr.String())
+	}
+	if !addr.IsPrivate() && !cgnatMigrationPrefix.Contains(addr) {
+		return netip.Addr{}, fmt.Errorf("disallowed public or unconfigured target peer IP %q for live migration", addr.String())
+	}
+	return addr, nil
+}
+
 // LiveMigrateVM orchestrates QMP RAM live migration to a peer Axonwall hypervisor node.
 func (m *VirtManager) LiveMigrateVM(vmid int, targetPeerIP string, user string) (string, error) {
-	cleanIP := strings.TrimSpace(targetPeerIP)
-	parsed := net.ParseIP(cleanIP)
-	if parsed == nil || parsed.IsLoopback() || parsed.IsUnspecified() {
-		return "", fmt.Errorf("invalid target peer IP %q for live migration", targetPeerIP)
+	addr, err := m.validateMigrationTargetIP(targetPeerIP)
+	if err != nil {
+		return "", err
 	}
+	cleanIP := addr.String()
 	qmpSock := filepath.Join(virtQmpSocketDir, fmt.Sprintf("vm-%d.sock", vmid))
 	if _, err := os.Stat(qmpSock); err != nil {
 		return "", fmt.Errorf("VM %d is not running (QMP socket %s missing)", vmid, qmpSock)

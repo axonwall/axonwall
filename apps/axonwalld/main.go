@@ -3741,9 +3741,11 @@ func main() {
 
 	// Start in-kernel BPF-LSM Preventive Guard only in appliance mode or when explicitly enabled
 	lsmGuardManager := engine.NewLsmGuardManager()
+	lsmGuardManager.SetStateDir(stateDir)
 	if runtimeMode != engine.ModeCollector && (runtimeMode == engine.ModeAppliance || strings.TrimSpace(os.Getenv("AXONWALL_LSM_ENFORCE")) == "1") {
 		if err := lsmGuardManager.Start(engine.DefaultLsmGuardPolicyConfig()); err != nil {
-			log.Printf("[Agent] Warning: Failed to start BPF-LSM guard: %v", err)
+			log.Printf("[Agent] ALERT [DEGRADED SECURITY]: Failed to start BPF-LSM guard: %v", err)
+			lsmGuardManager.RecordDegradedState(err)
 		}
 	} else {
 		log.Printf("[Agent] Mode %s: skipping BPF-LSM enforcing attachment (set AXONWALL_LSM_ENFORCE=1 to enable)", runtimeMode)

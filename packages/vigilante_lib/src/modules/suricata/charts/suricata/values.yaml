@@ -32,3 +32,12 @@ resources:
   limits:
     cpu: 1000m
     memory: 1Gi
+
+podSecurityContext:
+  seccompProfile:
+    type: RuntimeDefault
+
+networkPolicy:
+  enabled: true
+  allowIngressFrom: []
+  allowEgressCidrs: []

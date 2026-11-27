@@ -118,8 +118,28 @@ if (fs.existsSync(rootLayoutPath)) {
   let rootLayout = fs.readFileSync(rootLayoutPath, "utf8");
   rootLayout = rootLayout
     .replaceAll("'\''/favicon.svg'\''", "'\''/api/docs-bundle/favicon.svg'\''")
-    .replaceAll("'\''/logo-icon.svg'\''", "'\''/api/docs-bundle/logo-icon.svg'\''");
+    .replaceAll("'\''/logo-icon.svg'\''", "'\''/api/docs-bundle/logo-icon.svg'\''")
+    .replace(/<html([^>]*)>/, (m, attrs) =>
+      attrs.includes("data-theme=") ? m : `<html${attrs} data-theme="axonwall-emerald">`
+    )
+    .replace(/<script\b[\s\S]*?localStorage[\s\S]*?\/>\s*/g, "")
+    .replace(/<script\b[\s\S]*?localStorage[\s\S]*?<\/script>\s*/g, "");
   fs.writeFileSync(rootLayoutPath, rootLayout);
+}
+
+const themesLibPath = path.join(work, "src/lib/themes.ts");
+if (fs.existsSync(themesLibPath)) {
+  let themesLib = fs.readFileSync(themesLibPath, "utf8");
+  // Opaque-origin sandboxed iframes throw SecurityError on window.localStorage.
+  // Swap localStorage for an in-memory shim so ThemeSwitcher still works per-view without storage access.
+  themesLib = `const __sandboxThemeMemoryStore = new Map<string, string>();
+const __axonwallSandboxStorage = {
+  getItem: (k: string): string | null => __sandboxThemeMemoryStore.get(k) ?? null,
+  setItem: (k: string, v: string): void => { __sandboxThemeMemoryStore.set(k, String(v)); },
+  removeItem: (k: string): void => { __sandboxThemeMemoryStore.delete(k); },
+};
+` + themesLib.replace(/\blocalStorage\b/g, "__axonwallSandboxStorage");
+  fs.writeFileSync(themesLibPath, themesLib);
 }
 
 const docsLayoutPath = path.join(work, "src/app/docs/layout.tsx");
@@ -147,10 +167,28 @@ if (fs.existsSync(k3sPagePath)) {
   k3s = k3s
     .replaceAll(`href="/docs/installer-raid-zfs#k3s-storage-edition"`, `href="/api/docs-bundle/docs/installer-raid-zfs/#k3s-storage-edition"`)
     .replaceAll(`href="/docs/custom-kernel"`, `href="/api/docs-bundle/docs/custom-kernel/"`)
-    .replaceAll(`<a href="/k3s/explorer"`, `<a href="/k3s/explorer" target="_top"`)
-    .replaceAll(`<a href="/k3s/cluster"`, `<a href="/k3s/cluster" target="_top"`);
+    .replaceAll(`<a href="/k3s/explorer"`, `<a href="/k3s/explorer" target="_blank" rel="noopener noreferrer"`)
+    .replaceAll(`<a href="/k3s/cluster"`, `<a href="/k3s/cluster" target="_blank" rel="noopener noreferrer"`);
   fs.writeFileSync(k3sPagePath, k3s);
 }
+
+// Strip any remaining target="_top" attributes across all copied source files so
+// links never depend on allow-top-navigation inside the sandboxed docs iframe.
+function stripTopTargets(dir) {
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      stripTopTargets(full);
+    } else if (/\.(tsx?|jsx?|html)$/.test(entry.name)) {
+      const orig = fs.readFileSync(full, "utf8");
+      const next = orig.replace(/\s+target=(["'\''])_top\1/g, "");
+      if (next !== orig) {
+        fs.writeFileSync(full, next);
+      }
+    }
+  }
+}
+stripTopTargets(path.join(work, "src"));
 '
 
 echo "[docs-bundle] Exporting static offline documentation bundle (v${VERSION})..."

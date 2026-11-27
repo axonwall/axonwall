@@ -10,7 +10,7 @@ output_log="/var/log/k3s-agent.log"
 error_log="/var/log/k3s-agent.log"
 respawn_delay=5
 respawn_max=0
-rc_ulimit="-n 1048576 -u unlimited"
+rc_ulimit="-n 1048576 -u unlimited -c 0"
 
 depend() {
     need localmount

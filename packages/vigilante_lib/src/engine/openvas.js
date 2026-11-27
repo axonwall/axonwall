@@ -4,6 +4,7 @@ import { execa } from 'execa';
 import { getVigilanteEvidenceDir, ensureVigilanteConfig, shQuote, sanitizePathComponent, resolvePathInside, assertCliTarget, assertDnsLabel } from './config.js';
 import { getClusterContextArgs, getKubeExecutionEnv } from './k8s.js';
 import { saveEvidenceFile, listHostEvidence } from './evidence.js';
+import { assertSafeScanTarget } from './ssrf.js';
 import { logger } from '../utils/logger.js';
 
 /** Escape a value for embedding in the GMP XML payload. */
@@ -19,14 +20,26 @@ export function escapeXml(value) {
 export const xmlEscape = escapeXml;
 
 /**
- * Build the in-pod gvm-cli invocation. kubectl exec runs this through
- * `sh -c` inside the openvas pod, so every interpolated value — credentials
- * and the XML payload alike — is single-quote escaped with shQuote: a
- * quote, space, or $ in a password or host can no longer break out of its
- * argument and execute as shell inside the pod.
+ * Build a gvm-tools INI configuration payload passed via stdin to a mode-0600
+ * temp file inside the pod so credentials never appear in host or pod argv.
  */
-export function gvmCliCommand(username, password, xml) {
-  return `gvm-cli --gmp-username=${shQuote(username)} --gmp-password=${shQuote(password)} socket --socketpath=/run/gvmd/gvmd.sock -X ${shQuote(xml)}`;
+export function buildGvmConfigIni(username, password) {
+  const user = String(username ?? '');
+  const pass = String(password ?? '');
+  if (/[\r\n]/.test(user) || /[\r\n]/.test(pass)) {
+    throw new Error('Invalid OpenVAS credential: must not contain CR/LF');
+  }
+  return `[gmp]\nusername = ${user}\npassword = ${pass}\n`;
+}
+
+/**
+ * Build the in-pod gvm-cli invocation reading credentials from stdin into a
+ * private 0600 temporary config file cleaned up on exit, so neither kubectl
+ * on the host nor gvm-cli inside the pod exposes credentials on the command line.
+ */
+export function gvmCliCommand(usernameOrXml, password, maybeXml) {
+  const xml = maybeXml !== undefined ? maybeXml : (password !== undefined ? password : usernameOrXml);
+  return `umask 077 && cfg=$(mktemp) && trap 'rm -f "$cfg"' EXIT HUP INT TERM && cat > "$cfg" && chmod 600 "$cfg" && gvm-cli -c "$cfg" socket --socketpath=/run/gvmd/gvmd.sock -X ${shQuote(xml)}`;
 }
 
 export const SCAN_PROFILES = [
@@ -86,7 +99,10 @@ export async function getOpenVasCredentials({
   namespace = null,
   clusterName = 'vigilante-dev'
 } = {}) {
-  const candidateNamespaces = namespace ? [namespace] : ['openvas', 'default'];
+  const cleanNamespace = (namespace !== null && namespace !== undefined && namespace !== '')
+    ? assertDnsLabel(namespace, 'namespace')
+    : null;
+  const candidateNamespaces = cleanNamespace ? [cleanNamespace] : ['openvas', 'default'];
   const kubeEnv = getKubeExecutionEnv();
   const ctxArgs = await getClusterContextArgs(clusterName);
 
@@ -128,7 +144,10 @@ export async function checkOpenVasStatus({
   namespace = null,
   clusterName = 'vigilante-dev'
 } = {}) {
-  const candidateNamespaces = namespace ? [namespace] : ['openvas', 'default'];
+  const cleanNamespace = (namespace !== null && namespace !== undefined && namespace !== '')
+    ? assertDnsLabel(namespace, 'namespace')
+    : null;
+  const candidateNamespaces = cleanNamespace ? [cleanNamespace] : ['openvas', 'default'];
   const kubeEnv = getKubeExecutionEnv();
   const ctxArgs = await getClusterContextArgs(clusterName);
 
@@ -360,10 +379,24 @@ export async function runHostVulnerabilityScan({
   clusterName = 'vigilante-dev',
   simulate = false,
   onProgress = null,
-  onLog = null
+  onLog = null,
+  allowPrivate = true,
+  allowLoopback = true,
+  dnsLookup,
+  failOnDnsError,
+  scanTimeoutMs = 300000,
+  pollIntervalMs = 2000
 } = {}) {
   const rawHostIp = typeof host === 'string' ? host : host?.ip || '127.0.0.1';
   const hostIp = assertCliTarget(String(rawHostIp).trim(), 'OpenVAS target host');
+  await assertSafeScanTarget(hostIp, {
+    label: 'OpenVAS target host',
+    allowPrivate,
+    allowLoopback,
+    allowMetadata: false,
+    dnsLookup,
+    failOnDnsError
+  });
   if (namespace !== null && namespace !== undefined) {
     assertDnsLabel(namespace, 'namespace');
   }
@@ -406,53 +439,41 @@ export async function runHostVulnerabilityScan({
 
       const kubeEnv = getKubeExecutionEnv();
       const ctxArgs = await getClusterContextArgs(clusterName);
-      const targetXml = `<create_target><name>Target_${hostIp.replace(/[^a-zA-Z0-9]/g, '_')}_${Date.now()}</name><hosts>${xmlEscape(hostIp)}</hosts><port_list id="33d0cd82-57c6-11e1-8ed1-406186ea4fc5"/></create_target>`;
-      const { stdout: targetRes } = await execa('kubectl', [
-        'exec', '-n', effectiveNamespace, 'deployment/openvas', '-c', 'gvm-tools',
+      const gvmIni = buildGvmConfigIni(username, password);
+      const runGmpXml = (xml) => execa('kubectl', [
+        'exec', '-i', '-n', effectiveNamespace, 'deployment/openvas', '-c', 'gvm-tools',
         ...ctxArgs,
         '--', 'su', '-', 'nobody', '-s', '/bin/sh', '-c',
-        gvmCliCommand(username, password, targetXml)
-      ], { env: kubeEnv });
+        gvmCliCommand(xml)
+      ], { env: kubeEnv, input: gvmIni });
+
+      const targetXml = `<create_target><name>Target_${hostIp.replace(/[^a-zA-Z0-9]/g, '_')}_${Date.now()}</name><hosts>${xmlEscape(hostIp)}</hosts><port_list id="33d0cd82-57c6-11e1-8ed1-406186ea4fc5"/></create_target>`;
+      const { stdout: targetRes } = await runGmpXml(targetXml);
 
       const targetIdMatch = targetRes.match(/id="([^"]+)"/);
       const targetId = targetIdMatch ? targetIdMatch[1] : null;
 
       if (targetId) {
         const taskXml = `<create_task><name>Scan_${hostIp.replace(/[^a-zA-Z0-9]/g, '_')}</name><config id="${xmlEscape(configId)}"/><target id="${xmlEscape(targetId)}"/><scanner id="08b69003-5fc2-4037-a479-93b440211c73"/></create_task>`;
-        const { stdout: taskRes } = await execa('kubectl', [
-          'exec', '-n', effectiveNamespace, 'deployment/openvas', '-c', 'gvm-tools',
-          ...ctxArgs,
-          '--', 'su', '-', 'nobody', '-s', '/bin/sh', '-c',
-          gvmCliCommand(username, password, taskXml)
-        ], { env: kubeEnv });
+        const { stdout: taskRes } = await runGmpXml(taskXml);
         const taskIdMatch = taskRes.match(/id="([^"]+)"/);
         if (taskIdMatch) {
           const taskId = taskIdMatch[1];
           const startXml = `<start_task task_id="${xmlEscape(taskId)}"/>`;
-          const { stdout: startRes } = await execa('kubectl', [
-            'exec', '-n', effectiveNamespace, 'deployment/openvas', '-c', 'gvm-tools',
-            ...ctxArgs,
-            '--', 'su', '-', 'nobody', '-s', '/bin/sh', '-c',
-            gvmCliCommand(username, password, startXml)
-          ], { env: kubeEnv });
+          const { stdout: startRes } = await runGmpXml(startXml);
           const reportIdMatch = startRes.match(/<report_id>([^<]+)<\/report_id>/);
           const reportId = reportIdMatch ? reportIdMatch[1] : null;
           gmpTaskCreated = { taskId, targetId, reportId, started: true };
           if (onLog) onLog(`[openvas] Started GMP task ${taskId} in gvmd scheduler${reportId ? ` (report ${reportId})` : ''}.`);
 
           const statusXml = `<get_tasks task_id="${xmlEscape(taskId)}"/>`;
-          const pollTimeoutMs = Number(options.scanTimeoutMs) || 300000;
-          const pollIntervalMs = Number(options.pollIntervalMs) || 2000;
+          const pollTimeoutMs = Number(scanTimeoutMs) || 300000;
+          const boundedPollMs = Number(pollIntervalMs) || 2000;
           const pollDeadline = Date.now() + pollTimeoutMs;
           const terminalStates = new Set(['Done', 'Stopped', 'Interrupted']);
 
           while (true) {
-            const { stdout: statusRes } = await execa('kubectl', [
-              'exec', '-n', effectiveNamespace, 'deployment/openvas', '-c', 'gvm-tools',
-              ...ctxArgs,
-              '--', 'su', '-', 'nobody', '-s', '/bin/sh', '-c',
-              gvmCliCommand(username, password, statusXml)
-            ], { env: kubeEnv });
+            const { stdout: statusRes } = await runGmpXml(statusXml);
             const taskStatusMatch = statusRes.match(/<status>([^<]+)<\/status>/);
             if (taskStatusMatch) {
               gmpTaskCreated.status = taskStatusMatch[1];
@@ -460,17 +481,12 @@ export async function runHostVulnerabilityScan({
             if (terminalStates.has(gmpTaskCreated.status) || Date.now() >= pollDeadline) {
               break;
             }
-            await new Promise(r => setTimeout(r, pollIntervalMs));
+            await new Promise(r => setTimeout(r, boundedPollMs));
           }
 
           if (reportId) {
             const getReportXml = `<get_reports report_id="${xmlEscape(reportId)}" details="1"/>`;
-            const { stdout: reportXmlOut } = await execa('kubectl', [
-              'exec', '-n', effectiveNamespace, 'deployment/openvas', '-c', 'gvm-tools',
-              ...ctxArgs,
-              '--', 'su', '-', 'nobody', '-s', '/bin/sh', '-c',
-              gvmCliCommand(username, password, getReportXml)
-            ], { env: kubeEnv });
+            const { stdout: reportXmlOut } = await runGmpXml(getReportXml);
             gmpFindings = parseGmpReportFindings(reportXmlOut);
           }
         }

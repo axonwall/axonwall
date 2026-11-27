@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSession } from '@/server/auth';
 import { assertActionPermitted } from '@/server/auth-guard';
+import { checkPluginApiGuard } from '@/server/plugin-guard';
 import { callAgentApiDetailed } from '@/server/agent-client';
 import { getActivePendingInviteWindow } from '@/server/headscale-invites';
 import { resolveHeadscaleNetworkInfo } from '@/server/headscale-network';
@@ -71,6 +72,8 @@ export async function GET(req: NextRequest) {
     const msg = err instanceof Error ? err.message : 'Unauthorized';
     return NextResponse.json({ status: 'error', error: msg }, { status: msg === 'Unauthorized' ? 401 : 403 });
   }
+  const guard = await checkPluginApiGuard('headscale');
+  if (guard) return guard;
 
   const network = await resolveHeadscaleNetworkInfo(req);
   const agentRes = await callAgentApiDetailed<{
@@ -103,6 +106,8 @@ export async function POST(req: NextRequest) {
     const msg = err instanceof Error ? err.message : 'Unauthorized';
     return NextResponse.json({ status: 'error', error: msg }, { status: msg === 'Unauthorized' ? 401 : 403 });
   }
+  const guard = await checkPluginApiGuard('headscale');
+  if (guard) return guard;
 
   const body = await req.json().catch(() => ({}));
   const action = typeof body?.action === 'string' ? body.action.trim() : 'sync';

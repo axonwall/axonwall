@@ -51,7 +51,8 @@ export async function exportToPng(
   filename: string = 'nmap-topology.png',
   options: ExportPngOptions = {}
 ): Promise<void> {
-  const scale = options.scale || 2;
+  const scale = coercePositiveSvgNumber(options.scale, 2);
+  const quality = coercePositiveSvgNumber(options.quality, 0.95);
   const bgColor = options.backgroundColor || '#090d16';
 
   if (sourceElement instanceof HTMLCanvasElement) {
@@ -63,14 +64,14 @@ export async function exportToPng(
         } else {
           reject(new Error('Canvas toBlob failed'));
         }
-      }, 'image/png', options.quality || 0.95);
+      }, 'image/png', quality);
     });
   }
 
   // If SVG element, render onto a canvas
   const bbox = sourceElement.getBoundingClientRect();
-  const width = (bbox.width || 1200) * scale;
-  const height = (bbox.height || 800) * scale;
+  const width = coercePositiveSvgNumber(bbox.width, 1200) * scale;
+  const height = coercePositiveSvgNumber(bbox.height, 800) * scale;
 
   const canvas = document.createElement('canvas');
   canvas.width = width;
@@ -105,7 +106,7 @@ export async function exportToPng(
         } else {
           reject(new Error('Canvas toBlob failed'));
         }
-      }, 'image/png', options.quality || 0.95);
+      }, 'image/png', quality);
     };
     img.onerror = (err) => {
       URL.revokeObjectURL(url);
@@ -125,6 +126,37 @@ function escapeXml(unsafe: unknown): string {
     .replace(/'/g, '&#39;');
 }
 
+function coerceSvgNumber(value: unknown, fallback: number): number {
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? value : fallback;
+  }
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (!trimmed) return fallback;
+    const parsed = Number(trimmed);
+    return Number.isFinite(parsed) ? parsed : fallback;
+  }
+  return fallback;
+}
+
+function coercePositiveSvgNumber(value: unknown, fallback: number): number {
+  const num = coerceSvgNumber(value, fallback);
+  return num > 0 ? num : fallback;
+}
+
+function sanitizeSvgColor(value: unknown, fallback: string): string {
+  if (typeof value !== 'string') return fallback;
+  const trimmed = value.trim();
+  if (
+    /^#[0-9a-f]{3,8}$/i.test(trimmed) ||
+    /^[a-z]{1,24}$/i.test(trimmed) ||
+    /^(rgb|hsl)a?\(\s*[0-9.%\s,]+\)$/i.test(trimmed)
+  ) {
+    return escapeXml(trimmed);
+  }
+  return fallback;
+}
+
 /**
  * Programmatic headless generator: creates an SVG string representation of a TopologyGraph
  * without requiring a DOM (can run in Node.js / CLI / CI report generator).
@@ -133,63 +165,85 @@ export function generateHeadlessSvg(
   graph: TopologyGraph,
   options: { width?: number; height?: number; title?: string } = {}
 ): string {
-  const width = options.width || 1200;
-  const height = options.height || 800;
-  const title = options.title || 'Nmap Network Topology Map';
+  const opts = options ?? {};
+  const width = coercePositiveSvgNumber(opts.width, 1200);
+  const height = coercePositiveSvgNumber(opts.height, 800);
+  const title = opts.title || 'Nmap Network Topology Map';
+  const nodes = Array.isArray(graph?.nodes) ? graph.nodes : [];
+  const links = Array.isArray(graph?.links) ? graph.links : [];
 
-  const nodeMap = new Map<string, typeof graph.nodes[0]>();
-  for (const n of graph.nodes) nodeMap.set(n.id, n);
+  const nodeMap = new Map<string, (typeof nodes)[number]>();
+  for (const n of nodes) nodeMap.set(n.id, n);
 
   let linksSvg = '';
-  for (const link of graph.links) {
-    const sId = typeof link.source === 'string' ? link.source : (link.source as any).id;
-    const tId = typeof link.target === 'string' ? link.target : (link.target as any).id;
+  for (const link of links) {
+    const sId = typeof link.source === 'string' ? link.source : (link.source as any)?.id;
+    const tId = typeof link.target === 'string' ? link.target : (link.target as any)?.id;
     const s = nodeMap.get(sId);
     const t = nodeMap.get(tId);
     if (!s || !t) continue;
 
     const strokeColor = link.type === 'traceroute' ? '#38bdf8' : '#64748b';
-    const strokeWidth = link.type === 'traceroute' ? 2 : 1.5;
+    const strokeWidth = coercePositiveSvgNumber(link.type === 'traceroute' ? 2 : 1.5, 1.5);
     const strokeDash = link.type === 'subnet' ? 'stroke-dasharray="4,4"' : '';
 
-    const sx = Number(s.x) || 0;
-    const sy = Number(s.y) || 0;
-    const tx = Number(t.x) || 0;
-    const ty = Number(t.y) || 0;
+    const sx = coerceSvgNumber(s.x, 0);
+    const sy = coerceSvgNumber(s.y, 0);
+    const tx = coerceSvgNumber(t.x, 0);
+    const ty = coerceSvgNumber(t.y, 0);
+    const lineOpacity = coerceSvgNumber(0.6, 0.6);
 
     linksSvg += `
-      <line x1="${sx}" y1="${sy}" x2="${tx}" y2="${ty}" stroke="${strokeColor}" stroke-width="${strokeWidth}" ${strokeDash} opacity="0.6" />
+      <line x1="${escapeXml(sx)}" y1="${escapeXml(sy)}" x2="${escapeXml(tx)}" y2="${escapeXml(ty)}" stroke="${escapeXml(strokeColor)}" stroke-width="${escapeXml(strokeWidth)}" ${strokeDash} opacity="${escapeXml(lineOpacity)}" />
     `;
 
     if (link.label) {
-      const midX = (sx + tx) / 2;
-      const midY = (sy + ty) / 2;
+      const midX = coerceSvgNumber((sx + tx) / 2, 0);
+      const midY = coerceSvgNumber((sy + ty) / 2, 0);
+      const labelY = coerceSvgNumber(midY - 4, -4);
+      const linkFontSize = coercePositiveSvgNumber(10, 10);
       linksSvg += `
-        <text x="${midX}" y="${midY - 4}" fill="#94a3b8" font-size="10" font-family="sans-serif" text-anchor="middle">${escapeXml(link.label)}</text>
+        <text x="${escapeXml(midX)}" y="${escapeXml(labelY)}" fill="#94a3b8" font-size="${escapeXml(linkFontSize)}" font-family="sans-serif" text-anchor="middle">${escapeXml(link.label)}</text>
       `;
     }
   }
 
   let nodesSvg = '';
-  for (const node of graph.nodes) {
+  for (const node of nodes) {
     const isScanner = node.nodeType === 'scanner';
-    const fill = escapeXml(node.color || '#3b82f6');
-    const stroke = isScanner ? '#a855f7' : node.status === 'up' ? '#22c55e' : '#ef4444';
-    const nx = Number(node.x) || 0;
-    const ny = Number(node.y) || 0;
-    const r = Number(node.radius) || 10;
+    const fill = sanitizeSvgColor(node.color, '#3b82f6');
+    const stroke = escapeXml(isScanner ? '#a855f7' : node.status === 'up' ? '#22c55e' : '#ef4444');
+    const nx = coerceSvgNumber(node.x, 0);
+    const ny = coerceSvgNumber(node.y, 0);
+    const r = coercePositiveSvgNumber(node.radius, 10);
+    const nodeStrokeWidth = coercePositiveSvgNumber(2.5, 2.5);
+    const labelY = coerceSvgNumber(r + 14, 24);
+    const ipY = coerceSvgNumber(r + 26, 36);
+    const labelFontSize = coercePositiveSvgNumber(11, 11);
+    const ipFontSize = coercePositiveSvgNumber(9, 9);
 
     nodesSvg += `
-      <g transform="translate(${nx}, ${ny})">
-        <circle r="${r}" fill="${fill}" stroke="${stroke}" stroke-width="2.5" />
-        <text y="${r + 14}" fill="#f8fafc" font-size="11" font-family="sans-serif" font-weight="600" text-anchor="middle">${escapeXml(node.label)}</text>
-        <text y="${r + 26}" fill="#94a3b8" font-size="9" font-family="monospace" text-anchor="middle">${escapeXml(node.ip)}</text>
+      <g transform="translate(${escapeXml(nx)}, ${escapeXml(ny)})">
+        <circle r="${escapeXml(r)}" fill="${fill}" stroke="${stroke}" stroke-width="${escapeXml(nodeStrokeWidth)}" />
+        <text y="${escapeXml(labelY)}" fill="#f8fafc" font-size="${escapeXml(labelFontSize)}" font-family="sans-serif" font-weight="600" text-anchor="middle">${escapeXml(node.label)}</text>
+        <text y="${escapeXml(ipY)}" fill="#94a3b8" font-size="${escapeXml(ipFontSize)}" font-family="monospace" text-anchor="middle">${escapeXml(node.ip)}</text>
       </g>
     `;
   }
 
+  const bgCx = coerceSvgNumber(width / 2, 600);
+  const bgCy = coerceSvgNumber(height / 2, 400);
+  const bgR = coercePositiveSvgNumber(Math.min(width, height) * 0.45, 360);
+  const titleX = coerceSvgNumber(24, 24);
+  const titleY = coerceSvgNumber(36, 36);
+  const titleFontSize = coercePositiveSvgNumber(18, 18);
+  const subtitleY = coerceSvgNumber(56, 56);
+  const subtitleFontSize = coercePositiveSvgNumber(12, 12);
+  const nodeCount = coerceSvgNumber(nodes.length, 0);
+  const linkCount = coerceSvgNumber(links.length, 0);
+
   return `<?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${width} ${height}" width="${width}" height="${height}" style="background-color: #0b0f19;">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${escapeXml(width)} ${escapeXml(height)}" width="${escapeXml(width)}" height="${escapeXml(height)}" style="background-color: #0b0f19;">
   <defs>
     <radialGradient id="bgGlow" cx="50%" cy="50%" r="50%">
       <stop offset="0%" stop-color="#1e1b4b" stop-opacity="0.5" />
@@ -197,10 +251,10 @@ export function generateHeadlessSvg(
     </radialGradient>
   </defs>
   <rect width="100%" height="100%" fill="#0b0f19" />
-  <circle cx="${width / 2}" cy="${height / 2}" r="${Math.min(width, height) * 0.45}" fill="url(#bgGlow)" />
+  <circle cx="${escapeXml(bgCx)}" cy="${escapeXml(bgCy)}" r="${escapeXml(bgR)}" fill="url(#bgGlow)" />
   
-  <text x="24" y="36" fill="#f8fafc" font-size="18" font-family="sans-serif" font-weight="bold">${escapeXml(title)}</text>
-  <text x="24" y="56" fill="#64748b" font-size="12" font-family="monospace">Generated with NastyMap · ${graph.nodes.length} nodes · ${graph.links.length} links</text>
+  <text x="${escapeXml(titleX)}" y="${escapeXml(titleY)}" fill="#f8fafc" font-size="${escapeXml(titleFontSize)}" font-family="sans-serif" font-weight="bold">${escapeXml(title)}</text>
+  <text x="${escapeXml(titleX)}" y="${escapeXml(subtitleY)}" fill="#64748b" font-size="${escapeXml(subtitleFontSize)}" font-family="monospace">Generated with NastyMap · ${escapeXml(nodeCount)} nodes · ${escapeXml(linkCount)} links</text>
 
   <g id="links">
     ${linksSvg}
@@ -219,18 +273,23 @@ export function generateHtmlReport(scan: NmapRun, graph: TopologyGraph): string 
     title: `Nmap Scan Report: ${scan.args || 'Network Scan'}`,
   });
 
-  const hostsList = scan.hosts
+  const hosts = Array.isArray(scan?.hosts) ? scan.hosts : [];
+  const hostsList = hosts
     .map(
-      (h) => `
+      (h) => {
+        const statusState = h.status?.state || 'unknown';
+        const ports = Array.isArray(h.ports) ? h.ports : [];
+        return `
     <tr style="border-bottom: 1px solid #1e293b;">
       <td style="padding: 10px 14px; font-family: monospace; color: #38bdf8;">${escapeXml(h.ipv4 || h.id)}</td>
       <td style="padding: 10px 14px; color: #f8fafc;">${escapeXml(h.primaryHostname || '-')}</td>
-      <td style="padding: 10px 14px;"><span style="display:inline-block; padding: 2px 8px; border-radius: 9999px; font-size: 11px; font-weight: bold; background: ${h.status.state === 'up' ? '#065f46; color: #34d399;' : '#881337; color: #f87171;'}">${escapeXml(h.status.state.toUpperCase())}</span></td>
+      <td style="padding: 10px 14px;"><span style="display:inline-block; padding: 2px 8px; border-radius: 9999px; font-size: 11px; font-weight: bold; background: ${statusState === 'up' ? '#065f46; color: #34d399;' : '#881337; color: #f87171;'}">${escapeXml(statusState.toUpperCase())}</span></td>
       <td style="padding: 10px 14px; color: #94a3b8;">${escapeXml(h.primaryOs || h.osFamily || 'Unknown')}</td>
-      <td style="padding: 10px 14px; color: #cbd5e1;">${escapeXml(h.ports.filter((p) => p.state === 'open').map((p) => `${p.portid}/${p.protocol}`).join(', ') || 'None')}</td>
+      <td style="padding: 10px 14px; color: #cbd5e1;">${escapeXml(ports.filter((p) => p.state === 'open').map((p) => `${p.portid}/${p.protocol}`).join(', ') || 'None')}</td>
       <td style="padding: 10px 14px; color: #94a3b8;">${escapeXml(h.latencyMs !== undefined ? `${h.latencyMs} ms` : '-')}</td>
     </tr>
-  `
+  `;
+      }
     )
     .join('');
 
@@ -253,7 +312,7 @@ export function generateHtmlReport(scan: NmapRun, graph: TopologyGraph): string 
     <div class="header">
       <h1 style="margin: 0 0 8px 0; font-size: 24px; color: #38bdf8;">NastyMap Scan Report</h1>
       <p style="margin: 0; color: #94a3b8; font-family: monospace; font-size: 13px;">Command: ${escapeXml(scan.args)}</p>
-      <p style="margin: 4px 0 0 0; color: #64748b; font-size: 12px;">Scanned at ${escapeXml(scan.startstr)} · Nmap v${escapeXml(scan.version)} · ${scan.hosts.length} Hosts</p>
+      <p style="margin: 4px 0 0 0; color: #64748b; font-size: 12px;">Scanned at ${escapeXml(scan.startstr)} · Nmap v${escapeXml(scan.version)} · ${escapeXml(coerceSvgNumber(hosts.length, 0))} Hosts</p>
     </div>
 
     <div class="map-container">

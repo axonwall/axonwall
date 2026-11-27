@@ -17,6 +17,7 @@ import { getDesiredStateInternal } from './desired-state-internal';
 import { callAgentApi, callAgentApiResponse } from './agent-client';
 import { getSession } from './auth';
 import { assertActionPermitted } from './auth-guard';
+import { assertPluginEnabled } from './plugin-guard';
 import { assertSafeOutboundUrl } from './ssrf-guard';
 
 // C-M8: these server actions used to apply with no expectedFingerprint, so
@@ -117,6 +118,7 @@ export interface TaskItem {
 export async function getVirtConfigAction(): Promise<VirtConfig> {
   const session = await getSession();
   assertActionPermitted(session);
+  await assertPluginEnabled('core-virt');
 
   const state = await getCurrentDesiredState();
   return (
@@ -137,6 +139,7 @@ export async function getVirtConfigAction(): Promise<VirtConfig> {
 export async function getVmListAction(): Promise<VMStatusItem[]> {
   const session = await getSession();
   assertActionPermitted(session);
+  await assertPluginEnabled('core-virt');
 
   const state = await getCurrentDesiredState();
   const configuredVms = state.virt?.vms ?? [];
@@ -188,6 +191,7 @@ export async function vmPowerAction(
 ): Promise<{ success: boolean; upid?: string; message: string }> {
   const session = await getSession();
   assertActionPermitted(session, 'operator');
+  await assertPluginEnabled('core-virt');
 
   // Register spec with daemon on start if configured
   if (action === 'start') {
@@ -272,6 +276,7 @@ export async function saveVmAction(
 ): Promise<{ success: boolean; message: string }> {
   const session = await getSession();
   assertActionPermitted(session, 'admin');
+  await assertPluginEnabled('core-virt');
 
   // Validate ranges server-side (vmid 100–99999, cores 1–128, memory >= 128
   // MB, …): the form's min/max attributes are client-side only, and NaN or
@@ -371,6 +376,7 @@ export async function deleteVmAction(
 ): Promise<{ success: boolean; message: string }> {
   const session = await getSession();
   assertActionPermitted(session, 'admin');
+  await assertPluginEnabled('core-virt');
 
   const state = await getCurrentDesiredState();
   if (!state.virt?.vms) {
@@ -422,6 +428,7 @@ export async function deleteVmAction(
 export async function getContainerListAction(): Promise<ContainerStatusItem[]> {
   const session = await getSession();
   assertActionPermitted(session);
+  await assertPluginEnabled('core-virt');
 
   const state = await getCurrentDesiredState();
   const configuredCts = state.virt?.containers ?? [];
@@ -471,6 +478,7 @@ export async function containerPowerAction(
 ): Promise<{ success: boolean; upid?: string; message: string }> {
   const session = await getSession();
   assertActionPermitted(session, 'operator');
+  await assertPluginEnabled('core-virt');
 
   if (action === 'start' || action === 'reboot' || action === 'reset') {
     const state = await getCurrentDesiredState();
@@ -606,6 +614,7 @@ export async function saveContainerAction(
 ): Promise<{ success: boolean; message: string }> {
   const session = await getSession();
   assertActionPermitted(session, 'admin');
+  await assertPluginEnabled('core-virt');
 
   // Validate ranges server-side (ctid 100–99999, cores 1–128, memory >= 256
   // MB, …): the form's min/max attributes are client-side only.
@@ -692,6 +701,7 @@ export async function deleteContainerAction(
 ): Promise<{ success: boolean; message: string }> {
   const session = await getSession();
   assertActionPermitted(session, 'admin');
+  await assertPluginEnabled('core-virt');
 
   const state = await getCurrentDesiredState();
   if (!state.virt?.containers) {
@@ -729,6 +739,7 @@ export async function deleteContainerAction(
 export async function getPciInventoryAction(): Promise<PciDeviceItem[]> {
   const session = await getSession();
   assertActionPermitted(session);
+  await assertPluginEnabled('core-virt');
 
   const daemonResp = await callAgentApi<{ devices: PciDeviceItem[] }>('/v1/virt/pci');
   // C25: a daemon outage used to render as "No PCI devices detected",
@@ -776,6 +787,7 @@ export async function bindPciVfioAction(
 ): Promise<{ success: boolean; message: string }> {
   const session = await getSession();
   assertActionPermitted(session, 'admin');
+  await assertPluginEnabled('core-virt');
   validatePciBdf(bdf);
 
   const daemonResp = await callAgentApiResponse<{ success: boolean; message?: string }>('/v1/virt/pci', 'POST', {
@@ -801,6 +813,7 @@ export async function unbindPciVfioAction(
 ): Promise<{ success: boolean; message: string }> {
   const session = await getSession();
   assertActionPermitted(session, 'admin');
+  await assertPluginEnabled('core-virt');
   validatePciBdf(bdf);
 
   const daemonResp = await callAgentApiResponse<{ success: boolean; message?: string }>('/v1/virt/pci', 'POST', {
@@ -827,6 +840,7 @@ export async function configureSriovAction(
 ): Promise<{ success: boolean; message: string }> {
   const session = await getSession();
   assertActionPermitted(session, 'admin');
+  await assertPluginEnabled('core-virt');
   validatePciBdf(bdf);
 
   if (!Number.isInteger(numVfs) || numVfs < 0) {
@@ -867,6 +881,7 @@ export async function configureSriovAction(
 export async function getIsoListAction(pool?: string): Promise<IsoItem[]> {
   const session = await getSession();
   assertActionPermitted(session);
+  await assertPluginEnabled('core-virt');
   if (pool) {
     validatePoolName(pool);
   }
@@ -888,6 +903,7 @@ export async function downloadIsoAction(
 ): Promise<{ success: boolean; upid?: string; message: string }> {
   const session = await getSession();
   assertActionPermitted(session, 'admin');
+  await assertPluginEnabled('core-virt');
   validatePoolName(pool);
   validateIsoFilename(filename);
   await validateIsoDownloadUrl(url);
@@ -916,6 +932,7 @@ export async function downloadIsoAction(
 export async function getBackupListAction(pool?: string): Promise<BackupItem[]> {
   const session = await getSession();
   assertActionPermitted(session);
+  await assertPluginEnabled('core-virt');
   if (pool) {
     validatePoolName(pool);
   }
@@ -937,6 +954,7 @@ export async function triggerBackupAction(
 ): Promise<{ success: boolean; upid?: string; message: string }> {
   const session = await getSession();
   assertActionPermitted(session, 'operator');
+  await assertPluginEnabled('core-virt');
   if (pool) {
     validatePoolName(pool);
   }
@@ -970,6 +988,7 @@ export async function restoreBackupAction(
 ): Promise<{ success: boolean; upid?: string; message: string }> {
   const session = await getSession();
   assertActionPermitted(session, 'admin');
+  await assertPluginEnabled('core-virt');
   if (pool) validatePoolName(pool);
   if (!archivePath || archivePath.includes('..')) {
     throw new Error('Invalid backup archive path');
@@ -997,6 +1016,7 @@ export async function pruneBackupsAction(
 ): Promise<{ success: boolean; pruned?: number; message: string }> {
   const session = await getSession();
   assertActionPermitted(session, 'admin');
+  await assertPluginEnabled('core-virt');
   validatePoolName(pool || 'tank');
   const safeKeep = Math.max(1, Math.min(365, Math.floor(Number(keepLast) || 5)));
 
@@ -1027,6 +1047,7 @@ export async function manageWorkloadSnapshotAction(
 ): Promise<{ success: boolean; message: string }> {
   const session = await getSession();
   assertActionPermitted(session, 'operator');
+  await assertPluginEnabled('core-virt');
   if (!/^[a-zA-Z0-9_.-]{1,64}$/.test((label || '').trim())) {
     throw new Error('Snapshot label must be 1–64 alphanumeric, dash, dot, or underscore characters');
   }
@@ -1056,6 +1077,7 @@ export async function cloneVmAction(
 ): Promise<{ success: boolean; message: string }> {
   const session = await getSession();
   assertActionPermitted(session, 'admin');
+  await assertPluginEnabled('core-virt');
   const cleanName = (newName || '').trim().toLowerCase().replace(/[^a-z0-9_.-]/g, '-');
   if (!cleanName) {
     throw new Error('Clone name is required');
@@ -1084,6 +1106,7 @@ export async function liveMigrateVmAction(
 ): Promise<{ success: boolean; upid?: string; message: string }> {
   const session = await getSession();
   assertActionPermitted(session, 'admin');
+  await assertPluginEnabled('core-virt');
   const peer = (targetPeerIp || '').trim();
   if (!/^[a-zA-Z0-9.:-]+$/.test(peer)) {
     throw new Error('Invalid target peer IP/hostname');
@@ -1118,6 +1141,7 @@ export async function getVmQgaInterfacesAction(
 ): Promise<{ success: boolean; interfaces: QgaGuestInterface[]; error?: string }> {
   const session = await getSession();
   assertActionPermitted(session);
+  await assertPluginEnabled('core-virt');
   const daemonResp = await callAgentApi<{ success?: boolean; interfaces?: QgaGuestInterface[]; error?: string }>(
     `/v1/virt/qga?vmid=${encodeURIComponent(String(vmid))}`
   );
@@ -1136,6 +1160,7 @@ export async function exportVmLibvirtXmlAction(
 ): Promise<{ success: boolean; xml?: string; error?: string }> {
   const session = await getSession();
   assertActionPermitted(session);
+  await assertPluginEnabled('core-virt');
   const daemonResp = await callAgentApi<{ success?: boolean; xml?: string; domainXml?: string; error?: string }>(
     `/v1/virt/libvirt-xml?vmid=${encodeURIComponent(String(vmid))}`
   );
@@ -1152,6 +1177,7 @@ export async function exportVmLibvirtXmlAction(
 export async function getTaskListAction(): Promise<TaskItem[]> {
   const session = await getSession();
   assertActionPermitted(session);
+  await assertPluginEnabled('core-virt');
 
   const daemonResp = await callAgentApi<{ tasks: TaskItem[] }>('/v1/tasks');
   // C25: never render an empty task list for a daemon outage.

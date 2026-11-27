@@ -23,6 +23,56 @@ import { autoSignIfConfigured } from './gpg.js';
 import { saveEvidenceFile } from './evidence.js';
 import { logger } from '../utils/logger.js';
 
+const SECRET_FINDING_KEY_RE = /^(?:match|matched_?text|secret|secret_?value|secret_?key|raw_?secret|access_?key|value|raw|code|lines|line|snippet|content|token|pass|password|passwd|pwd|credential|credentials|api_?key|private_?key|auth|auth_?token|bearer|signature)$/i;
+const OOB_SENSITIVE_KEY_RE = /^(?:pass|password|passwd|pwd|secret|secret_?value|raw_?secret|token|api_?key|private_?key|rakp_?hash|hashcat|hash|raw|creds|credential|credentials|auth|bearer)$/i;
+const GENERAL_CREDENTIAL_KEY_RE = /^(?:pass|password|passwd|pwd|secret|secret_?value|raw_?secret|token|api_?key|private_?key|rakp_?hash|hashcat)$/i;
+
+function redactValue(val) {
+  if (val === null || val === undefined || val === '') return val;
+  return '[REDACTED]';
+}
+
+function redactObjectFields(node, keyRegex, seen = new WeakSet()) {
+  if (node === null || node === undefined || typeof node !== 'object') return node;
+  if (seen.has(node)) return '[Circular]';
+  seen.add(node);
+  if (Array.isArray(node)) {
+    return node.map((item) => redactObjectFields(item, keyRegex, seen));
+  }
+  const out = {};
+  for (const [k, v] of Object.entries(node)) {
+    if (keyRegex.test(k)) {
+      if (k === 'raw' || k === 'rawSecret') {
+        out[k] = redactValue(v);
+      } else if (Array.isArray(v)) {
+        out[k] = v.map((item) =>
+          item !== null && typeof item === 'object'
+            ? redactObjectFields(item, keyRegex, seen)
+            : redactValue(item)
+        );
+      } else if (v !== null && typeof v === 'object') {
+        out[k] = redactObjectFields(v, keyRegex, seen);
+      } else {
+        out[k] = redactValue(v);
+      }
+    } else {
+      out[k] = redactObjectFields(v, keyRegex, seen);
+    }
+  }
+  return out;
+}
+
+function sanitizeTrivySecret(secret) {
+  if (secret === null || secret === undefined) return secret;
+  if (typeof secret !== 'object') return redactValue(secret);
+  return redactObjectFields(secret, SECRET_FINDING_KEY_RE);
+}
+
+function sanitizeOobBmcDetails(bmc) {
+  if (bmc === null || bmc === undefined || typeof bmc !== 'object') return bmc;
+  return redactObjectFields(bmc, OOB_SENSITIVE_KEY_RE);
+}
+
 /**
  * Calculate a normalized 0–100 Composite Risk Score and Risk Tier
  * @param {Object} findings
@@ -282,7 +332,7 @@ export async function buildHostDossier(target, options = {}) {
     }
     const secrets = ta.secrets || ta.findings?.secrets || [];
     if (secrets.length > 0) {
-      dossier.vulnerabilities.secrets.push(...secrets);
+      dossier.vulnerabilities.secrets.push(...secrets.map(sanitizeTrivySecret));
       dossier.mitreTechniques.push('T1552'); // Unsecured Credentials
       dossier.remediations.push(`Rotate leaked secret found in container/manifest: ${ta.target}`);
     }
@@ -296,7 +346,7 @@ export async function buildHostDossier(target, options = {}) {
     const bmc = (os.bmcs || os.parsed?.bmcs || []).find(b => b.ip === normalizedTarget);
     if (bmc) {
       dossier.outOfBand.detected = true;
-      dossier.outOfBand.details = bmc;
+      dossier.outOfBand.details = sanitizeOobBmcDetails(bmc);
       dossier.mitreTechniques.push('T1584'); // Compromise Infrastructure
       dossier.remediations.push(`Isolate BMC/IPMI interface for ${normalizedTarget} on a dedicated management VLAN.`);
     }
@@ -460,19 +510,26 @@ export async function buildHostDossier(target, options = {}) {
   dossier.riskTier = risk.tier;
   dossier.riskColor = risk.color;
 
-  // Persist dossier
+  // Defense-in-depth mask of any credential/secret fields before persistence
+  const sanitizedDossier = redactObjectFields(dossier, GENERAL_CREDENTIAL_KEY_RE);
+
+  // Persist dossier with strict owner-only directory and file permissions
+  await fs.mkdir(dossiersDir, { recursive: true, mode: 0o700 });
+  await fs.chmod(dossiersDir, 0o700).catch(() => {});
   const dossierPath = resolvePathInside(dossiersDir, `${cleanTarget}.json`);
-  await fs.writeFile(dossierPath, JSON.stringify(dossier, null, 2), 'utf8');
+  const serializedDossier = JSON.stringify(sanitizedDossier, null, 2);
+  await fs.writeFile(dossierPath, serializedDossier, { encoding: 'utf8', mode: 0o600 });
+  await fs.chmod(dossierPath, 0o600);
 
   try {
-    await saveEvidenceFile('dossiers', cleanTarget, `${cleanTarget}.json`, JSON.stringify(dossier, null, 2));
+    await saveEvidenceFile('dossiers', cleanTarget, `${cleanTarget}.json`, serializedDossier);
     await autoSignIfConfigured(resolvePathInside(getHostEvidenceDir('dossiers', cleanTarget), `${cleanTarget}.json`));
   } catch (err) {
     logger.warn('DOSSIER', `Failed to save signed evidence: ${err.message}`);
   }
 
   logger.info('DOSSIER', `Compiled Unified Host Dossier for ${target} (Risk: ${risk.score}/100 [${risk.tier}])`);
-  return dossier;
+  return sanitizedDossier;
 }
 
 /**

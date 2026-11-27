@@ -299,16 +299,33 @@ export function compileNfsExports(nas?: NasConfig): string {
     const syncMode = exp.async ? 'async' : 'sync';
     const squash = exp.mapRootUser === 'root' ? 'no_root_squash' : 'root_squash';
     const secOpt = exp.secFlavor && exp.secFlavor !== 'sys' ? `,sec=${exp.secFlavor}` : '';
-    const rawNets = exp.allowedNetworks && exp.allowedNetworks.length > 0
-      ? exp.allowedNetworks
-      : ['*'];
-    const nets = rawNets.map((n) => sanitizeIniVal(n).replace(/[\s()]/g, '')).filter(Boolean);
+    const rawNets = Array.isArray(exp.allowedNetworks) ? exp.allowedNetworks : [];
+    const nets = rawNets
+      .map((n) => sanitizeIniVal(n).replace(/[\s()]/g, ''))
+      .filter((n) => n && n !== '*');
+    if (nets.length === 0) {
+      lines.push(`# Disabled NFS export ${sanitizeIniVal(exp.path)}: allowedNetworks must not be empty or '*'`);
+      continue;
+    }
     const clientSpecs = nets.map((net) => `${net}(${mode},${syncMode},no_subtree_check,${squash}${secOpt})`).join(' ');
     lines.push(`${sanitizeIniVal(exp.path).replace(/[\s()]/g, '')} ${clientSpecs}`);
   }
 
   lines.push('');
   return lines.join('\n');
+}
+
+function validateIscsiZvolPath(rawPath: string): string {
+  const trimmed = String(rawPath ?? '').trim();
+  if (
+    !trimmed ||
+    trimmed.includes('..') ||
+    /[\r\n\0]/.test(trimmed) ||
+    !/^\/dev\/zvol\/[a-zA-Z0-9._-]+\/[a-zA-Z0-9._/-]+$/.test(trimmed)
+  ) {
+    throw new Error(`Invalid iSCSI LUN zvolPath (must start with /dev/zvol/<pool>/... without ..): ${rawPath}`);
+  }
+  return trimmed;
 }
 
 export function compileLioTargetSaveconfig(nas?: NasConfig): string {
@@ -319,9 +336,7 @@ export function compileLioTargetSaveconfig(nas?: NasConfig): string {
   for (const t of targets) {
     const tpgLuns: Array<Record<string, unknown>> = [];
     for (const l of t.luns) {
-      const zvolDev = l.zvolPath.startsWith('/dev/')
-        ? l.zvolPath
-        : `/dev/zvol/${l.zvolPath.replace(/^\/+/, '')}`;
+      const zvolDev = validateIscsiZvolPath(l.zvolPath);
       const soName = `${t.iqn.replace(/[^a-zA-Z0-9_-]/g, '_')}_lun${l.lunId}`;
       storageObjects.push({
         alua_tpgs: [{ alua_access_type: 3, name: 'default_tg_pt_gp', tg_pt_gp_id: 0 }],
@@ -346,8 +361,8 @@ export function compileLioTargetSaveconfig(nas?: NasConfig): string {
           tag: 1,
           attributes: {
             authentication: t.chapUser && t.chapSecret ? 1 : 0,
-            generate_node_acls: t.allowedInitiators.length === 0 ? 1 : 0,
-            cache_dynamic_acls: t.allowedInitiators.length === 0 ? 1 : 0,
+            generate_node_acls: 0,
+            cache_dynamic_acls: 0,
           },
           luns: tpgLuns,
           portals: [{ ip_address: t.portalIp || '0.0.0.0', port: t.portalPort || 3260 }],
@@ -444,7 +459,7 @@ export function compileIscsiConfig(nas?: NasConfig): string {
         chapSecret: t.chapSecret || undefined,
         luns: t.luns.map((l) => ({
           lunId: l.lunId,
-          zvolDevice: l.zvolPath.startsWith('/dev/') ? l.zvolPath : `/dev/zvol/${l.zvolPath.replace(/^\/+/, '')}`,
+          zvolDevice: validateIscsiZvolPath(l.zvolPath),
           blockSize: Number(l.blockSize),
           readOnly: l.readOnly,
         })),

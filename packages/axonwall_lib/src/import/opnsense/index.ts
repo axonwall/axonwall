@@ -40,6 +40,53 @@ function normalizeXmlPort(raw: unknown, aliasMap: Map<string, string>): string {
   return s.replace(/:/g, '-');
 }
 
+function parseXmlEndpoint(
+  endpoint: any,
+  aliasMap: Map<string, string>,
+  defaultAddr: string,
+  mapWanIp = false,
+): { addr: string; port: string; negated: boolean } {
+  let addr = defaultAddr;
+  let port = '';
+  let negated = false;
+
+  if (typeof endpoint === 'string') {
+    const rawAddr = endpoint.trim();
+    if (rawAddr) {
+      const aliasMatch = aliasMap.get(rawAddr);
+      addr = aliasMatch ? `$${aliasMatch}` : rawAddr;
+    }
+    return { addr, port, negated };
+  }
+
+  if (endpoint && typeof endpoint === 'object') {
+    if (endpoint.any !== undefined) {
+      addr = defaultAddr;
+    } else if (endpoint.network) {
+      const rawNet = String(endpoint.network).trim();
+      if (rawNet === '(self)') {
+        addr = 'self';
+      } else if (mapWanIp && (rawNet.toLowerCase() === 'wanip' || rawNet.toLowerCase() === 'wan_ip')) {
+        addr = 'wan_ip';
+      } else {
+        addr = `$${rawNet.replace(/[^a-zA-Z0-9_]/g, '_')}`;
+      }
+    } else if (endpoint.address) {
+      const rawAddr = String(endpoint.address).trim();
+      const aliasMatch = aliasMap.get(rawAddr);
+      addr = aliasMatch ? `$${aliasMatch}` : rawAddr;
+    }
+    if (endpoint.not !== undefined && addr !== 'any' && addr !== 'wan_ip') {
+      negated = true;
+    }
+    if (endpoint.port) {
+      port = normalizeXmlPort(endpoint.port, aliasMap);
+    }
+  }
+
+  return { addr, port, negated };
+}
+
 export function importOpnsenseConfig(xmlContent: string): ImportReport {
   const warnings: string[] = [];
   const reviewItems: ImportReviewItem[] = [];
@@ -47,6 +94,7 @@ export function importOpnsenseConfig(xmlContent: string): ImportReport {
     ignoreAttributes: false,
     attributeNamePrefix: '@_',
     parseTagValue: false,
+    processEntities: false,
     isArray: (name) => {
       return ['alias', 'rule', 'staticmap', 'hosts', 'vlan', 'tag'].includes(name);
     },
@@ -163,7 +211,26 @@ export function importOpnsenseConfig(xmlContent: string): ImportReport {
     const rawRules = Array.isArray(root.filter.rule) ? root.filter.rule : [root.filter.rule];
     let sortOrder = 10;
     for (const r of rawRules) {
-      const action = r.type === 'block' ? 'block' : r.type === 'reject' ? 'reject' : 'pass';
+      const rawType = String(r.type ?? '').trim().toLowerCase();
+      if (rawType === 'match') {
+        warnings.push(
+          `Skipped non-terminal OPNsense "match" rule${r.descr ? ` ("${r.descr}")` : ''}: queue/tag match rules do not pass or block traffic.`,
+        );
+        continue;
+      }
+      let action: 'pass' | 'block' | 'reject';
+      let hasUnknownType = false;
+      if (rawType === 'pass') {
+        action = 'pass';
+      } else if (rawType === 'block') {
+        action = 'block';
+      } else if (rawType === 'reject') {
+        action = 'reject';
+      } else {
+        action = 'block';
+        hasUnknownType = true;
+      }
+
       const iface = r.interface || 'any';
       const rawProto = String(r.protocol || 'any').toLowerCase();
       const validProtos = new Set(['any', 'tcp', 'udp', 'tcp_udp', 'icmp', 'ipv6-icmp', 'esp', 'ah', 'gre']);
@@ -173,46 +240,38 @@ export function importOpnsenseConfig(xmlContent: string): ImportReport {
       }
       const descr = r.descr ? String(r.descr) : '';
 
-      // Parse source
-      let src = 'any';
-      let srcPort = '';
-      let negatedSrc = false;
-      if (r.source) {
-        if (r.source.any !== undefined) src = 'any';
-        else if (r.source.network) {
-          const rawNet = String(r.source.network);
-          src = rawNet === '(self)' ? 'self' : `$${rawNet.replace(/[^a-zA-Z0-9_]/g, '_')}`;
-        } else if (r.source.address) {
-          const rawAddr = String(r.source.address).trim();
-          const aliasMatch = aliasMap.get(rawAddr);
-          src = aliasMatch ? `$${aliasMatch}` : rawAddr;
-        }
-        if (r.source.not !== undefined && src !== 'any') negatedSrc = true;
-        if (r.source.port) srcPort = normalizeXmlPort(r.source.port, aliasMap);
-      }
-
-      // Parse destination
-      let dst = 'any';
-      let dstPort = '';
-      let negatedDst = false;
-      if (r.destination) {
-        if (r.destination.any !== undefined) dst = 'any';
-        else if (r.destination.network) {
-          const rawNet = String(r.destination.network);
-          dst = rawNet === '(self)' ? 'self' : `$${rawNet.replace(/[^a-zA-Z0-9_]/g, '_')}`;
-        } else if (r.destination.address) {
-          const rawAddr = String(r.destination.address).trim();
-          const aliasMatch = aliasMap.get(rawAddr);
-          dst = aliasMatch ? `$${aliasMatch}` : rawAddr;
-        }
-        if (r.destination.not !== undefined && dst !== 'any') negatedDst = true;
-        if (r.destination.port) dstPort = normalizeXmlPort(r.destination.port, aliasMap);
-      }
+      // Parse source & destination
+      const parsedSrc = parseXmlEndpoint(r.source, aliasMap, 'any');
+      const parsedDst = parseXmlEndpoint(r.destination, aliasMap, 'any');
+      const src = parsedSrc.addr;
+      const srcPort = parsedSrc.port;
+      const negatedSrc = parsedSrc.negated;
+      const dst = parsedDst.addr;
+      const dstPort = parsedDst.port;
+      const negatedDst = parsedDst.negated;
 
       const hasNegation = negatedSrc || negatedDst;
       const ruleIndex = rules.length;
-      const finalDescr = hasNegation ? `[REVIEW: Negated match] ${descr}`.trim() : descr;
-      const isEnabled = hasNegation ? false : !isXmlFlagSet(r.disabled);
+      const reviewPrefixes: string[] = [];
+      if (hasUnknownType) reviewPrefixes.push(`Unknown rule type "${rawType || 'missing'}"`);
+      if (hasNegation) reviewPrefixes.push('Negated match');
+      const finalDescr = reviewPrefixes.length > 0 ? `[REVIEW: ${reviewPrefixes.join('; ')}] ${descr}`.trim() : descr;
+      const isEnabled = hasNegation || hasUnknownType ? false : !isXmlFlagSet(r.disabled);
+
+      if (hasUnknownType) {
+        const matchSummary = `TYPE=${rawType || 'missing'} ${proto} from ${src} to ${dst}`;
+        const explanation = `OPNsense rule "${descr || sortOrder}" has unrecognized or missing <type> "${rawType || 'missing'}" (${matchSummary}). Imported fail-closed with action: block and enabled: false.`;
+        const suggestedResolution = `Verify the intended rule action (pass, block, or reject) in OPNsense before enabling.`;
+        warnings.push(explanation + ' ' + suggestedResolution);
+        reviewItems.push({
+          ruleId: String(r['@_uuid'] || r.uuid || `rule-${ruleIndex + 1}`),
+          ruleIndex,
+          reason: 'manual_review',
+          originalMatchSummary: matchSummary,
+          explanation,
+          suggestedResolution,
+        });
+      }
 
       if (hasNegation) {
         const reason: ImportReviewItem['reason'] =
@@ -267,19 +326,31 @@ export function importOpnsenseConfig(xmlContent: string): ImportReport {
       const rawNatProto = String(n.protocol || 'tcp').toLowerCase();
       let natProto = rawNatProto === 'tcp/udp' || rawNatProto === 'tcp_udp' ? 'tcp_udp' : rawNatProto === 'icmpv6' ? 'ipv6-icmp' : rawNatProto;
       if (!validNatProtos.has(natProto)) natProto = 'tcp';
+
+      const dnatSrc = parseXmlEndpoint(n.source, aliasMap, 'any');
+      const dnatDst = parseXmlEndpoint(n.destination, aliasMap, 'wan_ip', true);
+      const isNoRdr = n.nordr !== undefined && isXmlFlagSet(n.nordr);
+      const hasNatReview = dnatSrc.negated || dnatDst.negated || isNoRdr;
+      const baseNatDescr = n.descr ? String(n.descr) : '';
+      if (hasNatReview) {
+        warnings.push(
+          `OPNsense DNAT rule "${baseNatDescr || sortOrder}" uses ${isNoRdr ? '<nordr/> exclusion' : 'negated source/destination matching'} which cannot be safely activated as a standard forward; imported with enabled: false.`,
+        );
+      }
+
       nat.push({
         type: 'dnat',
         interface: (n.interface || 'wan').toLowerCase(),
         protocol: natProto as any,
-        source: 'any',
-        sourcePort: '',
-        destination: 'wan_ip',
+        source: dnatSrc.addr,
+        sourcePort: dnatSrc.port,
+        destination: dnatDst.addr,
         destinationPort: normalizeXmlPort(n.destination?.port || n.local_port || '', aliasMap),
         targetIp: n.target ? String(n.target) : '',
         targetPort: normalizeXmlPort(n.local_port || '', aliasMap),
         log: isXmlFlagSet(n.log),
-        enabled: !isXmlFlagSet(n.disabled),
-        description: n.descr ? String(n.descr) : '',
+        enabled: hasNatReview ? false : !isXmlFlagSet(n.disabled),
+        description: hasNatReview ? `[REVIEW: ${isNoRdr ? 'No-RDR' : 'Negated NAT'}] ${baseNatDescr}`.trim() : baseNatDescr,
         sortOrder,
       });
       sortOrder += 10;

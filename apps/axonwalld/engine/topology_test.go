@@ -148,6 +148,7 @@ func TestTopologyManager_ProbeFabricPinnedTLSAndPhasedApplyRollback(t *testing.T
 		cfg: K3sRuntimeBundle{Enabled: true},
 	}
 	tm := NewTopologyManager(cfgDir, k3sMgr, nil, nil, nil, nil)
+	tm.SetAllowLoopbackForTest(true)
 	tm.lldpRunner = func(_ context.Context) ([]byte, error) {
 		return []byte(`{"lldp":{"interface":[{"eth1":{"chassis":{"core-sw01":{"name":{"value":"core-sw01"}}},"port":{"id":{"value":"Ethernet1"}}}}]}}`), nil
 	}
@@ -254,5 +255,45 @@ func TestTopologyManager_ProbeFabricPinnedTLSAndPhasedApplyRollback(t *testing.T
 	})
 	if err != nil || !okRes.Success || confirmedCount.Load() != 1 {
 		t.Fatalf("expected successful phased apply + confirm, got: err=%v res=%+v (confirmed=%d)", err, okRes, confirmedCount.Load())
+	}
+}
+
+func TestTopologyPeerClientBlocksLoopbackIMDSAndRedirects(t *testing.T) {
+	var targetHits int
+	targetSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		targetHits++
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer targetSrv.Close()
+
+	redirSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, targetSrv.URL+"/probe", http.StatusFound)
+	}))
+	defer redirSrv.Close()
+
+	tm := NewTopologyManager(t.TempDir(), nil, nil, nil, nil, nil)
+	defaultClient, err := tm.BuildPeerHTTPClient(TopologyPeerHostPayload{ID: "p1", APIURL: targetSrv.URL})
+	if err != nil {
+		t.Fatalf("BuildPeerHTTPClient: %v", err)
+	}
+	if _, err := defaultClient.Get(targetSrv.URL); err == nil {
+		t.Fatal("expected default Topology peer client to block 127.0.0.1 loopback")
+	}
+	if _, err := defaultClient.Get("http://169.254.169.254/latest/meta-data/"); err == nil {
+		t.Fatal("expected default Topology peer client to block IMDS")
+	}
+
+	tm.SetAllowLoopbackForTest(true)
+	loopbackClient, err := tm.BuildPeerHTTPClient(TopologyPeerHostPayload{ID: "p1", APIURL: redirSrv.URL})
+	if err != nil {
+		t.Fatalf("BuildPeerHTTPClient loopback: %v", err)
+	}
+	resp, err := loopbackClient.Get(redirSrv.URL)
+	if err != nil {
+		t.Fatalf("expected unfollowed 302 response, got: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusFound || targetHits != 0 {
+		t.Fatalf("expected redirect not followed (status=%d, targetHits=%d)", resp.StatusCode, targetHits)
 	}
 }

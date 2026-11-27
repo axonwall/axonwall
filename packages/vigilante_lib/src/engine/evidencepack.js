@@ -15,6 +15,78 @@ export const OID_SHA256 = '2.16.840.1.101.3.4.2.1';
 export const OID_VIGILANTE_TSA_POLICY = '1.3.6.1.4.1.58284.1.1';
 
 /**
+ * Deterministic canonical JSON serialization with lexicographically sorted keys.
+ * @param {any} value
+ * @returns {string}
+ */
+export function canonicalJson(value) {
+  if (value === null || typeof value === 'boolean' || typeof value === 'string') {
+    return JSON.stringify(value);
+  }
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? JSON.stringify(value) : 'null';
+  }
+  if (Array.isArray(value)) {
+    return '[' + value.map(item => (item === undefined || typeof item === 'function' || typeof item === 'symbol') ? 'null' : canonicalJson(item)).join(',') + ']';
+  }
+  if (typeof value === 'object') {
+    if (typeof value.toJSON === 'function') {
+      return canonicalJson(value.toJSON());
+    }
+    const keys = Object.keys(value).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+    const parts = [];
+    for (const k of keys) {
+      const v = value[k];
+      if (v === undefined || typeof v === 'function' || typeof v === 'symbol') continue;
+      parts.push(`${JSON.stringify(k)}:${canonicalJson(v)}`);
+    }
+    return '{' + parts.join(',') + '}';
+  }
+  return 'null';
+}
+
+/**
+ * Extract and deterministically order the integrity-critical manifest payload
+ * covering bundle identity, timestamps, evidence items, and chain of custody.
+ * @param {Object} manifest
+ * @returns {Object}
+ */
+export function buildCanonicalEvidenceManifest(manifest) {
+  const items = Array.isArray(manifest?.evidenceItems) ? manifest.evidenceItems : [];
+  const orderedItems = items
+    .map((item) => ({
+      filename: item?.filename ?? '',
+      type: item?.type ?? 'RAW_EVIDENCE',
+      size: item?.size ?? 0,
+      sha256: String(item?.sha256 ?? '').toLowerCase(),
+      acquiredAt: item?.acquiredAt ?? ''
+    }))
+    .sort((a, b) => {
+      if (a.filename < b.filename) return -1;
+      if (a.filename > b.filename) return 1;
+      if (a.sha256 < b.sha256) return -1;
+      if (a.sha256 > b.sha256) return 1;
+      return 0;
+    });
+
+  return {
+    bundleId: manifest?.bundleId ?? null,
+    caseNumber: manifest?.caseNumber ?? null,
+    exportedAt: manifest?.exportedAt ?? null,
+    evidenceItems: orderedItems,
+    chainOfCustody: manifest?.chainOfCustody ?? null
+  };
+}
+
+function timingSafeEqualStr(a, b) {
+  if (typeof a !== 'string' || typeof b !== 'string') return false;
+  const bufA = Buffer.from(a, 'utf8');
+  const bufB = Buffer.from(b, 'utf8');
+  if (bufA.length !== bufB.length) return false;
+  return crypto.timingSafeEqual(bufA, bufB);
+}
+
+/**
  * Generate an RFC 3161 compliant Time-Stamp Token (TST) structure
  * @param {string} dataHash SHA-256 hash of the evidence manifest
  * @param {Object} [options={}]
@@ -47,12 +119,12 @@ export function generateRfc3161Timestamp(dataHash, options = {}) {
   };
 
   // Sign TSTInfo canonical representation
-  const canonicalTstStr = JSON.stringify(tstInfo);
+  const canonicalTstStr = canonicalJson(tstInfo);
   const signature = crypto.createHmac('sha256', secretKey).update(canonicalTstStr).digest('hex');
 
   const pemFormatted = [
     '-----BEGIN RFC3161 TIME-STAMP TOKEN-----',
-    Buffer.from(JSON.stringify({ tstInfo, signature })).toString('base64').replace(/(.{64})/g, '$1\n'),
+    Buffer.from(canonicalJson({ tstInfo, signature })).toString('base64').replace(/(.{64})/g, '$1\n'),
     '-----END RFC3161 TIME-STAMP TOKEN-----'
   ].join('\n');
 
@@ -121,36 +193,153 @@ exit $?
 `;
 
   const nodeScript = `import fs from 'node:fs';
+import path from 'node:path';
 import crypto from 'node:crypto';
+import { fileURLToPath } from 'node:url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const bundleRoot = fs.realpathSync(__dirname);
+const rootPrefix = bundleRoot.endsWith(path.sep) ? bundleRoot : bundleRoot + path.sep;
+
+function canonicalJson(value) {
+  if (value === null || typeof value === 'boolean' || typeof value === 'string') {
+    return JSON.stringify(value);
+  }
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? JSON.stringify(value) : 'null';
+  }
+  if (Array.isArray(value)) {
+    return '[' + value.map(item => (item === undefined || typeof item === 'function' || typeof item === 'symbol') ? 'null' : canonicalJson(item)).join(',') + ']';
+  }
+  if (typeof value === 'object') {
+    if (typeof value.toJSON === 'function') {
+      return canonicalJson(value.toJSON());
+    }
+    const keys = Object.keys(value).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+    const parts = [];
+    for (const k of keys) {
+      const v = value[k];
+      if (v === undefined || typeof v === 'function' || typeof v === 'symbol') continue;
+      parts.push(JSON.stringify(k) + ':' + canonicalJson(v));
+    }
+    return '{' + parts.join(',') + '}';
+  }
+  return 'null';
+}
+
+function buildCanonicalManifest(manifest) {
+  const items = Array.isArray(manifest?.evidenceItems) ? manifest.evidenceItems : [];
+  const orderedItems = items
+    .map(item => ({
+      filename: item?.filename ?? '',
+      type: item?.type ?? 'RAW_EVIDENCE',
+      size: item?.size ?? 0,
+      sha256: String(item?.sha256 ?? '').toLowerCase(),
+      acquiredAt: item?.acquiredAt ?? ''
+    }))
+    .sort((a, b) => {
+      if (a.filename < b.filename) return -1;
+      if (a.filename > b.filename) return 1;
+      if (a.sha256 < b.sha256) return -1;
+      if (a.sha256 > b.sha256) return 1;
+      return 0;
+    });
+  return {
+    bundleId: manifest?.bundleId ?? null,
+    caseNumber: manifest?.caseNumber ?? null,
+    exportedAt: manifest?.exportedAt ?? null,
+    evidenceItems: orderedItems,
+    chainOfCustody: manifest?.chainOfCustody ?? null
+  };
+}
+
+function timingSafeEqualStr(a, b) {
+  if (typeof a !== 'string' || typeof b !== 'string') return false;
+  const bufA = Buffer.from(a, 'utf8');
+  const bufB = Buffer.from(b, 'utf8');
+  if (bufA.length !== bufB.length) return false;
+  return crypto.timingSafeEqual(bufA, bufB);
+}
 
 console.log('[*] Verifying ISO/IEC 27037 Evidence Manifest and SHA-256 file hashes...');
 
-const manifest = JSON.parse(fs.readFileSync('${manifestFilename}', 'utf8'));
+const manifestPath = path.join(bundleRoot, ${JSON.stringify(manifestFilename)});
+const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
 let allValid = true;
 
+if (!manifest || typeof manifest !== 'object' || !Array.isArray(manifest.evidenceItems)) {
+  console.error('[-] INVALID MANIFEST: missing evidenceItems array');
+  process.exit(1);
+}
+
+if (!manifest.bundleId || !manifest.caseNumber || !manifest.exportedAt || !manifest.chainOfCustody) {
+  console.error('[-] INVALID MANIFEST: missing integrity-critical metadata (bundleId/caseNumber/exportedAt/chainOfCustody)');
+  allValid = false;
+}
+
+const seenFilenames = new Set();
 for (const item of manifest.evidenceItems) {
-  if (!fs.existsSync(item.filename)) {
-    console.error('[-] MISSING EVIDENCE FILE: ' + item.filename);
+  const rawName = item?.filename;
+  if (typeof rawName !== 'string' || !rawName) {
+    console.error('[-] INVALID EVIDENCE ITEM FILENAME');
     allValid = false;
     continue;
   }
-  const content = fs.readFileSync(item.filename);
+  const baseName = path.basename(rawName);
+  if (!baseName || baseName !== rawName || baseName === '.' || baseName === '..') {
+    console.error('[-] PATH TRAVERSAL REJECTED: ' + rawName);
+    allValid = false;
+    continue;
+  }
+  if (seenFilenames.has(baseName)) {
+    console.error('[-] DUPLICATE EVIDENCE FILENAME: ' + baseName);
+    allValid = false;
+    continue;
+  }
+  seenFilenames.add(baseName);
+
+  const candidatePath = path.join(bundleRoot, baseName);
+  if (!fs.existsSync(candidatePath)) {
+    console.error('[-] MISSING EVIDENCE FILE: ' + baseName);
+    allValid = false;
+    continue;
+  }
+  const realItemPath = fs.realpathSync(candidatePath);
+  if (!realItemPath.startsWith(rootPrefix)) {
+    console.error('[-] SYMLINK/PATH ESCAPE REJECTED: ' + baseName);
+    allValid = false;
+    continue;
+  }
+  if (!fs.statSync(realItemPath).isFile()) {
+    console.error('[-] NOT A REGULAR FILE: ' + baseName);
+    allValid = false;
+    continue;
+  }
+  const content = fs.readFileSync(realItemPath);
   const hash = crypto.createHash('sha256').update(content).digest('hex');
-  if (hash.toLowerCase() === item.sha256.toLowerCase()) {
-    console.log('  ✔ [PASS] ' + item.filename + ' (' + item.sha256.substring(0, 16) + '...)');
+  const expectedSha = String(item.sha256 || '').toLowerCase();
+  const sizeOk = typeof item.size !== 'number' || content.length === item.size;
+  if (timingSafeEqualStr(hash.toLowerCase(), expectedSha) && sizeOk) {
+    console.log('  ✔ [PASS] ' + baseName + ' (' + expectedSha.substring(0, 16) + '...)');
   } else {
-    console.error('  ✖ [TAMPERED] ' + item.filename + ' expected: ' + item.sha256 + ', got: ' + hash);
+    console.error('  ✖ [TAMPERED] ' + baseName + ' expected: ' + expectedSha + ', got: ' + hash);
     allValid = false;
   }
 }
 
-// Verify RFC 3161 Token
-const expectedManifestHash = manifest.rfc3161Token.tstInfo.messageImprint.hashedMessage;
-const itemsPayload = manifest.evidenceItems.map(i => i.sha256).sort().join('');
-const computedPayloadHash = crypto.createHash('sha256').update(itemsPayload).digest('hex');
+// Verify canonical manifest aggregateHash and RFC 3161 Token
+const canonicalPayload = canonicalJson(buildCanonicalManifest(manifest));
+const computedPayloadHash = crypto.createHash('sha256').update(canonicalPayload, 'utf8').digest('hex');
 
-if (expectedManifestHash === computedPayloadHash) {
-  console.log('[+] RFC 3161 Timestamp Token Imprint matches evidence items.');
+if (!manifest.aggregateHash || !timingSafeEqualStr(String(manifest.aggregateHash).toLowerCase(), computedPayloadHash)) {
+  console.error('[-] Manifest aggregateHash MISMATCH!');
+  allValid = false;
+}
+
+const expectedManifestHash = manifest.rfc3161Token?.tstInfo?.messageImprint?.hashedMessage;
+if (typeof expectedManifestHash === 'string' && timingSafeEqualStr(expectedManifestHash.toLowerCase(), computedPayloadHash)) {
+  console.log('[+] RFC 3161 Timestamp Token Imprint matches canonical evidence manifest.');
 } else {
   console.error('[-] RFC 3161 Message Imprint MISMATCH!');
   allValid = false;
@@ -163,10 +352,15 @@ const tsaKey = process.env.VIGILANTE_TSA_KEY;
 if (!tsaKey) {
   console.error('[-] VIGILANTE_TSA_KEY is not set: RFC 3161 token signature cannot be verified.');
   allValid = false;
+} else if (!manifest.rfc3161Token?.tstInfo || typeof manifest.rfc3161Token?.signature !== 'string') {
+  console.error('[-] RFC 3161 Timestamp Token missing tstInfo or signature.');
+  allValid = false;
 } else {
   const expectedSignature = crypto.createHmac('sha256', tsaKey)
-    .update(JSON.stringify(manifest.rfc3161Token.tstInfo)).digest('hex');
-  if (expectedSignature === manifest.rfc3161Token.signature) {
+    .update(canonicalJson(manifest.rfc3161Token.tstInfo)).digest('hex');
+  const expectedBuf = Buffer.from(expectedSignature, 'utf8');
+  const actualBuf = Buffer.from(manifest.rfc3161Token.signature, 'utf8');
+  if (expectedBuf.length === actualBuf.length && crypto.timingSafeEqual(expectedBuf, actualBuf)) {
     console.log('[+] RFC 3161 Timestamp Token signature verified.');
   } else {
     console.error('[-] RFC 3161 Timestamp Token SIGNATURE MISMATCH!');
@@ -195,14 +389,16 @@ if (allValid) {
  */
 export async function createEvidenceBundle(caseMetadata = {}, evidenceItems = [], options = {}) {
   const baseDir = options.outputDir || path.join(getVigilanteEvidenceDir(), 'bundles');
-  await fs.mkdir(baseDir, { recursive: true });
+  await fs.mkdir(baseDir, { recursive: true, mode: 0o700 });
+  await fs.chmod(baseDir, 0o700).catch(() => {});
 
   const timestamp = Date.now();
   const rawCaseNumber = caseMetadata.caseNumber || `CASE-${new Date().getFullYear()}-${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
   const caseNumber = sanitizePathComponent(rawCaseNumber);
   const bundleId = `evidence-bundle-${caseNumber.toLowerCase()}-${timestamp}`;
   const bundleDir = resolvePathInside(baseDir, bundleId);
-  await fs.mkdir(bundleDir, { recursive: true });
+  await fs.mkdir(bundleDir, { recursive: true, mode: 0o700 });
+  await fs.chmod(bundleDir, 0o700).catch(() => {});
 
   // 1. Write evidence items and record their SHA-256 hashes
   const packagedItems = [];
@@ -221,14 +417,15 @@ export async function createEvidenceBundle(caseMetadata = {}, evidenceItems = []
     let fileBuffer;
     if (item.content) {
       fileBuffer = Buffer.isBuffer(item.content) ? item.content : Buffer.from(item.content, 'utf8');
-      await fs.writeFile(destPath, fileBuffer);
+      await fs.writeFile(destPath, fileBuffer, { mode: 0o600 });
     } else if (item.path && fsSync.existsSync(item.path)) {
       fileBuffer = await fs.readFile(item.path);
-      await fs.writeFile(destPath, fileBuffer);
+      await fs.writeFile(destPath, fileBuffer, { mode: 0o600 });
     } else {
       fileBuffer = Buffer.from(JSON.stringify(item.data || {}), 'utf8');
-      await fs.writeFile(destPath, fileBuffer);
+      await fs.writeFile(destPath, fileBuffer, { mode: 0o600 });
     }
+    await fs.chmod(destPath, 0o600);
 
     const sha256 = crypto.createHash('sha256').update(fileBuffer).digest('hex');
     packagedItems.push({
@@ -240,21 +437,28 @@ export async function createEvidenceBundle(caseMetadata = {}, evidenceItems = []
     });
   }
 
-  // 2. Generate aggregate items hash for RFC 3161 Message Imprint
-  const itemsPayload = packagedItems.map(i => i.sha256).sort().join('');
-  const aggregateHash = crypto.createHash('sha256').update(itemsPayload).digest('hex');
-
-  // 3. Generate RFC 3161 Time-Stamp Token
-  const rfc3161Token = generateRfc3161Timestamp(aggregateHash, options);
-
-  // 4. Generate ISO/IEC 27037 Chain of Custody Record
+  // 2. Generate ISO/IEC 27037 Chain of Custody Record and export timestamp BEFORE sealing
+  const exportedAt = new Date().toISOString();
   const chainOfCustody = generateChainOfCustodyRecord({ ...caseMetadata, caseNumber });
+
+  // 3. Compute canonical aggregate hash over the FULL integrity-critical manifest
+  const canonicalManifest = buildCanonicalEvidenceManifest({
+    bundleId,
+    caseNumber,
+    exportedAt,
+    evidenceItems: packagedItems,
+    chainOfCustody
+  });
+  const aggregateHash = crypto.createHash('sha256').update(canonicalJson(canonicalManifest), 'utf8').digest('hex');
+
+  // 4. Generate RFC 3161 Time-Stamp Token binding the canonical manifest hash
+  const rfc3161Token = generateRfc3161Timestamp(aggregateHash, options);
 
   // 5. Assemble Evidence Manifest
   const manifest = {
     bundleId,
     caseNumber,
-    exportedAt: new Date().toISOString(),
+    exportedAt,
     standard: 'ISO/IEC 27037:2012 / RFC 3161',
     evidenceItems: packagedItems,
     aggregateHash,
@@ -263,7 +467,8 @@ export async function createEvidenceBundle(caseMetadata = {}, evidenceItems = []
   };
 
   const manifestPath = path.join(bundleDir, 'evidence_manifest.json');
-  await fs.writeFile(manifestPath, JSON.stringify(manifest, null, 2), 'utf8');
+  await fs.writeFile(manifestPath, JSON.stringify(manifest, null, 2), { encoding: 'utf8', mode: 0o600 });
+  await fs.chmod(manifestPath, 0o600);
 
   // 6. Generate standalone offline verification scripts
   const { bashScript, nodeScript } = generateVerificationScripts('evidence_manifest.json');
@@ -300,41 +505,77 @@ export async function verifyEvidenceBundle(bundleDir, options = {}) {
 
   const manifest = JSON.parse(await fs.readFile(manifestPath, 'utf8'));
   const failures = [];
+  const items = Array.isArray(manifest?.evidenceItems) ? manifest.evidenceItems : [];
 
-  for (const item of manifest.evidenceItems) {
-    const baseName = path.basename(item.filename || '');
-    if (!baseName || baseName !== item.filename) {
-      failures.push(`Invalid manifest item filename '${item.filename}': must be a plain basename`);
+  if (!Array.isArray(manifest?.evidenceItems)) {
+    failures.push('Manifest evidenceItems must be an array');
+  }
+  if (!manifest?.bundleId || !manifest?.caseNumber || !manifest?.exportedAt || !manifest?.chainOfCustody) {
+    failures.push('Manifest is missing required integrity-critical metadata (bundleId, caseNumber, exportedAt, or chainOfCustody)');
+  }
+
+  const seenFilenames = new Set();
+  for (const item of items) {
+    const rawName = item?.filename;
+    if (typeof rawName !== 'string' || !rawName) {
+      failures.push('Invalid manifest item: missing filename');
       continue;
     }
+    const baseName = path.basename(rawName);
+    if (!baseName || baseName !== rawName || baseName === '.' || baseName === '..') {
+      failures.push(`Invalid manifest item filename '${rawName}': must be a plain basename`);
+      continue;
+    }
+    if (seenFilenames.has(baseName)) {
+      failures.push(`Duplicate manifest item filename '${baseName}'`);
+      continue;
+    }
+    seenFilenames.add(baseName);
+
     let itemPath;
     try {
       itemPath = resolvePathInside(bundleDir, baseName);
     } catch {
-      failures.push(`Path traversal rejected for evidence item '${item.filename}'`);
+      failures.push(`Path traversal rejected for evidence item '${rawName}'`);
       continue;
     }
     if (!fsSync.existsSync(itemPath)) {
-      failures.push(`Missing file: ${item.filename}`);
+      failures.push(`Missing file: ${rawName}`);
+      continue;
+    }
+    const st = fsSync.statSync(itemPath);
+    if (!st.isFile()) {
+      failures.push(`Evidence item '${rawName}' is not a regular file`);
       continue;
     }
     const buf = await fs.readFile(itemPath);
     const calculatedHash = crypto.createHash('sha256').update(buf).digest('hex');
-    if (calculatedHash.toLowerCase() !== item.sha256.toLowerCase()) {
-      failures.push(`Hash mismatch on ${item.filename}: expected ${item.sha256}, got ${calculatedHash}`);
+    const expectedSha = String(item.sha256 || '').toLowerCase();
+    if (!timingSafeEqualStr(calculatedHash.toLowerCase(), expectedSha)) {
+      failures.push(`Hash mismatch on ${rawName}: expected ${item.sha256}, got ${calculatedHash}`);
+    }
+    if (typeof item.size === 'number' && buf.length !== item.size) {
+      failures.push(`Size mismatch on ${rawName}: expected ${item.size}, got ${buf.length}`);
     }
   }
 
-  const itemsPayload = manifest.evidenceItems.map(i => i.sha256).sort().join('');
-  const calculatedAggregate = crypto.createHash('sha256').update(itemsPayload).digest('hex');
+  const canonicalManifest = buildCanonicalEvidenceManifest(manifest);
+  const calculatedAggregate = crypto.createHash('sha256').update(canonicalJson(canonicalManifest), 'utf8').digest('hex');
+
+  if (!manifest?.aggregateHash || !timingSafeEqualStr(String(manifest.aggregateHash).toLowerCase(), calculatedAggregate)) {
+    failures.push('Manifest aggregateHash does not match calculated canonical manifest hash');
+  }
 
   // Verify the time-stamp token's existence and HMAC signature before dereferencing tstInfo fields.
-  if (!manifest.rfc3161Token || !manifest.rfc3161Token.tstInfo || !manifest.rfc3161Token.signature) {
+  if (!manifest?.rfc3161Token || !manifest.rfc3161Token.tstInfo || !manifest.rfc3161Token.signature) {
     failures.push('RFC 3161 token is missing or incomplete');
   } else {
     const hashedMsg = manifest.rfc3161Token.tstInfo?.messageImprint?.hashedMessage;
-    if (hashedMsg !== calculatedAggregate) {
-      failures.push('RFC 3161 Message Imprint does not match calculated aggregate evidence hash');
+    if (manifest.rfc3161Token.tstInfo?.messageImprint?.hashAlgorithm !== OID_SHA256) {
+      failures.push('RFC 3161 Message Imprint hashAlgorithm is invalid');
+    }
+    if (typeof hashedMsg !== 'string' || !timingSafeEqualStr(hashedMsg.toLowerCase(), calculatedAggregate)) {
+      failures.push('RFC 3161 Message Imprint does not match calculated canonical manifest hash');
     }
 
     const tsaKey = resolveTsaKey(options.signingKey);
@@ -342,10 +583,10 @@ export async function verifyEvidenceBundle(bundleDir, options = {}) {
       failures.push('TSA key not configured: RFC 3161 token signature cannot be verified (set VIGILANTE_TSA_KEY or evidencepack.tsaKey in config.yaml)');
     } else {
       const expectedSignature = crypto.createHmac('sha256', tsaKey)
-        .update(JSON.stringify(manifest.rfc3161Token.tstInfo))
+        .update(canonicalJson(manifest.rfc3161Token.tstInfo))
         .digest('hex');
-      const expectedBuf = Buffer.from(expectedSignature);
-      const actualBuf = Buffer.from(String(manifest.rfc3161Token.signature));
+      const expectedBuf = Buffer.from(expectedSignature, 'utf8');
+      const actualBuf = Buffer.from(String(manifest.rfc3161Token.signature), 'utf8');
       if (expectedBuf.length !== actualBuf.length || !crypto.timingSafeEqual(expectedBuf, actualBuf)) {
         failures.push('RFC 3161 token signature verification failed');
       }
@@ -356,10 +597,10 @@ export async function verifyEvidenceBundle(bundleDir, options = {}) {
 
   return {
     valid: isValid,
-    bundleId: manifest.bundleId,
-    caseNumber: manifest.caseNumber,
-    totalItems: manifest.evidenceItems.length,
+    bundleId: manifest?.bundleId,
+    caseNumber: manifest?.caseNumber,
+    totalItems: items.length,
     failures,
-    rfc3161Timestamp: manifest.rfc3161Token?.tstInfo?.genTime || null
+    rfc3161Timestamp: manifest?.rfc3161Token?.tstInfo?.genTime || null
   };
 }

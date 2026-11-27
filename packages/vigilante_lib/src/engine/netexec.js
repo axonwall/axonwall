@@ -1,6 +1,7 @@
 import { execa } from 'execa';
 import fs from 'node:fs/promises';
 import fsSync from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import net from 'node:net';
 import {
@@ -11,6 +12,7 @@ import {
 } from './config.js';
 import { autoSignIfConfigured } from './gpg.js';
 import { saveEvidenceFile } from './evidence.js';
+import { assertSafeScanTarget, createPinnedLookup } from './ssrf.js';
 import { logger } from '../utils/logger.js';
 
 export const NETEXEC_PROFILES = [
@@ -36,7 +38,8 @@ export const NETEXEC_PROFILES = [
     buildArgs: (target, opts = {}) => {
       const a = ['smb', target, '--pass-pol'];
       if (opts.user) a.push('-u', opts.user);
-      if (opts.password) a.push('-p', opts.password);
+      if (opts.passwordFile) a.push('-p', opts.passwordFile);
+      else if (opts.password) a.push('-p', opts.password);
       return a;
     }
   },
@@ -76,7 +79,19 @@ export async function checkNetexecInstalled() {
  * @param {string} target 
  * @returns {Promise<Array<{ protocol: string, port: number, open: boolean }>>}
  */
-export async function probeAuthProtocolsNative(target) {
+export async function probeAuthProtocolsNative(target, opts = {}) {
+  const cleanTarget = assertCliTarget(target, 'netexec target');
+  const scanTarget = await assertSafeScanTarget(cleanTarget, {
+    label: 'netexec target',
+    allowPrivate: opts.allowPrivate ?? true,
+    allowLoopback: opts.allowLoopback ?? true,
+    allowMetadata: false,
+    dnsLookup: opts.dnsLookup,
+    failOnDnsError: opts.failOnDnsError
+  });
+  const connectHost = scanTarget.hostname || cleanTarget;
+  const pinnedLookup = scanTarget.addresses.length > 0 ? createPinnedLookup(scanTarget.addresses) : undefined;
+
   const ports = [
     { protocol: 'SMB', port: 445 },
     { protocol: 'LDAP', port: 389 },
@@ -102,7 +117,7 @@ export async function probeAuthProtocolsNative(target) {
         socket.destroy();
         resolve(false);
       });
-      socket.connect(p.port, target);
+      socket.connect(pinnedLookup ? { port: p.port, host: connectHost, lookup: pinnedLookup } : { port: p.port, host: connectHost });
     });
 
     results.push({ protocol: p.protocol, port: p.port, open: isOpen });
@@ -160,53 +175,89 @@ export function parseNetexecOutput(rawOutput) {
  * @returns {Promise<object>}
  */
 export async function runNetexecAudit(target, profileId = 'smb-signing', opts = {}) {
-  assertCliTarget(target, 'netexec target');
+  const cleanTarget = assertCliTarget(target, 'netexec target');
+  await assertSafeScanTarget(cleanTarget, {
+    label: 'netexec target',
+    allowPrivate: opts.allowPrivate ?? true,
+    allowLoopback: opts.allowLoopback ?? true,
+    allowMetadata: false,
+    dnsLookup: opts.dnsLookup,
+    failOnDnsError: opts.failOnDnsError
+  });
+  if (opts.password && /[\r\n]/.test(String(opts.password))) {
+    throw new Error('Invalid netexec password: must not contain newlines');
+  }
+
   await ensureVigilanteConfig();
   const netexecDir = getVigilanteNetexecDir();
+  await fs.mkdir(netexecDir, { recursive: true, mode: 0o700 });
   const profile = NETEXEC_PROFILES.find((p) => p.id === profileId) || NETEXEC_PROFILES[0];
   const tool = await checkNetexecInstalled();
 
   const timestamp = new Date().toISOString();
-  const scanId = `netexec_${target.replace(/[^a-zA-Z0-9_.-]/g, '_')}_${Date.now()}`;
+  const scanId = `netexec_${cleanTarget.replace(/[^a-zA-Z0-9_.-]/g, '_')}_${Date.now()}`;
   let rawOutput = '';
   let findings = [];
+  let secretTempDir = null;
 
-  if (tool.runner === 'host') {
-    try {
-      const res = await execa(tool.bin, profile.buildArgs(target, opts));
-      rawOutput = res.stdout;
-      findings = parseNetexecOutput(rawOutput);
-    } catch (err) {
-      rawOutput = (err.stdout || '') + '\n' + (err.stderr || '');
-      findings = parseNetexecOutput(rawOutput);
+  try {
+    let profileOpts = opts;
+    if (opts.password && !opts.passwordFile && (tool.runner === 'host' || tool.runner === 'docker')) {
+      secretTempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'vigilante-nxc-'));
+      await fs.chmod(secretTempDir, 0o700);
+      const hostPassFile = path.join(secretTempDir, 'pass.txt');
+      await fs.writeFile(hostPassFile, String(opts.password), { encoding: 'utf8', mode: 0o600 });
+      profileOpts = {
+        ...opts,
+        passwordFile: tool.runner === 'docker' ? '/run/nxc-secrets/pass.txt' : hostPassFile
+      };
     }
-  } else if (tool.runner === 'docker') {
-    try {
-      const res = await execa('docker', ['run', '--rm', 'netexec/netexec:latest', ...profile.buildArgs(target, opts)]);
-      rawOutput = res.stdout;
-      findings = parseNetexecOutput(rawOutput);
-    } catch (err) {
-      rawOutput = err.stdout || '';
-      findings = parseNetexecOutput(rawOutput);
+
+    if (tool.runner === 'host') {
+      try {
+        const res = await execa(tool.bin, profile.buildArgs(cleanTarget, profileOpts));
+        rawOutput = res.stdout;
+        findings = parseNetexecOutput(rawOutput);
+      } catch (err) {
+        rawOutput = (err.stdout || '') + '\n' + (err.stderr || '');
+        findings = parseNetexecOutput(rawOutput);
+      }
+    } else if (tool.runner === 'docker') {
+      const dockerPrefix = ['run', '--rm'];
+      if (secretTempDir) {
+        dockerPrefix.push('-v', `${secretTempDir}:/run/nxc-secrets:ro`);
+      }
+      try {
+        const res = await execa('docker', [...dockerPrefix, 'netexec/netexec:latest', ...profile.buildArgs(cleanTarget, profileOpts)]);
+        rawOutput = res.stdout;
+        findings = parseNetexecOutput(rawOutput);
+      } catch (err) {
+        rawOutput = err.stdout || '';
+        findings = parseNetexecOutput(rawOutput);
+      }
+    } else {
+      // Native protocol reachability fallback
+      const reachable = await probeAuthProtocolsNative(cleanTarget, opts);
+      findings = reachable.filter((r) => r.open).map((r) => ({
+        protocol: r.protocol,
+        ip: cleanTarget,
+        port: r.port,
+        hostname: cleanTarget,
+        detail: `Native probe: ${r.protocol} listening on port ${r.port}`,
+        smbSigning: 'unknown',
+        isVulnerableToRelay: false
+      }));
+      rawOutput = JSON.stringify(findings, null, 2);
     }
-  } else {
-    // Native protocol reachability fallback
-    const reachable = await probeAuthProtocolsNative(target);
-    findings = reachable.filter((r) => r.open).map((r) => ({
-      protocol: r.protocol,
-      ip: target,
-      port: r.port,
-      hostname: target,
-      detail: `Native probe: ${r.protocol} listening on port ${r.port}`,
-      smbSigning: 'unknown',
-      isVulnerableToRelay: false
-    }));
-    rawOutput = JSON.stringify(findings, null, 2);
+  } finally {
+    if (secretTempDir) {
+      await fs.rm(secretTempDir, { recursive: true, force: true }).catch(() => {});
+    }
   }
 
   const record = {
     id: scanId,
-    target,
+    target: cleanTarget,
     profile: profile.id,
     timestamp,
     findings,
@@ -214,14 +265,14 @@ export async function runNetexecAudit(target, profileId = 'smb-signing', opts = 
   };
 
   const filePath = path.join(netexecDir, `${scanId}.json`);
-  await fs.writeFile(filePath, JSON.stringify(record, null, 2), 'utf8');
+  await fs.writeFile(filePath, JSON.stringify(record, null, 2), { encoding: 'utf8', mode: 0o600 });
 
   // GPG sign if configured
   await autoSignIfConfigured(filePath);
 
   // Evidence file
   try {
-    await saveEvidenceFile('scans', target, `${scanId}.json`, record);
+    await saveEvidenceFile('scans', cleanTarget, `${scanId}.json`, record);
   } catch (err) {
     logger.warn('NETEXEC', `Could not save evidence file: ${err.message}`);
   }

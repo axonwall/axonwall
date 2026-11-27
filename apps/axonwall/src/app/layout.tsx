@@ -14,16 +14,7 @@ export default function RootLayout({
   return (
     <html lang="en" className="dark" suppressHydrationWarning>
       <head>
-        <script
-          dangerouslySetInnerHTML={{
-            __html: `
-              try {
-                var tid = localStorage.getItem('axonwall_theme_id') || 'axonwall-emerald';
-                document.documentElement.setAttribute('data-theme', tid);
-              } catch (e) {}
-            `,
-          }}
-        />
+        <script src="/theme-init.js" />
       </head>
       <body className="text-slate-100 antialiased selection:bg-emerald-500 selection:text-slate-950">
         {children}

@@ -552,25 +552,136 @@ export const DEFAULT_THEME_ID = 'axonwall-emerald';
 const THEME_STORAGE_KEY = 'axonwall_theme_id';
 const CUSTOM_THEMES_STORAGE_KEY = 'axonwall_custom_themes';
 
+const THEME_ID_RE = /^[a-z0-9_-]{1,64}$/;
+const SAFE_HEX_COLOR_RE = /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/;
+const SAFE_RGB_COLOR_RE =
+  /^rgba?\(\s*(?:\d{1,3}%?\s*,\s*){2}\d{1,3}%?(?:\s*,\s*(?:0|1|0?\.\d+))?\s*\)$/i;
+const SAFE_HSL_COLOR_RE =
+  /^hsla?\(\s*\d{1,3}(?:deg)?\s*,\s*\d{1,3}%\s*,\s*\d{1,3}%(?:\s*,\s*(?:0|1|0?\.\d+))?\s*\)$/i;
+
+const VALID_CATEGORIES = new Set<ThemeCategory>([
+  'axonwall',
+  'solarized',
+  'gruvbox',
+  'catppuccin',
+  'dark-ambient',
+  'dark-red',
+  'oled',
+  'light',
+  'cyber',
+  'custom',
+]);
+
+const REQUIRED_COLOR_FIELDS: ReadonlyArray<keyof ThemeColors> = [
+  'bg',
+  'text',
+  'cardBg',
+  'border',
+  'accent',
+];
+
+export const ALL_THEME_COLOR_FIELDS: ReadonlyArray<keyof ThemeColors> = [
+  'bg',
+  'text',
+  'textMuted',
+  'cardBg',
+  'border',
+  'accent',
+  'accentHover',
+  'ring',
+  'readerBg',
+  'readerText',
+  'readerCoord',
+  'selectionBg',
+  'selectionText',
+];
+
+export function isValidThemeId(id: unknown): id is string {
+  return typeof id === 'string' && THEME_ID_RE.test(id);
+}
+
+export function sanitizeThemeId(rawId: unknown, fallbackName?: string): string {
+  const hasExplicitId = rawId !== undefined && rawId !== null && String(rawId).trim() !== '';
+  const source = hasExplicitId
+    ? String(rawId)
+    : fallbackName
+      ? `custom-${fallbackName}`
+      : '';
+  const cleaned = source
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 64);
+  if (cleaned && THEME_ID_RE.test(cleaned)) {
+    return cleaned;
+  }
+  if (!hasExplicitId && fallbackName) {
+    return 'custom-theme';
+  }
+  throw new Error('Theme id is invalid after sanitization.');
+}
+
+export function isValidThemeColor(value: unknown): value is string {
+  if (typeof value !== 'string') return false;
+  const trimmed = value.trim();
+  if (!trimmed || trimmed.length > 64 || /[\u0000-\u001f\u007f;{}'"`\\<>]/.test(trimmed)) {
+    return false;
+  }
+  return (
+    SAFE_HEX_COLOR_RE.test(trimmed) ||
+    SAFE_RGB_COLOR_RE.test(trimmed) ||
+    SAFE_HSL_COLOR_RE.test(trimmed)
+  );
+}
+
+function sanitizeOptionalHomepage(raw: unknown): string | undefined {
+  if (typeof raw !== 'string') return undefined;
+  const trimmed = raw.trim();
+  if (!trimmed || /[\u0000-\u001f\u007f\s]/.test(trimmed)) return undefined;
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol === 'https:' || parsed.protocol === 'http:') {
+      return trimmed;
+    }
+  } catch {
+    return undefined;
+  }
+  return undefined;
+}
+
 /**
  * Retrieves a theme by its unique identifier (checks builtin + custom themes)
  */
 export function getThemeById(themeId: string, customThemes: AxonwallTheme[] = []): AxonwallTheme {
-  const custom = customThemes.find((t) => t.id === themeId);
+  if (!isValidThemeId(themeId)) {
+    return BUILTIN_THEMES[0];
+  }
+  const custom = customThemes.find((t) => isValidThemeId(t.id) && t.id === themeId);
   if (custom) return custom;
   const found = BUILTIN_THEMES.find((t) => t.id === themeId);
   return found || BUILTIN_THEMES[0];
 }
 
 /**
- * Returns stored custom themes from localStorage
+ * Returns stored custom themes from localStorage, re-validating every entry on read.
  */
 export function getStoredCustomThemes(): AxonwallTheme[] {
   if (typeof window === 'undefined') return [];
   try {
     const raw = localStorage.getItem(CUSTOM_THEMES_STORAGE_KEY);
     if (!raw) return [];
-    return JSON.parse(raw) as AxonwallTheme[];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    const validated: AxonwallTheme[] = [];
+    for (const item of parsed) {
+      try {
+        validated.push(validateThemeObject(item));
+      } catch {
+        // Drop invalid or tampered themes read from storage
+      }
+    }
+    return validated;
   } catch (err) {
     console.error('Failed to parse custom themes from storage:', err);
     return [];
@@ -582,14 +693,15 @@ export function getStoredCustomThemes(): AxonwallTheme[] {
  */
 export function saveCustomTheme(theme: AxonwallTheme): AxonwallTheme[] {
   if (typeof window === 'undefined') return [];
+  const safeTheme = validateThemeObject(theme);
   const current = getStoredCustomThemes();
-  const existingIdx = current.findIndex((t) => t.id === theme.id);
+  const existingIdx = current.findIndex((t) => t.id === safeTheme.id);
   let updated: AxonwallTheme[];
   if (existingIdx >= 0) {
     updated = [...current];
-    updated[existingIdx] = theme;
+    updated[existingIdx] = safeTheme;
   } else {
-    updated = [...current, theme];
+    updated = [...current, safeTheme];
   }
   try {
     localStorage.setItem(CUSTOM_THEMES_STORAGE_KEY, JSON.stringify(updated));
@@ -620,7 +732,8 @@ export function deleteCustomTheme(themeId: string): AxonwallTheme[] {
 export function getStoredThemeId(): string {
   if (typeof window === 'undefined') return DEFAULT_THEME_ID;
   try {
-    return localStorage.getItem(THEME_STORAGE_KEY) || DEFAULT_THEME_ID;
+    const stored = localStorage.getItem(THEME_STORAGE_KEY);
+    return isValidThemeId(stored) ? stored : DEFAULT_THEME_ID;
   } catch {
     return DEFAULT_THEME_ID;
   }
@@ -633,7 +746,13 @@ export function applyTheme(theme: AxonwallTheme, targetElement?: HTMLElement): v
   if (typeof document === 'undefined') return;
 
   const target = targetElement || document.documentElement;
-  const colors = theme.colors;
+  let safeTheme: AxonwallTheme;
+  try {
+    safeTheme = validateThemeObject(theme);
+  } catch {
+    safeTheme = BUILTIN_THEMES[0];
+  }
+  const colors = safeTheme.colors;
 
   // Set standard Axonwall theme variables
   target.style.setProperty('--theme-bg', colors.bg);
@@ -670,7 +789,7 @@ export function applyTheme(theme: AxonwallTheme, targetElement?: HTMLElement): v
   }
 
   // Toggle dark/light class
-  if (theme.isDark) {
+  if (safeTheme.isDark) {
     target.classList.add('dark');
     target.classList.remove('light');
   } else {
@@ -678,11 +797,11 @@ export function applyTheme(theme: AxonwallTheme, targetElement?: HTMLElement): v
     target.classList.remove('dark');
   }
 
-  target.setAttribute('data-theme', theme.id);
+  target.setAttribute('data-theme', safeTheme.id);
 
   // Persist choice
   try {
-    localStorage.setItem(THEME_STORAGE_KEY, theme.id);
+    localStorage.setItem(THEME_STORAGE_KEY, safeTheme.id);
   } catch (err) {
     // Ignore storage quota/permission errors
   }
@@ -700,7 +819,7 @@ export function importThemeFromJSON(jsonText: string): AxonwallTheme | AxonwallT
   }
 
   // Multi-theme manifest
-  if (parsed.themes && Array.isArray(parsed.themes)) {
+  if (parsed && typeof parsed === 'object' && parsed.themes && Array.isArray(parsed.themes)) {
     const validatedThemes: AxonwallTheme[] = [];
     for (const t of parsed.themes) {
       validatedThemes.push(validateThemeObject(t));
@@ -727,66 +846,128 @@ export function importThemeFromJSON(jsonText: string): AxonwallTheme | AxonwallT
   return validateThemeObject(parsed);
 }
 
-function validateThemeObject(obj: any): AxonwallTheme {
-  if (!obj || typeof obj !== 'object') {
+export function validateThemeObject(obj: any): AxonwallTheme {
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) {
     throw new Error('Theme definition must be a JSON object.');
   }
 
-  const name = String(obj.name || '').trim();
+  const name = typeof obj.name === 'string' ? obj.name.trim().slice(0, 128) : '';
   if (!name) {
     throw new Error('Theme must specify a non-empty "name".');
   }
 
-  const id = (obj.id ? String(obj.id) : `custom-${name.toLowerCase().replace(/[^a-z0-9_-]/g, '-')}`).trim();
-  const colors = obj.colors || {};
+  const id = sanitizeThemeId(obj.id, name);
+  const colors = obj.colors;
+  if (!colors || typeof colors !== 'object' || Array.isArray(colors)) {
+    throw new Error('Theme must specify a valid "colors" object.');
+  }
 
-  const requiredColors = ['bg', 'text', 'cardBg', 'border', 'accent'];
-  for (const rc of requiredColors) {
-    if (!colors[rc] || typeof colors[rc] !== 'string') {
-      throw new Error(`Theme is missing required color property: "colors.${rc}"`);
+  for (const rc of REQUIRED_COLOR_FIELDS) {
+    if (!isValidThemeColor(colors[rc])) {
+      throw new Error(`Theme has missing or invalid required color property: "colors.${rc}"`);
     }
   }
+
+  const bg = String(colors.bg).trim();
+  const text = String(colors.text).trim();
+  const cardBg = String(colors.cardBg).trim();
+  const border = String(colors.border).trim();
+  const accent = String(colors.accent).trim();
+
+  const resolveOptionalColor = (field: keyof ThemeColors, fallback: string): string => {
+    const raw = colors[field];
+    if (raw === undefined || raw === null || (typeof raw === 'string' && raw.trim() === '')) {
+      return fallback;
+    }
+    if (!isValidThemeColor(raw)) {
+      throw new Error(`Theme has invalid color value for "colors.${field}"`);
+    }
+    return raw.trim();
+  };
+
+  const validatedColors: ThemeColors = {
+    bg,
+    text,
+    textMuted: resolveOptionalColor('textMuted', text),
+    cardBg,
+    border,
+    accent,
+    accentHover: resolveOptionalColor('accentHover', accent),
+    ring: resolveOptionalColor('ring', accent),
+    readerBg: resolveOptionalColor('readerBg', bg),
+    readerText: resolveOptionalColor('readerText', text),
+    readerCoord: resolveOptionalColor('readerCoord', accent),
+    selectionBg: resolveOptionalColor('selectionBg', cardBg),
+    selectionText: resolveOptionalColor('selectionText', text),
+  };
+
+  const category: ThemeCategory = VALID_CATEGORIES.has(obj.category as ThemeCategory)
+    ? (obj.category as ThemeCategory)
+    : 'custom';
 
   return {
     id,
     name,
-    description: String(obj.description || 'Custom imported theme'),
-    category: (obj.category as ThemeCategory) || 'custom',
+    description: typeof obj.description === 'string' && obj.description.trim()
+      ? obj.description.trim().slice(0, 512)
+      : 'Custom imported theme',
+    category,
     isDark: typeof obj.isDark === 'boolean' ? obj.isDark : true,
-    colors: {
-      bg: colors.bg,
-      text: colors.text,
-      textMuted: colors.textMuted || colors.text,
-      cardBg: colors.cardBg,
-      border: colors.border,
-      accent: colors.accent,
-      accentHover: colors.accentHover || colors.accent,
-      ring: colors.ring || colors.accent,
-      readerBg: colors.readerBg || colors.bg,
-      readerText: colors.readerText || colors.text,
-      readerCoord: colors.readerCoord || colors.accent,
-      selectionBg: colors.selectionBg || colors.cardBg,
-      selectionText: colors.selectionText || colors.text,
-    },
-    author: obj.author ? String(obj.author) : undefined,
-    homepage: obj.homepage ? String(obj.homepage) : undefined,
-    version: obj.version ? String(obj.version) : '1.0.0',
+    colors: validatedColors,
+    author: typeof obj.author === 'string' && obj.author.trim() ? obj.author.trim().slice(0, 128) : undefined,
+    homepage: sanitizeOptionalHomepage(obj.homepage),
+    version: typeof obj.version === 'string' && obj.version.trim() ? obj.version.trim().slice(0, 32) : '1.0.0',
   };
 }
 
+function parseSafeHttpsThemeUrl(rawUrl: string): URL {
+  const trimmed = rawUrl.trim();
+  if (!trimmed) {
+    throw new Error('Remote theme URL is required.');
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    throw new Error('Remote theme URL must be a valid absolute https:// URL.');
+  }
+  if (parsed.protocol !== 'https:') {
+    throw new Error('Remote theme URL must use https://.');
+  }
+  if (parsed.username || parsed.password) {
+    throw new Error('Remote theme URL must not contain embedded credentials.');
+  }
+  return parsed;
+}
+
 /**
- * Fetches themes from a remote URL or GitHub repository
+ * Fetches themes from a remote HTTPS URL or GitHub repository
  * e.g. https://github.com/winnegansFake/winnegansFake -> resolves to raw themes
  */
 export async function fetchThemesFromRemote(url: string): Promise<AxonwallTheme[]> {
-  let targetUrl = url.trim();
+  const parsedInput = parseSafeHttpsThemeUrl(url);
+  let targetUrl = parsedInput.toString();
 
-  // If user pasted a github repo link, e.g. https://github.com/user/repo
-  const ghMatch = targetUrl.match(/^https?:\/\/github\.com\/([^\/]+)\/([^\/]+)(\/?.*)$/);
+  // If user pasted an https://github.com/owner/repo link, resolve to raw.githubusercontent.com
+  const ghMatch =
+    parsedInput.hostname.toLowerCase() === 'github.com'
+      ? parsedInput.pathname.match(/^\/([^/]+)\/([^/]+)(\/?.*)$/)
+      : null;
   if (ghMatch) {
     const owner = ghMatch[1];
     const repo = ghMatch[2].replace(/\.git$/, '');
     const remainder = ghMatch[3].replace(/^\//, '');
+    if (
+      !/^[A-Za-z0-9._-]+$/.test(owner) ||
+      !/^[A-Za-z0-9._-]+$/.test(repo) ||
+      owner === '.' ||
+      owner === '..' ||
+      repo === '.' ||
+      repo === '..' ||
+      remainder.split('/').some((seg) => seg === '..')
+    ) {
+      throw new Error('Invalid GitHub repository path.');
+    }
 
     if (!remainder || remainder === 'tree/main' || remainder === 'tree/master') {
       // Try themes.json on main branch first
@@ -796,18 +977,28 @@ export async function fetchThemesFromRemote(url: string): Promise<AxonwallTheme[
     }
   }
 
+  const safeTargetUrl = parseSafeHttpsThemeUrl(targetUrl).toString();
   let response: Response;
   try {
-    response = await fetch(targetUrl);
+    response = await fetch(safeTargetUrl, { credentials: 'omit' });
   } catch (err: any) {
     throw new Error(`Network error connecting to remote theme URL: ${err?.message || err}`);
   }
 
+  if (response.url && !response.url.startsWith('https://')) {
+    throw new Error('Refusing insecure redirect from remote theme URL.');
+  }
+
   if (!response.ok) {
     // If fallback to main/themes.json failed on a github repo, try theme.json
-    if (targetUrl.endsWith('/themes.json') && ghMatch) {
-      const fallbackUrl = targetUrl.replace(/\/themes\.json$/, '/theme.json');
-      const fallbackResp = await fetch(fallbackUrl);
+    if (safeTargetUrl.endsWith('/themes.json') && ghMatch) {
+      const fallbackUrl = parseSafeHttpsThemeUrl(
+        safeTargetUrl.replace(/\/themes\.json$/, '/theme.json')
+      ).toString();
+      const fallbackResp = await fetch(fallbackUrl, { credentials: 'omit' });
+      if (fallbackResp.url && !fallbackResp.url.startsWith('https://')) {
+        throw new Error('Refusing insecure redirect from remote theme URL.');
+      }
       if (fallbackResp.ok) {
         const text = await fallbackResp.text();
         const res = importThemeFromJSON(text);

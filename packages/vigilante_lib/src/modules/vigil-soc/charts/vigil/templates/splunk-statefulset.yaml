@@ -23,10 +23,18 @@ spec:
     spec:
       serviceAccountName: {{ include "vigil.serviceAccountName" . }}
       {{- include "vigil.imagePullSecrets" . | nindent 6 }}
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: splunk
           image: "{{ .Values.splunk.image.repository }}:{{ .Values.splunk.image.tag }}"
           imagePullPolicy: {{ .Values.splunk.image.pullPolicy | default "IfNotPresent" }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
           env:
             - name: SPLUNK_START_ARGS
               value: "--accept-license"

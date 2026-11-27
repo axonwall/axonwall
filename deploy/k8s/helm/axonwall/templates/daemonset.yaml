@@ -17,7 +17,11 @@ spec:
         app.kubernetes.io/name: axonwalld
         app.kubernetes.io/instance: {{ .Release.Name }}
     spec:
+      automountServiceAccountToken: false
       hostNetwork: true
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
       tolerations:
         - key: node-role.kubernetes.io/control-plane
           operator: Exists
@@ -27,7 +31,7 @@ spec:
           effect: NoExecute
       containers:
         - name: axonwalld
-          image: "{{ .Values.nodeFirewall.image.repository }}:{{ .Values.nodeFirewall.image.tag }}"
+          image: "{{ .Values.nodeFirewall.image.repository }}:{{ .Values.nodeFirewall.image.tag }}{{- if .Values.nodeFirewall.image.digest }}@{{ .Values.nodeFirewall.image.digest }}{{- end }}"
           imagePullPolicy: {{ .Values.image.pullPolicy | default "IfNotPresent" }}
           env:
             - name: AXONWALL_SOCKET_GROUP
@@ -38,12 +42,20 @@ spec:
                   name: {{ .Values.auth.existingSecret | default "axonwall-auth-secret" }}
                   key: {{ .Values.auth.agentTokenKey | default "agent-token" }}
           securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
             capabilities:
+              drop: ["ALL"]
               add:
                 - NET_ADMIN
                 - NET_RAW
-                - SYS_ADMIN
+                - BPF
+                - PERFMON
           volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: run
+              mountPath: /run
             - name: run-axonwalld
               mountPath: /run/axonwalld
             - name: var-lib-axonwall
@@ -52,6 +64,10 @@ spec:
               mountPath: /lib/modules
               readOnly: true
       volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: run
+          emptyDir: {}
         - name: run-axonwalld
           hostPath:
             path: /run/axonwalld
@@ -85,17 +101,24 @@ spec:
         app.kubernetes.io/name: axonwall-ui
         app.kubernetes.io/instance: {{ .Release.Name }}
     spec:
+      automountServiceAccountToken: false
       securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        runAsGroup: 1001
         fsGroup: 1001
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: axonwall-ui
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}{{- if .Values.image.digest }}@{{ .Values.image.digest }}{{- end }}"
           imagePullPolicy: {{ .Values.image.pullPolicy | default "IfNotPresent" }}
           securityContext:
             runAsNonRoot: true
             runAsUser: 1001
             runAsGroup: 1001
             allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
             capabilities:
               drop: ["ALL"]
           env:
@@ -123,10 +146,14 @@ spec:
                   name: {{ .Values.auth.existingSecret | default "axonwall-auth-secret" }}
                   key: {{ .Values.auth.localAdminPasswordKey | default "local-admin-password" }}
             - name: LDAP_URL
-              value: "ldap://{{ .Values.ldap.host | default "axonwall-ldap" }}:{{ .Values.ldap.port | default 389 }}"
+              value: "ldaps://{{ .Values.ldap.host | default "axonwall-ldap" }}:{{ .Values.ldap.port | default 636 }}"
             - name: LDAP_BASE_DN
               value: {{ .Values.ldap.baseDn | default "dc=axonwall,dc=internal" | quote }}
           volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: run
+              mountPath: /run
             - name: run-axonwalld
               mountPath: /run/axonwalld
           ports:
@@ -134,6 +161,10 @@ spec:
               containerPort: {{ .Values.service.port | default 3000 }}
               protocol: TCP
       volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: run
+          emptyDir: {}
         - name: run-axonwalld
           hostPath:
             path: /run/axonwalld

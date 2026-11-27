@@ -3,11 +3,13 @@ package engine
 import (
 	"bytes"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -28,6 +30,7 @@ const (
 	HookIDUringSqpoll       uint32 = 3
 	HookIDBpfTokenDelegated uint32 = 4
 	HookIDBpfTokenBlocked   uint32 = 5
+	HookIDBpfLsmDegraded    uint32 = 6
 
 	PolicyIdxEnforceBpfLoad     uint32 = 0
 	PolicyIdxEnforceUringSqpoll uint32 = 1
@@ -35,6 +38,31 @@ const (
 	PolicyIdxAllowBpfTokens     uint32 = 3
 	PolicyIdxAuditBpfTokens     uint32 = 4
 	PolicyIdxTokenSafeProgsLo   uint32 = 5
+	PolicyIdxTokenSafeProgsHi   uint32 = 6
+
+	// DefaultSafeTokenProgMask matches DEFAULT_SAFE_TOKEN_PROG_MASK in lsm_guard.c
+	// and kernelSafeBpfProgBits in bpf_token.go.
+	DefaultSafeTokenProgMask uint64 = (1 << 1) | // socket_filter
+		(1 << 3) | // sched_cls
+		(1 << 4) | // sched_act
+		(1 << 6) | // xdp
+		(1 << 8) | // cgroup_skb
+		(1 << 9) | // cgroup_sock
+		(1 << 10) | // lwt_in
+		(1 << 11) | // lwt_out
+		(1 << 12) | // lwt_xmit
+		(1 << 13) | // sock_ops
+		(1 << 14) | // sk_skb
+		(1 << 15) | // cgroup_device
+		(1 << 17) | // sk_msg
+		(1 << 18) | // cgroup_sock_addr
+		(1 << 19) | // lwt_seg6local
+		(1 << 21) | // sk_reuseport
+		(1 << 22) | // flow_dissector
+		(1 << 23) | // cgroup_sysctl
+		(1 << 25) | // cgroup_sockopt
+		(1 << 30) | // sk_lookup
+		(1 << 32) // netfilter
 
 	maxRecentLsmEvents = 256
 )
@@ -66,6 +94,7 @@ type LsmGuardPolicyConfig struct {
 	EnforceCopyfailAead   bool
 	AllowDelegatedTokens  bool
 	AuditDelegatedTokens  bool
+	SafeTokenProgMask     uint64
 	TrustedBpfLoaderPaths []string
 	TrustedAfAlgPaths     []string
 }
@@ -77,6 +106,7 @@ func DefaultLsmGuardPolicyConfig() LsmGuardPolicyConfig {
 		EnforceCopyfailAead:  true,
 		AllowDelegatedTokens: true,
 		AuditDelegatedTokens: true,
+		SafeTokenProgMask:    DefaultSafeTokenProgMask,
 		TrustedBpfLoaderPaths: []string{
 			"/usr/sbin/bpftool",
 			"/usr/local/bin/bpftool",
@@ -141,6 +171,8 @@ func HookMetaFromID(hookID uint32) (hookName string, mitre string) {
 		return "lsm/bpf_token (BPF_TOKEN_CREATE UserNS Delegated)", "T1610"
 	case HookIDBpfTokenBlocked:
 		return "lsm/bpf_token (BPF_TOKEN Ring-0 Violation Denied)", "T1611"
+	case HookIDBpfLsmDegraded:
+		return "lsm/degraded (BPF-LSM Guard Load Failure)", "T1562.001"
 	default:
 		return "lsm/unknown", "T1014"
 	}
@@ -176,18 +208,34 @@ func DecodeLsmEvent(raw []byte, ts time.Time) (BpfLsmDenialEvent, error) {
 	}, nil
 }
 
+type LsmGuardStatus struct {
+	Attached        bool                   `json:"attached"`
+	Degraded        bool                   `json:"degraded"`
+	SecurityPosture string                 `json:"securityPosture"`
+	LoadError       string                 `json:"loadError,omitempty"`
+	DegradedSince   string                 `json:"degradedSince,omitempty"`
+	AttachedHooks   []string               `json:"attachedHooks"`
+	Allowlist       []BpfLsmAllowlistEntry `json:"allowlist"`
+	Events          []BpfLsmDenialEvent    `json:"events"`
+}
+
 type LsmGuardManager struct {
-	mu            sync.RWMutex
-	objsMu        sync.RWMutex
-	objs          ebpf.LsmGuardObjects
-	links         []link.Link
-	rbReader      *ringbuf.Reader
-	attached      bool
-	attachedHooks []string
-	allowlisted   []BpfLsmAllowlistEntry
-	events        []BpfLsmDenialEvent
-	stopOnce      sync.Once
-	doneChan      chan struct{}
+	mu                  sync.RWMutex
+	objsMu              sync.RWMutex
+	objs                ebpf.LsmGuardObjects
+	links               []link.Link
+	rbReader            *ringbuf.Reader
+	attached            bool
+	attachedHooks       []string
+	allowlisted         []BpfLsmAllowlistEntry
+	events              []BpfLsmDenialEvent
+	stateDir            string
+	degraded            bool
+	loadError           string
+	degradedSince       time.Time
+	degradedEventLogged bool
+	stopOnce            sync.Once
+	doneChan            chan struct{}
 }
 
 var (
@@ -218,16 +266,186 @@ func boolToUint32(v bool) uint32 {
 	return 0
 }
 
+// SetStateDir configures the directory where persistent BPF-LSM guard
+// posture/alert status (lsm-guard-status.json) is written.
+func (m *LsmGuardManager) SetStateDir(dir string) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.stateDir = strings.TrimSpace(dir)
+}
+
+func (m *LsmGuardManager) effectiveStateDirLocked() string {
+	if m.stateDir != "" {
+		return m.stateDir
+	}
+	return strings.TrimSpace(os.Getenv("AXONWALL_STATE_DIR"))
+}
+
+func (m *LsmGuardManager) buildStatusLocked() LsmGuardStatus {
+	posture := "inactive"
+	if m.degraded {
+		posture = "degraded"
+	} else if m.attached {
+		posture = "enforcing"
+	}
+	hooksCopy := append([]string(nil), m.attachedHooks...)
+	if hooksCopy == nil {
+		hooksCopy = []string{}
+	}
+	allowCopy := append([]BpfLsmAllowlistEntry(nil), m.allowlisted...)
+	if allowCopy == nil {
+		allowCopy = []BpfLsmAllowlistEntry{}
+	}
+	eventsCopy := append([]BpfLsmDenialEvent(nil), m.events...)
+	if eventsCopy == nil {
+		eventsCopy = []BpfLsmDenialEvent{}
+	}
+	since := ""
+	if !m.degradedSince.IsZero() {
+		since = m.degradedSince.UTC().Format(time.RFC3339)
+	}
+	return LsmGuardStatus{
+		Attached:        m.attached,
+		Degraded:        m.degraded,
+		SecurityPosture: posture,
+		LoadError:       m.loadError,
+		DegradedSince:   since,
+		AttachedHooks:   hooksCopy,
+		Allowlist:       allowCopy,
+		Events:          eventsCopy,
+	}
+}
+
+func (m *LsmGuardManager) persistStatusLocked() {
+	dir := m.effectiveStateDirLocked()
+	if dir == "" {
+		return
+	}
+	if err := os.MkdirAll(dir, 0750); err != nil {
+		log.Printf("[BPF-LSM] Warning: unable to create state dir %s for LSM status: %v", dir, err)
+		return
+	}
+	st := m.buildStatusLocked()
+	payload, err := json.MarshalIndent(st, "", "  ")
+	if err != nil {
+		return
+	}
+	target := filepath.Join(dir, "lsm-guard-status.json")
+	tmp, err := os.CreateTemp(dir, ".lsm-guard-status-*.tmp")
+	if err != nil {
+		log.Printf("[BPF-LSM] Warning: unable to stage %s: %v", target, err)
+		return
+	}
+	tmpPath := tmp.Name()
+	if _, err := tmp.Write(append(payload, '\n')); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpPath)
+		return
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return
+	}
+	_ = os.Chmod(tmpPath, 0640)
+	if err := os.Rename(tmpPath, target); err != nil {
+		_ = os.Remove(tmpPath)
+		log.Printf("[BPF-LSM] Warning: unable to persist %s: %v", target, err)
+	}
+}
+
+func (m *LsmGuardManager) recordDegradedLocked(err error, stillAttached bool) {
+	msg := "BPF-LSM guard failed to load"
+	if err != nil && strings.TrimSpace(err.Error()) != "" {
+		msg = err.Error()
+	}
+	now := time.Now().UTC()
+	prevMsg := m.loadError
+	m.degraded = true
+	m.attached = stillAttached
+	m.loadError = msg
+	if m.degradedSince.IsZero() {
+		m.degradedSince = now
+	}
+	if !m.degradedEventLogged || prevMsg != msg {
+		hookName, mitre := HookMetaFromID(HookIDBpfLsmDegraded)
+		ev := BpfLsmDenialEvent{
+			Timestamp:      now.Format(time.RFC3339),
+			PID:            uint32(os.Getpid()),
+			UID:            uint32(os.Getuid()),
+			HookID:         HookIDBpfLsmDegraded,
+			Hook:           hookName,
+			Blocked:        false,
+			Comm:           "axonwalld",
+			Detail:         msg,
+			MitreTechnique: mitre,
+		}
+		if len(m.events) >= maxRecentLsmEvents {
+			m.events = append(m.events[1:], ev)
+		} else {
+			m.events = append(m.events, ev)
+		}
+		m.degradedEventLogged = true
+	}
+	m.persistStatusLocked()
+}
+
+// RecordDegradedState marks the BPF-LSM guard as degraded (recording an alert
+// event and persisting lsm-guard-status.json when a state directory is set).
+func (m *LsmGuardManager) RecordDegradedState(err error) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.recordDegradedLocked(err, m.attached)
+}
+
+// DegradedStatus reports whether BPF-LSM loading/attachment failed or degraded.
+func (m *LsmGuardManager) DegradedStatus() (degraded bool, loadError string, degradedSince time.Time) {
+	if m == nil {
+		return false, "", time.Time{}
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.degraded, m.loadError, m.degradedSince
+}
+
+// Status returns a full snapshot including attachment and degraded-security posture.
+func (m *LsmGuardManager) Status() LsmGuardStatus {
+	if m == nil {
+		return LsmGuardStatus{
+			SecurityPosture: "inactive",
+			AttachedHooks:   []string{},
+			Allowlist:       []BpfLsmAllowlistEntry{},
+			Events:          []BpfLsmDenialEvent{},
+		}
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.buildStatusLocked()
+}
+
 func (m *LsmGuardManager) Start(cfg LsmGuardPolicyConfig) error {
 	posture := InspectKernelPosture()
 	if !posture.BpfLsmActive {
-		log.Printf("[BPF-LSM] Notice: 'bpf' is not active in /sys/kernel/security/lsm (%v); skipping live LSM trampoline attachment.", posture.ActiveLsms)
-		return nil
+		err := fmt.Errorf("bpf LSM is not active in /sys/kernel/security/lsm (%v)", posture.ActiveLsms)
+		log.Printf("[BPF-LSM] ALERT [DEGRADED SECURITY]: %v; live LSM trampoline attachment unavailable.", err)
+		m.mu.Lock()
+		m.recordDegradedLocked(err, false)
+		m.mu.Unlock()
+		return err
 	}
 
 	spec, err := ebpf.LoadLsmGuard()
 	if err != nil {
-		return fmt.Errorf("loading LsmGuard CollectionSpec: %w", err)
+		loadErr := fmt.Errorf("loading LsmGuard CollectionSpec: %w", err)
+		m.mu.Lock()
+		m.recordDegradedLocked(loadErr, false)
+		m.mu.Unlock()
+		return loadErr
 	}
 
 	// Graceful CO-RE compatibility with pre-6.9 kernels: only load BPF_TOKEN LSM
@@ -243,16 +461,23 @@ func (m *LsmGuardManager) Start(cfg LsmGuardPolicyConfig) error {
 	m.objsMu.Lock()
 	if err := spec.LoadAndAssign(&m.objs, nil); err != nil {
 		m.objsMu.Unlock()
-		return fmt.Errorf("loading LsmGuard eBPF objects: %w", err)
+		assignErr := fmt.Errorf("loading LsmGuard eBPF objects: %w", err)
+		m.mu.Lock()
+		m.recordDegradedLocked(assignErr, false)
+		m.mu.Unlock()
+		return assignErr
 	}
 
 	// 1. Configure enforcement policy array before attaching hooks
+	safeProgMask := cfg.SafeTokenProgMask & DefaultSafeTokenProgMask
 	policies := map[uint32]uint32{
 		PolicyIdxEnforceBpfLoad:     boolToUint32(cfg.EnforceBpfLoad),
 		PolicyIdxEnforceUringSqpoll: boolToUint32(cfg.EnforceUringSqpoll),
 		PolicyIdxEnforceCopyfail:    boolToUint32(cfg.EnforceCopyfailAead),
 		PolicyIdxAllowBpfTokens:     boolToUint32(cfg.AllowDelegatedTokens),
 		PolicyIdxAuditBpfTokens:     boolToUint32(cfg.AuditDelegatedTokens),
+		PolicyIdxTokenSafeProgsLo:   uint32(safeProgMask & 0xffffffff),
+		PolicyIdxTokenSafeProgsHi:   uint32(safeProgMask >> 32),
 	}
 	for idx, val := range policies {
 		if m.objs.PolicyConfig != nil {
@@ -346,6 +571,7 @@ func (m *LsmGuardManager) Start(cfg LsmGuardPolicyConfig) error {
 	}
 
 	var attachedHooks []string
+	var hookErrs []string
 	for _, hs := range hookSpecs {
 		if !hs.enabled {
 			continue
@@ -353,6 +579,7 @@ func (m *LsmGuardManager) Start(cfg LsmGuardPolicyConfig) error {
 		l, err := hs.fn()
 		if err != nil {
 			log.Printf("[BPF-LSM] Warning: could not attach %s: %v", hs.name, err)
+			hookErrs = append(hookErrs, fmt.Sprintf("%s: %v", hs.name, err))
 			continue
 		}
 		m.links = append(m.links, l)
@@ -363,7 +590,14 @@ func (m *LsmGuardManager) Start(cfg LsmGuardPolicyConfig) error {
 		_ = m.objs.Close()
 		m.objs = ebpf.LsmGuardObjects{}
 		m.objsMu.Unlock()
-		return errors.New("no BPF-LSM hooks could be attached")
+		attachErr := errors.New("no BPF-LSM hooks could be attached")
+		if len(hookErrs) > 0 {
+			attachErr = fmt.Errorf("no BPF-LSM hooks could be attached (%s)", strings.Join(hookErrs, "; "))
+		}
+		m.mu.Lock()
+		m.recordDegradedLocked(attachErr, false)
+		m.mu.Unlock()
+		return attachErr
 	}
 
 	rb, err := ringbuf.NewReader(m.objs.Events)
@@ -375,7 +609,11 @@ func (m *LsmGuardManager) Start(cfg LsmGuardPolicyConfig) error {
 		_ = m.objs.Close()
 		m.objs = ebpf.LsmGuardObjects{}
 		m.objsMu.Unlock()
-		return fmt.Errorf("opening BPF-LSM ringbuf reader: %w", err)
+		rbErr := fmt.Errorf("opening BPF-LSM ringbuf reader: %w", err)
+		m.mu.Lock()
+		m.recordDegradedLocked(rbErr, false)
+		m.mu.Unlock()
+		return rbErr
 	}
 	m.rbReader = rb
 	m.objsMu.Unlock()
@@ -384,6 +622,15 @@ func (m *LsmGuardManager) Start(cfg LsmGuardPolicyConfig) error {
 	m.attached = true
 	m.attachedHooks = attachedHooks
 	m.allowlisted = allowEntries
+	if len(hookErrs) > 0 {
+		m.recordDegradedLocked(fmt.Errorf("partial BPF-LSM hook attach failure: %s", strings.Join(hookErrs, "; ")), true)
+	} else {
+		m.degraded = false
+		m.loadError = ""
+		m.degradedSince = time.Time{}
+		m.degradedEventLogged = false
+		m.persistStatusLocked()
+	}
 	m.mu.Unlock()
 
 	log.Printf("[BPF-LSM] Attached %d in-kernel LSM guards (%v) with %d allowlisted (dev,ino) executables",

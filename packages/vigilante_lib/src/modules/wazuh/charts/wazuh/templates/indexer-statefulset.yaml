@@ -1,3 +1,4 @@
+{{- $secretName := .Values.existingSecret | default (printf "%s-secrets" (include "wazuh.fullname" .)) -}}
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -24,12 +25,25 @@ spec:
       annotations:
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
     spec:
+      automountServiceAccountToken: false
+      securityContext:
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
       initContainers:
         - name: generate-certs
           image: {{ .Values.images.certs }}
           imagePullPolicy: {{ .Values.imagePullPolicy }}
           securityContext:
             runAsUser: 0
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+              add:
+                - CHOWN
+                - DAC_OVERRIDE
+                - FOWNER
           env:
             - name: CERT_TOOL_VERSION
               value: {{ .Values.certsToolVersion | quote }}
@@ -70,8 +84,13 @@ spec:
           image: {{ .Values.images.indexer }}
           imagePullPolicy: {{ .Values.imagePullPolicy }}
           securityContext:
+            runAsNonRoot: true
             runAsUser: 1000
             runAsGroup: 1000
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
           env:
             - name: OPENSEARCH_JAVA_OPTS
               value: {{ .Values.indexer.javaOpts | quote }}
@@ -97,9 +116,10 @@ spec:
             - name: config
               mountPath: /usr/share/wazuh-indexer/config/opensearch.yml
               subPath: opensearch.yml
-            - name: config
+            - name: security-users
               mountPath: /usr/share/wazuh-indexer/config/opensearch-security/internal_users.yml
               subPath: internal_users.yml
+              readOnly: true
             - name: certs
               mountPath: /usr/share/wazuh-indexer/config/certs
       volumes:
@@ -118,6 +138,11 @@ spec:
             items:
               - key: opensearch.yml
                 path: opensearch.yml
+        - name: security-users
+          secret:
+            secretName: {{ $secretName }}
+            defaultMode: 0440
+            items:
               - key: internal_users.yml
                 path: internal_users.yml
 {{ if not .Values.indexer.persistence.enabled }}

@@ -2,6 +2,7 @@
 # Install with:
 #   helm install vigil infra/helm/vigil -f infra/helm/vigil/values-dev.yaml \
 #     --set secrets.anthropicApiKey=$ANTHROPIC_API_KEY \
+#     --set secrets.postgresPassword=$POSTGRES_PASSWORD \
 #     -n vigil --create-namespace
 #
 # This profile is NOT suitable for production:
@@ -67,4 +68,4 @@ redis:
       memory: 384Mi
 
 secrets:
-  postgresPassword: "dev_password_change_me"
+  postgresPassword: ""

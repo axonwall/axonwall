@@ -160,16 +160,23 @@ export function readHeadscaleConfigDefaults(): { serverUrl: string; magicDnsDoma
 }
 
 export function resolveHeadscaleUsername(
-  sessionOrUsername: string | { username?: string; email?: string }
+  sessionOrUsername: string | { username?: string; email?: string; source?: string }
 ): string {
+  const source = typeof sessionOrUsername === 'object' ? sessionOrUsername.source : undefined;
   const rawInput =
     typeof sessionOrUsername === 'string'
       ? sessionOrUsername
       : sessionOrUsername.username || sessionOrUsername.email || '';
-  const raw = rawInput.trim().toLowerCase();
-  if (!raw) {
+  const trimmed = rawInput.trim().toLowerCase();
+  if (!trimmed) {
     throw new Error('Username is required to resolve Headscale namespace');
   }
+  const raw =
+    source === 'oidc' && !trimmed.startsWith('oidc:')
+      ? `oidc:${trimmed}`
+      : source === 'ldap' && !trimmed.startsWith('ldap:')
+        ? `ldap:${trimmed}`
+        : trimmed;
   if (/^[a-z][a-z0-9_-]{0,31}$/.test(raw)) {
     return raw;
   }

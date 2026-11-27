@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import net from 'node:net';
 import type { NextRequest } from 'next/server';
 import { sanitizeHaProxyHostname } from '@axonwall/lib/compile/haproxy';
 import { getDesiredStateInternal } from './desired-state-internal';
@@ -38,9 +39,7 @@ export async function resolveHeadscaleNetworkInfo(
   const state = await getDesiredStateInternal().catch(() => null);
   const cfgDefaults = readHeadscaleConfigDefaults();
 
-  const reqOrigin = req
-    ? resolvePublicOrigin(req.headers, req.nextUrl?.origin || 'https://axonwall.local')
-    : '';
+  const reqOrigin = req ? resolvePublicOrigin(req.headers, '') : '';
 
   const enabled = Boolean(state?.headscale?.enabled);
   const serviceRunning = isHeadscaleSocketReady();
@@ -98,19 +97,43 @@ export async function resolveHeadscaleNetworkInfo(
   };
 }
 
-export function resolveClientIp(req: Request): string {
-  const rawXff = req.headers.get('x-forwarded-for');
-  if (rawXff) {
-    const parts = rawXff
-      .split(',')
-      .map((p) => p.trim())
-      .filter(Boolean);
-    const rightmost = parts[parts.length - 1];
-    if (rightmost) return rightmost;
+function normalizeIpLiteral(raw: string | undefined | null): string {
+  const trimmed = (raw || '').trim();
+  if (!trimmed) return '';
+  const stripped =
+    trimmed.startsWith('::ffff:') && net.isIPv4(trimmed.slice(7)) ? trimmed.slice(7) : trimmed;
+  return net.isIP(stripped) ? stripped : '';
+}
+
+function isLoopbackIp(ip: string): boolean {
+  return ip === '127.0.0.1' || ip === '::1';
+}
+
+export function resolveClientIp(req: Request, peerIpOverride?: string): string {
+  const rawPeer =
+    peerIpOverride ??
+    (req as { ip?: string; socket?: { remoteAddress?: string } }).ip ??
+    (req as { socket?: { remoteAddress?: string } }).socket?.remoteAddress;
+  const peerIp = normalizeIpLiteral(rawPeer);
+  const trustProxy =
+    process.env.AXONWALL_TRUST_PROXY === '1' ||
+    process.env.AXONWALL_TRUST_PROXY === 'true' ||
+    (peerIp !== '' && isLoopbackIp(peerIp));
+
+  if (trustProxy) {
+    const rawXff = req.headers.get('x-forwarded-for');
+    if (rawXff) {
+      const parts = rawXff
+        .split(',')
+        .map((p) => normalizeIpLiteral(p))
+        .filter(Boolean);
+      const rightmost = parts[parts.length - 1];
+      if (rightmost) return rightmost;
+    }
+    const realIp = normalizeIpLiteral(req.headers.get('x-real-ip'));
+    if (realIp) return realIp;
   }
-  const realIp = req.headers.get('x-real-ip')?.trim();
-  if (realIp) return realIp;
-  return 'unknown';
+  return peerIp || 'unknown';
 }
 
 export function generateTemporaryPassword(length = 16): string {

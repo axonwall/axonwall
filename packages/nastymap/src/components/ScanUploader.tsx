@@ -2,7 +2,7 @@
 
 import React, { useState, useRef } from 'react';
 import type { NmapRun } from '../types/nmap';
-import { parseNmapXml } from '../parser/nmap-xml-parser';
+import { MAX_NMAP_XML_BYTES, parseNmapXml } from '../parser/nmap-xml-parser';
 import { SAMPLE_SCANS } from '../data/sample-scans';
 import { Upload, FileCode, CheckCircle, AlertTriangle, Sparkles, FolderOpen, ArrowRight } from 'lucide-react';
 
@@ -28,9 +28,11 @@ export function ScanUploader({ onScanLoaded, className = '' }: ScanUploaderProps
     }
   };
 
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
+  const readXmlFile = (file: File) => {
+    if (file.size > MAX_NMAP_XML_BYTES) {
+      setError(`Nmap XML payload exceeds maximum allowed size of ${MAX_NMAP_XML_BYTES} bytes (25 MB).`);
+      return;
+    }
 
     const reader = new FileReader();
     reader.onload = (event) => {
@@ -40,18 +42,18 @@ export function ScanUploader({ onScanLoaded, className = '' }: ScanUploaderProps
     reader.readAsText(file);
   };
 
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    readXmlFile(file);
+  };
+
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault();
     setIsDragging(false);
     const file = e.dataTransfer.files?.[0];
     if (!file) return;
-
-    const reader = new FileReader();
-    reader.onload = (event) => {
-      const content = event.target?.result as string;
-      handleProcessXml(content, file.name);
-    };
-    reader.readAsText(file);
+    readXmlFile(file);
   };
 
   return (

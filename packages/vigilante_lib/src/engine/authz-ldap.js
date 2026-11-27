@@ -3,6 +3,10 @@ import net from 'node:net';
 import tls from 'node:tls';
 import { load as yamlLoad } from 'js-yaml';
 import { getVigilanteAuthzFile, getVigilanteConfigFile } from './config.js';
+import { assertSafeOutboundTarget, classifyIpRange } from './ssrf.js';
+
+export const MAX_LDAP_BUFFER_BYTES = 1024 * 1024; // 1 MB socket buffer cap
+const VALID_LDAP_ROLES = new Set(['owner', 'admin', 'operator', 'viewer']);
 
 export const DEFAULT_AXONWALL_PLUGIN_PATHS = [
   '/etc/axonwall/ldap-plugins/vigilante.json',
@@ -60,10 +64,95 @@ export function escapeLdapDnValue(value) {
 function splitCsv(val) {
   if (!val) return [];
   if (Array.isArray(val)) return val.map(x => String(x).trim()).filter(Boolean);
-  return String(val)
+  const str = String(val).trim();
+  if (!str) return [];
+  if (str.startsWith('[')) {
+    try {
+      const parsed = JSON.parse(str);
+      if (Array.isArray(parsed)) return parsed.map(x => String(x).trim()).filter(Boolean);
+    } catch {
+      // Fall through to delimiter parsing
+    }
+  }
+  if (str.includes(';')) {
+    return str.split(';').map(s => s.trim()).filter(Boolean);
+  }
+  // Preserve single LDAP DN strings (which contain commas between RDNs)
+  if (str.includes('=')) {
+    return [str];
+  }
+  return str
     .split(',')
     .map(s => s.trim())
     .filter(Boolean);
+}
+
+function splitLdapRdns(dn) {
+  const s = String(dn ?? '').trim();
+  if (!s) return [];
+  const rdns = [];
+  let cur = '';
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    if (ch === '\\' && i + 1 < s.length) {
+      cur += ch + s[i + 1];
+      i++;
+    } else if (ch === ',') {
+      if (cur.trim()) rdns.push(cur.trim());
+      cur = '';
+    } else {
+      cur += ch;
+    }
+  }
+  if (cur.trim()) {
+    rdns.push(cur.trim());
+  }
+  return rdns;
+}
+
+function normalizeLdapRdns(dn) {
+  return splitLdapRdns(dn).map(rdn => {
+    const eqIdx = rdn.indexOf('=');
+    if (eqIdx === -1) return rdn.toLowerCase();
+    const attr = rdn.slice(0, eqIdx).trim().toLowerCase();
+    const val = rdn.slice(eqIdx + 1).trim().toLowerCase();
+    return `${attr}=${val}`;
+  });
+}
+
+/**
+ * Normalize an RFC 4514 LDAP Distinguished Name for exact comparison.
+ */
+export function normalizeLdapDn(dn) {
+  return normalizeLdapRdns(dn).join(',');
+}
+
+function isLdapDn(value) {
+  const rdns = splitLdapRdns(value);
+  return rdns.length > 0 && /^[a-zA-Z0-9.-]+\s*=/.test(rdns[0]);
+}
+
+function isDnUnderBase(dn, baseDn) {
+  if (!dn || !baseDn) return false;
+  const dnRdns = normalizeLdapRdns(dn);
+  const baseRdns = normalizeLdapRdns(baseDn);
+  if (dnRdns.length === 0 || baseRdns.length === 0 || dnRdns.length <= baseRdns.length) {
+    return false;
+  }
+  const offset = dnRdns.length - baseRdns.length;
+  for (let i = 0; i < baseRdns.length; i++) {
+    if (dnRdns[offset + i] !== baseRdns[i]) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function extractCnFromFirstRdn(dnOrNormDn) {
+  const rdns = normalizeLdapRdns(dnOrNormDn);
+  if (rdns.length === 0) return null;
+  const match = /^cn=(.+)$/i.exec(rdns[0]);
+  return match ? match[1].trim().toLowerCase() : null;
 }
 
 /**
@@ -265,11 +354,31 @@ export function resolveVigilanteLdapConfig(overrides = {}) {
       ? Boolean(yamlLdap.allowLocalBreakGlass)
       : true;
 
-  const defaultRole =
-    overrides.defaultRole ||
-    process.env.VIGILANTE_LDAP_DEFAULT_ROLE ||
-    yamlLdap?.defaultRole ||
-    'viewer';
+  const rawDefaultRole =
+    overrides.defaultRole !== undefined
+      ? overrides.defaultRole
+      : process.env.VIGILANTE_LDAP_DEFAULT_ROLE !== undefined
+      ? process.env.VIGILANTE_LDAP_DEFAULT_ROLE
+      : yamlLdap?.defaultRole !== undefined
+      ? yamlLdap.defaultRole
+      : fileBinding?.defaultRole !== undefined
+      ? fileBinding.defaultRole
+      : null;
+
+  let defaultRole = null;
+  if (rawDefaultRole !== null && rawDefaultRole !== undefined) {
+    const trimmedRole = String(rawDefaultRole).trim().toLowerCase();
+    if (trimmedRole && trimmedRole !== 'none' && trimmedRole !== 'null') {
+      if (!VALID_LDAP_ROLES.has(trimmedRole)) {
+        throw new Error(`Invalid LDAP defaultRole '${rawDefaultRole}'`);
+      }
+      defaultRole = trimmedRole;
+    }
+  }
+
+  if (enabled || overrides.uri !== undefined || envUri || fileBinding?.url || fileBinding?.uri || yamlLdap?.uri || yamlLdap?.url) {
+    parseLdapTarget(uri);
+  }
 
   const timeoutMs = Number(
     overrides.timeoutMs || process.env.VIGILANTE_LDAP_TIMEOUT_MS || yamlLdap?.timeoutMs || 5000
@@ -324,24 +433,52 @@ export function resolveVigilanteLdapConfig(overrides = {}) {
 }
 
 /**
- * Map a list of LDAP group CNs to the highest-privilege Vigilante CASL role.
- * Precedence: owner > admin > operator > viewer > defaultRole
+ * Map a list of LDAP group DNs (or explicit bare CNs when requireDn is false)
+ * to the highest-privilege Vigilante CASL role.
+ * Precedence: owner > admin > operator > viewer > defaultRole (defaults to null / fail-closed).
  *
  * @param {string[]} groups
  * @param {Object} [roleMapping]
- * @param {string} [defaultRole='viewer']
+ * @param {string|null} [defaultRole=null]
+ * @param {Object} [options={}]
  * @returns {'owner' | 'admin' | 'operator' | 'viewer' | null}
  */
-export function mapLdapGroupsToRole(groups = [], roleMapping = DEFAULT_ROLE_MAPPING, defaultRole = 'viewer') {
-  const normalized = new Set(
-    (groups || []).map(g => {
-      const s = String(g).trim();
-      const match = /^cn=([^,]+)/i.exec(s);
-      return (match ? match[1] : s).toLowerCase();
-    })
-  );
+export function mapLdapGroupsToRole(
+  groups = [],
+  roleMapping = DEFAULT_ROLE_MAPPING,
+  defaultRole = null,
+  options = {}
+) {
+  const groupSearchBase = options?.groupSearchBase ? normalizeLdapDn(options.groupSearchBase) : null;
+  const requireDn = Boolean(options?.requireDn);
 
-  const hasAny = list => (list || []).some(g => normalized.has(String(g).toLowerCase()));
+  const normalizedDns = new Set();
+  const verifiedBaseCns = new Set();
+
+  for (const g of groups || []) {
+    const s = String(g ?? '').trim();
+    if (!s) continue;
+    if (isLdapDn(s)) {
+      const normDn = normalizeLdapDn(s);
+      normalizedDns.add(normDn);
+      if (groupSearchBase && isDnUnderBase(normDn, groupSearchBase)) {
+        const cn = extractCnFromFirstRdn(normDn);
+        if (cn) verifiedBaseCns.add(cn);
+      }
+    } else if (!requireDn) {
+      verifiedBaseCns.add(s.toLowerCase());
+    }
+  }
+
+  const hasAny = list =>
+    (list || []).some(mapped => {
+      const m = String(mapped ?? '').trim();
+      if (!m) return false;
+      if (isLdapDn(m)) {
+        return normalizedDns.has(normalizeLdapDn(m));
+      }
+      return verifiedBaseCns.has(m.toLowerCase());
+    });
 
   if (hasAny(roleMapping.ownerGroups)) return 'owner';
   if (hasAny(roleMapping.adminGroups)) return 'admin';
@@ -573,19 +710,86 @@ function buildUnbindRequest(messageId) {
   return berEncodeSequence([berEncodeInt(messageId), unbindReq]);
 }
 
-function parseLdapTarget(uri) {
-  const u = new URL(uri.includes('://') ? uri : `ldap://${uri}`);
+const BLOCKED_LDAP_HOSTNAMES = new Set([
+  'metadata.google.internal',
+  'metadata.goog',
+  'metadata',
+  'instance-data'
+]);
+const MAX_SEARCH_ENTRIES = 1000;
+
+export function parseLdapTarget(uri) {
+  if (typeof uri !== 'string' || !uri.trim()) {
+    throw new Error('Invalid LDAP URI: non-empty string required');
+  }
+  const raw = uri.trim();
+  if (/[\s\0\r\n]/.test(raw)) {
+    throw new Error('Invalid LDAP URI: whitespace and control characters are not allowed');
+  }
+  if (!/^ldaps?:\/\//i.test(raw)) {
+    throw new Error(`Invalid LDAP URI '${uri}': scheme must be ldap:// or ldaps://`);
+  }
+  const u = new URL(raw);
+  if (u.protocol !== 'ldap:' && u.protocol !== 'ldaps:') {
+    throw new Error(`Invalid LDAP URI '${uri}': unsupported protocol '${u.protocol}'`);
+  }
+  if (u.username || u.password) {
+    throw new Error('Invalid LDAP URI: embedded credentials are not permitted');
+  }
+  if ((u.pathname && u.pathname !== '/') || u.search || u.hash) {
+    throw new Error('Invalid LDAP URI: path, query, and fragment components are not permitted');
+  }
+  const host = u.hostname.replace(/^\[|\]$/g, '').split('%')[0].replace(/\.+$/, '').toLowerCase();
+  if (!host) {
+    throw new Error(`Invalid LDAP URI '${uri}': missing hostname`);
+  }
+  if (BLOCKED_LDAP_HOSTNAMES.has(host)) {
+    throw new Error(`Blocked SSRF LDAP URI: metadata hostname '${host}' is forbidden`);
+  }
+  const ipCls = classifyIpRange(host);
+  if (ipCls === 'metadata' || ipCls === 'unspecified' || ipCls === 'reserved' || ipCls === 'invalid') {
+    throw new Error(`Blocked SSRF LDAP URI: address '${host}' (${ipCls}) is not permitted`);
+  }
   const isTls = u.protocol === 'ldaps:';
-  const host = u.hostname || '127.0.0.1';
   const port = u.port ? Number(u.port) : isTls ? 636 : 389;
-  return { isTls, host, port };
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error(`Invalid LDAP URI '${uri}': invalid port '${u.port}'`);
+  }
+  return { isTls, host, port, url: u };
 }
 
-class MinimalLdapSession {
-  constructor(uri, timeoutMs = 5000, tlsRejectUnauthorized = true) {
+function berPeekDeclaredTotalLength(buf) {
+  if (buf.length < 2) return null;
+  const first = buf[1];
+  if ((first & 0x80) === 0) {
+    return { total: 2 + first, invalid: false };
+  }
+  const numBytes = first & 0x7f;
+  if (numBytes === 0 || numBytes > 3) {
+    return { total: Infinity, invalid: true };
+  }
+  if (buf.length < 2 + numBytes) return null;
+  let len = 0;
+  for (let i = 0; i < numBytes; i++) {
+    len = ((len << 8) | buf[2 + i]) >>> 0;
+  }
+  return { total: 2 + numBytes + len, invalid: false };
+}
+
+export class MinimalLdapSession {
+  constructor(
+    uri,
+    timeoutMs = 5000,
+    tlsRejectUnauthorized = true,
+    { maxBufferBytes = MAX_LDAP_BUFFER_BYTES, dnsLookup } = {}
+  ) {
     this.uri = uri;
     this.timeoutMs = timeoutMs;
     this.tlsRejectUnauthorized = tlsRejectUnauthorized !== false;
+    this.maxBufferBytes = Number.isInteger(maxBufferBytes) && maxBufferBytes > 0
+      ? maxBufferBytes
+      : MAX_LDAP_BUFFER_BYTES;
+    this.dnsLookup = dnsLookup;
     this.socket = null;
     this.buffer = Buffer.alloc(0);
     this.nextMsgId = 1;
@@ -593,9 +797,32 @@ class MinimalLdapSession {
     this.connectTimer = null;
   }
 
-  connect() {
-    const { isTls, host, port } = parseLdapTarget(this.uri);
-    return new Promise((resolve, reject) => {
+  async connect() {
+    const { isTls, host, port, url } = parseLdapTarget(this.uri);
+    const { isIp, addresses } = await assertSafeOutboundTarget(url.toString(), {
+      label: 'LDAP URI',
+      allowedProtocols: ['ldap:', 'ldaps:'],
+      allowPrivate: true,
+      allowLoopback: true,
+      allowMetadata: false,
+      failOnDnsError: true,
+      ...(this.dnsLookup ? { dnsLookup: this.dnsLookup } : {})
+    });
+    const pinnedIp = addresses[0];
+    const family = pinnedIp ? net.isIP(pinnedIp) : 0;
+    if (!pinnedIp || (family !== 4 && family !== 6)) {
+      throw new Error(`LDAP connection failed: no valid resolved address for '${host}'`);
+    }
+    const pinnedLookup = (_reqHost, opts, cb) => {
+      const callback = typeof opts === 'function' ? opts : cb;
+      if (typeof opts === 'object' && opts?.all) {
+        callback(null, [{ address: pinnedIp, family }]);
+      } else {
+        callback(null, pinnedIp, family);
+      }
+    };
+
+    return await new Promise((resolve, reject) => {
       let settled = false;
       const clearConnectTimer = () => {
         if (this.connectTimer) {
@@ -634,11 +861,26 @@ class MinimalLdapSession {
       };
 
       this.socket = isTls
-        ? tls.connect({ host, port, rejectUnauthorized: this.tlsRejectUnauthorized }, onConnect)
-        : net.createConnection({ host, port }, onConnect);
+        ? tls.connect(
+            {
+              host,
+              port,
+              lookup: pinnedLookup,
+              ...(isIp ? {} : { servername: host }),
+              rejectUnauthorized: this.tlsRejectUnauthorized
+            },
+            onConnect
+          )
+        : net.createConnection({ host, port, lookup: pinnedLookup }, onConnect);
 
       this.socket.on('error', onError);
       this.socket.on('data', chunk => {
+        if (this.buffer.length + chunk.length > this.maxBufferBytes) {
+          this._failAndClose(
+            new Error(`LDAP socket buffer exceeded maximum cap (${this.maxBufferBytes} bytes)`)
+          );
+          return;
+        }
         this.buffer = Buffer.concat([this.buffer, chunk]);
         this._drainBuffer();
       });
@@ -657,17 +899,59 @@ class MinimalLdapSession {
     });
   }
 
+  _failAndClose(err) {
+    this.buffer = Buffer.alloc(0);
+    if (this.pending) {
+      const p = this.pending;
+      this.pending = null;
+      clearTimeout(p.timer);
+      p.reject(err);
+    }
+    this.close();
+  }
+
   _drainBuffer() {
     while (this.buffer.length > 0) {
+      const declared = berPeekDeclaredTotalLength(this.buffer);
+      if (declared) {
+        if (declared.invalid || declared.total > this.maxBufferBytes) {
+          this._failAndClose(
+            new Error(`LDAP message size exceeds maximum buffer cap (${this.maxBufferBytes} bytes)`)
+          );
+          return;
+        }
+      }
+
       const msgEl = berReadElement(this.buffer, 0);
       if (!msgEl) break;
       this.buffer = this.buffer.subarray(msgEl.nextOffset);
 
+      if (msgEl.tag !== 0x30) {
+        this._failAndClose(new Error(`Malformed LDAPMessage: expected SEQUENCE tag 0x30, got 0x${msgEl.tag.toString(16)}`));
+        return;
+      }
+
       const children = berReadChildren(msgEl.value);
-      if (children.length < 2) continue;
+      if (children.length < 2) {
+        this._failAndClose(new Error('Malformed LDAPMessage: expected messageID and protocolOp'));
+        return;
+      }
+      const msgIdEl = children[0];
       const opEl = children[1];
+      if (!msgIdEl || msgIdEl.tag !== 0x02 || msgIdEl.value.length < 1 || msgIdEl.value.length > 4) {
+        this._failAndClose(new Error('Malformed LDAPMessage: invalid INTEGER messageID'));
+        return;
+      }
+      const respMsgId = berReadInt(msgIdEl);
 
       if (!this.pending) continue;
+
+      if (respMsgId !== this.pending.msgId) {
+        this._failAndClose(
+          new Error(`LDAP messageId correlation mismatch: expected ${this.pending.msgId}, got ${respMsgId}`)
+        );
+        return;
+      }
 
       if (opEl.tag === 0x61 && this.pending.type === 'bind') {
         // BindResponse [APPLICATION 1]
@@ -685,6 +969,10 @@ class MinimalLdapSession {
         p.resolve({ resultCode, diagnosticMessage });
       } else if (opEl.tag === 0x64 && this.pending.type === 'search') {
         // SearchResultEntry [APPLICATION 4]
+        if (this.pending.entries.length >= MAX_SEARCH_ENTRIES) {
+          this._failAndClose(new Error(`LDAP search exceeded maximum entry cap (${MAX_SEARCH_ENTRIES})`));
+          return;
+        }
         const entryChildren = berReadChildren(opEl.value);
         const objectName = entryChildren[0] ? entryChildren[0].value.toString('utf8') : '';
         const attrs = {};
@@ -713,11 +1001,22 @@ class MinimalLdapSession {
         }
         const resultCode = berReadInt(resultEl);
         p.resolve({ resultCode, entries: p.entries });
+      } else {
+        this._failAndClose(
+          new Error(`Unexpected LDAP protocolOp 0x${opEl.tag.toString(16)} for pending '${this.pending.type}'`)
+        );
+        return;
       }
     }
   }
 
   bind(bindDN, password) {
+    if (!this.socket || this.socket.destroyed) {
+      return Promise.reject(new Error('LDAP socket is not connected'));
+    }
+    if (this.pending) {
+      return Promise.reject(new Error('Concurrent LDAP requests on MinimalLdapSession are not supported'));
+    }
     const msgId = this.nextMsgId++;
     const packet = buildBindRequest(msgId, bindDN, password);
     return new Promise((resolve, reject) => {
@@ -725,12 +1024,18 @@ class MinimalLdapSession {
         this.pending = null;
         reject(new Error('LDAP bind request timed out'));
       }, this.timeoutMs);
-      this.pending = { type: 'bind', timer, resolve, reject };
+      this.pending = { msgId, type: 'bind', timer, resolve, reject };
       this.socket.write(packet);
     });
   }
 
   search(baseDN, filterStr, attributes = []) {
+    if (!this.socket || this.socket.destroyed) {
+      return Promise.reject(new Error('LDAP socket is not connected'));
+    }
+    if (this.pending) {
+      return Promise.reject(new Error('Concurrent LDAP requests on MinimalLdapSession are not supported'));
+    }
     const msgId = this.nextMsgId++;
     const packet = buildSearchRequest(msgId, baseDN, filterStr, attributes);
     return new Promise((resolve, reject) => {
@@ -738,7 +1043,7 @@ class MinimalLdapSession {
         this.pending = null;
         reject(new Error('LDAP search request timed out'));
       }, this.timeoutMs);
-      this.pending = { type: 'search', entries: [], timer, resolve, reject };
+      this.pending = { msgId, type: 'search', entries: [], timer, resolve, reject };
       this.socket.write(packet);
     });
   }
@@ -798,7 +1103,16 @@ export async function authenticateLdapUser(username, password, configOverrides =
     };
   }
 
-  const cfg = resolveVigilanteLdapConfig(configOverrides);
+  let cfg;
+  try {
+    cfg = resolveVigilanteLdapConfig(configOverrides);
+  } catch (err) {
+    return {
+      ok: false,
+      code: 'INVALID_LDAP_CONFIG',
+      error: err?.message || 'Invalid OpenLDAP configuration.'
+    };
+  }
   if (!cfg.enabled) {
     return {
       ok: false,
@@ -807,9 +1121,13 @@ export async function authenticateLdapUser(username, password, configOverrides =
     };
   }
 
+  const sessionOpts = {
+    ...(configOverrides.maxBufferBytes ? { maxBufferBytes: configOverrides.maxBufferBytes } : {}),
+    ...(configOverrides.dnsLookup ? { dnsLookup: configOverrides.dnsLookup } : {})
+  };
   const hasServiceBind = Boolean(cfg.bindDN && cfg.bindPassword);
   const lookupSession = hasServiceBind
-    ? new MinimalLdapSession(cfg.uri, cfg.timeoutMs, cfg.tlsRejectUnauthorized)
+    ? new MinimalLdapSession(cfg.uri, cfg.timeoutMs, cfg.tlsRejectUnauthorized, sessionOpts)
     : null;
   let userSession = null;
   let userDN = '';
@@ -853,9 +1171,23 @@ export async function authenticateLdapUser(username, password, configOverrides =
           error: `User '${cleanUser}' was not found in OpenLDAP directory.`
         };
       }
+      if (userSearch.entries.length !== 1) {
+        return {
+          ok: false,
+          code: 'AMBIGUOUS_USER',
+          error: `Ambiguous OpenLDAP user search for '${cleanUser}': expected 1 entry, found ${userSearch.entries.length}.`
+        };
+      }
 
       const entry = userSearch.entries[0];
       userDN = entry.dn;
+      if (!userDN || !isLdapDn(userDN)) {
+        return {
+          ok: false,
+          code: 'INVALID_USER_ENTRY',
+          error: `Directory returned an invalid user DN for '${cleanUser}'.`
+        };
+      }
       const attrs = entry.attributes || {};
 
       if (attrs.pwdaccountlockedtime && attrs.pwdaccountlockedtime.length > 0) {
@@ -873,11 +1205,15 @@ export async function authenticateLdapUser(username, password, configOverrides =
       email = attrs.mail && attrs.mail[0] ? attrs.mail[0] : undefined;
 
       if (attrs.memberof && attrs.memberof.length > 0) {
-        groups.push(...attrs.memberof);
+        for (const mo of attrs.memberof) {
+          if (isLdapDn(mo)) {
+            groups.push(normalizeLdapDn(mo));
+          }
+        }
       }
 
       // Phase 2: Verify user password on a separate LDAP session
-      const verifySession = new MinimalLdapSession(cfg.uri, cfg.timeoutMs, cfg.tlsRejectUnauthorized);
+      const verifySession = new MinimalLdapSession(cfg.uri, cfg.timeoutMs, cfg.tlsRejectUnauthorized, sessionOpts);
       try {
         await verifySession.connect();
         const userBind = await verifySession.bind(userDN, cleanPass);
@@ -897,7 +1233,7 @@ export async function authenticateLdapUser(username, password, configOverrides =
       userDN = `uid=${escapeLdapDnValue(cleanUser)},${cfg.userSearchBase}`;
 
       // Phase 2 (direct bind): Authenticate user and reuse the authenticated session for group lookup
-      userSession = new MinimalLdapSession(cfg.uri, cfg.timeoutMs, cfg.tlsRejectUnauthorized);
+      userSession = new MinimalLdapSession(cfg.uri, cfg.timeoutMs, cfg.tlsRejectUnauthorized, sessionOpts);
       await userSession.connect();
       const userBind = await userSession.bind(userDN, cleanPass);
       if (userBind.resultCode !== 0) {
@@ -921,25 +1257,29 @@ export async function authenticateLdapUser(username, password, configOverrides =
     const groupSearch = await groupSearchSession.search(cfg.groupSearchBase, groupFilter, ['cn']);
     if (groupSearch.entries && groupSearch.entries.length > 0) {
       for (const ge of groupSearch.entries) {
-        const cns = ge.attributes?.cn || [];
-        for (const cn of cns) {
-          groups.push(cn);
+        if (!ge.dn || !isLdapDn(ge.dn) || !isDnUnderBase(ge.dn, cfg.groupSearchBase)) {
+          continue;
+        }
+        const normGroupDn = normalizeLdapDn(ge.dn);
+        groups.push(normGroupDn);
+        if (!extractCnFromFirstRdn(normGroupDn)) {
+          const cns = ge.attributes?.cn || [];
+          for (const cn of cns) {
+            const cleanCn = String(cn || '').trim();
+            if (cleanCn && !isLdapDn(cleanCn)) {
+              groups.push(normalizeLdapDn(`cn=${escapeLdapDnValue(cleanCn)},${cfg.groupSearchBase}`));
+            }
+          }
         }
       }
     }
 
-    const dedupGroups = Array.from(
-      new Set(
-        groups
-          .map(g => {
-            const m = /^cn=([^,]+)/i.exec(String(g).trim());
-            return m ? m[1] : String(g).trim();
-          })
-          .filter(Boolean)
-      )
-    );
+    const dedupGroups = Array.from(new Set(groups.filter(Boolean)));
 
-    const mappedRole = mapLdapGroupsToRole(dedupGroups, cfg.roleMapping, cfg.defaultRole);
+    const mappedRole = mapLdapGroupsToRole(dedupGroups, cfg.roleMapping, cfg.defaultRole, {
+      groupSearchBase: cfg.groupSearchBase,
+      requireDn: true
+    });
     if (!mappedRole) {
       return {
         ok: false,
@@ -977,27 +1317,43 @@ export async function authenticateLdapUser(username, password, configOverrides =
  */
 export async function getVigilanteLdapStatus(configOverrides = {}) {
   const cfg = resolveVigilanteLdapConfig(configOverrides);
-  const { host, port } = parseLdapTarget(cfg.uri);
+  const { port, url } = parseLdapTarget(cfg.uri);
 
   let reachable = false;
   if (cfg.enabled) {
-    reachable = await new Promise(resolve => {
-      const sock = net.createConnection({ host, port });
-      const timer = setTimeout(() => {
-        sock.destroy();
-        resolve(false);
-      }, 1200);
-      sock.on('connect', () => {
-        clearTimeout(timer);
-        sock.destroy();
-        resolve(true);
+    try {
+      const { addresses } = await assertSafeOutboundTarget(url.toString(), {
+        label: 'LDAP URI',
+        allowedProtocols: ['ldap:', 'ldaps:'],
+        allowPrivate: true,
+        allowLoopback: true,
+        allowMetadata: false,
+        failOnDnsError: true
       });
-      sock.on('error', () => {
-        clearTimeout(timer);
-        sock.destroy();
-        resolve(false);
-      });
-    });
+      const pinnedIp = addresses[0];
+      const family = pinnedIp ? net.isIP(pinnedIp) : 0;
+      if (pinnedIp && (family === 4 || family === 6)) {
+        reachable = await new Promise(resolve => {
+          const sock = net.createConnection({ host: pinnedIp, port, family });
+          const timer = setTimeout(() => {
+            sock.destroy();
+            resolve(false);
+          }, 1200);
+          sock.on('connect', () => {
+            clearTimeout(timer);
+            sock.destroy();
+            resolve(true);
+          });
+          sock.on('error', () => {
+            clearTimeout(timer);
+            sock.destroy();
+            resolve(false);
+          });
+        });
+      }
+    } catch {
+      reachable = false;
+    }
   }
 
   return {

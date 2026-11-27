@@ -89,14 +89,9 @@ export function checkInviteRateLimit(clientKey: string): boolean {
   }
   const existing = inviteRateLimits.get(key);
   if (!existing || existing.resetAt <= now) {
-    if (inviteRateLimits.size >= INVITE_RATE_MAX_KEYS) {
-      // Never evict actively rate-limited entries under map pressure.
-      for (const [k, rec] of inviteRateLimits) {
-        if (inviteRateLimits.size < INVITE_RATE_MAX_KEYS) break;
-        if (rec.count < INVITE_RATE_MAX_ATTEMPTS) {
-          inviteRateLimits.delete(k);
-        }
-      }
+    if (!existing && inviteRateLimits.size >= INVITE_RATE_MAX_KEYS) {
+      // Hard global cap: fail closed (429) rather than evicting tracked entries or growing unboundedly.
+      return false;
     }
     inviteRateLimits.set(key, { count: 1, resetAt: now + INVITE_RATE_WINDOW_MS });
     return true;

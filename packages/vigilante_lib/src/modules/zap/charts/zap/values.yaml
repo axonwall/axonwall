@@ -1,14 +1,27 @@
 image:
   repository: ghcr.io/zaproxy/zaproxy
-  tag: "stable"
+  tag: "2.16.0"
+  digest: ""
   pullPolicy: IfNotPresent
+
+existingSecret: ""
+
+secret:
+  create: true
+
+api:
+  # Optional explicit API key; leave empty to auto-generate and preserve via lookup.
+  key: ""
+  # Anchored regex restricting Host headers permitted to access the ZAP REST API.
+  # Leave empty to default to localhost, 127.0.0.1, and the release Service DNS names.
+  allowedAddrs: ""
 
 service:
   type: ClusterIP
   port: 8080
 
 ingress:
-  enabled: true
+  enabled: false
   annotations: {}
   hosts:
     - host: zap.vigilante.local
@@ -16,6 +29,34 @@ ingress:
     - secretName: zap-tls
       hosts:
         - zap.vigilante.local
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  fsGroup: 1000
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: false
+  capabilities:
+    drop:
+      - ALL
+
+networkPolicy:
+  enabled: true
+  ingressControllerNamespaceSelector:
+    kubernetes.io/metadata.name: kube-system
+  allowPrivateTargets: false
+  egressExceptCidrs:
+    - 169.254.169.254/32
+    - 10.0.0.0/8
+    - 172.16.0.0/12
+    - 192.168.0.0/16
+    - 100.64.0.0/10
+    - 127.0.0.0/8
 
 resources:
   requests:

@@ -6,6 +6,7 @@
 
 import fs from 'node:fs/promises';
 import fsSync from 'node:fs';
+import net from 'node:net';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { dump as yamlDump } from 'js-yaml';
@@ -335,9 +336,26 @@ export function generateDecoyDeploymentYaml(serviceType = 'smb', options = {}) {
   };
 }
 
+function isHighEntropyCanaryValue(val) {
+  if (typeof val !== 'string') return false;
+  const trimmed = val.trim();
+  if (trimmed.length < 16) return false;
+  return new Set(trimmed).size >= 5;
+}
+
+function extractVerifiedEventIp(event) {
+  if (!event || typeof event !== 'object') return null;
+  const raw = event.srcIp || event.sourceIp || event.ip || null;
+  if (typeof raw !== 'string') return null;
+  const cleaned = raw.trim().replace(/^\[|\]$/g, '').split('%')[0];
+  return cleaned && net.isIP(cleaned) ? cleaned : null;
+}
+
 /**
- * Detect if any canary token or honeypot was interacted with
- * @param {Array<Object>} events Raw K8s audit logs, Falco alerts, or network flow records
+ * Detect if any high-entropy canary token or canary ID was interacted with.
+ * Plain substring matching against canary.name is intentionally prohibited to
+ * avoid false-positive containment from ordinary log terms.
+ * @param {Array<Object|string>} events Raw K8s audit logs, Falco alerts, or network flow records
  * @param {Array<Object>} [registeredCanaries]
  * @returns {Array<Object>} List of matched canary trip events
  */
@@ -352,14 +370,17 @@ export function detectCanaryTripped(events = [], registeredCanaries = []) {
       let isMatch = false;
       let matchedIndicator = '';
 
-      if (canary.tokenSignature && raw.includes(canary.tokenSignature)) {
+      if (isHighEntropyCanaryValue(canary.token) && raw.includes(canary.token)) {
+        isMatch = true;
+        matchedIndicator = 'token';
+      } else if (isHighEntropyCanaryValue(canary.tokenSignature) && raw.includes(canary.tokenSignature)) {
         isMatch = true;
         matchedIndicator = `token:${canary.tokenSignature}`;
       } else if (canary.tokenData && typeof canary.tokenData === 'object') {
-        const tokenFields = ['accessKeyId', 'secretAccessKey', 'token', 'webhookUrl', 'clientCert'];
+        const tokenFields = ['accessKeyId', 'secretAccessKey', 'token', 'webhookUrl', 'clientCert', 'canaryId'];
         for (const field of tokenFields) {
           const val = canary.tokenData[field];
-          if (typeof val === 'string' && val.length >= 8 && raw.includes(val)) {
+          if (isHighEntropyCanaryValue(val) && raw.includes(val)) {
             isMatch = true;
             matchedIndicator = `tokenData.${field}`;
             break;
@@ -367,12 +388,19 @@ export function detectCanaryTripped(events = [], registeredCanaries = []) {
         }
       }
 
-      if (!isMatch && canary.name && raw.includes(canary.name) && (canary.type === 'SERVICE_ACCOUNT' || canary.type === 'DECOY_SERVICE')) {
+      if (!isMatch && isHighEntropyCanaryValue(canary.id) && raw.includes(canary.id)) {
         isMatch = true;
-        matchedIndicator = `name:${canary.name}`;
+        matchedIndicator = `id:${canary.id}`;
       }
 
       if (isMatch) {
+        const rawSourcePod = event && typeof event === 'object'
+          ? (event.pod || event.sourcePod || event.pod_name || '')
+          : '';
+        const sourcePod = (typeof rawSourcePod === 'string' && rawSourcePod.trim())
+          ? rawSourcePod.trim()
+          : 'unknown-workload';
+
         tripped.push({
           tripId: `trip-${Date.now().toString(36)}-${crypto.randomBytes(3).toString('hex')}`,
           canaryId: canary.id,
@@ -380,8 +408,8 @@ export function detectCanaryTripped(events = [], registeredCanaries = []) {
           canaryName: canary.name,
           namespace: canary.namespace,
           matchedIndicator,
-          sourcePod: event.pod || event.sourcePod || event.pod_name || 'unknown-workload',
-          sourceIp: event.srcIp || event.sourceIp || event.ip || '10.42.0.99',
+          sourcePod,
+          sourceIp: extractVerifiedEventIp(event),
           timestamp: new Date().toISOString(),
           severity: 'CRITICAL',
           rawEventSnippet: raw.substring(0, 300)
@@ -401,7 +429,7 @@ export function detectCanaryTripped(events = [], registeredCanaries = []) {
  */
 export async function triggerCanaryAlarm(canaryTrip, options = {}) {
   const autoIsolate = options.autoIsolate !== false;
-  logger.warn('CANARY', `🚨 CANARY HONEYPOT TRIPPED! Canary: ${canaryTrip.canaryName} (${canaryTrip.canaryType}) by ${canaryTrip.sourcePod} [${canaryTrip.sourceIp}]`);
+  logger.warn('CANARY', `🚨 CANARY HONEYPOT TRIPPED! Canary: ${canaryTrip.canaryName} (${canaryTrip.canaryType}) by ${canaryTrip.sourcePod} [${canaryTrip.sourceIp || 'no-source-ip'}]`);
 
   const alarmRecord = {
     alarmId: `alarm-${Date.now().toString(36)}-${crypto.randomBytes(3).toString('hex')}`,
@@ -410,7 +438,7 @@ export async function triggerCanaryAlarm(canaryTrip, options = {}) {
     canaryName: canaryTrip.canaryName,
     sourcePod: canaryTrip.sourcePod,
     sourceNamespace: canaryTrip.namespace || 'default',
-    sourceIp: canaryTrip.sourceIp,
+    sourceIp: canaryTrip.sourceIp || null,
     timestamp: new Date().toISOString(),
     verdict: 'HIGH_FIDELITY_INTRUSION_DETECTED',
     soarAction: null
@@ -436,9 +464,9 @@ export async function triggerCanaryAlarm(canaryTrip, options = {}) {
         error: err.message
       };
     }
-  } else if (autoIsolate && canaryTrip.sourceIp) {
+  } else if (autoIsolate && typeof canaryTrip.sourceIp === 'string' && net.isIP(canaryTrip.sourceIp.trim())) {
     try {
-      const block = await blockIp(canaryTrip.sourceIp, { reason: `Canary trip on ${canaryTrip.canaryName}` });
+      const block = await blockIp(canaryTrip.sourceIp.trim(), { reason: `Canary trip on ${canaryTrip.canaryName}` });
       alarmRecord.soarAction = {
         action: 'BLOCK_IP',
         containmentId: block.containmentId,
@@ -455,7 +483,7 @@ export async function triggerCanaryAlarm(canaryTrip, options = {}) {
   if (c) {
     c.tripped = true;
     c.lastTrippedAt = alarmRecord.timestamp;
-    c.lastTrippedBy = `${canaryTrip.sourcePod}@${canaryTrip.sourceIp}`;
+    c.lastTrippedBy = `${canaryTrip.sourcePod}@${canaryTrip.sourceIp || 'unknown-ip'}`;
     const regPath = getRegistryPath();
     await fs.writeFile(regPath, JSON.stringify(canaries, null, 2), 'utf8');
   }
@@ -612,14 +640,20 @@ export async function startCanaryWebhookListener(options = {}) {
           return;
         }
 
+        if (url.searchParams.has('token')) {
+          res.writeHead(401, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Query-string token authentication is not permitted; use Authorization or X-Canary-Token header' }));
+          return;
+        }
+
         const authHeader = String(req.headers.authorization || '');
         const bearerToken = authHeader.toLowerCase().startsWith('bearer ')
           ? authHeader.slice(7).trim()
           : '';
-        const providedToken =
-          bearerToken ||
-          String(req.headers['x-canary-token'] || '') ||
-          String(url.searchParams.get('token') || '');
+        const rawCanaryHeader = Array.isArray(req.headers['x-canary-token'])
+          ? req.headers['x-canary-token'][0]
+          : String(req.headers['x-canary-token'] || '');
+        const providedToken = bearerToken || rawCanaryHeader.trim();
 
         if (!timingSafeEqualToken(providedToken, authToken)) {
           res.writeHead(401, { 'Content-Type': 'application/json' });
@@ -629,10 +663,11 @@ export async function startCanaryWebhookListener(options = {}) {
 
         const trailingCid = url.pathname.slice(expectedPath.length).replace(/^\/+/, '').trim();
         const cid = (url.searchParams.get('cid') || trailingCid).trim();
-        const clientIp = req.socket?.remoteAddress || '127.0.0.1';
+        const rawRemoteIp = req.socket?.remoteAddress ? req.socket.remoteAddress.replace(/^::ffff:/, '') : '';
+        const clientIp = rawRemoteIp && net.isIP(rawRemoteIp) ? rawRemoteIp : null;
 
         if (cid) {
-          logger.warn('CANARY', `Incoming trap callback tripped on canaryId: ${cid} from ${clientIp}`);
+          logger.warn('CANARY', `Incoming trap callback tripped on canaryId: ${cid} from ${clientIp || 'unknown-ip'}`);
           try {
             await triggerCanaryAlarm({
               tripId: `trip-cb-${Date.now().toString(36)}`,

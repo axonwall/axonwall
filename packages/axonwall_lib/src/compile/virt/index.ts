@@ -135,13 +135,77 @@ function sanitizeCloudInitScalar(val: string): string {
 }
 
 const SAFE_POOL_REGEX = /^[a-zA-Z0-9_.-]+$/;
-const SAFE_ZVOL_PATH_REGEX = /^\/dev\/[a-zA-Z0-9_./-]+$/;
-const SAFE_ISO_PATH_REGEX = /^\/[a-zA-Z0-9_./-]+$/;
+const SAFE_ZVOL_PATH_REGEX = /^\/dev\/zvol\/[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_./-]+$/;
+const SAFE_ISO_PATH_REGEX = /^\/(?:var\/lib\/axonwall\/isos|mnt)\/[a-zA-Z0-9_./-]+$/;
+const SAFE_KERNEL_PATH_REGEX = /^\/(?:var\/lib\/axonwall\/kernels|boot)\/[a-zA-Z0-9_./-]+$/;
+const SAFE_FWCFG_PATH_REGEX = /^\/(?:var\/lib\/axonwall\/fwcfg|run\/axonwall\/fwcfg)\/[a-zA-Z0-9_./-]+$/;
+const SAFE_VIRTIOFS_PATH_REGEX = /^\/mnt\/[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_./-]+$/;
+const SAFE_EDGE_KERNEL_PATH_REGEX = /^\/usr\/lib\/axonwall\/edge\/slot-[AB]\/axonwall-edge-[a-z0-9-]+\.efi$/;
+const SAFE_EDGE_FWCFG_PATH_REGEX = /^\/run\/axonwall\/edge\/[a-zA-Z0-9_.-]+$/;
 const SAFE_MAC_REGEX = /^([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$/;
 const SAFE_PCI_BDF_REGEX = /^([0-9a-fA-F]{4}:)?[0-9a-fA-F]{2}:[0-9a-fA-F]{2}\.[0-7]$/;
 const SAFE_PCI_SLOT_REGEX = /^0x[0-9a-fA-F]+$/;
 const SAFE_IFACE_REGEX = /^[a-zA-Z0-9_.:-]+$/;
 const SAFE_FWCFG_NAME_REGEX = /^[a-zA-Z0-9_./-]+$/;
+
+function hasUnsafePathChars(p: string): boolean {
+  return !p || p.includes(',') || p.includes('..') || /[\r\n\0]/.test(p);
+}
+
+function validateVmKernelOrInitrdPath(
+  p: string,
+  kind: 'kernel' | 'initrd',
+  allowHostedEdgePaths?: boolean,
+): string {
+  const allowed =
+    kind === 'kernel' && allowHostedEdgePaths
+      ? SAFE_KERNEL_PATH_REGEX.test(p) || SAFE_EDGE_KERNEL_PATH_REGEX.test(p)
+      : SAFE_KERNEL_PATH_REGEX.test(p);
+  if (hasUnsafePathChars(p) || !allowed) {
+    throw new Error(`Invalid VM ${kind} path: ${p}`);
+  }
+  return p;
+}
+
+function validateVmFwCfgEntry(
+  entry: { name: string; file: string },
+  allowHostedEdgePaths?: boolean,
+): void {
+  const fileAllowed = allowHostedEdgePaths
+    ? SAFE_FWCFG_PATH_REGEX.test(entry.file) || SAFE_EDGE_FWCFG_PATH_REGEX.test(entry.file)
+    : SAFE_FWCFG_PATH_REGEX.test(entry.file);
+  if (
+    !entry.name ||
+    !entry.file ||
+    hasUnsafePathChars(entry.name) ||
+    hasUnsafePathChars(entry.file) ||
+    !SAFE_FWCFG_NAME_REGEX.test(entry.name) ||
+    !fileAllowed
+  ) {
+    throw new Error(`Invalid VM fw_cfg entry: ${entry.name}=${entry.file}`);
+  }
+}
+
+function validateVmZvolPath(zvolPath: string): string {
+  if (hasUnsafePathChars(zvolPath) || !SAFE_ZVOL_PATH_REGEX.test(zvolPath)) {
+    throw new Error(`Invalid VM disk zvol path: ${zvolPath}`);
+  }
+  return zvolPath;
+}
+
+function validateVmIsoPath(isoPath: string): string {
+  if (hasUnsafePathChars(isoPath) || !SAFE_ISO_PATH_REGEX.test(isoPath)) {
+    throw new Error(`Invalid VM ISO image path: ${isoPath}`);
+  }
+  return isoPath;
+}
+
+function validateVmVirtioFsHostPath(hostPath: string): string {
+  if (hasUnsafePathChars(hostPath) || !SAFE_VIRTIOFS_PATH_REGEX.test(hostPath)) {
+    throw new Error(`Invalid VM VirtioFS hostPath: ${hostPath}`);
+  }
+  return hostPath;
+}
 
 export function generateDeterministicMac(vmid: number, nicIdx: number): string {
   const hexVmid = vmid.toString(16).padStart(4, '0');
@@ -154,6 +218,7 @@ export function generateDeterministicMac(vmid: number, nicIdx: number): string {
 export interface VirtCompileOptions {
   osFamily?: OsFamily;
   existsFn?: (p: string) => boolean;
+  allowHostedEdgePaths?: boolean;
 }
 
 export function compileVmProcess(vm: VirtualMachine, opts?: VirtCompileOptions): CompiledVmProcess {
@@ -220,45 +285,22 @@ export function compileVmProcess(vm: VirtualMachine, opts?: VirtCompileOptions):
   }
 
   if (vm.kernelPath) {
-    if (
-      vm.kernelPath.includes(',') ||
-      vm.kernelPath.includes('..') ||
-      /[\r\n\0]/.test(vm.kernelPath) ||
-      !SAFE_ISO_PATH_REGEX.test(vm.kernelPath)
-    ) {
-      throw new Error(`Invalid VM kernel path: ${vm.kernelPath}`);
-    }
+    validateVmKernelOrInitrdPath(vm.kernelPath, 'kernel', opts?.allowHostedEdgePaths);
     args.push('-kernel', vm.kernelPath);
     if (vm.initrdPath) {
-      if (
-        vm.initrdPath.includes(',') ||
-        vm.initrdPath.includes('..') ||
-        /[\r\n\0]/.test(vm.initrdPath) ||
-        !SAFE_ISO_PATH_REGEX.test(vm.initrdPath)
-      ) {
-        throw new Error(`Invalid VM initrd path: ${vm.initrdPath}`);
-      }
+      validateVmKernelOrInitrdPath(vm.initrdPath, 'initrd', opts?.allowHostedEdgePaths);
       args.push('-initrd', vm.initrdPath);
     }
     if (vm.kernelArgs) {
       args.push('-append', String(vm.kernelArgs).replace(/[\r\n\0]+/g, ' ').trim());
     }
+  } else if (vm.initrdPath) {
+    validateVmKernelOrInitrdPath(vm.initrdPath, 'initrd', opts?.allowHostedEdgePaths);
   }
 
   if (vm.fwCfg && vm.fwCfg.length > 0) {
     for (const entry of vm.fwCfg) {
-      if (
-        !entry.name ||
-        !entry.file ||
-        entry.name.includes(',') ||
-        entry.file.includes(',') ||
-        entry.name.includes('..') ||
-        entry.file.includes('..') ||
-        !SAFE_FWCFG_NAME_REGEX.test(entry.name) ||
-        !SAFE_ISO_PATH_REGEX.test(entry.file)
-      ) {
-        throw new Error(`Invalid VM fw_cfg entry: ${entry.name}=${entry.file}`);
-      }
+      validateVmFwCfgEntry(entry, opts?.allowHostedEdgePaths);
       args.push('-fw_cfg', `name=${entry.name},file=${entry.file}`);
     }
   }
@@ -308,16 +350,9 @@ export function compileVmProcess(vm: VirtualMachine, opts?: VirtCompileOptions):
         throw new Error(`Invalid VM disk storage pool: ${pool}`);
       }
       const driveId = `drive-disk${idx}`;
-      const zvolPath =
-        disk.zvol || `/dev/zvol/${pool}/vms/vm-${vm.vmid}-disk-${idx}`;
-      if (
-        zvolPath.includes(',') ||
-        zvolPath.includes('..') ||
-        /[\r\n\0]/.test(zvolPath) ||
-        !SAFE_ZVOL_PATH_REGEX.test(zvolPath)
-      ) {
-        throw new Error(`Invalid VM disk zvol path: ${zvolPath}`);
-      }
+      const zvolPath = validateVmZvolPath(
+        disk.zvol || `/dev/zvol/${pool}/vms/vm-${vm.vmid}-disk-${idx}`,
+      );
       const cache = disk.cache || 'none';
       const discardOpt = disk.discard ? ',discard=unmap' : '';
       const aioOpt = cache === 'none' ? ',aio=native' : '';
@@ -369,14 +404,7 @@ export function compileVmProcess(vm: VirtualMachine, opts?: VirtCompileOptions):
 
   // ISO / Optical Drive
   if (vm.iso) {
-    if (
-      vm.iso.includes(',') ||
-      vm.iso.includes('..') ||
-      /[\r\n\0]/.test(vm.iso) ||
-      !SAFE_ISO_PATH_REGEX.test(vm.iso)
-    ) {
-      throw new Error(`Invalid VM ISO image path: ${vm.iso}`);
-    }
+    validateVmIsoPath(vm.iso);
     args.push(
       '-drive',
       `file=${vm.iso},media=cdrom,id=cdrom0,readonly=on`
@@ -443,6 +471,7 @@ export function compileVmProcess(vm: VirtualMachine, opts?: VirtCompileOptions):
       'node,memdev=mem',
     );
     vm.virtioFsShares.forEach((share, idx) => {
+      validateVmVirtioFsHostPath(share.hostPath);
       const safeTag = share.tag.replace(/[^a-zA-Z0-9_-]/g, '');
       args.push(
         '-chardev',
@@ -520,6 +549,20 @@ export function compileVmProcess(vm: VirtualMachine, opts?: VirtCompileOptions):
 }
 
 export function compileLibvirtDomainXml(vm: VirtualMachine, opts?: VirtCompileOptions): string {
+  if (vm.kernelPath) {
+    validateVmKernelOrInitrdPath(vm.kernelPath, 'kernel', opts?.allowHostedEdgePaths);
+  }
+  if (vm.initrdPath) {
+    validateVmKernelOrInitrdPath(vm.initrdPath, 'initrd', opts?.allowHostedEdgePaths);
+  }
+  if (vm.fwCfg) {
+    for (const entry of vm.fwCfg) {
+      validateVmFwCfgEntry(entry, opts?.allowHostedEdgePaths);
+    }
+  }
+  if (vm.iso) {
+    validateVmIsoPath(vm.iso);
+  }
   const safeName = escapeXmlAttr(sanitizeIdentifier(vm.name));
   const vcpus = (vm.cores || 1) * (vm.sockets || 1);
   const memKib = (vm.memoryMb || 2048) * 1024;
@@ -579,8 +622,10 @@ export function compileLibvirtDomainXml(vm: VirtualMachine, opts?: VirtCompileOp
   if (!vm.diskless) {
     vm.disks.forEach((disk, idx) => {
       const pool = disk.pool || 'tank';
-      const safePool = SAFE_POOL_REGEX.test(pool) && !pool.includes('..') ? pool : 'tank';
-      const zvolPath = disk.zvol || `/dev/zvol/${safePool}/vms/vm-${vmidNum}-disk-${idx}`;
+      if (!SAFE_POOL_REGEX.test(pool) || pool.includes('..')) {
+        throw new Error(`Invalid VM disk storage pool: ${pool}`);
+      }
+      const zvolPath = validateVmZvolPath(disk.zvol || `/dev/zvol/${pool}/vms/vm-${vmidNum}-disk-${idx}`);
       const targetBus = disk.bus === 'nvme' ? 'virtio' : disk.bus || 'virtio';
       const devPrefix = targetBus === 'scsi' || targetBus === 'sata' ? 'sd' : targetBus === 'ide' ? 'hd' : 'vd';
       const targetDev = `${devPrefix}${String.fromCharCode(97 + idx)}`;
@@ -594,9 +639,10 @@ export function compileLibvirtDomainXml(vm: VirtualMachine, opts?: VirtCompileOp
   }
 
   for (const share of vm.virtioFsShares ?? []) {
+    const hostPath = validateVmVirtioFsHostPath(share.hostPath);
     xml.push(`    <filesystem type='mount' accessmode='passthrough'>`);
     xml.push(`      <driver type='virtiofs' queue='1024'/>`);
-    xml.push(`      <source dir='${escapeXmlAttr(share.hostPath)}'/>`);
+    xml.push(`      <source dir='${escapeXmlAttr(hostPath)}'/>`);
     xml.push(`      <target dir='${escapeXmlAttr(share.tag)}'/>`);
     if (share.readOnly) xml.push(`      <readonly/>`);
     xml.push(`    </filesystem>`);
@@ -922,7 +968,11 @@ export function compileVxlan(zones: VxlanZone[], interfaces: Interface[] = []): 
 
   for (const zone of zones) {
     if (!zone.enabled) continue;
-    const name = sanitizeIdentifier(zone.name);
+    const rawName = String(zone.name || '').trim();
+    const name = sanitizeIdentifier(rawName);
+    if (!name || rawName.startsWith('-') || name.startsWith('-')) {
+      throw new Error(`Invalid VXLAN zone name: ${zone.name}`);
+    }
     const port = zone.port || 4789;
     const rawDev = zone.underlayInterface || 'lan';
     const dev = ifDeviceMap.get(rawDev) || rawDev;
@@ -957,7 +1007,10 @@ export function compileHostedEdge(
   const sku = edgeCfg.skuProfile || 'sku-vm-virtio';
   const hostHostname = sanitizeIdentifier(opts?.hostname || state.system?.hostname || 'axonwall');
   const edgeId = `edge-${hostHostname}`;
-  const ztpToken = opts?.ztpToken || 'ztp_hosted_edge_bootstrap';
+  const ztpToken = opts?.ztpToken?.trim();
+  if (!ztpToken) {
+    throw new Error('compileHostedEdge requires an explicit non-empty ztpToken');
+  }
   const hubIpOnly = (edgeCfg.lan.hostAddress || '10.0.0.2/24').split('/')[0] || '10.0.0.2';
   const safeHubHost = hubIpOnly.replace(/[^a-zA-Z0-9.:_-]/g, '') || '10.0.0.2';
   const hubPort = state.fleet?.listenPort || 2966;
@@ -1049,7 +1102,7 @@ export function compileHostedEdge(
     enabled: true,
   };
 
-  const vmSpec = compileVmProcess(edgeVm);
+  const vmSpec = compileVmProcess(edgeVm, { allowHostedEdgePaths: true });
 
   const wanAddrSpec =
     edgeCfg.wan.ipv4Mode === 'static' && edgeCfg.wan.ipv4Address

@@ -6,6 +6,7 @@ import path from 'node:path';
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { NextRequest } from 'next/server';
 import { mintSupabaseToken } from '@axonwall/lib/ldap';
+import { enablePluginWithDependencies } from '@axonwall/lib/plugins';
 import { DesiredStateSchema } from '@axonwall/lib/schemas';
 import type { UserSession } from '@axonwall/lib/rbac';
 
@@ -160,6 +161,27 @@ describe('Phase 5 Web Console security & bug-hunt regressions', () => {
   });
 
   it('W-C2 & W-M5: /api/auth/gateway rejects empty roles=, with 400 and enforces live .password_changed state', async () => {
+    const gatewayState = enablePluginWithDependencies(
+      'identity-aware-proxy',
+      DesiredStateSchema.parse({
+        version: 1,
+        zeroTrust: {
+          enabled: true,
+          apps: [
+            {
+              name: 'Gateway Test',
+              publicHostname: '127.0.0.1',
+              internalUpstream: 'http://10.0.0.5:8080',
+              allowedRoles: ['admin'],
+              enabled: true,
+            },
+          ],
+        },
+      })
+    ).state;
+    persistDesiredStateToDisk(gatewayState);
+    invalidateDesiredStateCacheInternal();
+
     hoisted.mockSessionState.current = {
       userId: 'ro-1',
       username: 'auditor',

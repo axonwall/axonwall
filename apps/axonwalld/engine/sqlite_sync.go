@@ -9,6 +9,8 @@ import (
 	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -400,20 +402,136 @@ func (m *SqliteSyncManager) verifyPeerPayload(what string, digest []byte, sigHea
 	return nil
 }
 
+var (
+	syncHAPKICACertPath   = HAPKICACertPath
+	syncHAPKINodeCertPath = HAPKINodeCertPath
+	syncHAPKINodeKeyPath  = HAPKINodeKeyPath
+)
+
+type errRoundTripper struct {
+	err error
+}
+
+func (rt errRoundTripper) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, rt.err
+}
+
+func validateCertNotExpired(label string, der []byte, now time.Time) error {
+	cert, err := x509.ParseCertificate(der)
+	if err != nil {
+		return fmt.Errorf("corrupt %s certificate: %w", label, err)
+	}
+	if now.Before(cert.NotBefore) {
+		return fmt.Errorf("%s certificate not valid until %s", label, cert.NotBefore.UTC().Format(time.RFC3339))
+	}
+	if now.After(cert.NotAfter) {
+		return fmt.Errorf("%s certificate expired at %s", label, cert.NotAfter.UTC().Format(time.RFC3339))
+	}
+	return nil
+}
+
+// loadValidatedHAPKIConfig loads and validates the HA PKI TLS config.
+// It distinguishes genuinely un-enrolled nodes (missingEnrollment=true) from
+// corrupt, expired, partial, or unreadable PKI files (missingEnrollment=false).
+func loadValidatedHAPKIConfig() (*tls.Config, bool, error) {
+	_, caStatErr := os.Stat(syncHAPKICACertPath)
+	_, certStatErr := os.Stat(syncHAPKINodeCertPath)
+	_, keyStatErr := os.Stat(syncHAPKINodeKeyPath)
+
+	caMissing := caStatErr != nil && errors.Is(caStatErr, os.ErrNotExist)
+	certMissing := certStatErr != nil && errors.Is(certStatErr, os.ErrNotExist)
+	keyMissing := keyStatErr != nil && errors.Is(keyStatErr, os.ErrNotExist)
+
+	// If neither node cert nor key exists, the node has not completed enrollment.
+	// Still validate ca.crt if present so a corrupt CA fails closed rather than downgrading.
+	if certMissing && keyMissing {
+		if caMissing {
+			return nil, true, os.ErrNotExist
+		}
+		if caStatErr != nil {
+			return nil, false, caStatErr
+		}
+		caBytes, err := os.ReadFile(syncHAPKICACertPath)
+		if err != nil {
+			return nil, false, err
+		}
+		now := time.Now()
+		var parsedAny bool
+		for rest := caBytes; len(rest) > 0; {
+			var block *pem.Block
+			block, rest = pem.Decode(rest)
+			if block == nil {
+				break
+			}
+			if block.Type == "CERTIFICATE" {
+				if err := validateCertNotExpired("HA CA", block.Bytes, now); err != nil {
+					return nil, false, err
+				}
+				parsedAny = true
+			}
+		}
+		if !parsedAny {
+			return nil, false, fmt.Errorf("failed to parse HA CA certificate")
+		}
+		return nil, true, os.ErrNotExist
+	}
+
+	tlsCfg, err := LoadHAPKITLSConfigFromPaths(syncHAPKICACertPath, syncHAPKINodeCertPath, syncHAPKINodeKeyPath)
+	if err != nil {
+		return nil, false, err
+	}
+
+	now := time.Now()
+	caBytes, err := os.ReadFile(syncHAPKICACertPath)
+	if err != nil {
+		return nil, false, err
+	}
+	var parsedCA bool
+	for rest := caBytes; len(rest) > 0; {
+		var block *pem.Block
+		block, rest = pem.Decode(rest)
+		if block == nil {
+			break
+		}
+		if block.Type == "CERTIFICATE" {
+			if err := validateCertNotExpired("HA CA", block.Bytes, now); err != nil {
+				return nil, false, err
+			}
+			parsedCA = true
+		}
+	}
+	if !parsedCA {
+		return nil, false, fmt.Errorf("failed to parse HA CA certificate")
+	}
+
+	if len(tlsCfg.Certificates) == 0 || len(tlsCfg.Certificates[0].Certificate) == 0 {
+		return nil, false, fmt.Errorf("HA node certificate missing")
+	}
+	if err := validateCertNotExpired("HA node", tlsCfg.Certificates[0].Certificate[0], now); err != nil {
+		return nil, false, err
+	}
+	return tlsCfg, false, nil
+}
+
 // peerClient returns the HTTP client and URL scheme the backup poller
 // should use for peer data endpoints. When mTLS is requested AND the HA
 // PKI material is present, the client presents the node certificate and
-// verifies the peer against the shared HA CA. Otherwise it falls back to
-// the plain token-authenticated client: a not-yet-enrolled node has no
-// certificate to present. Enrollment itself (EnrollPKIFromPeer) never
-// uses this client: it requires verified HTTPS against the peer CA
-// provisioned locally and fails closed without one (R4-A-H2).
-// The k3s-token and state/db fetchers use this client; enrollment
-// never does.
+// verifies the peer against the shared HA CA. When PKI files are genuinely
+// un-enrolled (os.ErrNotExist), it falls back to the plain token-authenticated
+// client so enrollment can proceed. When PKI files exist but are corrupt or
+// expired, it fails closed over https without downgrading to cleartext http://.
 func (m *SqliteSyncManager) peerClient(timeout time.Duration) (*http.Client, string) {
 	if m.mtlsRequested() {
-		if tlsCfg, err := LoadHAPKITLSConfig(); err == nil {
+		tlsCfg, missingEnrollment, err := loadValidatedHAPKIConfig()
+		if err == nil {
 			return &http.Client{Timeout: timeout, Transport: &http.Transport{TLSClientConfig: tlsCfg}}, "https"
+		}
+		if !missingEnrollment {
+			slog.Error("HA sync transport 'mtls' requested and PKI material exists but failed validation; refusing cleartext http:// downgrade", "error", err)
+			return &http.Client{
+				Timeout:   timeout,
+				Transport: errRoundTripper{err: fmt.Errorf("HA sync mTLS fail-closed: %w", err)},
+			}, "https"
 		}
 	}
 	return &http.Client{Timeout: timeout}, "http"
@@ -438,21 +556,23 @@ func (m *SqliteSyncManager) startMasterServer() error {
 	}
 
 	// D-04 Phase 1: serve mutual TLS when the operator selected the mtls
-	// transport AND HA PKI material exists. Enrollment is the bootstrap
-	// that creates that material, so an mtls request on a never-enrolled
-	// node falls back to token-http with a loud error instead of serving
-	// nothing at all; the effective transport is reported in /status so
-	// the state is observable, and flips to mtls on the next config apply
-	// once the pair has enrolled.
+	// transport AND HA PKI material exists. Only fall back to token-http
+	// when enrollment certs are genuinely absent (os.ErrNotExist); if PKI
+	// files exist and are corrupt, expired, or mismatched, fail closed.
 	serveTLS := false
 	if resolvedTransport(m.cfg.Transport) == "mtls" {
-		if tlsCfg, err := LoadHAPKITLSConfig(); err == nil {
+		tlsCfg, missingEnrollment, err := loadValidatedHAPKIConfig()
+		if err == nil {
 			// Verify client certificates when presented (rejecting foreign CAs at handshake)
 			// while allowing unenrolled backup nodes to reach /api/v1/sync/pki-enroll over HTTPS
 			// with X-Axonwall-Sync-Token; requireMTLSClientCert gates all data endpoints.
 			tlsCfg.ClientAuth = tls.VerifyClientCertIfGiven
 			m.server.TLSConfig = tlsCfg
 			serveTLS = true
+		} else if !missingEnrollment {
+			slog.Error("HA sync transport 'mtls' requested and PKI material exists but failed validation; refusing cleartext token-http downgrade", "error", err)
+			m.effectiveTransport = "mtls"
+			return fmt.Errorf("HA sync mTLS fail-closed (invalid or expired PKI material): %w", err)
 		} else {
 			slog.Error("HA sync transport 'mtls' requested but HA PKI material is unavailable; serving token-http until the pair has enrolled (check /api/v1/sync/status transport field)", "error", err)
 		}

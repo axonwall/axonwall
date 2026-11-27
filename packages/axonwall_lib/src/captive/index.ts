@@ -96,13 +96,26 @@ export class CaptiveSessionManager {
     return session;
   }
 
+  private pruneExpired(now: number): void {
+    for (const [id, s] of this.sessions.entries()) {
+      if (s.expiresAt <= now) {
+        this.sessions.delete(id);
+      }
+    }
+  }
+
   isClientAuthenticated(clientIp: string, clientMac?: string): boolean {
     const now = Date.now();
+    this.pruneExpired(now);
+    const normIp = clientIp.trim();
+    const normMac = clientMac?.trim().toLowerCase() || '';
     for (const s of this.sessions.values()) {
-      if (s.clientIp === clientIp || (clientMac && s.clientMac === clientMac)) {
-        if (s.expiresAt > now) {
+      if (normMac) {
+        if (s.clientIp === normIp && s.clientMac.toLowerCase() === normMac) {
           return true;
         }
+      } else if (s.clientIp === normIp) {
+        return true;
       }
     }
     return false;
@@ -114,12 +127,7 @@ export class CaptiveSessionManager {
 
   getActiveSessions(): CaptiveSession[] {
     const now = Date.now();
-    const active: CaptiveSession[] = [];
-    for (const s of this.sessions.values()) {
-      if (s.expiresAt > now) {
-        active.push(s);
-      }
-    }
-    return active;
+    this.pruneExpired(now);
+    return Array.from(this.sessions.values());
   }
 }

@@ -23,3 +23,19 @@ icon: https://vigilsoc.org/logo.png
 annotations:
   artifacthub.io/category: security
   artifacthub.io/license: Apache-2.0
+dependencies:
+  - name: opentelemetry-collector
+    version: 0.108.0
+    repository: https://open-telemetry.github.io/opentelemetry-helm-charts
+    condition: otelCollector.enabled
+    alias: otelCollector
+  - name: postgresql
+    version: 16.2.2
+    repository: oci://registry-1.docker.io/bitnamicharts
+    condition: postgresql.bitnami.enabled
+    alias: bitnamiPostgresql
+  - name: redis
+    version: 20.3.0
+    repository: oci://registry-1.docker.io/bitnamicharts
+    condition: redis.bitnami.enabled
+    alias: bitnamiRedis

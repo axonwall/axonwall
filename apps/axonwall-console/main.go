@@ -12,6 +12,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
+	"math"
 	"net"
 	"net/http"
 	"os"
@@ -24,6 +26,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode"
 
 	"github.com/skip2/go-qrcode"
 	"golang.org/x/crypto/scrypt"
@@ -571,13 +574,242 @@ func readCurrentNetworkConfigForEdition(edition, confPath string) NetworkConfig 
 // resolveIfaceMtu implements the C27 rule for updateStateJSON's
 // setIface closure: an existing entry keeps its MTU (whatever JSON
 // decoded it as), and only a brand-new entry defaults to 1500.
-func resolveIfaceMtu(entry map[string]interface{}) interface{} {
+func parseValidIfaceMtu(raw interface{}) (int, bool) {
+	var val int
+	switch v := raw.(type) {
+	case int:
+		val = v
+	case int64:
+		val = int(v)
+	case float64:
+		if math.IsNaN(v) || math.IsInf(v, 0) || v != math.Trunc(v) {
+			return 0, false
+		}
+		val = int(v)
+	case json.Number:
+		n, err := v.Int64()
+		if err != nil {
+			return 0, false
+		}
+		val = int(n)
+	default:
+		return 0, false
+	}
+	if val < 576 || val > 65535 {
+		return 0, false
+	}
+	return val, true
+}
+
+func resolveIfaceMtuInt(entry map[string]interface{}) int {
 	if entry != nil {
 		if mtu, ok := entry["mtu"]; ok && mtu != nil {
-			return mtu
+			if parsed, valid := parseValidIfaceMtu(mtu); valid {
+				return parsed
+			}
 		}
 	}
 	return 1500
+}
+
+func resolveIfaceMtu(entry map[string]interface{}) interface{} {
+	return resolveIfaceMtuInt(entry)
+}
+
+var validExtraIfaceNameRoleRe = regexp.MustCompile(`^[a-z0-9_-]{1,15}$`)
+
+type validatedExtraIface struct {
+	Name        string
+	Role        string
+	Device      string
+	YamlDevice  string
+	Type        string
+	Enabled     bool
+	DHCPServer  bool
+	IPv4Address string
+	IPv4IP      string
+	IPv4Netmask string
+	IPv4Gateway string
+	MTU         int
+	Description string
+}
+
+func hasControlOrWhitespace(s string) bool {
+	for _, r := range s {
+		if unicode.IsControl(r) || unicode.IsSpace(r) {
+			return true
+		}
+	}
+	return false
+}
+
+func rawExtraIfaceNameForLog(entry map[string]interface{}) string {
+	if entry == nil {
+		return "<nil>"
+	}
+	name, ok := entry["name"].(string)
+	if !ok {
+		return "<non-string>"
+	}
+	if len(name) > 64 {
+		return name[:64] + "..."
+	}
+	return name
+}
+
+func validateExtraInterface(entry map[string]interface{}) (validatedExtraIface, string, bool) {
+	if entry == nil {
+		return validatedExtraIface{}, "nil interface entry", false
+	}
+
+	name, ok := entry["name"].(string)
+	if !ok || !validExtraIfaceNameRoleRe.MatchString(name) {
+		return validatedExtraIface{}, "invalid interface name", false
+	}
+
+	var roleStr string
+	if rawRole, hasRole := entry["role"]; hasRole && rawRole != nil {
+		rs, ok := rawRole.(string)
+		if !ok || !validExtraIfaceNameRoleRe.MatchString(rs) {
+			return validatedExtraIface{}, "invalid interface role", false
+		}
+		roleStr = rs
+	} else if strings.HasPrefix(name, "wan") {
+		roleStr = "wan"
+	} else {
+		roleStr = "lan"
+	}
+
+	typeStr := "dhcp"
+	if rawType, hasType := entry["type"]; hasType && rawType != nil {
+		ts, ok := rawType.(string)
+		if !ok || (ts != "dhcp" && ts != "static") {
+			return validatedExtraIface{}, "invalid interface type (must be dhcp or static)", false
+		}
+		typeStr = ts
+	}
+
+	devStr := ""
+	if rawDev, hasDev := entry["device"]; hasDev && rawDev != nil {
+		ds, ok := rawDev.(string)
+		if !ok {
+			return validatedExtraIface{}, "device must be a string", false
+		}
+		if hasControlOrWhitespace(ds) {
+			return validatedExtraIface{}, "device contains whitespace or control characters", false
+		}
+		if ds != "" && !strings.EqualFold(ds, "none") {
+			if !validIfNameRe.MatchString(ds) || ds == "." || ds == ".." || strings.Contains(ds, "..") {
+				return validatedExtraIface{}, "invalid device identifier", false
+			}
+			devStr = ds
+		}
+	}
+	yamlDev := devStr
+	if yamlDev == "" {
+		yamlDev = "none"
+	}
+
+	enabled := devStr != ""
+	if rawEn, hasEn := entry["enabled"]; hasEn && rawEn != nil {
+		en, ok := rawEn.(bool)
+		if !ok {
+			return validatedExtraIface{}, "enabled must be a boolean", false
+		}
+		enabled = en && devStr != ""
+	}
+
+	dhcpSrv := false
+	if rawDhcp, hasDhcp := entry["dhcpServer"]; hasDhcp && rawDhcp != nil {
+		b, ok := rawDhcp.(bool)
+		if !ok {
+			return validatedExtraIface{}, "dhcpServer must be a boolean", false
+		}
+		dhcpSrv = b
+	}
+
+	var ipStr, ipAddr, netmask string
+	if rawIP, hasIP := entry["ipv4Address"]; hasIP && rawIP != nil {
+		s, ok := rawIP.(string)
+		if !ok {
+			return validatedExtraIface{}, "ipv4Address must be a string", false
+		}
+		if s != "" {
+			if hasControlOrWhitespace(s) || strings.Contains(s, ":") {
+				return validatedExtraIface{}, "invalid ipv4Address characters", false
+			}
+			ip, ipNet, err := net.ParseCIDR(s)
+			if err != nil || ip == nil || ipNet == nil {
+				return validatedExtraIface{}, "invalid ipv4Address CIDR", false
+			}
+			ip4 := ip.To4()
+			ones, bits := ipNet.Mask.Size()
+			if ip4 == nil || bits != 32 {
+				return validatedExtraIface{}, "ipv4Address must be IPv4 CIDR", false
+			}
+			ipAddr = ip4.String()
+			netmask = cidrToNetmask(ones)
+			ipStr = fmt.Sprintf("%s/%d", ipAddr, ones)
+		}
+	}
+
+	var gwStr string
+	if rawGW, hasGW := entry["ipv4Gateway"]; hasGW && rawGW != nil {
+		s, ok := rawGW.(string)
+		if !ok {
+			return validatedExtraIface{}, "ipv4Gateway must be a string", false
+		}
+		if s != "" {
+			if hasControlOrWhitespace(s) || strings.Contains(s, ":") {
+				return validatedExtraIface{}, "invalid ipv4Gateway characters", false
+			}
+			gw := net.ParseIP(s)
+			if gw == nil || gw.To4() == nil {
+				return validatedExtraIface{}, "invalid ipv4Gateway IP", false
+			}
+			gwStr = gw.To4().String()
+		}
+	}
+
+	mtu := 1500
+	if rawMtu, hasMtu := entry["mtu"]; hasMtu && rawMtu != nil {
+		parsedMtu, valid := parseValidIfaceMtu(rawMtu)
+		if !valid {
+			return validatedExtraIface{}, "invalid mtu", false
+		}
+		mtu = parsedMtu
+	}
+
+	desc := ""
+	if rawDesc, hasDesc := entry["description"]; hasDesc && rawDesc != nil {
+		s, ok := rawDesc.(string)
+		if !ok {
+			return validatedExtraIface{}, "description must be a string", false
+		}
+		if len(s) > 255 || strings.ContainsRune(s, '\x00') {
+			return validatedExtraIface{}, "invalid description", false
+		}
+		desc = s
+	}
+	if desc == "" {
+		desc = strings.ToUpper(name) + " Network"
+	}
+
+	return validatedExtraIface{
+		Name:        name,
+		Role:        roleStr,
+		Device:      devStr,
+		YamlDevice:  yamlDev,
+		Type:        typeStr,
+		Enabled:     enabled,
+		DHCPServer:  dhcpSrv,
+		IPv4Address: ipStr,
+		IPv4IP:      ipAddr,
+		IPv4Netmask: netmask,
+		IPv4Gateway: gwStr,
+		MTU:         mtu,
+		Description: desc,
+	}, "", true
 }
 
 func consoleDesiredStateLockPath(etcDir, varDir string) string {
@@ -686,6 +918,8 @@ func updateStateJSONWithPaths(cfg NetworkConfig, etcDir, varDir, lockPath string
 			if name, ok := ifaceMap["name"].(string); ok {
 				ifacesMap[name] = ifaceMap
 				originalOrder = append(originalOrder, name)
+			} else {
+				log.Printf("[!] Warning: dropping extra interface entry with non-string name")
 			}
 		}
 	}
@@ -768,8 +1002,10 @@ func updateStateJSONWithPaths(cfg NetworkConfig, etcDir, varDir, lockPath string
 			}
 		}
 	}
+	var validExtras []validatedExtraIface
 	for _, name := range originalOrder {
 		if !seen[name] {
+			seen[name] = true
 			if entry, ok := ifacesMap[name]; ok {
 				if devStr, _ := entry["device"].(string); devStr != "" {
 					normDev := strings.ToLower(strings.TrimSpace(devStr))
@@ -780,9 +1016,14 @@ func updateStateJSONWithPaths(cfg NetworkConfig, etcDir, varDir, lockPath string
 						continue
 					}
 				}
+				validated, reason, valid := validateExtraInterface(entry)
+				if !valid {
+					log.Printf("[!] Warning: dropping invalid extra interface %q from state.json: %s", rawExtraIfaceNameForLog(entry), reason)
+					continue
+				}
 				updatedList = append(updatedList, entry)
 				extraIfaces = append(extraIfaces, entry)
-				seen[name] = true
+				validExtras = append(validExtras, validated)
 			}
 		}
 	}
@@ -884,15 +1125,9 @@ func updateStateJSONWithPaths(cfg NetworkConfig, etcDir, varDir, lockPath string
 	if cfg.Opt2Device != "" {
 		validInternal["opt2"] = true
 	}
-	for _, entry := range extraIfaces {
-		name, _ := entry["name"].(string)
-		roleStr, _ := entry["role"].(string)
-		en := true
-		if b, hasEn := entry["enabled"].(bool); hasEn {
-			en = b
-		}
-		if name != "" && en && roleStr != "wan" && !strings.HasPrefix(name, "wan") {
-			validInternal[strings.ToLower(strings.TrimSpace(name))] = true
+	for _, v := range validExtras {
+		if v.Enabled && v.Role != "wan" && v.Role != "wan-delegated" && !strings.HasPrefix(v.Name, "wan") {
+			validInternal[strings.ToLower(v.Name)] = true
 		}
 	}
 	sysMap, _ := state["system"].(map[string]interface{})
@@ -933,54 +1168,77 @@ func updateStateJSONWithPaths(cfg NetworkConfig, etcDir, varDir, lockPath string
 		writeSystemYamlAntiLockoutWithOptions(allowedIfaces, alPorts, alEnabled)
 	}
 
-	if etcDir != "/etc/axonwall" || varDir != "/var/lib/axonwall" {
-		return extraIfaces
+	yamlEntries := buildInterfacesYamlEntries(cfg, validExtras, ifacesMap)
+	yamlPaths := []string{
+		filepath.Join(etcDir, "interfaces.yaml"),
+		filepath.Join(varDir, "etc-axonwall", "interfaces.yaml"),
 	}
-	// Also write /etc/axonwall/interfaces.yaml and /var/lib/axonwall/etc-axonwall/interfaces.yaml
-	var yamlBuilder strings.Builder
-	yamlBuilder.WriteString("# ============================================================================\n")
-	yamlBuilder.WriteString("# Axonwall Firewall Configuration — /etc/axonwall/interfaces.yaml\n")
-	yamlBuilder.WriteString("# Physical & Logical Interfaces, VLANs, Bridges, and LACP Bonds\n")
-	yamlBuilder.WriteString("# ============================================================================\n\n")
-	yamlBuilder.WriteString("interfaces:\n")
+	writeInterfacesYamlToPaths(yamlPaths, yamlEntries)
 
-	writeYamlIface := func(name, role, device, ifType string, dhcpSrv bool, ipAddr, gw, desc string, mtu interface{}) {
-		if ifType == "" {
-			ifType = "dhcp"
-		}
-		if mtu == nil {
-			mtu = 1500
-		}
-		enabled := device != "" && device != "none"
-		storedDev := device
-		if storedDev == "" {
-			storedDev = "none"
-		}
-		yamlBuilder.WriteString(fmt.Sprintf("  - name: %s\n", name))
-		yamlBuilder.WriteString(fmt.Sprintf("    role: %s\n", role))
-		yamlBuilder.WriteString(fmt.Sprintf("    device: %s\n", storedDev))
-		yamlBuilder.WriteString(fmt.Sprintf("    type: %s\n", ifType))
-		yamlBuilder.WriteString(fmt.Sprintf("    enabled: %t\n", enabled))
-		yamlBuilder.WriteString(fmt.Sprintf("    dhcpServer: %t\n", dhcpSrv))
-		if ifType == "static" && ipAddr != "" {
-			yamlBuilder.WriteString(fmt.Sprintf("    ipv4Address: %s\n", ipAddr))
-		}
-		if ifType == "static" && gw != "" {
-			yamlBuilder.WriteString(fmt.Sprintf("    ipv4Gateway: %s\n", gw))
-		}
-		yamlBuilder.WriteString(fmt.Sprintf("    mtu: %v\n", mtu))
-		yamlBuilder.WriteString(fmt.Sprintf("    description: %q\n", desc))
+	return extraIfaces
+}
+
+const interfacesYamlHeader = "# ============================================================================\n" +
+	"# Axonwall Firewall Configuration — /etc/axonwall/interfaces.yaml\n" +
+	"# Physical & Logical Interfaces, VLANs, Bridges, and LACP Bonds\n" +
+	"# ============================================================================\n\n"
+
+type yamlInterfaceConfigEntry struct {
+	Name        string `yaml:"name"`
+	Role        string `yaml:"role"`
+	Device      string `yaml:"device"`
+	Type        string `yaml:"type"`
+	Enabled     bool   `yaml:"enabled"`
+	DHCPServer  bool   `yaml:"dhcpServer"`
+	IPv4Address string `yaml:"ipv4Address,omitempty"`
+	IPv4Gateway string `yaml:"ipv4Gateway,omitempty"`
+	MTU         int    `yaml:"mtu"`
+	Description string `yaml:"description"`
+}
+
+func makeCoreYamlIfaceEntry(name, role, device, ifType string, dhcpSrv bool, ipAddr, gw, desc string, mtu int) yamlInterfaceConfigEntry {
+	if ifType == "" {
+		ifType = "dhcp"
 	}
+	if mtu < 576 || mtu > 65535 {
+		mtu = 1500
+	}
+	enabled := device != "" && device != "none"
+	storedDev := device
+	if storedDev == "" {
+		storedDev = "none"
+	}
+	entry := yamlInterfaceConfigEntry{
+		Name:        name,
+		Role:        role,
+		Device:      storedDev,
+		Type:        ifType,
+		Enabled:     enabled,
+		DHCPServer:  dhcpSrv,
+		MTU:         mtu,
+		Description: desc,
+	}
+	if ifType == "static" && ipAddr != "" {
+		entry.IPv4Address = ipAddr
+	}
+	if ifType == "static" && gw != "" {
+		entry.IPv4Gateway = gw
+	}
+	return entry
+}
 
-	writeYamlIface("wan", "wan", cfg.WanDevice, cfg.WanMode, false, cfg.WanIP, cfg.WanGateway, "WAN Gateway", resolveIfaceMtu(ifacesMap["wan"]))
-	writeYamlIface("lan", "lan", cfg.LanDevice, cfg.LanMode, cfg.LanMode == "static" && cfg.LanDHCP, cfg.LanIP, "", "LAN Network", resolveIfaceMtu(ifacesMap["lan"]))
+func buildInterfacesYamlEntries(cfg NetworkConfig, validExtras []validatedExtraIface, ifacesMap map[string]map[string]interface{}) []yamlInterfaceConfigEntry {
+	entries := []yamlInterfaceConfigEntry{
+		makeCoreYamlIfaceEntry("wan", "wan", cfg.WanDevice, cfg.WanMode, false, cfg.WanIP, cfg.WanGateway, "WAN Gateway", resolveIfaceMtuInt(ifacesMap["wan"])),
+		makeCoreYamlIfaceEntry("lan", "lan", cfg.LanDevice, cfg.LanMode, cfg.LanMode == "static" && cfg.LanDHCP, cfg.LanIP, "", "LAN Network", resolveIfaceMtuInt(ifacesMap["lan"])),
+	}
 	if cfg.Opt1Device != "" {
 		opt1Dhcp := cfg.Opt1Mode == "static" && cfg.Opt1DHCP
 		opt1Desc := "OPT1 (Joined Network / Non-authoritative)"
 		if opt1Dhcp {
 			opt1Desc = "OPT1 (Authoritative Network)"
 		}
-		writeYamlIface("opt1", "lan", cfg.Opt1Device, cfg.Opt1Mode, opt1Dhcp, cfg.Opt1IP, "", opt1Desc, resolveIfaceMtu(ifacesMap["opt1"]))
+		entries = append(entries, makeCoreYamlIfaceEntry("opt1", "lan", cfg.Opt1Device, cfg.Opt1Mode, opt1Dhcp, cfg.Opt1IP, "", opt1Desc, resolveIfaceMtuInt(ifacesMap["opt1"])))
 	}
 	if cfg.Opt2Device != "" {
 		opt2Dhcp := cfg.Opt2Mode == "static" && cfg.Opt2DHCP
@@ -988,74 +1246,114 @@ func updateStateJSONWithPaths(cfg NetworkConfig, etcDir, varDir, lockPath string
 		if opt2Dhcp {
 			opt2Desc = "OPT2 (Authoritative Network)"
 		}
-		writeYamlIface("opt2", "lan", cfg.Opt2Device, cfg.Opt2Mode, opt2Dhcp, cfg.Opt2IP, "", opt2Desc, resolveIfaceMtu(ifacesMap["opt2"]))
+		entries = append(entries, makeCoreYamlIfaceEntry("opt2", "lan", cfg.Opt2Device, cfg.Opt2Mode, opt2Dhcp, cfg.Opt2IP, "", opt2Desc, resolveIfaceMtuInt(ifacesMap["opt2"])))
 	}
-	for _, entry := range extraIfaces {
-		name, _ := entry["name"].(string)
-		devStr, _ := entry["device"].(string)
-		roleStr, _ := entry["role"].(string)
-		if roleStr == "" {
-			if strings.HasPrefix(name, "wan") {
-				roleStr = "wan"
-			} else {
-				roleStr = "lan"
-			}
+	for _, v := range validExtras {
+		entry := yamlInterfaceConfigEntry{
+			Name:        v.Name,
+			Role:        v.Role,
+			Device:      v.YamlDevice,
+			Type:        v.Type,
+			Enabled:     v.Enabled,
+			DHCPServer:  v.DHCPServer,
+			MTU:         v.MTU,
+			Description: v.Description,
 		}
-		typeStr, _ := entry["type"].(string)
-		if typeStr == "" {
-			typeStr = "dhcp"
+		if v.Type == "static" && v.IPv4Address != "" {
+			entry.IPv4Address = v.IPv4Address
 		}
-		dhcpSrv, _ := entry["dhcpServer"].(bool)
-		ipStr, _ := entry["ipv4Address"].(string)
-		gwStr, _ := entry["ipv4Gateway"].(string)
-		descStr, _ := entry["description"].(string)
-		if descStr == "" {
-			descStr = strings.ToUpper(name) + " Network"
+		if v.Type == "static" && v.IPv4Gateway != "" {
+			entry.IPv4Gateway = v.IPv4Gateway
 		}
-		writeYamlIface(name, roleStr, devStr, typeStr, dhcpSrv, ipStr, gwStr, descStr, resolveIfaceMtu(entry))
+		entries = append(entries, entry)
 	}
-
-	// Preserve existing VLANs, bridges, bonds/laggs, and VRFs from existing file
-	existingYaml, _ := os.ReadFile("/etc/axonwall/interfaces.yaml")
-	if len(existingYaml) == 0 {
-		existingYaml, _ = os.ReadFile("/var/lib/axonwall/etc-axonwall/interfaces.yaml")
-	}
-	extraSections := ""
-	if len(existingYaml) > 0 {
-		str := string(existingYaml)
-		minIdx := -1
-		for _, sec := range []string{"\nvlans:", "\nbridges:", "\nbonds:", "\nlaggs:", "\nvirtualIps:", "\nvrfs:"} {
-			idx := strings.Index(str, sec)
-			if idx != -1 && (minIdx == -1 || idx < minIdx) {
-				minIdx = idx
-			}
-		}
-		if minIdx != -1 {
-			extraSections = strings.TrimSpace(str[minIdx+1:])
-		}
-	}
-	if extraSections != "" {
-		yamlBuilder.WriteString(extraSections)
-		yamlBuilder.WriteString("\n")
-	} else {
-		yamlBuilder.WriteString("vlans: []\n")
-		yamlBuilder.WriteString("bridges: []\n")
-		yamlBuilder.WriteString("laggs: []\n")
-	}
-
-	yamlBytes := []byte(yamlBuilder.String())
-	writeSharedConfigFile("/etc/axonwall/interfaces.yaml", yamlBytes, 0660)
-	writeSharedConfigFile("/var/lib/axonwall/etc-axonwall/interfaces.yaml", yamlBytes, 0660)
-
-	return extraIfaces
+	return entries
 }
 
-func writeSharedConfigFile(path string, data []byte, mode os.FileMode) {
+func marshalInterfacesYaml(entries []yamlInterfaceConfigEntry, existingYaml []byte) ([]byte, error) {
+	var ifacesNode yaml.Node
+	if err := ifacesNode.Encode(entries); err != nil {
+		return nil, err
+	}
+	ifacesPtr := &ifacesNode
+	if ifacesNode.Kind == yaml.DocumentNode && len(ifacesNode.Content) > 0 {
+		ifacesPtr = ifacesNode.Content[0]
+	}
+
+	var doc yaml.Node
+	hasExistingHeader := false
+	parsedExisting := false
+	if len(bytes.TrimSpace(existingYaml)) > 0 {
+		if err := yaml.Unmarshal(existingYaml, &doc); err == nil && doc.Kind == yaml.DocumentNode && len(doc.Content) > 0 && doc.Content[0].Kind == yaml.MappingNode {
+			parsedExisting = true
+			rootMap := doc.Content[0]
+			if findYamlMappingVal(rootMap, "interfaces") != nil {
+				setYamlMappingKey(rootMap, "interfaces", ifacesPtr)
+			} else {
+				rootMap.Content = append([]*yaml.Node{buildYamlScalar("!!str", "interfaces"), ifacesPtr}, rootMap.Content...)
+			}
+			hasExistingHeader = strings.HasPrefix(strings.TrimSpace(string(existingYaml)), "#")
+		}
+	}
+
+	if !parsedExisting {
+		doc = yaml.Node{
+			Kind: yaml.DocumentNode,
+			Content: []*yaml.Node{
+				{
+					Kind: yaml.MappingNode,
+					Tag:  "!!map",
+					Content: []*yaml.Node{
+						buildYamlScalar("!!str", "interfaces"), ifacesPtr,
+						buildYamlScalar("!!str", "vlans"), {Kind: yaml.SequenceNode, Tag: "!!seq", Style: yaml.FlowStyle},
+						buildYamlScalar("!!str", "bridges"), {Kind: yaml.SequenceNode, Tag: "!!seq", Style: yaml.FlowStyle},
+						buildYamlScalar("!!str", "laggs"), {Kind: yaml.SequenceNode, Tag: "!!seq", Style: yaml.FlowStyle},
+					},
+				},
+			},
+		}
+	}
+
+	var buf bytes.Buffer
+	if !hasExistingHeader {
+		buf.WriteString(interfacesYamlHeader)
+	}
+	enc := yaml.NewEncoder(&buf)
+	enc.SetIndent(2)
+	if err := enc.Encode(&doc); err != nil {
+		_ = enc.Close()
+		return nil, err
+	}
+	if err := enc.Close(); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+func writeInterfacesYamlToPaths(yamlPaths []string, entries []yamlInterfaceConfigEntry) {
+	var existingYaml []byte
+	for _, p := range yamlPaths {
+		if data, err := os.ReadFile(p); err == nil && len(bytes.TrimSpace(data)) > 0 {
+			existingYaml = data
+			break
+		}
+	}
+	yamlBytes, err := marshalInterfacesYaml(entries, existingYaml)
+	if err != nil {
+		log.Printf("[!] Warning: failed to marshal interfaces.yaml: %v", err)
+		return
+	}
+	for _, p := range yamlPaths {
+		writeSharedConfigFile(p, yamlBytes, 0660)
+	}
+}
+
+func writeAtomicFile(path string, data []byte, dirMode, fileMode os.FileMode, groupName string) {
 	dir := filepath.Dir(path)
 	if dfi, err := os.Lstat(dir); err == nil && (dfi.Mode()&os.ModeSymlink) != 0 {
 		return
 	}
-	_ = os.MkdirAll(dir, 0775)
+	_ = os.MkdirAll(dir, dirMode)
 	if fi, err := os.Lstat(path); err == nil && (fi.Mode()&os.ModeSymlink) != 0 {
 		return
 	}
@@ -1075,14 +1373,16 @@ func writeSharedConfigFile(path string, data []byte, mode os.FileMode) {
 		return
 	}
 	_ = tmp.Sync()
-	_ = tmp.Chmod(mode)
+	_ = tmp.Chmod(fileMode)
 	if err := tmp.Close(); err != nil {
 		return
 	}
-	if grp, err := user.LookupGroup("axonwall-api"); err == nil {
-		if gid, err := strconv.Atoi(grp.Gid); err == nil {
-			_ = os.Lchown(dir, -1, gid)
-			_ = os.Lchown(tmpPath, -1, gid)
+	if groupName != "" {
+		if grp, err := user.LookupGroup(groupName); err == nil {
+			if gid, err := strconv.Atoi(grp.Gid); err == nil {
+				_ = os.Lchown(dir, -1, gid)
+				_ = os.Lchown(tmpPath, -1, gid)
+			}
 		}
 	}
 	if fi, err := os.Lstat(path); err == nil && (fi.Mode()&os.ModeSymlink) != 0 {
@@ -1091,6 +1391,10 @@ func writeSharedConfigFile(path string, data []byte, mode os.FileMode) {
 	if err := os.Rename(tmpPath, path); err == nil {
 		renamed = true
 	}
+}
+
+func writeSharedConfigFile(path string, data []byte, mode os.FileMode) {
+	writeAtomicFile(path, data, 0775, mode, "axonwall-api")
 }
 
 func sanitizeConfKey(name string) string {
@@ -1105,7 +1409,27 @@ func sanitizeConfKey(name string) string {
 	return b.String()
 }
 
-func persistNetworkInterfaces(cfg NetworkConfig) {
+type networkPersistPaths struct {
+	etcDir                string
+	varDir                string
+	lockPath              string
+	networkInterfacesPath string
+	legacyIfacesDropin    string
+	lockdownNftPath       string
+}
+
+func defaultNetworkPersistPaths() networkPersistPaths {
+	return networkPersistPaths{
+		etcDir:                "/etc/axonwall",
+		varDir:                "/var/lib/axonwall",
+		lockPath:              consoleDesiredStateLockPath("/etc/axonwall", "/var/lib/axonwall"),
+		networkInterfacesPath: "/etc/network/interfaces",
+		legacyIfacesDropin:    "/etc/network/interfaces.d/axonwall",
+		lockdownNftPath:       "/usr/share/axonwall/lockdown.nft",
+	}
+}
+
+func normalizeNetworkConfig(cfg NetworkConfig) NetworkConfig {
 	cfg.WanDevice = normalizeAssignedDevice(cfg.WanDevice)
 	cfg.LanDevice = normalizeAssignedDevice(cfg.LanDevice)
 	cfg.Opt1Device = normalizeAssignedDevice(cfg.Opt1Device)
@@ -1122,11 +1446,42 @@ func persistNetworkInterfaces(cfg NetworkConfig) {
 	if cfg.Opt2Device != "" && cfg.Opt2Mode == "" {
 		cfg.Opt2Mode = "dhcp"
 	}
+	return cfg
+}
+
+func filterAndValidateExtraInterfaces(entries []map[string]interface{}) ([]validatedExtraIface, []map[string]interface{}) {
+	var valid []validatedExtraIface
+	var kept []map[string]interface{}
+	for _, entry := range entries {
+		v, reason, ok := validateExtraInterface(entry)
+		if !ok {
+			log.Printf("[!] Warning: dropping invalid extra interface %q: %s", rawExtraIfaceNameForLog(entry), reason)
+			continue
+		}
+		valid = append(valid, v)
+		kept = append(kept, entry)
+	}
+	return valid, kept
+}
+
+func persistNetworkInterfaces(cfg NetworkConfig) {
+	persistNetworkInterfacesWithPaths(cfg, defaultNetworkPersistPaths())
+}
+
+func persistNetworkInterfacesWithPaths(cfg NetworkConfig, paths networkPersistPaths) {
+	cfg = normalizeNetworkConfig(cfg)
 
 	// 1. Update Web UI state first so we also retrieve any 5th+ interfaces from state.json
-	extraIfaces := updateStateJSON(cfg)
+	extraIfaces := updateStateJSONWithPaths(cfg, paths.etcDir, paths.varDir, paths.lockPath)
 
-	// 2. Write /etc/axonwall/interfaces.conf and /var/lib/axonwall/etc-axonwall/interfaces.conf
+	writePersistedNetworkFiles(cfg, extraIfaces, paths)
+}
+
+func writePersistedNetworkFiles(cfg NetworkConfig, extraIfaces []map[string]interface{}, paths networkPersistPaths) {
+	cfg = normalizeNetworkConfig(cfg)
+	validExtras, keptRawExtras := filterAndValidateExtraInterfaces(extraIfaces)
+
+	// 2. Write interfaces.conf to both /etc/axonwall and /var/lib/axonwall/etc-axonwall
 	var conf strings.Builder
 	conf.WriteString(fmt.Sprintf("WAN_INTERFACE=%s\n", cfg.WanDevice))
 	conf.WriteString(fmt.Sprintf("WAN_MODE=%s\n", cfg.WanMode))
@@ -1166,39 +1521,19 @@ func persistNetworkInterfaces(cfg NetworkConfig) {
 	writeIfaceConf("lan", "lan", cfg.LanDevice, cfg.LanMode, cfg.LanIP, "", cfg.LanMode == "static" && cfg.LanDHCP)
 	writeIfaceConf("opt1", "lan", cfg.Opt1Device, cfg.Opt1Mode, cfg.Opt1IP, "", cfg.Opt1Mode == "static" && cfg.Opt1DHCP)
 	writeIfaceConf("opt2", "lan", cfg.Opt2Device, cfg.Opt2Mode, cfg.Opt2IP, "", cfg.Opt2Mode == "static" && cfg.Opt2DHCP)
-	for _, entry := range extraIfaces {
-		en, hasEn := entry["enabled"].(bool)
-		if hasEn && !en {
+	for _, v := range validExtras {
+		if !v.Enabled || v.Device == "" {
 			continue
 		}
-		name, _ := entry["name"].(string)
-		devStr := normalizeAssignedDevice(fmt.Sprintf("%v", entry["device"]))
-		if name == "" || devStr == "" {
-			continue
-		}
-		roleStr, _ := entry["role"].(string)
-		if roleStr == "" {
-			if strings.HasPrefix(name, "wan") {
-				roleStr = "wan"
-			} else {
-				roleStr = "lan"
-			}
-		}
-		modeStr, _ := entry["type"].(string)
-		if modeStr == "" {
-			modeStr = "dhcp"
-		}
-		ipStr, _ := entry["ipv4Address"].(string)
-		gwStr, _ := entry["ipv4Gateway"].(string)
-		dhcpSrv, _ := entry["dhcpServer"].(bool)
-		writeIfaceConf(name, roleStr, devStr, modeStr, ipStr, gwStr, dhcpSrv)
+		writeIfaceConf(v.Name, v.Role, v.Device, v.Type, v.IPv4Address, v.IPv4Gateway, v.DHCPServer)
 	}
 	conf.WriteString(fmt.Sprintf("AXONWALL_INTERFACES=%s\n", strings.Join(allNames, ",")))
 
-	writeSharedConfigFile("/etc/axonwall/interfaces.conf", []byte(conf.String()), 0664)
-	writeSharedConfigFile("/var/lib/axonwall/etc-axonwall/interfaces.conf", []byte(conf.String()), 0664)
-	writeSharedConfigFile("/etc/axonwall/.interfaces_configured", []byte(time.Now().UTC().Format(time.RFC3339)+"\n"), 0664)
-	writeSharedConfigFile("/var/lib/axonwall/etc-axonwall/.interfaces_configured", []byte(time.Now().UTC().Format(time.RFC3339)+"\n"), 0664)
+	writeSharedConfigFile(filepath.Join(paths.etcDir, "interfaces.conf"), []byte(conf.String()), 0664)
+	writeSharedConfigFile(filepath.Join(paths.varDir, "etc-axonwall", "interfaces.conf"), []byte(conf.String()), 0664)
+	configuredStamp := []byte(time.Now().UTC().Format(time.RFC3339) + "\n")
+	writeSharedConfigFile(filepath.Join(paths.etcDir, ".interfaces_configured"), configuredStamp, 0664)
+	writeSharedConfigFile(filepath.Join(paths.varDir, "etc-axonwall", ".interfaces_configured"), configuredStamp, 0664)
 
 	// 3. Write /etc/network/interfaces
 	var ifaces strings.Builder
@@ -1314,48 +1649,33 @@ func persistNetworkInterfaces(cfg NetworkConfig) {
 	}
 
 	// 5th+ interfaces from state.json
-	for _, entry := range extraIfaces {
-		en, hasEn := entry["enabled"].(bool)
-		if hasEn && !en {
+	for _, v := range validExtras {
+		if !v.Enabled || v.Device == "" || writtenDevs[v.Device] {
 			continue
 		}
-		name, _ := entry["name"].(string)
-		devStr := normalizeAssignedDevice(fmt.Sprintf("%v", entry["device"]))
-		if devStr == "" || writtenDevs[devStr] {
-			continue
-		}
-		writtenDevs[devStr] = true
-		modeStr, _ := entry["type"].(string)
-		ipStr, _ := entry["ipv4Address"].(string)
-		gwStr, _ := entry["ipv4Gateway"].(string)
-		ifaces.WriteString(fmt.Sprintf("# %s Interface\nauto %s\n", strings.ToUpper(name), devStr))
-		if modeStr == "static" && ipStr != "" {
-			ipParts := strings.Split(ipStr, "/")
-			ipAddr := ipParts[0]
-			netmask := "255.255.255.0"
-			if len(ipParts) > 1 {
-				if c, err := strconv.Atoi(ipParts[1]); err == nil {
-					netmask = cidrToNetmask(c)
-				}
-			}
-			ifaces.WriteString(fmt.Sprintf("iface %s inet static\n", devStr))
-			ifaces.WriteString(fmt.Sprintf("    address %s\n", ipAddr))
-			ifaces.WriteString(fmt.Sprintf("    netmask %s\n", netmask))
-			if gwStr != "" {
-				ifaces.WriteString(fmt.Sprintf("    gateway %s\n", gwStr))
+		writtenDevs[v.Device] = true
+		ifaces.WriteString(fmt.Sprintf("# %s Interface\nauto %s\n", strings.ToUpper(v.Name), v.Device))
+		if v.Type == "static" && v.IPv4Address != "" {
+			ifaces.WriteString(fmt.Sprintf("iface %s inet static\n", v.Device))
+			ifaces.WriteString(fmt.Sprintf("    address %s\n", v.IPv4IP))
+			ifaces.WriteString(fmt.Sprintf("    netmask %s\n", v.IPv4Netmask))
+			if v.IPv4Gateway != "" {
+				ifaces.WriteString(fmt.Sprintf("    gateway %s\n", v.IPv4Gateway))
 			}
 		} else {
-			ifaces.WriteString(fmt.Sprintf("iface %s inet dhcp\n", devStr))
+			ifaces.WriteString(fmt.Sprintf("iface %s inet dhcp\n", v.Device))
 		}
 		ifaces.WriteString("\n")
 	}
 
-	_ = os.MkdirAll("/etc/network", 0755)
-	_ = os.WriteFile("/etc/network/interfaces", []byte(ifaces.String()), 0644)
-	_ = os.Remove("/etc/network/interfaces.d/axonwall")
+	writeAtomicFile(paths.networkInterfacesPath, []byte(ifaces.String()), 0755, 0644, "")
+	if paths.legacyIfacesDropin != "" {
+		_ = os.Remove(paths.legacyIfacesDropin)
+	}
 
 	// 4. Sync /usr/share/axonwall/lockdown.nft and live nftables anti-lockout rules so configured LAN/OPT interfaces are immediately reachable
-	reconcileConsoleAntiLockoutNft(cfg, extraIfaces)
+	alEnabled, allowedIfaces, alPorts := readAntiLockoutFromStatePaths(paths.etcDir, paths.varDir)
+	reconcileConsoleAntiLockoutNftWithPaths(cfg, keptRawExtras, allowedIfaces, alPorts, alEnabled, paths.lockdownNftPath)
 }
 
 func extractAntiLockoutSettings(alMap map[string]interface{}, validInternal map[string]bool) (bool, []string, []int) {
@@ -1588,13 +1908,177 @@ func formatNftPortSet(ports []int) string {
 	return "{ " + strings.Join(parts, ", ") + " }"
 }
 
+func isNftIdentChar(b byte) bool {
+	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || b == '_'
+}
+
+func skipNftSpaceAndComments(s string, i int) int {
+	for i < len(s) {
+		switch s[i] {
+		case ' ', '\t', '\r', '\n':
+			i++
+		case '#':
+			for i < len(s) && s[i] != '\n' {
+				i++
+			}
+		default:
+			return i
+		}
+	}
+	return i
+}
+
+func skipNftString(s string, i int) int {
+	i++
+	for i < len(s) {
+		if s[i] == '\\' && i+1 < len(s) {
+			i += 2
+			continue
+		}
+		if s[i] == '"' {
+			return i + 1
+		}
+		i++
+	}
+	return i
+}
+
+func findNftMatchingBrace(s string, openIdx int) int {
+	depth := 1
+	i := openIdx + 1
+	for i < len(s) {
+		switch s[i] {
+		case '#':
+			for i < len(s) && s[i] != '\n' {
+				i++
+			}
+		case '"':
+			i = skipNftString(s, i)
+		case '{':
+			depth++
+			i++
+		case '}':
+			depth--
+			if depth == 0 {
+				return i
+			}
+			i++
+		default:
+			i++
+		}
+	}
+	return -1
+}
+
+// updateLockdownWanInterfaces updates ONLY the `set wan_interfaces` block in
+// lockdown.nft, leaving all other sets/chains and their `elements = { ... }`
+// declarations completely untouched.
+func updateLockdownWanInterfaces(content string, elems []string) (string, bool) {
+	blockStart, blockEnd := -1, -1
+	for i := 0; i < len(content); {
+		switch content[i] {
+		case '#':
+			for i < len(content) && content[i] != '\n' {
+				i++
+			}
+			continue
+		case '"':
+			i = skipNftString(content, i)
+			continue
+		}
+		if strings.HasPrefix(content[i:], "set") &&
+			(i == 0 || !isNftIdentChar(content[i-1])) &&
+			i+3 < len(content) && !isNftIdentChar(content[i+3]) {
+			p := skipNftSpaceAndComments(content, i+3)
+			if p > i+3 && strings.HasPrefix(content[p:], "wan_interfaces") &&
+				(p+len("wan_interfaces") == len(content) || !isNftIdentChar(content[p+len("wan_interfaces")])) {
+				openPos := skipNftSpaceAndComments(content, p+len("wan_interfaces"))
+				if openPos < len(content) && content[openPos] == '{' {
+					closePos := findNftMatchingBrace(content, openPos)
+					if closePos != -1 {
+						blockStart = openPos + 1
+						blockEnd = closePos
+						break
+					}
+				}
+			}
+		}
+		i++
+	}
+	if blockStart == -1 || blockEnd == -1 {
+		return content, false
+	}
+
+	body := content[blockStart:blockEnd]
+	newElements := fmt.Sprintf("elements = { %s }", strings.Join(elems, ", "))
+	for j := 0; j < len(body); {
+		switch body[j] {
+		case '#':
+			for j < len(body) && body[j] != '\n' {
+				j++
+			}
+			continue
+		case '"':
+			j = skipNftString(body, j)
+			continue
+		}
+		if strings.HasPrefix(body[j:], "elements") &&
+			(j == 0 || !isNftIdentChar(body[j-1])) &&
+			(j+8 == len(body) || !isNftIdentChar(body[j+8])) {
+			k := skipNftSpaceAndComments(body, j+8)
+			if k < len(body) && body[k] == '=' {
+				k = skipNftSpaceAndComments(body, k+1)
+				if k < len(body) && body[k] == '{' {
+					elemClose := findNftMatchingBrace(body, k)
+					if elemClose != -1 {
+						updatedBody := body[:j] + newElements + body[elemClose+1:]
+						return content[:blockStart] + updatedBody + content[blockEnd:], true
+					}
+				}
+			}
+		}
+		j++
+	}
+
+	if nlIdx := strings.LastIndexByte(body, '\n'); nlIdx != -1 {
+		indent := "        "
+		for _, line := range strings.Split(body, "\n") {
+			trimmed := strings.TrimSpace(line)
+			if trimmed != "" && !strings.HasPrefix(trimmed, "#") {
+				indent = line[:len(line)-len(strings.TrimLeft(line, " \t"))]
+				break
+			}
+		}
+		updatedBody := body[:nlIdx+1] + indent + newElements + "\n" + body[nlIdx+1:]
+		return content[:blockStart] + updatedBody + content[blockEnd:], true
+	}
+	trimmed := strings.TrimSpace(body)
+	var updatedBody string
+	if trimmed == "" {
+		updatedBody = " " + newElements + " "
+	} else if strings.HasSuffix(trimmed, ";") {
+		updatedBody = strings.TrimRight(body, " \t") + " " + newElements + " "
+	} else {
+		updatedBody = strings.TrimRight(body, " \t") + "; " + newElements + " "
+	}
+	return content[:blockStart] + updatedBody + content[blockEnd:], true
+}
+
 func reconcileConsoleAntiLockoutNft(cfg NetworkConfig, extraIfaces []map[string]interface{}) {
 	alEnabled, allowedIfaces, alPorts := readAntiLockoutFromStatePaths("/etc/axonwall", "/var/lib/axonwall")
 	reconcileConsoleAntiLockoutNftWithConfig(cfg, extraIfaces, allowedIfaces, alPorts, alEnabled)
 }
 
 func reconcileConsoleAntiLockoutNftWithConfig(cfg NetworkConfig, extraIfaces []map[string]interface{}, allowedIfaces []string, ports []int, alEnabled bool) {
-	lockdownPath := "/usr/share/axonwall/lockdown.nft"
+	reconcileConsoleAntiLockoutNftWithPaths(cfg, extraIfaces, allowedIfaces, ports, alEnabled, "/usr/share/axonwall/lockdown.nft")
+}
+
+func reconcileConsoleAntiLockoutNftWithPaths(cfg NetworkConfig, extraIfaces []map[string]interface{}, allowedIfaces []string, ports []int, alEnabled bool, lockdownPath string) {
+	cfg.WanDevice = normalizeAssignedDevice(cfg.WanDevice)
+	cfg.LanDevice = normalizeAssignedDevice(cfg.LanDevice)
+	cfg.Opt1Device = normalizeAssignedDevice(cfg.Opt1Device)
+	cfg.Opt2Device = normalizeAssignedDevice(cfg.Opt2Device)
+
 	internalDevs := []struct {
 		role string
 		dev  string
@@ -1607,43 +2091,39 @@ func reconcileConsoleAntiLockoutNftWithConfig(cfg NetworkConfig, extraIfaces []m
 	if cfg.WanDevice != "" {
 		wanDevs = append(wanDevs, cfg.WanDevice)
 	}
-	for _, entry := range extraIfaces {
-		en, hasEn := entry["enabled"].(bool)
-		if hasEn && !en {
+	validExtras, _ := filterAndValidateExtraInterfaces(extraIfaces)
+	for _, v := range validExtras {
+		if !v.Enabled || v.Device == "" {
 			continue
 		}
-		name, _ := entry["name"].(string)
-		devStr := normalizeAssignedDevice(fmt.Sprintf("%v", entry["device"]))
-		if devStr == "" {
-			continue
-		}
-		roleStr, _ := entry["role"].(string)
-		if roleStr == "wan" || (roleStr == "" && strings.HasPrefix(name, "wan")) {
-			wanDevs = append(wanDevs, devStr)
+		if v.Role == "wan" || v.Role == "wan-delegated" {
+			wanDevs = append(wanDevs, v.Device)
 		} else {
 			internalDevs = append(internalDevs, struct {
 				role string
 				dev  string
-			}{name, devStr})
+			}{v.Name, v.Device})
 		}
 	}
 
 	internalSet := make(map[string]bool)
-	internalHasLink := false
 	for _, item := range internalDevs {
 		if item.dev == "" {
 			continue
 		}
 		internalSet[item.dev] = true
-		if cData, cErr := os.ReadFile(filepath.Join("/sys/class/net", item.dev, "carrier")); cErr == nil && strings.TrimSpace(string(cData)) == "1" {
-			internalHasLink = true
+	}
+	wanSet := make(map[string]bool)
+	for _, wDev := range wanDevs {
+		if wDev != "" {
+			wanSet[wDev] = true
 		}
 	}
 
 	if lData, lErr := os.ReadFile(lockdownPath); lErr == nil {
 		content := string(lData)
 		elemList := []string{`"wan0"`}
-		if internalHasLink {
+		if len(internalSet) > 0 {
 			seenWan := map[string]bool{"wan0": true}
 			for _, wDev := range wanDevs {
 				if wDev != "" && !seenWan[wDev] && !internalSet[wDev] {
@@ -1652,17 +2132,9 @@ func reconcileConsoleAntiLockoutNftWithConfig(cfg NetworkConfig, extraIfaces []m
 				}
 			}
 		}
-		newElements := fmt.Sprintf("elements = { %s }", strings.Join(elemList, ", "))
-		var updatedLines []string
-		for _, line := range strings.Split(content, "\n") {
-			if strings.Contains(line, "elements = {") {
-				indent := line[:strings.Index(line, "elements")]
-				updatedLines = append(updatedLines, indent+newElements)
-			} else {
-				updatedLines = append(updatedLines, line)
-			}
+		if updated, ok := updateLockdownWanInterfaces(content, elemList); ok && updated != content {
+			writeAtomicFile(lockdownPath, []byte(updated), 0755, 0644, "")
 		}
-		_ = os.WriteFile(lockdownPath, []byte(strings.Join(updatedLines, "\n")), 0644)
 	}
 
 	// Ensure wan_interfaces set in live nftables does not block LAN/OPT interfaces
@@ -1711,7 +2183,7 @@ func reconcileConsoleAntiLockoutNftWithConfig(cfg NetworkConfig, extraIfaces []m
 		}
 	}
 	for _, entry := range internalDevs {
-		if entry.dev == "" || entry.dev == cfg.WanDevice {
+		if entry.dev == "" || wanSet[entry.dev] {
 			continue
 		}
 		if !allowedSet[strings.ToLower(strings.TrimSpace(entry.role))] {

@@ -5,7 +5,8 @@ import net from 'node:net';
 import http from 'node:http';
 import path from 'node:path';
 import { logger } from '../utils/logger.js';
-import { getCtfSandboxesFile, requireCtfFlagSecret, assertDnsLabel, isValidHostname } from './config.js';
+import { getCtfSandboxesFile, requireCtfFlagSecret, assertDnsLabel, assertCliTarget, isValidHostname } from './config.js';
+import { assertSafeOutboundTarget, createPinnedLookup } from './ssrf.js';
 import { getClusterContextArgs, getKubeExecutionEnv } from './k8s.js';
 
 export const CHALLENGE_CATEGORIES = [
@@ -752,33 +753,61 @@ export async function testChallengeConnection({
   host = '127.0.0.1',
   port = 31337,
   timeoutMs = 2500,
-  category = 'pwn'
+  category = 'pwn',
+  allowPrivate = true,
+  allowLoopback = true,
+  dnsLookup,
+  failOnDnsError
 } = {}) {
+  const cleanHost = assertCliTarget(String(host ?? '127.0.0.1').trim(), 'challenge host');
+  const validPort = assertValidPort(port, 31337);
+  const { hostname: safeHost, addresses } = await assertSafeOutboundTarget(cleanHost, {
+    label: 'challenge host',
+    allowBareHost: true,
+    allowPrivate,
+    allowLoopback,
+    allowMetadata: false,
+    dnsLookup,
+    failOnDnsError
+  });
+  const boundedTimeout = Math.max(50, Math.min(60000, Number.isFinite(Number(timeoutMs)) ? Number(timeoutMs) : 2500));
+  const pinnedLookup = addresses.length > 0 ? createPinnedLookup(addresses) : undefined;
+
   return new Promise((resolve) => {
+    let settled = false;
+    const finish = (payload) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(payload);
+    };
+
     const timer = setTimeout(() => {
-      resolve({ success: false, latencyMs: timeoutMs, message: 'Connection timed out' });
-    }, timeoutMs);
+      socket.destroy();
+      finish({ success: false, latencyMs: boundedTimeout, message: 'Connection timed out' });
+    }, boundedTimeout);
 
     const start = Date.now();
     const socket = new net.Socket();
 
-    socket.setTimeout(timeoutMs);
+    socket.setTimeout(boundedTimeout);
 
-    socket.connect(port, host, () => {
-      clearTimeout(timer);
-      const latencyMs = Date.now() - start;
-      socket.destroy();
-      resolve({
-        success: true,
-        latencyMs,
-        message: `Connected successfully in ${latencyMs}ms (${category.toUpperCase()} port ${port})`
-      });
-    });
+    socket.connect(
+      pinnedLookup ? { port: validPort, host: safeHost, lookup: pinnedLookup } : { port: validPort, host: safeHost },
+      () => {
+        const latencyMs = Date.now() - start;
+        socket.destroy();
+        finish({
+          success: true,
+          latencyMs,
+          message: `Connected successfully in ${latencyMs}ms (${category.toUpperCase()} port ${validPort})`
+        });
+      }
+    );
 
     socket.on('error', (err) => {
-      clearTimeout(timer);
       socket.destroy();
-      resolve({
+      finish({
         success: false,
         latencyMs: Date.now() - start,
         message: `Connection failed: ${err.message}`
@@ -786,11 +815,10 @@ export async function testChallengeConnection({
     });
 
     socket.on('timeout', () => {
-      clearTimeout(timer);
       socket.destroy();
-      resolve({
+      finish({
         success: false,
-        latencyMs: timeoutMs,
+        latencyMs: boundedTimeout,
         message: 'Socket timeout waiting for response'
       });
     });
@@ -962,6 +990,13 @@ export function deriveTeamHmacFlag({ teamId, challengeId, secretKey }) {
   return `VIGILANTE{${challengeId}_${teamId}_${digest}}`;
 }
 
+export function sanitizeSafeTeamId(teamId) {
+  const raw = String(teamId ?? '');
+  const base = raw.toLowerCase().replace(/[^a-z0-9]/g, '') || 'team';
+  const suffix = crypto.createHash('sha256').update(raw).digest('hex').slice(0, 8);
+  return `${base}-${suffix}`;
+}
+
 /**
  * Generate Kubernetes multi-document YAML for an ephemeral team sandbox
  */
@@ -984,7 +1019,7 @@ export function generateEphemeralSandboxManifest({
   if (!isValidHostname(domain)) {
     throw new Error(`Invalid domain '${domain}': expected a dotted hostname`);
   }
-  const safeTeam = teamId.toLowerCase().replace(/[^a-z0-9]/g, '');
+  const safeTeam = sanitizeSafeTeamId(teamId);
   const safeChal = challengeId.toLowerCase().replace(/[^a-z0-9-]/g, '');
   const safeSandbox = String(sandboxId).toLowerCase().replace(/[^a-z0-9-]/g, '-');
   const appName = `${safeTeam}-${safeChal}`;
@@ -1194,7 +1229,7 @@ export async function spawnEphemeralSandbox({
     const dynamicFlag = deriveTeamHmacFlag({ teamId, challengeId, secretKey });
 
     // 5. Build identifiers & timestamps
-    const safeTeam = teamId.toLowerCase().replace(/[^a-z0-9]/g, '');
+    const safeTeam = sanitizeSafeTeamId(teamId);
     const safeChal = challengeId.toLowerCase().replace(/[^a-z0-9-]/g, '');
     const sandboxId = `sbx-${safeTeam}-${safeChal}-${crypto.randomBytes(3).toString('hex')}`;
     const expiresAt = new Date(now + effectiveTtlMinutes * 60 * 1000).toISOString();
@@ -1371,7 +1406,7 @@ export async function reapExpiredSandboxes({
         activeSandboxesRegistry.delete(id);
 
         if (!mock) {
-          const safeTeam = sbx.teamId.toLowerCase().replace(/[^a-z0-9]/g, '');
+          const safeTeam = sanitizeSafeTeamId(sbx.teamId);
           const safeChal = sbx.challengeId.toLowerCase().replace(/[^a-z0-9-]/g, '');
           const appName = `${safeTeam}-${safeChal}`;
           const targetNs = sbx.namespace || namespace;
@@ -1452,7 +1487,7 @@ export async function terminateSandbox({
     await persistSandboxRegistry();
 
     if (!mock) {
-      const safeTeam = targetRecord.teamId.toLowerCase().replace(/[^a-z0-9]/g, '');
+      const safeTeam = sanitizeSafeTeamId(targetRecord.teamId);
       const safeChal = targetRecord.challengeId.toLowerCase().replace(/[^a-z0-9-]/g, '');
       const appName = `${safeTeam}-${safeChal}`;
       const targetNs = targetRecord.namespace || namespace;

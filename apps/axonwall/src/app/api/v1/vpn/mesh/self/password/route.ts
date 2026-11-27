@@ -6,11 +6,14 @@ import { getJwtSecret, SESSION_COOKIE } from '@/server/auth-constants';
 import { assertMeshSelfServicePermitted } from '@/server/auth-guard';
 import { callAgentApiResponse } from '@/server/agent-client';
 import { bumpUserSessionEpoch, stampSessionEpoch } from '@/server/session-revocation';
+import { checkPluginApiGuard } from '@/server/plugin-guard';
 
 export async function POST(req: NextRequest) {
   try {
     const session = await getSession();
     assertMeshSelfServicePermitted(session);
+    const pluginGuard = await checkPluginApiGuard('headscale');
+    if (pluginGuard) return pluginGuard;
 
     if (session.source !== 'local') {
       return NextResponse.json(

@@ -51,7 +51,7 @@ export function compileKeepalived(ha: HighAvailabilityConfig, hostname: string =
     }
 
     if (vrrp.authPassword) {
-      const safePassword = vrrp.authPassword.split(/[\r\n]/)[0].trim().replace(/[\r\n\s]+/g, '').slice(0, 8);
+      const safePassword = vrrp.authPassword.split(/[\r\n]/)[0].trim().replace(/[\r\n\s{}]+/g, '').slice(0, 8);
       if (safePassword) {
         lines.push('    authentication {');
         lines.push('        auth_type PASS');
@@ -396,7 +396,7 @@ export function compileSqliteSyncConfig(ha: HighAvailabilityConfig, localIp: str
     requireSignedPayloads: sync.requireSignedPayloads,
     peerAddress: sync.peerAddress || effectivePeer,
     peerPort: sync.peerPort || sync.listenPort,
-    authToken: sync.authToken || ha.vrrpInstances?.[0]?.authPassword || '',
+    authToken: sync.authToken || '',
     localAddress: localIp,
     autoPromoteHeadscale: true,
     checkpointOnSync: true,

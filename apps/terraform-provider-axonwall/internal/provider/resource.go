@@ -83,6 +83,13 @@ func decodeJSONWithNumbers(raw string) (interface{}, error) {
 	if err := dec.Decode(&v); err != nil {
 		return nil, err
 	}
+	var trailing interface{}
+	if err := dec.Decode(&trailing); err != io.EOF {
+		if err == nil {
+			return nil, fmt.Errorf("unexpected trailing JSON data")
+		}
+		return nil, err
+	}
 	return v, nil
 }
 
@@ -248,18 +255,41 @@ func (r *DesiredStateResource) Read(ctx context.Context, req resource.ReadReques
 			resp.Diagnostics.AddError("Invalid /state response JSON", err.Error())
 			return
 		}
-		if !data.StateJSON.IsNull() && strings.TrimSpace(data.StateJSON.ValueString()) != "" {
-			if existingObj, existingErr := decodeJSONWithNumbers(data.StateJSON.ValueString()); existingErr == nil {
-				projected := projectManagedJSON(existingObj, jsonObj)
-				if !jsonDeepEqual(projected, existingObj) {
-					if normBytes, err := json.Marshal(projected); err == nil {
-						data.StateJSON = types.StringValue(string(normBytes))
-					}
+		if _, ok := jsonObj.(map[string]interface{}); !ok {
+			resp.Diagnostics.AddError("Invalid /state response JSON", "Expected top-level JSON object from /state")
+			return
+		}
+		if !data.StateJSON.IsNull() && !data.StateJSON.IsUnknown() {
+			existingObj, existingErr := decodeJSONWithNumbers(data.StateJSON.ValueString())
+			if existingErr != nil {
+				resp.Diagnostics.AddError(
+					"Invalid prior state_json in Terraform state",
+					fmt.Sprintf("Failed to parse prior state_json for safe field projection; refusing to fall back to unprojected /state response: %s", existingErr),
+				)
+				return
+			}
+			if _, ok := existingObj.(map[string]interface{}); !ok {
+				resp.Diagnostics.AddError(
+					"Invalid prior state_json in Terraform state",
+					"Expected prior state_json to be a JSON object; refusing to fall back to unprojected /state response",
+				)
+				return
+			}
+			projected := projectManagedJSON(existingObj, jsonObj)
+			if !jsonDeepEqual(projected, existingObj) {
+				normBytes, err := json.Marshal(projected)
+				if err != nil {
+					resp.Diagnostics.AddError("Failed to marshal projected state_json", err.Error())
+					return
 				}
-			} else if normBytes, err := json.Marshal(jsonObj); err == nil {
 				data.StateJSON = types.StringValue(string(normBytes))
 			}
-		} else if normBytes, err := json.Marshal(jsonObj); err == nil {
+		} else {
+			normBytes, err := json.Marshal(jsonObj)
+			if err != nil {
+				resp.Diagnostics.AddError("Failed to marshal /state response JSON", err.Error())
+				return
+			}
 			data.StateJSON = types.StringValue(string(normBytes))
 		}
 	}

@@ -401,6 +401,69 @@ func resolveSetElements(s *NftSetSpec) error {
 	return nil
 }
 
+// stripUnquotedNftComment removes trailing `# ...` comments outside double quotes.
+func stripUnquotedNftComment(s string) string {
+	inQuote := false
+	escaped := false
+	for i := 0; i < len(s); i++ {
+		ch := s[i]
+		if inQuote {
+			if escaped {
+				escaped = false
+				continue
+			}
+			if ch == '\\' {
+				escaped = true
+				continue
+			}
+			if ch == '"' {
+				inQuote = false
+			}
+			continue
+		}
+		if ch == '"' {
+			inQuote = true
+			continue
+		}
+		if ch == '#' {
+			return strings.TrimSpace(s[:i])
+		}
+	}
+	return s
+}
+
+// countBraceDelta counts unquoted '{' and '}' characters in a comment-stripped line.
+func countBraceDelta(s string) (opens, closes int) {
+	inQuote := false
+	escaped := false
+	for i := 0; i < len(s); i++ {
+		ch := s[i]
+		if inQuote {
+			if escaped {
+				escaped = false
+				continue
+			}
+			if ch == '\\' {
+				escaped = true
+				continue
+			}
+			if ch == '"' {
+				inQuote = false
+			}
+			continue
+		}
+		switch ch {
+		case '"':
+			inQuote = true
+		case '{':
+			opens++
+		case '}':
+			closes++
+		}
+	}
+	return opens, closes
+}
+
 // CompileNftScriptToNetlinkBatch parses an Axonwall nftables script (emergency lockdown or
 // satellite/edge-ngfw policy) into an atomic sequence of NETLINK_NETFILTER messages.
 // It requires zero userland binaries (/usr/sbin/nft) or C libraries.
@@ -411,6 +474,8 @@ func CompileNftScriptToNetlinkBatch(script string) (*NftCompiledBatch, error) {
 
 	lines := strings.Split(script, "\n")
 	inTable := false
+	tableSeen := false
+	braceDepth := 0
 	inSet := ""
 	var curSet NftSetSpec
 	inFlowtable := ""
@@ -422,23 +487,61 @@ func CompileNftScriptToNetlinkBatch(script string) (*NftCompiledBatch, error) {
 	var elemBuf strings.Builder
 
 	for _, rawLine := range lines {
-		line := strings.TrimSpace(rawLine)
-		if line == "" || strings.HasPrefix(line, "#") || line == "flush ruleset" {
+		line := stripUnquotedNftComment(strings.TrimSpace(rawLine))
+		if line == "" {
+			continue
+		}
+		if !tableSeen && line == "flush ruleset" {
 			continue
 		}
 
-		// Strip inline comments if outside quotes
-		if strings.HasPrefix(line, "table inet ") {
-			fields := strings.Fields(line)
-			if len(fields) >= 3 {
-				batch.TableName = strings.TrimSuffix(fields[2], "{")
-			}
-			inTable = true
-			continue
-		}
+		opens, closes := countBraceDelta(line)
 
 		if !inTable {
-			continue
+			fields := strings.Fields(line)
+			if len(fields) > 0 && fields[0] == "table" {
+				if tableSeen {
+					return nil, fmt.Errorf("multi-table nftables scripts are not supported in native netlink compiler")
+				}
+				if len(fields) < 3 || fields[1] != "inet" || strings.HasPrefix(fields[2], "{") {
+					return nil, fmt.Errorf("non-inet nftables table %q is not supported in native netlink compiler", line)
+				}
+				tableName := strings.TrimSuffix(fields[2], "{")
+				if tableName == "" {
+					return nil, fmt.Errorf("missing table name in %q", line)
+				}
+				if opens == 0 {
+					return nil, fmt.Errorf("expected '{' opening table %q in %q", tableName, line)
+				}
+				braceDepth += opens - closes
+				if braceDepth < 0 {
+					return nil, fmt.Errorf("unexpected '}' in table declaration %q", line)
+				}
+				if braceDepth == 0 {
+					openIdx := strings.Index(line, "{")
+					closeIdx := strings.LastIndex(line, "}")
+					if openIdx >= 0 && closeIdx > openIdx && strings.TrimSpace(line[openIdx+1:closeIdx]) != "" {
+						return nil, fmt.Errorf("single-line populated table %q requires nft binary fallback", tableName)
+					}
+					batch.TableName = tableName
+					tableSeen = true
+					inTable = false
+					continue
+				}
+				if openIdx := strings.Index(line, "{"); openIdx >= 0 && strings.TrimSpace(line[openIdx+1:]) != "" {
+					return nil, fmt.Errorf("unexpected inline statement after table open in %q", line)
+				}
+				batch.TableName = tableName
+				tableSeen = true
+				inTable = true
+				continue
+			}
+			return nil, fmt.Errorf("unexpected top-level statement outside inet table in native netlink compiler: %q", line)
+		}
+
+		braceDepth += opens - closes
+		if braceDepth < 0 {
+			return nil, fmt.Errorf("unexpected '}' in nftables script at %q", line)
 		}
 
 		if inSet != "" {
@@ -452,13 +555,15 @@ func CompileNftScriptToNetlinkBatch(script string) (*NftCompiledBatch, error) {
 					curSet.ElementSpecs = append(curSet.ElementSpecs, splitSetElementEntries(elemBuf.String())...)
 					elemBuf.Reset()
 					inElements = false
-					// A trailing "}" on the same line closes the set itself.
-					if strings.TrimSpace(line[idx+1:]) == "}" {
+					if braceDepth <= 1 {
 						if err := resolveSetElements(&curSet); err != nil {
 							return nil, fmt.Errorf("set %s: %w", curSet.Name, err)
 						}
 						batch.Sets = append(batch.Sets, curSet)
 						inSet = ""
+						if braceDepth == 0 {
+							inTable = false
+						}
 					}
 				} else {
 					elemBuf.WriteString(line)
@@ -466,12 +571,29 @@ func CompileNftScriptToNetlinkBatch(script string) (*NftCompiledBatch, error) {
 				}
 				continue
 			}
-			if line == "}" {
+			if braceDepth <= 1 && (line == "}" || strings.HasSuffix(line, "}")) {
+				if strings.HasPrefix(line, "elements") {
+					rest := strings.TrimSpace(strings.TrimPrefix(line, "elements"))
+					rest = strings.TrimSpace(strings.TrimPrefix(rest, "="))
+					openIdx := strings.Index(rest, "{")
+					if openIdx < 0 {
+						return nil, fmt.Errorf("set %s: malformed elements line %q", curSet.Name, line)
+					}
+					rest = rest[openIdx+1:]
+					if closeIdx := strings.Index(rest, "}"); closeIdx >= 0 {
+						curSet.ElementSpecs = append(curSet.ElementSpecs, splitSetElementEntries(rest[:closeIdx])...)
+					}
+				} else if line != "}" && strings.TrimSpace(strings.ReplaceAll(line, " ", "")) != "}}" {
+					return nil, fmt.Errorf("set %s: unexpected closing line %q", curSet.Name, line)
+				}
 				if err := resolveSetElements(&curSet); err != nil {
 					return nil, fmt.Errorf("set %s: %w", curSet.Name, err)
 				}
 				batch.Sets = append(batch.Sets, curSet)
 				inSet = ""
+				if braceDepth == 0 {
+					inTable = false
+				}
 				continue
 			}
 			if strings.HasPrefix(line, "type ") {
@@ -519,6 +641,9 @@ func CompileNftScriptToNetlinkBatch(script string) (*NftCompiledBatch, error) {
 						}
 						batch.Sets = append(batch.Sets, curSet)
 						inSet = ""
+						if braceDepth == 0 {
+							inTable = false
+						}
 					}
 				} else {
 					elemBuf.WriteString(rest)
@@ -530,10 +655,16 @@ func CompileNftScriptToNetlinkBatch(script string) (*NftCompiledBatch, error) {
 		}
 
 		if inFlowtable != "" {
-			if line == "}" {
+			if braceDepth <= 1 && (line == "}" || strings.TrimSpace(strings.ReplaceAll(line, " ", "")) == "}}") {
 				batch.Flowtables = append(batch.Flowtables, curFt)
 				inFlowtable = ""
+				if braceDepth == 0 {
+					inTable = false
+				}
 				continue
+			}
+			if braceDepth < 2 {
+				return nil, fmt.Errorf("flowtable %s: unexpected brace nesting on %q", curFt.Name, line)
 			}
 			if strings.HasPrefix(line, "hook ") {
 				curFt.HookNum = nfNetdevIngress
@@ -557,10 +688,19 @@ func CompileNftScriptToNetlinkBatch(script string) (*NftCompiledBatch, error) {
 		}
 
 		if inChain != "" {
-			if line == "}" {
+			if braceDepth <= 1 && (line == "}" || strings.TrimSpace(strings.ReplaceAll(line, " ", "")) == "}}") {
 				batch.Chains = append(batch.Chains, curChain)
 				inChain = ""
+				if braceDepth == 0 {
+					inTable = false
+				}
 				continue
+			}
+			if braceDepth > 2 {
+				return nil, fmt.Errorf("chain %s: multi-line block %q requires nft binary fallback", curChain.Name, line)
+			}
+			if braceDepth < 2 {
+				return nil, fmt.Errorf("chain %s: unexpected brace nesting on %q", curChain.Name, line)
 			}
 			if strings.HasPrefix(line, "type ") && strings.Contains(line, "hook ") {
 				parseChainHeader(line, &curChain)
@@ -574,42 +714,101 @@ func CompileNftScriptToNetlinkBatch(script string) (*NftCompiledBatch, error) {
 			continue
 		}
 
+		if line == "}" {
+			if braceDepth != 0 {
+				return nil, fmt.Errorf("unexpected brace depth %d on table close", braceDepth)
+			}
+			inTable = false
+			continue
+		}
+
 		if strings.HasPrefix(line, "set ") {
 			fields := strings.Fields(line)
-			if len(fields) >= 2 {
-				inSet = strings.TrimSuffix(fields[1], "{")
-				curSet = NftSetSpec{
-					Name:  inSet,
-					SetID: nextSetID,
+			if len(fields) < 2 || opens == 0 {
+				return nil, fmt.Errorf("malformed set declaration %q", line)
+			}
+			setName := strings.TrimSuffix(fields[1], "{")
+			if setName == "" {
+				return nil, fmt.Errorf("missing set name in %q", line)
+			}
+			curSet = NftSetSpec{
+				Name:  setName,
+				SetID: nextSetID,
+			}
+			nextSetID++
+			if braceDepth == 1 {
+				openIdx := strings.Index(line, "{")
+				closeIdx := strings.LastIndex(line, "}")
+				if openIdx >= 0 && closeIdx > openIdx && strings.TrimSpace(line[openIdx+1:closeIdx]) != "" {
+					return nil, fmt.Errorf("single-line populated set %q requires nft binary fallback", setName)
 				}
-				nextSetID++
+				batch.Sets = append(batch.Sets, curSet)
+			} else {
+				inSet = setName
 			}
 			continue
 		}
 
 		if strings.HasPrefix(line, "flowtable ") {
 			fields := strings.Fields(line)
-			if len(fields) >= 2 {
-				inFlowtable = strings.TrimSuffix(fields[1], "{")
-				curFt = NftFlowtableSpec{
-					Name: inFlowtable,
+			if len(fields) < 2 || opens == 0 {
+				return nil, fmt.Errorf("malformed flowtable declaration %q", line)
+			}
+			ftName := strings.TrimSuffix(fields[1], "{")
+			if ftName == "" {
+				return nil, fmt.Errorf("missing flowtable name in %q", line)
+			}
+			curFt = NftFlowtableSpec{
+				Name: ftName,
+			}
+			if braceDepth == 1 {
+				openIdx := strings.Index(line, "{")
+				closeIdx := strings.LastIndex(line, "}")
+				if openIdx >= 0 && closeIdx > openIdx && strings.TrimSpace(line[openIdx+1:closeIdx]) != "" {
+					return nil, fmt.Errorf("single-line populated flowtable %q requires nft binary fallback", ftName)
 				}
+				batch.Flowtables = append(batch.Flowtables, curFt)
+			} else {
+				inFlowtable = ftName
 			}
 			continue
 		}
 
 		if strings.HasPrefix(line, "chain ") {
 			fields := strings.Fields(line)
-			if len(fields) >= 2 {
-				inChain = strings.TrimSuffix(fields[1], "{")
-				curChain = NftChainSpec{
-					Name:   inChain,
-					Type:   "filter",
-					Policy: nfAccept,
+			if len(fields) < 2 || opens == 0 {
+				return nil, fmt.Errorf("malformed chain declaration %q", line)
+			}
+			chainName := strings.TrimSuffix(fields[1], "{")
+			if chainName == "" {
+				return nil, fmt.Errorf("missing chain name in %q", line)
+			}
+			curChain = NftChainSpec{
+				Name:   chainName,
+				Type:   "filter",
+				Policy: nfAccept,
+			}
+			if braceDepth == 1 {
+				openIdx := strings.Index(line, "{")
+				closeIdx := strings.LastIndex(line, "}")
+				if openIdx >= 0 && closeIdx > openIdx && strings.TrimSpace(line[openIdx+1:closeIdx]) != "" {
+					return nil, fmt.Errorf("single-line populated chain %q requires nft binary fallback", chainName)
 				}
+				batch.Chains = append(batch.Chains, curChain)
+			} else {
+				inChain = chainName
 			}
 			continue
 		}
+
+		return nil, fmt.Errorf("unsupported table-level statement %q in native netlink compiler", line)
+	}
+
+	if braceDepth != 0 || inTable || inSet != "" || inFlowtable != "" || inChain != "" {
+		return nil, fmt.Errorf("unterminated block in nftables script (brace depth %d)", braceDepth)
+	}
+	if !tableSeen {
+		return nil, fmt.Errorf("nftables script contained no table inet block")
 	}
 
 	if len(batch.Chains) == 0 {
@@ -911,9 +1110,14 @@ func compileRuleTokens(chainName, line string, spec NftRuleSpec, tokens []string
 				return spec, fmt.Errorf("incomplete ip match")
 			}
 			target := tokens[valIdx]
-			offset := uint32(12) // IPv4 saddr offset
-			if field == "daddr" {
+			var offset uint32
+			switch field {
+			case "saddr":
+				offset = 12 // IPv4 saddr offset
+			case "daddr":
 				offset = 16 // IPv4 daddr offset
+			default:
+				return spec, fmt.Errorf("unsupported ip field %q (want saddr or daddr)", field)
 			}
 			exprs = append(exprs,
 				buildExprMetaLoad(nftMetaNFProto, nftReg1),
@@ -957,9 +1161,14 @@ func compileRuleTokens(chainName, line string, spec NftRuleSpec, tokens []string
 				return spec, fmt.Errorf("incomplete ip6 match")
 			}
 			target := tokens[valIdx]
-			offset := uint32(8) // IPv6 saddr offset
-			if field == "daddr" {
+			var offset uint32
+			switch field {
+			case "saddr":
+				offset = 8 // IPv6 saddr offset
+			case "daddr":
 				offset = 24 // IPv6 daddr offset
+			default:
+				return spec, fmt.Errorf("unsupported ip6 field %q (want saddr or daddr)", field)
 			}
 			exprs = append(exprs,
 				buildExprMetaLoad(nftMetaNFProto, nftReg1),
@@ -1039,9 +1248,14 @@ func compileRuleTokens(chainName, line string, spec NftRuleSpec, tokens []string
 			}
 			if metaKey == "nfproto" {
 				nfTok := tokens[valIdx]
-				var nfNum byte = nfprotoIPv6
-				if nfTok == "ipv4" || nfTok == "ip" {
+				var nfNum byte
+				switch nfTok {
+				case "ipv4", "ip":
 					nfNum = nfprotoIPv4
+				case "ipv6":
+					nfNum = nfprotoIPv6
+				default:
+					return spec, fmt.Errorf("unsupported meta nfproto %q (want ipv4 or ipv6)", nfTok)
 				}
 				exprs = append(exprs,
 					buildExprMetaLoad(nftMetaNFProto, nftReg1),
@@ -1126,6 +1340,15 @@ func compileRuleTokens(chainName, line string, spec NftRuleSpec, tokens []string
 				protoNum = byte(syscall.IPPROTO_UDP)
 			}
 			portField := tokens[i+1]
+			var offset uint32
+			switch portField {
+			case "sport":
+				offset = 0 // sport offset in TCP/UDP header
+			case "dport":
+				offset = 2 // dport offset in TCP/UDP header
+			default:
+				return spec, fmt.Errorf("unsupported %s field %q (want sport or dport)", tok, portField)
+			}
 			op, valIdx := parseCmpOpToken(tokens, i+2)
 			if valIdx >= len(tokens) {
 				return spec, fmt.Errorf("incomplete %s port match", tok)
@@ -1133,10 +1356,6 @@ func compileRuleTokens(chainName, line string, spec NftRuleSpec, tokens []string
 			portVal, err := strconv.Atoi(tokens[valIdx])
 			if err != nil || portVal < 1 || portVal > 65535 {
 				return spec, fmt.Errorf("invalid port %q", tokens[valIdx])
-			}
-			offset := uint32(2) // dport offset in TCP/UDP header
-			if portField == "sport" {
-				offset = 0
 			}
 			var portBytes [2]byte
 			binary.BigEndian.PutUint16(portBytes[:], uint16(portVal))

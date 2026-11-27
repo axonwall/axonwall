@@ -3,6 +3,7 @@ import { getSession } from '@/server/auth';
 import { assertActionPermitted } from '@/server/auth-guard';
 import { callAgentApiResponse } from '@/server/agent-client';
 import { resolveHeadscaleNetworkInfo } from '@/server/headscale-network';
+import { checkPluginApiGuard } from '@/server/plugin-guard';
 
 export const dynamic = 'force-dynamic';
 
@@ -10,6 +11,8 @@ export async function GET(req: NextRequest) {
   try {
     const session = await getSession();
     assertActionPermitted(session, 'admin');
+    const guard = await checkPluginApiGuard('headscale');
+    if (guard) return guard;
 
     const network = await resolveHeadscaleNetworkInfo(req);
     return NextResponse.json({ status: 'ok', data: network });
@@ -27,6 +30,8 @@ export async function POST(req: NextRequest) {
   try {
     const session = await getSession();
     assertActionPermitted(session, 'admin');
+    const guard = await checkPluginApiGuard('headscale');
+    if (guard) return guard;
 
     const body = await req.json().catch(() => ({}));
     const serverUrl = typeof body?.serverUrl === 'string' ? body.serverUrl.trim() : '';

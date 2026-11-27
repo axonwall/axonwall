@@ -1,3 +1,7 @@
+{{- $iface := required "interface is required" .Values.interface -}}
+{{- if not (regexMatch "^[a-zA-Z0-9_.:-]+$" $iface) -}}
+{{- fail (printf "invalid network interface name %q" $iface) -}}
+{{- end -}}
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
@@ -16,45 +20,72 @@ spec:
         app.kubernetes.io/name: {{ include "zeek.name" . }}
         app.kubernetes.io/instance: {{ .Release.Name }}
     spec:
+      automountServiceAccountToken: false
       hostNetwork: true
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
       containers:
         - name: zeek
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          workingDir: /usr/local/zeek/logs
           securityContext:
+            allowPrivilegeEscalation: false
             capabilities:
+              drop:
+                - ALL
               add:
                 - NET_ADMIN
                 - NET_RAW
           command:
-            - /bin/sh
-            - -c
-            - |
-              echo "[zeek] Starting in mirrored mode on {{ .Values.interface }}..."
-              mkdir -p /usr/local/zeek/logs /pcap-spool
-              {{- if .Values.pcapSpool.enabled }}
-              # Background watcher to replay PCAPs dropped into spool directory
-              (while true; do
-                for f in /pcap-spool/*.pcap /pcap-spool/*.pcapng; do
-                  if [ -f "$f" ]; then
-                    echo "[zeek:pcap] Replaying $f..."
-                    cd /usr/local/zeek/logs && zeek -r "$f" local || true
-                    mv "$f" "$f.processed"
-                  fi
-                done
-                sleep 2
-              done) &
-              {{- end }}
-              cd /usr/local/zeek/logs && exec zeek -i {{ .Values.interface }} local
+            - zeek
+          args:
+            - -i
+            - {{ $iface | quote }}
+            - local
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
           volumeMounts:
             - mountPath: /usr/local/zeek/logs
               name: zeek-logs
-            {{- if .Values.pcapSpool.enabled }}
+        {{- if .Values.pcapSpool.enabled }}
+        - name: pcap-spooler
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          workingDir: /usr/local/zeek/logs
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          command:
+            - /bin/sh
+            - -c
+            - |
+              mkdir -p /usr/local/zeek/logs /pcap-spool
+              while true; do
+                for f in /pcap-spool/*.pcap /pcap-spool/*.pcapng; do
+                  if [ -f "$f" ]; then
+                    echo "[zeek:pcap] Replaying $f..."
+                    zeek -r "$f" local || true
+                    mv "$f" "$f.processed"
+                  fi
+                done
+                sleep 2
+              done
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          volumeMounts:
+            - mountPath: /usr/local/zeek/logs
+              name: zeek-logs
             - mountPath: /pcap-spool
               name: pcap-spool
-            {{- end }}
+        {{- end }}
       volumes:
         - name: zeek-logs
           emptyDir: {}

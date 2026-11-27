@@ -21,15 +21,34 @@ spec:
       serviceAccountName: {{ include "vigil.serviceAccountName" . }}
       {{- include "vigil.imagePullSecrets" . | nindent 6 }}
       securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
         fsGroup: 999
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: redis
           image: "{{ .Values.redis.image.repository }}:{{ .Values.redis.image.tag }}"
           imagePullPolicy: {{ .Values.redis.image.pullPolicy | default "IfNotPresent" }}
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          {{- if .Values.redis.auth.enabled }}
+          env:
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "vigil.redis.passwordSecret" . }}
+                  key: {{ include "vigil.redis.passwordSecretKey" . }}
+          {{- end }}
           command:
             - redis-server
           args:
             {{- toYaml .Values.redis.args | nindent 12 }}
+            {{- if .Values.redis.auth.enabled }}
+            - --requirepass
+            - $(REDIS_PASSWORD)
+            {{- end }}
           ports:
             - name: redis
               containerPort: 6379
@@ -39,19 +58,36 @@ spec:
           readinessProbe:
             exec:
               command:
+                {{- if .Values.redis.auth.enabled }}
+                - /bin/sh
+                - -c
+                - REDISCLI_AUTH="$REDIS_PASSWORD" redis-cli ping
+                {{- else }}
                 - redis-cli
                 - ping
+                {{- end }}
             initialDelaySeconds: 5
             periodSeconds: 5
           livenessProbe:
             exec:
               command:
+                {{- if .Values.redis.auth.enabled }}
+                - /bin/sh
+                - -c
+                - REDISCLI_AUTH="$REDIS_PASSWORD" redis-cli ping
+                {{- else }}
                 - redis-cli
                 - ping
+                {{- end }}
             initialDelaySeconds: 30
             periodSeconds: 10
           resources:
             {{- toYaml .Values.redis.resources | nindent 12 }}
+      {{- if not .Values.redis.persistence.enabled }}
+      volumes:
+        - name: data
+          emptyDir: {}
+      {{- end }}
   {{- if .Values.redis.persistence.enabled }}
   volumeClaimTemplates:
     - metadata:

@@ -3,7 +3,7 @@ name: bloodhound
 description: BloodHound Community Edition (CE) Active Directory & Cloud Attack Path Graph Analysis
 type: application
 version: 0.1.0
-appVersion: "latest"
+appVersion: "6.3.0"
 keywords:
   - security
   - active-directory

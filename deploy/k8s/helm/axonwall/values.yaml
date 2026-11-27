@@ -5,6 +5,8 @@ image:
   repository: ghcr.io/axonwall/axonwall-ui
   pullPolicy: IfNotPresent
   tag: "v0.16.3"
+  # Pin immutable sha256:... digest in production deployments
+  digest: ""
 
 service:
   type: ClusterIP
@@ -24,6 +26,8 @@ nodeFirewall:
   image:
     repository: ghcr.io/axonwall/axonwalld
     tag: "v0.16.3"
+    # Pin immutable sha256:... digest in production deployments
+    digest: ""
 
 database:
   embedded: true
@@ -34,7 +38,7 @@ ldap:
   embedded: true
   host: "axonwall-ldap"
   baseDn: "dc=axonwall,dc=internal"
-  port: 389
+  port: 636
 
 observability:
   victoriaMetrics:

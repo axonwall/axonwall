@@ -3,6 +3,9 @@ package engine
 import (
 	"encoding/binary"
 	"net"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -204,5 +207,58 @@ func TestFlowStoreZstdChunkingFQLAndAlertingEndToEnd(t *testing.T) {
 	}
 	if res.TotalMatchedFlows != 2 {
 		t.Fatalf("expected 2 flows matching FQL on reloaded zstd store, got %d", res.TotalMatchedFlows)
+	}
+}
+
+func TestNetFlowHTTPClientsHardening(t *testing.T) {
+	var targetHits int
+	targetSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		targetHits++
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer targetSrv.Close()
+
+	redirSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, targetSrv.URL+"/redirected", http.StatusFound)
+	}))
+	defer redirSrv.Close()
+
+	mgr := NewNetFlowManager(t.TempDir(), nil, nil, nil, nil, nil)
+	metaClient, err := mgr.getMetadataHTTPClient(&NetFlowRuntimeBundle{}, targetSrv.URL)
+	if err != nil {
+		t.Fatalf("getMetadataHTTPClient: %v", err)
+	}
+	if _, err := metaClient.Get(targetSrv.URL); err == nil {
+		t.Fatal("expected metadata HTTP client to block loopback by default")
+	}
+	if _, err := metaClient.Get("http://169.254.169.254/latest/meta-data/"); err == nil {
+		t.Fatal("expected metadata HTTP client to block IMDS")
+	}
+
+	mgr.SetAllowLoopbackHTTPForTest(true)
+	metaLoopbackClient, err := mgr.getMetadataHTTPClient(&NetFlowRuntimeBundle{}, redirSrv.URL)
+	if err != nil {
+		t.Fatalf("getMetadataHTTPClient loopback: %v", err)
+	}
+	resp, err := metaLoopbackClient.Get(redirSrv.URL)
+	if err != nil {
+		t.Fatalf("expected unfollowed 302 from metadata client, got: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusFound || targetHits != 0 {
+		t.Fatalf("expected metadata client not to follow redirect (status=%d, targetHits=%d)", resp.StatusCode, targetHits)
+	}
+
+	if err := postAlertWebhookWithClient(targetSrv.URL, NetFlowAlertRulePayload{ID: "r1"}, "1.2.3.4", "test", nil); err == nil || !strings.Contains(err.Error(), "loopback") {
+		t.Fatalf("expected alert webhook default client to block loopback, got: %v", err)
+	}
+	if err := postNetflowReportWebhookWithClient(targetSrv.URL, NetFlowReportResponse{}, nil); err == nil || !strings.Contains(err.Error(), "loopback") {
+		t.Fatalf("expected report webhook default client to block loopback, got: %v", err)
+	}
+	if err := postAlertWebhookWithClient(redirSrv.URL, NetFlowAlertRulePayload{ID: "r1"}, "1.2.3.4", "test", metaLoopbackClient); err != nil {
+		t.Fatalf("expected non-followed 302 on alert webhook, got: %v", err)
+	}
+	if targetHits != 0 {
+		t.Fatalf("expected redirect target never reached by alert webhook, got %d hits", targetHits)
 	}
 }

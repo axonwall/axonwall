@@ -25,8 +25,10 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+const defaultCoreURL = "wss://axonwall.local:2966/ws/satellite"
+
 var (
-	coreURL           = flag.String("core", "wss://axonwall.local:2966/ws/satellite", "URL of the Axonwall Core Hub")
+	coreURL           = flag.String("core", defaultCoreURL, "URL of the Axonwall Core Hub")
 	token             = flag.String("token", "", "Zero-Touch Provisioning (ZTP) Token")
 	satID             = flag.String("id", "", "Satellite Hardware ID (MAC or Serial)")
 	watchdogTimeout   = flag.Int("watchdog", 60, "Watchdog timeout in seconds before rolling back nftables")
@@ -187,6 +189,9 @@ func main() {
 
 	// Super-Slim Edge NGFW PID 1 (/init) bootstrap
 	var bootCfg engine.EdgeBootConfig
+	var pid1Deps pid1BootstrapDeps
+	var baselineScript string
+	var baselineApplied bool
 	if engine.IsPID1() || *pid1Mode {
 		var err error
 		bootCfg, err = engine.BootstrapPID1()
@@ -195,64 +200,24 @@ func main() {
 		}
 		_ = netEngine.BringUpLoopback()
 
-		// If neither /proc/cmdline nor local Cloud-Init cidata specified interfaces,
-		// automatically discover the primary NIC (e.g. eth0) and acquire a DHCPv4 lease
-		// so the appliance can reach Cloud IMDS (169.254.169.254) and the Axonwall Hub.
-		if len(bootCfg.Interfaces) == 0 {
-			if primaryNIC := engine.DiscoverPrimaryNIC("/sys/class/net"); primaryNIC != "" {
-				slog.Info("No static boot interfaces specified; auto-configuring primary NIC via DHCPv4", "device", primaryNIC)
-				bootCfg.Interfaces = append(bootCfg.Interfaces, engine.EdgeInterfaceSpec{
-					Name:    "wan",
-					Device:  primaryNIC,
-					Address: "dhcp",
-					MTU:     1500,
-					Enabled: true,
-				})
-			}
-		}
+		pid1Deps = defaultPID1BootstrapDeps(netEngine, nftEngine)
 
-		for _, iface := range bootCfg.Interfaces {
-			if err := netEngine.ConfigureInterface(iface); err != nil {
-				slog.Warn("Boot interface config warning", "device", iface.Device, "error", err)
-			}
+		// Apply a fail-closed baseline nftables ruleset BEFORE bringing up WAN DHCPv4
+		// or probing link-local IMDS so unsolicited inbound traffic is dropped while
+		// bootstrapping, and pre-existing firewall policy (/etc/nftables.conf) is active.
+		baselineHubURL := *coreURL
+		if bootCfg.HubURL != "" && *coreURL == defaultCoreURL {
+			baselineHubURL = bootCfg.HubURL
 		}
-		for _, rt := range bootCfg.Routes {
-			if err := netEngine.AddRoute(rt); err != nil {
-				slog.Warn("Boot route config warning", "destination", rt.Destination, "error", err)
-			}
-		}
+		baselineScript, baselineApplied = applyPID1BaselineNft(baselineHubURL, pid1Deps)
 
-		// If local Cloud-Init seed was not present (or did not supply a ZTP token),
-		// probe Cloud IMDS HTTP metadata (OpenStack, AWS IMDSv2/v1, GCP, Azure) at 169.254.169.254.
-		if bootCfg.CloudInitSource == "" || bootCfg.ZtpToken == "" {
-			imdsCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			if imdsPayload, ok := engine.FetchIMDSCloudInit(imdsCtx, "http://169.254.169.254"); ok {
-				bootCfg.CloudInitSource = imdsPayload.Datasource
-				if err := engine.MergeCloudInitIntoBootConfig(&bootCfg, imdsPayload, "/"); err != nil {
-					slog.Warn("Cloud-Init IMDS merge warning", "source", imdsPayload.Datasource, "error", err)
-				} else {
-					slog.Info("Applied autonomous Cloud-Init IMDS configuration", "source", imdsPayload.Datasource, "id", bootCfg.SatelliteID, "hostname", bootCfg.Hostname)
-					if bootCfg.Hostname != "" {
-						_ = syscall.Sethostname([]byte(bootCfg.Hostname))
-					} else if bootCfg.SatelliteID != "" {
-						_ = syscall.Sethostname([]byte(bootCfg.SatelliteID))
-					}
-					for _, iface := range bootCfg.Interfaces {
-						_ = netEngine.ConfigureInterface(iface)
-					}
-					for _, rt := range bootCfg.Routes {
-						_ = netEngine.AddRoute(rt)
-					}
-				}
-			}
-			cancel()
-		}
+		bootstrapPID1InterfacesAndIMDS(&bootCfg, *coreURL, *token, pid1Deps)
 	} else if cmdlineBytes, err := os.ReadFile("/proc/cmdline"); err == nil {
 		bootCfg = engine.ParseKernelCmdline(string(cmdlineBytes))
 	}
 
 	// Apply /proc/cmdline & Cloud-Init parameters when CLI flags were not explicitly set
-	if bootCfg.HubURL != "" && *coreURL == "wss://axonwall.local:2966/ws/satellite" {
+	if bootCfg.HubURL != "" && *coreURL == defaultCoreURL {
 		*coreURL = bootCfg.HubURL
 	}
 	if *satID == "" && bootCfg.SatelliteID != "" {
@@ -282,28 +247,7 @@ func main() {
 	}
 
 	if engine.IsPID1() || *pid1Mode {
-		// Load Cloud-Init baseline router ruleset (/etc/nftables.conf) if provisioned,
-		// falling back to the fail-closed emergency lockdown ruleset before connecting to Hub.
-		// Forwarding stays disabled (fail-closed) unless a filtering ruleset loads.
-		initialScript := engine.BuildEmergencyLockdownNft(*coreURL)
-		if ciNftBytes, err := os.ReadFile("/etc/nftables.conf"); err == nil && hasNonCommentForwardChain(string(ciNftBytes)) {
-			initialScript = string(ciNftBytes)
-			slog.Info("Loading Cloud-Init baseline router nftables ruleset from /etc/nftables.conf")
-		}
-		if err := nftEngine.Apply(initialScript); err != nil {
-			slog.Error("Initial nftables ruleset failed; keeping IP forwarding disabled", "error", err)
-			_ = engine.SetForwarding("", false)
-		} else {
-			nftEngine.Confirm()
-			// B-H1 (round 3): a full ruleset Apply replaces the
-			// table, so it also wipes any fleet-block set elements.
-			// Re-insert the persisted TTL-bounded blocks (and
-			// re-arm their expiry timers) after every Apply.
-			nftEngine.RestoreFleetBlocks()
-			if err := engine.SetForwarding("", true); err != nil {
-				slog.Warn("Failed to enable IP forwarding", "error", err)
-			}
-		}
+		finalizePID1Nft(*coreURL, baselineScript, baselineApplied, pid1Deps)
 	}
 
 	slog.Info("Starting Axonwall Satellite / Edge NGFW Agent", "version", "0.16.3", "id", *satID, "pid1", engine.IsPID1() || *pid1Mode)
@@ -658,7 +602,7 @@ func main() {
 					if err := json.Unmarshal(env.Payload, &hsCfg); err != nil {
 						slog.Error("Malformed Headscale sync payload", "error", err)
 						sendAck(env.Type, env.CommandID, err)
-					} else if hsCfg.AuthKey == "" {
+					} else if strings.TrimSpace(hsCfg.AuthKey) == "" {
 						sendAck(env.Type, env.CommandID, errors.New("missing Headscale authKey"))
 					} else {
 						hsURL := strings.TrimSpace(hsCfg.ServerURL)
@@ -682,8 +626,7 @@ func main() {
 						// killed and the failure is acked to the hub
 						// instead of stalling the session.
 						hsCtx, hsCancel := context.WithTimeout(context.Background(), 30*time.Second)
-						cmd := exec.CommandContext(hsCtx, "tailscale", "up", "--login-server="+hsURL, "--authkey="+hsKey, "--reset")
-						out, err := cmd.CombinedOutput()
+						out, err := runTailscaleUp(hsCtx, hsURL, hsKey)
 						hsCancel()
 						if err != nil {
 							slog.Error("Failed to join Headscale mesh", "error", err, "output", string(out))
@@ -840,6 +783,183 @@ func main() {
 		case <-time.After(3 * time.Second):
 		}
 	}
+}
+
+type pid1BootstrapDeps struct {
+	applyNft           func(script string) error
+	confirmNft         func()
+	restoreFleet       func()
+	setForwarding      func(enabled bool) error
+	discoverPrimaryNIC func() string
+	configureInterface func(engine.EdgeInterfaceSpec) error
+	addRoute           func(engine.EdgeRouteSpec) error
+	fetchIMDS          func(context.Context, string) (engine.CloudInitPayload, bool)
+	mergeCloudInit     func(*engine.EdgeBootConfig, engine.CloudInitPayload, string) error
+	setHostname        func([]byte) error
+	nftConfPath        string
+	rootDir            string
+}
+
+func defaultPID1BootstrapDeps(netEngine *engine.EdgeNetworkEngine, nftEngine *engine.NftablesEngine) pid1BootstrapDeps {
+	return pid1BootstrapDeps{
+		applyNft:           nftEngine.Apply,
+		confirmNft:         nftEngine.Confirm,
+		restoreFleet:       nftEngine.RestoreFleetBlocks,
+		setForwarding:      func(enabled bool) error { return engine.SetForwarding("", enabled) },
+		discoverPrimaryNIC: func() string { return engine.DiscoverPrimaryNIC("/sys/class/net") },
+		configureInterface: netEngine.ConfigureInterface,
+		addRoute:           netEngine.AddRoute,
+		fetchIMDS:          engine.FetchIMDSCloudInit,
+		mergeCloudInit:     engine.MergeCloudInitIntoBootConfig,
+		setHostname:        syscall.Sethostname,
+		nftConfPath:        "/etc/nftables.conf",
+		rootDir:            "/",
+	}
+}
+
+func selectInitialNftScript(hubURL, nftConfPath string) (string, bool) {
+	if nftConfPath != "" {
+		if ciNftBytes, err := os.ReadFile(nftConfPath); err == nil && hasNonCommentForwardChain(string(ciNftBytes)) {
+			return string(ciNftBytes), true
+		}
+	}
+	return engine.BuildEmergencyLockdownNft(hubURL), false
+}
+
+func shouldProbeIMDS(bootCfg engine.EdgeBootConfig, flagCoreURL, flagToken string) bool {
+	probeCfg := bootCfg
+	if probeCfg.HubURL == "" && flagCoreURL != defaultCoreURL {
+		probeCfg.HubURL = flagCoreURL
+	}
+	if probeCfg.ZtpToken == "" && flagToken != "" {
+		probeCfg.ZtpToken = flagToken
+	}
+	return engine.ShouldProbeIMDS(probeCfg)
+}
+
+func applyPID1BaselineNft(hubURL string, deps pid1BootstrapDeps) (string, bool) {
+	baselineScript, fromConf := selectInitialNftScript(hubURL, deps.nftConfPath)
+	if fromConf {
+		slog.Info("Loading pre-existing baseline router nftables ruleset before WAN/IMDS bootstrap", "path", deps.nftConfPath)
+	} else {
+		slog.Info("Loading fail-closed emergency lockdown nftables ruleset before WAN/IMDS bootstrap")
+	}
+	if err := deps.applyNft(baselineScript); err != nil {
+		slog.Error("Baseline nftables ruleset failed before WAN/IMDS bootstrap; keeping IP forwarding disabled", "error", err)
+		_ = deps.setForwarding(false)
+		return baselineScript, false
+	}
+	deps.confirmNft()
+	deps.restoreFleet()
+	// Keep forwarding disabled until interface/route/boot setup completes.
+	_ = deps.setForwarding(false)
+	return baselineScript, true
+}
+
+func bootstrapPID1InterfacesAndIMDS(bootCfg *engine.EdgeBootConfig, flagCoreURL, flagToken string, deps pid1BootstrapDeps) {
+	if bootCfg == nil {
+		return
+	}
+
+	// If neither /proc/cmdline nor local Cloud-Init cidata specified interfaces,
+	// automatically discover the primary NIC (e.g. eth0) and acquire a DHCPv4 lease
+	// so the appliance can reach Cloud IMDS (169.254.169.254) and the Axonwall Hub.
+	if len(bootCfg.Interfaces) == 0 {
+		if primaryNIC := deps.discoverPrimaryNIC(); primaryNIC != "" {
+			slog.Info("No static boot interfaces specified; auto-configuring primary NIC via DHCPv4", "device", primaryNIC)
+			bootCfg.Interfaces = append(bootCfg.Interfaces, engine.EdgeInterfaceSpec{
+				Name:    "wan",
+				Device:  primaryNIC,
+				Address: "dhcp",
+				MTU:     1500,
+				Enabled: true,
+			})
+		}
+	}
+
+	for _, iface := range bootCfg.Interfaces {
+		if err := deps.configureInterface(iface); err != nil {
+			slog.Warn("Boot interface config warning", "device", iface.Device, "error", err)
+		}
+	}
+	for _, rt := range bootCfg.Routes {
+		if err := deps.addRoute(rt); err != nil {
+			slog.Warn("Boot route config warning", "destination", rt.Destination, "error", err)
+		}
+	}
+
+	if shouldProbeIMDS(*bootCfg, flagCoreURL, flagToken) {
+		imdsCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if imdsPayload, ok := deps.fetchIMDS(imdsCtx, "http://169.254.169.254"); ok {
+			if bootCfg.CloudInitSource == "" {
+				bootCfg.CloudInitSource = imdsPayload.Datasource
+			}
+			if err := deps.mergeCloudInit(bootCfg, imdsPayload, deps.rootDir); err != nil {
+				slog.Warn("Cloud-Init IMDS merge warning", "source", imdsPayload.Datasource, "error", err)
+			} else {
+				slog.Info("Applied autonomous Cloud-Init IMDS configuration", "source", imdsPayload.Datasource, "id", bootCfg.SatelliteID, "hostname", bootCfg.Hostname)
+				if bootCfg.Hostname != "" {
+					_ = deps.setHostname([]byte(bootCfg.Hostname))
+				} else if bootCfg.SatelliteID != "" {
+					_ = deps.setHostname([]byte(bootCfg.SatelliteID))
+				}
+				for _, iface := range bootCfg.Interfaces {
+					_ = deps.configureInterface(iface)
+				}
+				for _, rt := range bootCfg.Routes {
+					_ = deps.addRoute(rt)
+				}
+			}
+		}
+		cancel()
+	}
+}
+
+func finalizePID1Nft(hubURL, baselineScript string, baselineApplied bool, deps pid1BootstrapDeps) {
+	finalScript, fromConf := selectInitialNftScript(hubURL, deps.nftConfPath)
+	if !baselineApplied || finalScript != baselineScript {
+		if fromConf {
+			slog.Info("Loading Cloud-Init baseline router nftables ruleset from /etc/nftables.conf")
+		}
+		if err := deps.applyNft(finalScript); err != nil {
+			slog.Error("Initial nftables ruleset failed; keeping IP forwarding disabled", "error", err)
+			_ = deps.setForwarding(false)
+			return
+		}
+		deps.confirmNft()
+		// B-H1 (round 3): a full ruleset Apply replaces the table, so re-insert
+		// any persisted TTL-bounded blocks after every Apply.
+		deps.restoreFleet()
+	}
+	if err := deps.setForwarding(true); err != nil {
+		slog.Warn("Failed to enable IP forwarding", "error", err)
+	}
+}
+
+// runTailscaleUp enrolls the node in Headscale using an ephemeral 0600 temp file
+// for the auth key so the secret is never exposed in /proc/<pid>/cmdline.
+func runTailscaleUp(ctx context.Context, serverURL, authKey string) ([]byte, error) {
+	tmpFile, err := os.CreateTemp("", "axonwall-tailscale-authkey-*")
+	if err != nil {
+		return nil, fmt.Errorf("create tailscale authkey temp file: %w", err)
+	}
+	tmpPath := tmpFile.Name()
+	defer os.Remove(tmpPath)
+
+	if err := tmpFile.Chmod(0o600); err != nil {
+		_ = tmpFile.Close()
+		return nil, fmt.Errorf("chmod tailscale authkey temp file: %w", err)
+	}
+	if _, err := tmpFile.WriteString(authKey); err != nil {
+		_ = tmpFile.Close()
+		return nil, fmt.Errorf("write tailscale authkey temp file: %w", err)
+	}
+	if err := tmpFile.Close(); err != nil {
+		return nil, fmt.Errorf("close tailscale authkey temp file: %w", err)
+	}
+
+	cmd := exec.CommandContext(ctx, "tailscale", "up", "--login-server="+serverURL, "--authkey=file:"+tmpPath, "--reset")
+	return cmd.CombinedOutput()
 }
 
 func hasNonCommentForwardChain(nftContent string) bool {

@@ -41,7 +41,7 @@ function assertBoundedPositiveInt(value, label, max) {
 
 function buildValidatedNucleiArgs(target, baseFlags, opts = {}) {
   const cleanTarget = assertNucleiTarget(target);
-  const a = ['-u', cleanTarget, ...baseFlags, '-jsonl'];
+  const a = ['-u', cleanTarget, ...baseFlags, '-dr', '-jsonl'];
   if (opts.severity) {
     const sev = String(opts.severity).trim();
     if (!/^[a-z,]+$/i.test(sev)) {
@@ -75,7 +75,7 @@ export const NUCLEI_PROFILES = [
     severities: ['critical', 'high'],
     buildArgs: (target, opts = {}) => {
       const cleanTarget = assertNucleiTarget(target);
-      const a = ['-u', cleanTarget, '-s', 'critical,high', '-jsonl'];
+      const a = ['-u', cleanTarget, '-s', 'critical,high', '-dr', '-jsonl'];
       if (opts.concurrency !== undefined && opts.concurrency !== null && opts.concurrency !== '') {
         a.push('-c', assertBoundedPositiveInt(opts.concurrency, 'concurrency', 1000));
       }
@@ -185,7 +185,9 @@ export async function runNucleiScan(target, profileId = 'cves', opts = {}) {
     allowBareHost: true,
     allowPrivate: opts.allowPrivate,
     allowLoopback: opts.allowLoopback,
-    allowMetadata: false
+    allowMetadata: false,
+    dnsLookup: opts.dnsLookup,
+    failOnDnsError: opts.failOnDnsError
   });
   await ensureVigilanteConfig();
   const nucleiDir = getVigilanteNucleiDir();

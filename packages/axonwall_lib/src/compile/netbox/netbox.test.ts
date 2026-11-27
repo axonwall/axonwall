@@ -170,4 +170,30 @@ describe('NetBox DCIM & IPAM Plugin Compiler & Schema', () => {
     expect(parsedBack.netbox?.domain).toBe('ipam.axonwall.local');
     expect(parsedBack.netbox?.postgresStorageGb).toBe(50);
   });
+
+  it('omits wildcard * from ALLOWED_HOSTS, sets USE_X_FORWARDED_HOST = False by default, and validates Unbound domains/IPs (SEC-M23)', async () => {
+    const state = DesiredStateSchema.parse({
+      capabilities: { k3sEnabled: true },
+      k3s: { enabled: true },
+      interfaces: [
+        { name: 'lan', device: 'eth1', type: 'static', role: 'lan', enabled: true, ipv4Address: '10.80.0.1/24' },
+      ],
+      netbox: {
+        enabled: true,
+        domain: 'netbox.corp.internal',
+      },
+    });
+    const compiled = compileNetBoxBundle(state);
+    expect(compiled.extraPy).toContain('ALLOWED_HOSTS = ["netbox.corp.internal","netbox","netbox.netbox.svc.cluster.local","localhost","127.0.0.1","10.80.0.1"]');
+    expect(compiled.extraPy).not.toContain("'*'");
+    expect(compiled.extraPy).not.toContain('"*"');
+    expect(compiled.extraPy).toContain('USE_X_FORWARDED_HOST = False');
+
+    const { buildUnboundLocalDataOverride } = await import('../k3s/helpers.js');
+    expect(() => buildUnboundLocalDataOverride('test', 'bad" domain\nserver:', '10.80.0.1')).toThrow();
+    expect(() => buildUnboundLocalDataOverride('test', 'netbox.corp.internal', '10.80.0.1" evil')).toThrow();
+    expect(buildUnboundLocalDataOverride('test', 'netbox.corp.internal', 'fd00::10')).toContain(
+      'local-data: "netbox.corp.internal. IN AAAA fd00::10"',
+    );
+  });
 });

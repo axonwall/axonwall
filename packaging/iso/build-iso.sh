@@ -530,21 +530,31 @@ stage_pinned_k3s() {
     v1.32.3+k3s1) K3S_SHA256="${K3S_SHA256:-b19216803650b567bf980888dec39035edaf664339c55bc4462f7a003edbef83}" ;;
     *) K3S_SHA256="${K3S_SHA256:-}" ;;
   esac
+  if [[ -z "${K3S_SHA256}" ]]; then
+    echo "[!] ERROR: K3S_VERSION '${K3S_VERSION}' is not pinned; set an explicit K3S_SHA256 checksum (refusing same-origin TOFU sha256sum-amd64.txt)." >&2
+    exit 1
+  fi
+  if [[ ! "${K3S_SHA256}" =~ ^[0-9a-fA-F]{64}$ ]]; then
+    echo "[!] ERROR: Invalid K3S_SHA256 '${K3S_SHA256}' (expected 64-character hex SHA-256)." >&2
+    exit 1
+  fi
   mkdir -p "$(dirname "${dest_bin}")"
-  if [[ -f "${dest_bin}" ]] && [[ -n "${K3S_SHA256}" ]] && echo "${K3S_SHA256}  ${dest_bin}" | sha256sum -c - >/dev/null 2>&1; then
+  if [[ -f "${dest_bin}" ]] && echo "${K3S_SHA256}  ${dest_bin}" | sha256sum -c - >/dev/null 2>&1; then
     echo "[+] K3s ${K3S_VERSION} already staged at ${dest_bin} and verified; keeping."
   else
+    local tmp_bin
+    tmp_bin="$(mktemp "$(dirname "${dest_bin}")/.k3s.XXXXXX")"
     echo "[+] Fetching K3s ${K3S_VERSION} -> ${dest_bin}..."
-    curl -fsSL -o "${dest_bin}" "https://github.com/k3s-io/k3s/releases/download/${k3s_url_version}/k3s"
-    if [[ -z "${K3S_SHA256}" ]]; then
-      K3S_SHA256="$(curl -fsSL "https://github.com/k3s-io/k3s/releases/download/${k3s_url_version}/sha256sum-amd64.txt" | awk '$2 == "k3s" {print $1; exit}')"
-    fi
-    if [[ -z "${K3S_SHA256}" ]]; then
-      echo "[!] ERROR: Unable to determine SHA-256 checksum for K3s ${K3S_VERSION}" >&2
+    if ! curl -fsSL --proto '=https' --tlsv1.2 -o "${tmp_bin}" "https://github.com/k3s-io/k3s/releases/download/${k3s_url_version}/k3s"; then
+      rm -f "${tmp_bin}"
       exit 1
     fi
-    echo "${K3S_SHA256}  ${dest_bin}" | sha256sum -c -
-    chmod 0755 "${dest_bin}"
+    if ! echo "${K3S_SHA256}  ${tmp_bin}" | sha256sum -c -; then
+      rm -f "${tmp_bin}"
+      exit 1
+    fi
+    chmod 0755 "${tmp_bin}"
+    mv -f "${tmp_bin}" "${dest_bin}"
   fi
 }
 

@@ -717,7 +717,7 @@ export async function GET() {
         },
       },
       '/vpn/mesh/invites/preview': {
-        get: {
+        post: {
           summary: 'Preview validity and PIN requirement of a single-use Headscale invite token',
           responses: {
             '200': { description: 'Invite preview state' },

@@ -49,11 +49,29 @@ spec:
       annotations:
         checksum/secret: {{ include (print $.Template.BasePath "/secrets.yaml") . | sha256sum }}
     spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         {{- if $useEmbeddedDb }}
         - name: mariadb
-          image: "{{ .Values.librenms.db.image.repository }}:{{ .Values.librenms.db.image.tag }}"
+          image: "{{ .Values.librenms.db.image.repository }}:{{ .Values.librenms.db.image.tag }}{{- if .Values.librenms.db.image.digest }}@{{ .Values.librenms.db.image.digest }}{{- end }}"
           imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 999
+            runAsGroup: 1000
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
           env:
             - name: MARIADB_DATABASE
               value: {{ .Values.librenms.db.name | quote }}
@@ -71,7 +89,7 @@ spec:
               containerPort: 3306
           readinessProbe:
             exec:
-              command: ["sh", "-c", "mariadb-admin ping -h 127.0.0.1 -u\"$MARIADB_USER\" -p\"$MARIADB_PASSWORD\""]
+              command: ["sh", "-c", "MYSQL_PWD=\"$MARIADB_PASSWORD\" exec mariadb-admin ping -h 127.0.0.1 -u\"$MARIADB_USER\""]
             initialDelaySeconds: 10
             periodSeconds: 10
           resources:
@@ -81,8 +99,17 @@ spec:
               mountPath: /var/lib/mysql
         {{- end }}
         - name: librenms
-          image: "{{ .Values.librenms.image.repository }}:{{ .Values.librenms.image.tag }}"
+          image: "{{ .Values.librenms.image.repository }}:{{ .Values.librenms.image.tag }}{{- if .Values.librenms.image.digest }}@{{ .Values.librenms.image.digest }}{{- end }}"
           imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
           env:
             - name: TZ
               value: {{ .Values.librenms.timezone | quote }}

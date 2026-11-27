@@ -1,7 +1,22 @@
+import crypto from 'node:crypto';
 import { createLocalJWKSet, jwtVerify, type JSONWebKeySet, type JWTPayload } from 'jose';
 import { isPluginEnabled } from '@axonwall/lib/plugins';
 import { getDesiredStateInternal } from './desired-state-internal';
 import { assertSafeOutboundUrl, ssrfSafeFetch } from './ssrf-guard';
+
+const OIDC_ALLOWED_JWS_ALGS = [
+  'RS256',
+  'RS384',
+  'RS512',
+  'PS256',
+  'PS384',
+  'PS512',
+  'ES256',
+  'ES384',
+  'ES512',
+  'EdDSA',
+];
+const OIDC_MAX_RESPONSE_BYTES = 1024 * 1024;
 
 /**
  * OIDC helpers for SSO sign-in.
@@ -127,11 +142,9 @@ export function resolvePublicOrigin(
   }
 
   const rawHost = reqHeaders.get('host')?.split(',')[0]?.trim();
-  if (rawHost && SAFE_FORWARDED_HOST_RE.test(rawHost)) {
-    if (trustedHosts.size === 0 || trustedHosts.has(rawHost.toLowerCase())) {
-      const proto = fallbackOrigin.startsWith('http://') ? 'http' : 'https';
-      return `${proto}://${rawHost}`;
-    }
+  if (rawHost && SAFE_FORWARDED_HOST_RE.test(rawHost) && trustedHosts.has(rawHost.toLowerCase())) {
+    const proto = fallbackOrigin.startsWith('http://') ? 'http' : 'https';
+    return `${proto}://${rawHost}`;
   }
 
   return fallbackOrigin;
@@ -158,6 +171,31 @@ interface OidcDiscovery {
 
 let discoveryCache: { issuer: string; doc: OidcDiscovery; fetchedAt: number } | null = null;
 
+export function isOidcHttpAllowed(cfg: Pick<OidcConfig, 'issuerUrl'>): boolean {
+  return (
+    cfg.issuerUrl.startsWith('http://') &&
+    (process.env.NODE_ENV !== 'production' ||
+      process.env.OIDC_ALLOW_HTTP === '1' ||
+      process.env.AXONWALL_INSECURE_HTTP === '1')
+  );
+}
+
+export function validateOidcAuthorizationEndpoint(rawUrl: string, allowHttp: boolean): URL {
+  let parsed: URL;
+  try {
+    parsed = new URL(rawUrl);
+  } catch {
+    throw new Error('OIDC authorization_endpoint is not a valid URL');
+  }
+  if (parsed.username || parsed.password) {
+    throw new Error('OIDC authorization_endpoint must not contain embedded credentials');
+  }
+  if (parsed.protocol !== 'https:' && !(allowHttp && parsed.protocol === 'http:')) {
+    throw new Error('OIDC authorization_endpoint must use HTTPS');
+  }
+  return parsed;
+}
+
 export async function discoverOidc(cfg: OidcConfig): Promise<OidcDiscovery> {
   if (
     discoveryCache &&
@@ -166,12 +204,13 @@ export async function discoverOidc(cfg: OidcConfig): Promise<OidcDiscovery> {
   ) {
     return discoveryCache.doc;
   }
-  const allowHttp = cfg.issuerUrl.startsWith('http://');
+  const allowHttp = isOidcHttpAllowed(cfg);
   const res = await ssrfSafeFetch(
     `${cfg.issuerUrl}/.well-known/openid-configuration`,
     {
       headers: { accept: 'application/json' },
       timeoutMs: 10000,
+      maxResponseBytes: OIDC_MAX_RESPONSE_BYTES,
     },
     { allowHttp, allowPrivate: false }
   );
@@ -182,6 +221,7 @@ export async function discoverOidc(cfg: OidcConfig): Promise<OidcDiscovery> {
   if (!doc.authorization_endpoint || !doc.token_endpoint || !doc.jwks_uri) {
     throw new Error('OIDC discovery document is incomplete');
   }
+  validateOidcAuthorizationEndpoint(doc.authorization_endpoint, allowHttp);
   await Promise.all([
     assertSafeOutboundUrl(doc.token_endpoint, { allowHttp, allowPrivate: false }),
     assertSafeOutboundUrl(doc.jwks_uri, { allowHttp, allowPrivate: false }),
@@ -196,10 +236,14 @@ export function randomToken(bytes = 32): string {
   return Buffer.from(buf).toString('base64url');
 }
 
+export function computePkceChallenge(codeVerifier: string): string {
+  return crypto.createHash('sha256').update(codeVerifier).digest('base64url');
+}
+
 /**
  * Exchange an authorization code at the provider's token endpoint and
  * verify the returned ID token (signature via the provider JWKS, plus
- * issuer, audience, expiry, and the nonce bound at login time).
+ * issuer, audience, azp, expiry, and the nonce bound at login time).
  * Returns the verified claims; throws on any failure.
  */
 export async function exchangeCodeForIdentity(
@@ -207,18 +251,23 @@ export async function exchangeCodeForIdentity(
   discovery: OidcDiscovery,
   code: string,
   redirectUri: string,
-  expectedNonce: string | undefined
+  expectedNonce: string | undefined,
+  codeVerifier?: string
 ): Promise<JWTPayload> {
   if (!expectedNonce || !expectedNonce.trim()) {
     throw new Error('OIDC nonce missing');
   }
+  if (!codeVerifier || !codeVerifier.trim()) {
+    throw new Error('OIDC PKCE code_verifier missing');
+  }
 
-  const allowHttp = cfg.issuerUrl.startsWith('http://');
+  const allowHttp = isOidcHttpAllowed(cfg);
   const body = new URLSearchParams({
     grant_type: 'authorization_code',
     code,
     redirect_uri: redirectUri,
     client_id: cfg.clientId,
+    code_verifier: codeVerifier,
   });
   if (cfg.clientSecret) {
     body.set('client_secret', cfg.clientSecret);
@@ -234,6 +283,7 @@ export async function exchangeCodeForIdentity(
       },
       body: body.toString(),
       timeoutMs: 10000,
+      maxResponseBytes: OIDC_MAX_RESPONSE_BYTES,
     },
     { allowHttp, allowPrivate: false }
   );
@@ -250,6 +300,7 @@ export async function exchangeCodeForIdentity(
     {
       headers: { accept: 'application/json' },
       timeoutMs: 10000,
+      maxResponseBytes: OIDC_MAX_RESPONSE_BYTES,
     },
     { allowHttp, allowPrivate: false }
   );
@@ -261,9 +312,20 @@ export async function exchangeCodeForIdentity(
   const { payload } = await jwtVerify(tokens.id_token, jwks, {
     issuer: cfg.issuerUrl,
     audience: cfg.clientId,
+    algorithms: OIDC_ALLOWED_JWS_ALGS,
   });
   if (payload.nonce !== expectedNonce) {
     throw new Error('OIDC nonce mismatch');
+  }
+  if (typeof payload.sub !== 'string' || !payload.sub.trim()) {
+    throw new Error('OIDC sub claim missing');
+  }
+  if (Array.isArray(payload.aud) && payload.aud.length > 1) {
+    if (typeof payload.azp !== 'string' || payload.azp !== cfg.clientId) {
+      throw new Error('OIDC azp claim missing or mismatch for multi-audience token');
+    }
+  } else if (payload.azp !== undefined && payload.azp !== cfg.clientId) {
+    throw new Error('OIDC azp claim mismatch');
   }
   return payload;
 }

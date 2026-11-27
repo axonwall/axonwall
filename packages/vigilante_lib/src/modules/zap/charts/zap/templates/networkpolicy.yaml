@@ -1,0 +1,56 @@
+{{- if .Values.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "zap.fullname" . }}
+  namespace: {{ include "zap.namespace" . }}
+  labels:
+    {{- include "zap.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "zap.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector: {}
+      ports:
+        - protocol: TCP
+          port: 8080
+    {{- if and .Values.ingress.enabled .Values.networkPolicy.ingressControllerNamespaceSelector }}
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.ingressControllerNamespaceSelector | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: 8080
+    {{- end }}
+  egress:
+    # Allow DNS resolution via kube-system CoreDNS
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # Allow outbound scan targets while blocking IMDS (169.254.169.254/32) and cluster/private ranges
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            {{- if .Values.networkPolicy.allowPrivateTargets }}
+            except:
+              - 169.254.169.254/32
+            {{- else }}
+            except:
+              {{- range .Values.networkPolicy.egressExceptCidrs }}
+              - {{ . | quote }}
+              {{- end }}
+            {{- end }}
+{{- end }}

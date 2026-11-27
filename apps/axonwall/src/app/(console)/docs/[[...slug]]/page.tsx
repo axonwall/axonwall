@@ -10,7 +10,6 @@ import {
   Download,
   ExternalLink,
   Loader2,
-  Maximize2,
   Power,
   RefreshCw,
   Trash2,
@@ -168,14 +167,6 @@ export default function DocsPortalPage() {
 
           <div className="flex items-center gap-2 text-xs">
             <a
-              href={iframeSrc}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="px-2.5 py-1 rounded-md bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 transition inline-flex items-center gap-1.5"
-            >
-              <Maximize2 className="w-3.5 h-3.5" /> Open Full Tab
-            </a>
-            <a
               href={onlineUrl}
               target="_blank"
               rel="noopener noreferrer"
@@ -213,6 +204,7 @@ export default function DocsPortalPage() {
         <iframe
           src={iframeSrc}
           title="Axonwall Offline Documentation"
+          sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox"
           className="w-full flex-1 border-0 bg-[#080c14]"
         />
       </div>

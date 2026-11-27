@@ -309,10 +309,29 @@ expands from envFrom/env.
 {{- else if .Values.redis.external.url -}}
 {{- .Values.redis.external.url -}}
 {{- else if .Values.redis.enabled -}}
+{{- if .Values.redis.auth.enabled -}}
+{{- printf "redis://:$(REDIS_PASSWORD)@%s:%v/%s" (include "vigil.redis.fullname" .) (.Values.redis.service.port | default 6379) $db -}}
+{{- else -}}
 {{- printf "redis://%s:%v/%s" (include "vigil.redis.fullname" .) (.Values.redis.service.port | default 6379) $db -}}
+{{- end -}}
 {{- else -}}
 {{- required "redis.external.url is required when redis.enabled=false and redis.bitnami.enabled=false" "" -}}
 {{- end -}}
+{{- end -}}
+
+{{/*
+In-chart Redis password secret — used when redis.enabled=true and redis.auth.enabled=true.
+*/}}
+{{- define "vigil.redis.passwordSecret" -}}
+{{- if .Values.redis.auth.existingSecret -}}
+{{- .Values.redis.auth.existingSecret -}}
+{{- else -}}
+{{- printf "%s-auth" (include "vigil.redis.fullname" .) -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "vigil.redis.passwordSecretKey" -}}
+{{- .Values.redis.auth.existingSecretPasswordKey | default "REDIS_PASSWORD" -}}
 {{- end -}}
 
 {{/*

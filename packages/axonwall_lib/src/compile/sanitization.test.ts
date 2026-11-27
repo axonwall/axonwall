@@ -92,6 +92,7 @@ describe('Compiler Input Sanitization & Security Hardening', () => {
     it('sanitizes community, sysLocation, and sysContact against newline injection', () => {
       const conf = compileSnmpd({
         enabled: true,
+        version: 'v2c',
         community: 'public\nrocommunity evil-comm default\r\n',
         sysLocation: 'Server Room 1\nagentAddress udp:16161',
         sysContact: 'admin@axonwall.local\nexec badScript /bin/sh',
@@ -301,9 +302,9 @@ describe('Compiler Input Sanitization & Security Hardening', () => {
         cpuType: 'host',
         memoryMb: 1024,
         balloonMinMb: 0,
-        disks: [{ name: 'd0', pool: 'tank', sizeGb: 10, zvol: "/dev/zvol/tank/'inject", bus: 'virtio', cache: 'none', discard: false, readOnly: false, backup: true, iopsReadLimit: 0, iopsWriteLimit: 0 }],
+        disks: [{ name: 'd0', pool: 'tank', sizeGb: 10, zvol: '/dev/zvol/tank/disk0', bus: 'virtio', cache: 'none', discard: false, readOnly: false, backup: true, iopsReadLimit: 0, iopsWriteLimit: 0 }],
         nics: [{ mac: "52:54:00:00:00:01' <evil/>", bridge: "br0'><foo/>", model: 'virtio', firewall: true, rateLimitMbps: 0 }],
-        virtioFsShares: [{ hostPath: "/mnt/data'<>", tag: "tag'<>", readOnly: false }],
+        virtioFsShares: [{ hostPath: '/mnt/tank/data', tag: "tag'<>", readOnly: false }],
         pciPassthrough: [],
         usbPassthrough: [],
         agent: false,

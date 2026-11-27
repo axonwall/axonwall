@@ -62,8 +62,19 @@ export function compileRosenpass(config?: RosenpassConfig): RosenpassCompileResu
     if (peer.endpoint && sanitizeTomlString(peer.endpoint)) {
       lines.push(`endpoint = "${sanitizeTomlString(peer.endpoint)}"`);
     }
-    if (peer.keyOut && sanitizeTomlString(peer.keyOut)) {
-      lines.push(`key_out = "${sanitizeTomlString(peer.keyOut)}"`);
+    if (peer.keyOut) {
+      const safeKeyOut = sanitizeTomlString(peer.keyOut);
+      if (safeKeyOut) {
+        if (
+          safeKeyOut.includes('..') ||
+          !/^\/(?:etc|run)\/rosenpass\/[a-zA-Z0-9._/-]+$/.test(safeKeyOut)
+        ) {
+          throw new Error(
+            `Invalid Rosenpass keyOut path (must reside under /etc/rosenpass/ or /run/rosenpass/ without ..): ${peer.keyOut}`,
+          );
+        }
+        lines.push(`key_out = "${safeKeyOut}"`);
+      }
     } else {
       lines.push(`wg_device = "${wgDev}"`);
       lines.push(`wg_peer = "${wgPeerKey}"`);

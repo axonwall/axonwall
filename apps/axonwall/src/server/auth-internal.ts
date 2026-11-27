@@ -157,21 +157,46 @@ export async function verifyTotpCode(secret: string, token: string): Promise<boo
 const LOGIN_MAX_FAILURES = 5;
 const LOGIN_LOCKOUT_MS = 5 * 60 * 1000;
 const LOGIN_FAILURE_MAX_ENTRIES = 2000;
-const loginFailures = new Map<string, { count: number; lockedUntil: number }>();
+const loginFailures = new Map<string, { count: number; lockedUntil: number; lastAttemptAt: number }>();
+const loginChains = new Map<string, Promise<void>>();
+const loginInFlightCounts = new Map<string, number>();
 
-function pruneLoginFailures(now: number) {
+export type AuthAttemptResult = AuthResult & { statusCode?: number };
+
+export function resetLoginFailuresForTests(): void {
+  loginFailures.clear();
+  loginInFlightCounts.clear();
+  loginChains.clear();
+}
+
+function pruneExpiredLoginFailures(now: number) {
   for (const [k, rec] of loginFailures) {
-    if (rec.lockedUntil > 0 && rec.lockedUntil <= now) {
+    const expiredLockout = rec.lockedUntil > 0 && rec.lockedUntil <= now;
+    const staleUnlocked = rec.lockedUntil === 0 && now - rec.lastAttemptAt >= LOGIN_LOCKOUT_MS;
+    if (expiredLockout || staleUnlocked) {
       loginFailures.delete(k);
     }
   }
-  if (loginFailures.size >= LOGIN_FAILURE_MAX_ENTRIES) {
-    // Never evict actively locked accounts under map pressure; only evict unlocked entries.
-    for (const [k, rec] of loginFailures) {
-      if (loginFailures.size < LOGIN_FAILURE_MAX_ENTRIES) break;
-      if (rec.lockedUntil <= now) {
-        loginFailures.delete(k);
-      }
+}
+
+async function withSerializedAuthKey<T>(key: string, fn: () => Promise<T>): Promise<T> {
+  const prev = loginChains.get(key) ?? Promise.resolve();
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const tail = prev.then(
+    () => gate,
+    () => gate
+  );
+  loginChains.set(key, tail);
+  await prev;
+  try {
+    return await fn();
+  } finally {
+    release();
+    if (loginChains.get(key) === tail) {
+      loginChains.delete(key);
     }
   }
 }
@@ -180,38 +205,112 @@ export async function performAuthentication(
   username: string,
   password: string,
   totpCode?: string
-): Promise<AuthResult> {
+): Promise<AuthAttemptResult> {
   if (typeof username !== 'string' || typeof password !== 'string') {
     return { success: false, error: 'Username and password are required' };
   }
   const key = username.toLowerCase();
   const now = Date.now();
+  pruneExpiredLoginFailures(now);
+
   const initialRecord = loginFailures.get(key);
   if (initialRecord && initialRecord.lockedUntil > now) {
-    return { success: false, error: 'Too many failed sign-in attempts. Try again in a few minutes.' };
+    return {
+      success: false,
+      statusCode: 429,
+      error: 'Too many failed sign-in attempts. Try again in a few minutes.',
+    };
   }
-  const result = await performAuthenticationInner(username, password, totpCode);
-  const postNow = Date.now();
-  const latestRecord = loginFailures.get(key);
-  if (latestRecord && latestRecord.lockedUntil > postNow) {
-    // Another concurrent attempt triggered lockout while performAuthenticationInner was awaiting.
-    return { success: false, error: 'Too many failed sign-in attempts. Try again in a few minutes.' };
+  if (!initialRecord && loginFailures.size >= LOGIN_FAILURE_MAX_ENTRIES) {
+    return {
+      success: false,
+      statusCode: 429,
+      error: 'Too many authentication attempts. Try again in a few minutes.',
+    };
   }
-  if (result.success) {
-    loginFailures.delete(key);
-  } else {
-    // W-M4: once a prior lockout expires (lockedUntil > 0 && lockedUntil <= postNow),
-    // reset the failure counter instead of immediately re-locking on the next typo.
-    const activeUnexpiredCount = latestRecord && latestRecord.lockedUntil === 0 ? latestRecord.count : 0;
-    const count = activeUnexpiredCount + 1;
-    pruneLoginFailures(postNow);
-    loginFailures.delete(key);
-    loginFailures.set(key, {
-      count,
-      lockedUntil: count >= LOGIN_MAX_FAILURES ? postNow + LOGIN_LOCKOUT_MS : 0,
+
+  const activeCount = initialRecord && initialRecord.lockedUntil === 0 ? initialRecord.count : 0;
+  const inFlight = loginInFlightCounts.get(key) ?? 0;
+  if (!loginInFlightCounts.has(key) && loginInFlightCounts.size >= LOGIN_FAILURE_MAX_ENTRIES) {
+    return {
+      success: false,
+      statusCode: 429,
+      error: 'Too many authentication attempts. Try again in a few minutes.',
+    };
+  }
+  if (activeCount + inFlight >= LOGIN_MAX_FAILURES) {
+    return {
+      success: false,
+      statusCode: 429,
+      error: 'Too many failed sign-in attempts. Try again in a few minutes.',
+    };
+  }
+
+  loginInFlightCounts.set(key, inFlight + 1);
+  try {
+    return await withSerializedAuthKey(key, async () => {
+      const preNow = Date.now();
+      pruneExpiredLoginFailures(preNow);
+      const currentRec = loginFailures.get(key);
+      if (currentRec && currentRec.lockedUntil > preNow) {
+        return {
+          success: false,
+          statusCode: 429,
+          error: 'Too many failed sign-in attempts. Try again in a few minutes.',
+        };
+      }
+      if (!currentRec && loginFailures.size >= LOGIN_FAILURE_MAX_ENTRIES) {
+        return {
+          success: false,
+          statusCode: 429,
+          error: 'Too many authentication attempts. Try again in a few minutes.',
+        };
+      }
+
+      const result = await performAuthenticationInner(username, password, totpCode);
+      const postNow = Date.now();
+      const latestRecord = loginFailures.get(key);
+      if (latestRecord && latestRecord.lockedUntil > postNow) {
+        return {
+          success: false,
+          statusCode: 429,
+          error: 'Too many failed sign-in attempts. Try again in a few minutes.',
+        };
+      }
+      if (result.success) {
+        loginFailures.delete(key);
+      } else {
+        pruneExpiredLoginFailures(postNow);
+        if (!loginFailures.has(key) && loginFailures.size >= LOGIN_FAILURE_MAX_ENTRIES) {
+          return {
+            success: false,
+            statusCode: 429,
+            error: 'Too many authentication attempts. Try again in a few minutes.',
+          };
+        }
+        // W-M4: once a prior lockout expires (lockedUntil > 0 && lockedUntil <= postNow),
+        // reset the failure counter instead of immediately re-locking on the next typo.
+        const freshLatest = loginFailures.get(key);
+        const activeUnexpiredCount =
+          freshLatest && freshLatest.lockedUntil === 0 ? freshLatest.count : 0;
+        const count = activeUnexpiredCount + 1;
+        loginFailures.delete(key);
+        loginFailures.set(key, {
+          count,
+          lockedUntil: count >= LOGIN_MAX_FAILURES ? postNow + LOGIN_LOCKOUT_MS : 0,
+          lastAttemptAt: postNow,
+        });
+      }
+      return result;
     });
+  } finally {
+    const remaining = (loginInFlightCounts.get(key) ?? 1) - 1;
+    if (remaining <= 0) {
+      loginInFlightCounts.delete(key);
+    } else {
+      loginInFlightCounts.set(key, remaining);
+    }
   }
-  return result;
 }
 
 async function performAuthenticationInner(

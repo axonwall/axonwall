@@ -327,7 +327,7 @@ describe('Axonwall v0.16.2 verified bug fixes', () => {
     expect(hapCfg).toContain('option httpchk GET /health');
   });
 
-  it('fixes standalone compilers, schemas, Kea MACs, and cloud-init secret redaction', () => {
+  it('fixes standalone compilers, schemas, Kea MACs, and cloud-init secret redaction', async () => {
     // 1. NatRuleSchema rejects comma in targetPort
     expect(() =>
       NatRuleSchema.parse({ type: 'dnat', interface: 'wan', targetIp: '10.0.0.1', targetPort: '80,443' }),
@@ -456,16 +456,20 @@ describe('Axonwall v0.16.2 verified bug fixes', () => {
       v3Users: [],
     });
     expect(snmpOut).not.toContain('rocommunity');
-    const snmpV3 = compileSnmpd({
+    const { compileSnmpdPersistentUsers } = await import('../compile/snmp/index.js');
+    const snmpV3Cfg = {
       enabled: true,
-      version: 'v3',
+      version: 'v3' as const,
       community: '',
       sysLocation: 'DC1',
       sysContact: 'ops@example.com',
       listenPort: 161,
-      v3Users: [{ username: 'mon\\user', authProtocol: 'SHA-256', authPassword: 'auth\\pass123', privProtocol: 'AES', privPassword: 'priv\\pass123', securityLevel: 'authPriv' }],
-    });
-    expect(snmpV3).toContain('createUser monuser SHA-256 "authpass123" AES "privpass123"');
+      v3Users: [{ username: 'mon\\user', authProtocol: 'SHA-256' as const, authPassword: 'auth\\pass123', privProtocol: 'AES' as const, privPassword: 'priv\\pass123', securityLevel: 'authPriv' as const }],
+    };
+    const snmpV3 = compileSnmpd(snmpV3Cfg);
+    expect(snmpV3).not.toContain('createUser');
+    expect(snmpV3).toContain('rouser monuser priv -V all');
+    expect(compileSnmpdPersistentUsers(snmpV3Cfg)).toContain('createUser monuser SHA-256 "authpass123" AES "privpass123"');
 
     // 7. TC HTB default 1:99 + tc filter
     const tcOut = compileTrafficShaper({

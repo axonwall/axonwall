@@ -16,6 +16,7 @@ TTYReset=yes
 TTYVHangup=yes
 Restart=always
 RestartSec=1
+LimitCORE=0
 
 [Install]
 WantedBy=multi-user.target

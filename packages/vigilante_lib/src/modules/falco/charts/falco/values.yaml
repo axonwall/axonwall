@@ -1,6 +1,7 @@
 image:
   repository: falcosecurity/falco
-  tag: "latest"
+  tag: "0.45.0"
+  digest: ""
   pullPolicy: IfNotPresent
 
 driver:
@@ -21,14 +22,14 @@ falcosidekick:
   redis:
     image:
       repository: redis/redis-stack-server
-      tag: "latest"
+      tag: "7.4.0-v8"
 
 service:
   type: ClusterIP
   port: 2802
 
 ingress:
-  enabled: true
+  enabled: false
   annotations: {}
   hosts:
     - host: falco.vigilante.local
@@ -36,6 +37,23 @@ ingress:
     - secretName: falco-tls
       hosts:
         - falco.vigilante.local
+
+podSecurityContext:
+  seccompProfile:
+    type: RuntimeDefault
+
+networkPolicy:
+  enabled: true
+  ingressControllerNamespaceSelector:
+    kubernetes.io/metadata.name: kube-system
+  allowWebhookPrivateEgress: false
+  egressExceptCidrs:
+    - 169.254.169.254/32
+    - 10.0.0.0/8
+    - 172.16.0.0/12
+    - 192.168.0.0/16
+    - 100.64.0.0/10
+    - 127.0.0.0/8
 
 resources:
   requests:

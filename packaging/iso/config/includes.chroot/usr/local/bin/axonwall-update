@@ -4,52 +4,9 @@
 # ==============================================================================
 set -eu
 
-TARGET_SLOT="B"
-TARGET_VERSION=""
-UPDATE_CHANNEL="stable"
-FORCE_ROLLING=0
-FORCE_ZBM=0
-FORCE_BTRFS=0
-APT_UPGRADE=0
-ALLOW_UNSIGNED=0
-
-while [ $# -gt 0 ]; do
-  case "$1" in
-    --slot)
-      TARGET_SLOT="${2:-B}"
-      shift 2
-      ;;
-    --version)
-      TARGET_VERSION="${2:-}"
-      shift 2
-      ;;
-    --channel)
-      UPDATE_CHANNEL="${2:-stable}"
-      shift 2
-      ;;
-    --rolling)
-      FORCE_ROLLING=1
-      shift
-      ;;
-    --zbm|--zfsbootmenu)
-      FORCE_ZBM=1
-      shift
-      ;;
-    --btrfs|--snapper)
-      FORCE_BTRFS=1
-      shift
-      ;;
-    --apt|--apt-upgrade)
-      APT_UPGRADE=1
-      shift
-      ;;
-    --allow-unsigned)
-      ALLOW_UNSIGNED=1
-      shift
-      ;;
-    --help|-h)
-      cat << 'USAGE_EOF'
-Usage: axonwall-update [--slot A|B] [--version <ver>] [--channel <name>] [--rolling] [--zbm|--zfsbootmenu] [--btrfs|--snapper] [--apt|--apt-upgrade] [--allow-unsigned]
+usage() {
+  cat << 'USAGE_EOF'
+Usage: axonwall-update [--slot A|B] [--version <ver>] [--channel <name>] [--rolling] [--zbm|--zfsbootmenu] [--btrfs|--snapper] [--apt|--apt-upgrade] [--allow-unsigned] [--allow-downgrade]
   --slot A|B          Target dual-root slot (default B)
   --version <ver>     Release version to stage (required for ZBM updates)
   --channel <name>    Release channel (default stable)
@@ -58,18 +15,216 @@ Usage: axonwall-update [--slot A|B] [--version <ver>] [--channel <name>] [--roll
   --btrfs             Btrfs + Snapper pre/post snapshot update
   --apt               Also run an APT upgrade
   --allow-unsigned    Allow SHA-256 + TLS verification when no release signing key is installed
+  --allow-downgrade   Allow installing a version older than /etc/axonwall/version
 USAGE_EOF
-      exit 0
-      ;;
-    *)
-      # D-L1: unknown options used to be silently swallowed, so a typo
-      # like `--versoin 0.11.68 --slo C` ran a version-less update of
-      # the default slot B and exited 0. Fail loudly instead.
-      echo "[-] Error: unknown option '$1'. Valid options: --slot, --version, --channel, --rolling, --zbm, --btrfs, --apt, --allow-unsigned, --help." >&2
-      exit 1
-      ;;
+}
+
+cleanup_work_dir() {
+  _rc=$?
+  set +e
+  trap - EXIT INT TERM
+  if [ -n "${WORK_DIR:-}" ] && [ -d "${WORK_DIR}" ]; then
+    if [ -r /proc/mounts ]; then
+      _mpts="$(awk -v p="${WORK_DIR}/" 'index($2, p) == 1 {print $2}' /proc/mounts 2>/dev/null || true)"
+      for _mp in $_mpts; do
+        umount "$_mp" 2>/dev/null || umount -l "$_mp" 2>/dev/null || true
+      done
+    fi
+    for _mp in "${ZBM_STAGE_MNT:-}" "${STAGE_DIR:-}" "${SLOT_A_MNT:-}"; do
+      if [ -n "$_mp" ] && [ -d "$_mp" ]; then
+        if command -v mountpoint >/dev/null 2>&1 && mountpoint -q "$_mp" 2>/dev/null; then
+          umount "$_mp" 2>/dev/null || umount -l "$_mp" 2>/dev/null || true
+        fi
+      fi
+    done
+    _still_mounted=0
+    if [ -r /proc/mounts ] && awk -v p="${WORK_DIR}/" 'index($2, p) == 1 {found=1} END {exit !found}' /proc/mounts 2>/dev/null; then
+      _still_mounted=1
+    fi
+    if [ "$_still_mounted" = "0" ]; then
+      rm -rf "${WORK_DIR}" 2>/dev/null || true
+    else
+      echo "[!] WARNING: leaving ${WORK_DIR} because a submount could not be unmounted." >&2
+    fi
+  fi
+  return "$_rc"
+}
+
+validate_semver() {
+  _vs_ver="$1"
+  [ -n "$_vs_ver" ] || return 1
+  case "$_vs_ver" in
+    *..*|*[[:space:]]*|*/*) return 1 ;;
   esac
-done
+  printf '%s\n' "$_vs_ver" | LC_ALL=C awk '
+    BEGIN { ok = 0 }
+    NR > 1 { ok = 0; exit 1 }
+    /^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$/ { ok = 1 }
+    END { exit (ok && NR == 1) ? 0 : 1 }
+  '
+}
+
+# Compare two validated semantic versions; prints -1 (a<b), 0 (a==b), or 1 (a>b).
+semver_compare() {
+  _sc_a="$1"
+  _sc_b="$2"
+  LC_ALL=C awk -v a="$_sc_a" -v b="$_sc_b" '
+    function cmp_str(x, y) {
+      if (x == y) return 0
+      return (x < y) ? -1 : 1
+    }
+    BEGIN {
+      ha = index(a, "-")
+      if (ha > 0) { core_a = substr(a, 1, ha - 1); pre_a = substr(a, ha + 1) }
+      else { core_a = a; pre_a = "" }
+
+      hb = index(b, "-")
+      if (hb > 0) { core_b = substr(b, 1, hb - 1); pre_b = substr(b, hb + 1) }
+      else { core_b = b; pre_b = "" }
+
+      na = split(core_a, ca, ".")
+      nb = split(core_b, cb, ".")
+      max_n = (na > nb) ? na : nb
+      for (i = 1; i <= max_n; i++) {
+        va = (i <= na) ? ca[i] : "0"
+        vb = (i <= nb) ? cb[i] : "0"
+        if (va ~ /^[0-9]+$/ && vb ~ /^[0-9]+$/) {
+          if (va + 0 < vb + 0) { print -1; exit 0 }
+          if (va + 0 > vb + 0) { print 1; exit 0 }
+        } else {
+          r = cmp_str(va, vb)
+          if (r != 0) { print r; exit 0 }
+        }
+      }
+
+      if (pre_a == "" && pre_b == "") { print 0; exit 0 }
+      if (pre_a == "" && pre_b != "") { print 1; exit 0 }
+      if (pre_a != "" && pre_b == "") { print -1; exit 0 }
+
+      npa = split(pre_a, pa, ".")
+      npb = split(pre_b, pb, ".")
+      min_p = (npa < npb) ? npa : npb
+      for (i = 1; i <= min_p; i++) {
+        if (pa[i] == pb[i]) continue
+        numa = (pa[i] ~ /^[0-9]+$/)
+        numb = (pb[i] ~ /^[0-9]+$/)
+        if (numa && numb) {
+          print (pa[i] + 0 < pb[i] + 0) ? -1 : 1
+          exit 0
+        }
+        if (numa && !numb) { print -1; exit 0 }
+        if (!numa && numb) { print 1; exit 0 }
+        print cmp_str(pa[i], pb[i])
+        exit 0
+      }
+      if (npa < npb) { print -1; exit 0 }
+      if (npa > npb) { print 1; exit 0 }
+      print 0
+    }
+  '
+}
+
+check_downgrade() {
+  _cd_target="$1"
+  _cd_running="$2"
+  _cd_allow="${3:-0}"
+  [ -n "$_cd_target" ] || return 0
+  if [ -z "$_cd_running" ] || [ "$_cd_running" = "unknown" ]; then
+    return 0
+  fi
+  if ! validate_semver "$_cd_running"; then
+    echo "[!] WARNING: /etc/axonwall/version ('${_cd_running}') is not a valid semantic version; skipping downgrade check." >&2
+    return 0
+  fi
+  _cd_cmp="$(semver_compare "$_cd_target" "$_cd_running")" || return 1
+  if [ "$_cd_cmp" = "-1" ]; then
+    if [ "$_cd_allow" = "1" ]; then
+      echo "[!] Warning: --allow-downgrade specified; allowing downgrade from v${_cd_running} to v${_cd_target}." >&2
+      return 0
+    fi
+    echo "[-] ERROR: refusing to downgrade from v${_cd_running} to v${_cd_target} (pass --allow-downgrade to override)." >&2
+    return 1
+  fi
+  return 0
+}
+
+# Verify a .sha256 manifest is strictly 1 line matching:
+#   ^[0-9a-f]{64}  <exact expected filename>$
+# Prints the validated 64-char hex digest on success.
+verify_sha256_manifest() {
+  _vsm_sha_file="$1"
+  _vsm_expected_name="$2"
+  [ -f "$_vsm_sha_file" ] || return 1
+  case "$_vsm_expected_name" in
+    ""|*/*|*[[:space:]]*) return 1 ;;
+  esac
+  # Reject embedded NUL bytes and non-printable/control bytes (including CR and tabs).
+  _vsm_bytes="$(wc -c < "$_vsm_sha_file" 2>/dev/null | tr -d ' ')"
+  _vsm_nonul_bytes="$(tr -d '\000' < "$_vsm_sha_file" 2>/dev/null | wc -c | tr -d ' ')"
+  [ -n "$_vsm_bytes" ] && [ "$_vsm_bytes" = "$_vsm_nonul_bytes" ] || return 1
+  if LC_ALL=C grep -q '[^ -~]' "$_vsm_sha_file" 2>/dev/null; then
+    return 1
+  fi
+  LC_ALL=C awk -v expected="$_vsm_expected_name" '
+    BEGIN { bad = 0 }
+    NR > 1 { bad = 1; exit 1 }
+    {
+      if (length($0) != 66 + length(expected)) { bad = 1; exit 1 }
+      if (substr($0, 65, 2) != "  ") { bad = 1; exit 1 }
+      h = substr($0, 1, 64)
+      if (h !~ /^[0-9a-f]+$/ || length(h) != 64) { bad = 1; exit 1 }
+      fname = substr($0, 67)
+      if (index(fname, "/") > 0 || fname != expected) { bad = 1; exit 1 }
+      print h
+    }
+    END { if (bad || NR != 1) exit 1 }
+  ' "$_vsm_sha_file"
+}
+
+# Atomically install a binary or symlink onto a target directory using a private
+# temp file on the same filesystem + mv -f so running fds keep their old inode.
+atomic_install_bin() {
+  _aib_src="$1"
+  _aib_dir="${2%/}"
+  _aib_name="${3:-$(basename "$_aib_src")}"
+  _aib_dst="${_aib_dir}/${_aib_name}"
+
+  mkdir -p "$_aib_dir" 2>/dev/null || return 1
+
+  if [ -L "$_aib_src" ]; then
+    _aib_target="$(readlink "$_aib_src" 2>/dev/null || true)"
+    [ -n "$_aib_target" ] || return 1
+    _aib_tmpdir="$(mktemp -d "${_aib_dir}/.${_aib_name}.tmp.$$.XXXXXX" 2>/dev/null || true)"
+    if [ -z "$_aib_tmpdir" ] || [ ! -d "$_aib_tmpdir" ]; then
+      return 1
+    fi
+    chmod 0700 "$_aib_tmpdir" 2>/dev/null || true
+    if ! ln -s "$_aib_target" "${_aib_tmpdir}/item" 2>/dev/null || ! mv -f "${_aib_tmpdir}/item" "$_aib_dst" 2>/dev/null; then
+      rm -rf "$_aib_tmpdir" 2>/dev/null || true
+      return 1
+    fi
+    rmdir "$_aib_tmpdir" 2>/dev/null || rm -rf "$_aib_tmpdir" 2>/dev/null || true
+    return 0
+  fi
+
+  _aib_tmp="$(mktemp "${_aib_dir}/.${_aib_name}.tmp.$$.XXXXXX" 2>/dev/null || true)"
+  if [ -z "$_aib_tmp" ] || [ ! -f "$_aib_tmp" ]; then
+    return 1
+  fi
+  if ! cp "$_aib_src" "$_aib_tmp" 2>/dev/null; then
+    rm -f "$_aib_tmp" 2>/dev/null || true
+    return 1
+  fi
+  if ! chmod 0755 "$_aib_tmp" 2>/dev/null; then
+    rm -f "$_aib_tmp" 2>/dev/null || true
+    return 1
+  fi
+  if ! mv -f "$_aib_tmp" "$_aib_dst" 2>/dev/null; then
+    rm -f "$_aib_tmp" 2>/dev/null || true
+    return 1
+  fi
+  return 0
+}
 
 # D-M9 (round-3): flavor-specific update channel. The updater used to
 # download the NGFW `axonwall_${VER}_amd64.deb` on every box, so a vault
@@ -193,113 +348,6 @@ detect_edition() {
   exit 1
 }
 
-# Note: command substitution runs in a subshell, so a bare call would
-# swallow detect_edition's exit 1 — the `|| exit 1` makes the failure
-# propagate to this script.
-EDITION="$(detect_edition)" || exit 1
-
-ZBM_MODE=0
-if [ "$FORCE_ZBM" = "1" ]; then
-  ZBM_MODE=1
-elif [ -f /etc/axonwall/install-mode ] && grep -qiE 'zbm|zfsbootmenu' /etc/axonwall/install-mode 2>/dev/null; then
-  ZBM_MODE=1
-elif [ -f /var/lib/axonwall/install-mode ] && grep -qiE 'zbm|zfsbootmenu' /var/lib/axonwall/install-mode 2>/dev/null; then
-  ZBM_MODE=1
-elif grep -qs -E 'zfs=zroot/ROOT|boot=zfs' /proc/cmdline 2>/dev/null; then
-  ZBM_MODE=1
-elif command -v findmnt >/dev/null 2>&1 && findmnt -n -o FSTYPE / 2>/dev/null | grep -q 'zfs'; then
-  ZBM_MODE=1
-fi
-
-BTRFS_MODE=0
-if [ "$ZBM_MODE" = "1" ]; then
-  BTRFS_MODE=0
-elif [ "$FORCE_BTRFS" = "1" ]; then
-  BTRFS_MODE=1
-elif [ -f /etc/axonwall/install-mode ] && grep -qiE 'btrfs|snapper' /etc/axonwall/install-mode 2>/dev/null; then
-  BTRFS_MODE=1
-elif [ -f /var/lib/axonwall/install-mode ] && grep -qiE 'btrfs|snapper' /var/lib/axonwall/install-mode 2>/dev/null; then
-  BTRFS_MODE=1
-elif grep -qs -E 'axon_btrfs|rootfstype=btrfs|subvol=@' /proc/cmdline 2>/dev/null; then
-  BTRFS_MODE=1
-elif command -v findmnt >/dev/null 2>&1 && findmnt -n -o FSTYPE / 2>/dev/null | grep -q 'btrfs'; then
-  BTRFS_MODE=1
-fi
-
-ROLLING_MODE=0
-if [ "$ZBM_MODE" = "1" ] || [ "$BTRFS_MODE" = "1" ]; then
-  ROLLING_MODE=0
-elif [ "$FORCE_ROLLING" = "1" ]; then
-  ROLLING_MODE=1
-elif [ -f /etc/axonwall/install-mode ] && grep -qi 'rolling' /etc/axonwall/install-mode 2>/dev/null; then
-  ROLLING_MODE=1
-elif [ -f /var/lib/axonwall/install-mode ] && grep -qi 'rolling' /var/lib/axonwall/install-mode 2>/dev/null; then
-  ROLLING_MODE=1
-elif [ ! -e /dev/disk/by-label/axon_root_a ] && [ ! -e /dev/disk/by-label/axon_root_b ] && ! grep -qs -E 'slot=[AB]|axon_root_[ab]' /proc/cmdline 2>/dev/null; then
-  ROLLING_MODE=1
-fi
-
-TARGET_SLOT="$(printf '%s' "$TARGET_SLOT" | tr '[:lower:]' '[:upper:]')"
-if [ "$TARGET_SLOT" != "A" ] && [ "$TARGET_SLOT" != "B" ]; then
-  if [ "$ROLLING_MODE" = "1" ] || [ "$ZBM_MODE" = "1" ] || [ "$BTRFS_MODE" = "1" ]; then
-    TARGET_SLOT="A"
-  else
-    echo "[-] Error: Invalid target slot '${TARGET_SLOT}'. Must be 'A' or 'B'." >&2
-    exit 1
-  fi
-fi
-
-echo "================================================================================"
-echo "Axonwall Appliance Firmware Updater"
-if [ "$ZBM_MODE" = "1" ]; then
-  echo "  Install Mode  : ZFSBootMenu Root-on-ZFS (Boot Environments & Snapshots)"
-elif [ "$BTRFS_MODE" = "1" ]; then
-  echo "  Install Mode  : Btrfs + Snapper Root (CoW Pre/Post Snapshots)"
-elif [ "$ROLLING_MODE" = "1" ]; then
-  echo "  Install Mode  : Rolling Standard Linux (Single-Root /)"
-else
-  echo "  Install Mode  : Dual-Root A/B (Target: Slot ${TARGET_SLOT})"
-fi
-echo "  Target Version: ${TARGET_VERSION:-latest}"
-echo "  Channel       : ${UPDATE_CHANNEL}"
-echo "  Edition       : ${EDITION}"
-echo "================================================================================"
-
-# Pre-Update OpenLDAP Directory Backup (protects against MDB version skew on rollback)
-if command -v slapcat >/dev/null 2>&1 && [ -d /var/lib/axonwall/ldap/config/cn=config ]; then
-  BACKUP_TS="$(date -u +"%Y%m%dT%H%M%SZ" 2>/dev/null || echo "latest")"
-  mkdir -p /var/lib/axonwall/ldap/backups 2>/dev/null || true
-  echo "[+] Creating pre-update OpenLDAP LDIF snapshot in /var/lib/axonwall/ldap/backups/..."
-  # D-M8: this snapshot is what makes rollback possible after an
-  # LDAP-breaking update. A failed slapcat used to be swallowed (|| true)
-  # and the update proceeded with no snapshot at all. Fail closed: abort
-  # the update when either database cannot be dumped or its LDIF is
-  # missing afterwards. (An empty data LDIF is a valid backup of an empty
-  # directory, so existence — not size — is the check.)
-  _ldap_backup_failed=0
-  _ldap_config_ldif="/var/lib/axonwall/ldap/backups/pre-update-slot-${TARGET_SLOT}-config-${BACKUP_TS}.ldif"
-  _ldap_data_ldif="/var/lib/axonwall/ldap/backups/pre-update-slot-${TARGET_SLOT}-data-${BACKUP_TS}.ldif"
-  if ! slapcat -F /var/lib/axonwall/ldap/config -n 0 -l "$_ldap_config_ldif"; then
-    echo "[-] ERROR: slapcat failed to dump the OpenLDAP config database (cn=config)." >&2
-    _ldap_backup_failed=1
-  fi
-  if ! slapcat -F /var/lib/axonwall/ldap/config -n 1 -l "$_ldap_data_ldif"; then
-    echo "[-] ERROR: slapcat failed to dump the OpenLDAP data database." >&2
-    _ldap_backup_failed=1
-  fi
-  if [ "$_ldap_backup_failed" -eq 0 ]; then
-    chmod 0600 "$_ldap_config_ldif" "$_ldap_data_ldif" 2>/dev/null || true
-    if [ ! -f "$_ldap_config_ldif" ] || [ ! -f "$_ldap_data_ldif" ]; then
-      echo "[-] ERROR: pre-update OpenLDAP LDIF snapshot is incomplete (missing LDIF file)." >&2
-      _ldap_backup_failed=1
-    fi
-  fi
-  if [ "$_ldap_backup_failed" -eq 1 ]; then
-    echo "[-] ERROR: refusing to update without a pre-update LDAP snapshot; rollback after an LDAP-breaking update would have nothing to restore. Fix slapcat/LDAP and re-run the updater." >&2
-    exit 1
-  fi
-fi
-
 # Helper: Extract .deb payload to a destination directory (Debian & Alpine)
 extract_deb() {
   deb_file="$1"
@@ -309,7 +357,11 @@ extract_deb() {
     dpkg-deb -x "$deb_file" "$dest_dir" 2>/dev/null && return 0
   fi
 
-  deb_tmp_dir="$(mktemp -d /tmp/axonwall-deb-XXXXXX 2>/dev/null || true)"
+  if [ -n "${WORK_DIR:-}" ] && [ -d "${WORK_DIR}" ]; then
+    deb_tmp_dir="$(mktemp -d "${WORK_DIR}/deb-XXXXXX" 2>/dev/null || true)"
+  else
+    deb_tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/axonwall-deb-XXXXXX" 2>/dev/null || true)"
+  fi
   if [ -z "$deb_tmp_dir" ] || [ ! -d "$deb_tmp_dir" ]; then
     return 1
   fi
@@ -364,12 +416,13 @@ extract_deb() {
       rm -rf "$deb_tmp_dir"
       return 1
     fi
-    # Reject hardlinks unconditionally and validate every symlink target
-    # so legitimate in-tree relative links (generate-zbm, zbm-kcl,
-    # kubectl/crictl/ctr -> k3s) extract cleanly on Alpine while
-    # absolute, escaping, or traversed links fail closed.
-    if tar -tvf "$data_tar" 2>/dev/null | grep -qE '^h'; then
-      echo "[!] Update package contains hardlink members; refusing to extract." >&2
+    # Reject hardlinks, device nodes, FIFOs, and unknown member types
+    # unconditionally, and validate every symlink target so legitimate
+    # in-tree relative links (generate-zbm, zbm-kcl, kubectl/crictl/ctr
+    # -> k3s) extract cleanly on Alpine while absolute, escaping, or
+    # traversed links fail closed.
+    if tar -tvf "$data_tar" 2>/dev/null | grep -qE '^[hbcp]'; then
+      echo "[!] Update package contains disallowed tar members (hardlink/device/FIFO); refusing to extract." >&2
       rm -rf "$deb_tmp_dir"
       return 1
     fi
@@ -378,7 +431,7 @@ extract_deb() {
       {
         line = $0
         ftype = substr(line, 1, 1)
-        if (ftype == "h") { bad = 1; exit 1 }
+        if (ftype == "h" || ftype ~ /^[bcp]$/ || ftype !~ /^[-dl]$/) { bad = 1; exit 1 }
         rest = line
         if (!sub(/^[^ \t]+[ \t]+[^ \t]+[ \t]+([0-9]+,[ \t]*[0-9]+|[0-9]+)[ \t]+[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9][ \t]+[0-9][0-9]:[0-9][0-9](:[0-9][0-9])?[ \t]+/, "", rest)) {
           bad = 1; exit 1
@@ -430,21 +483,26 @@ extract_deb() {
         }
       }
     '; then
-      echo "[!] Update package contains unsafe symlink members; refusing to extract." >&2
+      echo "[!] Update package contains unsafe tar members; refusing to extract." >&2
       rm -rf "$deb_tmp_dir"
       return 1
     fi
+    _tar_perm_flag=""
+    if tar --help 2>&1 | grep -q -- '--no-same-permissions'; then
+      _tar_perm_flag="--no-same-permissions"
+    fi
     if tar --help 2>&1 | grep -q -- '--no-same-owner'; then
-      tar --no-same-owner -xf "$data_tar" -C "$dest_dir" 2>/dev/null || {
+      tar --no-same-owner --no-same-permissions -xf "$data_tar" -C "$dest_dir" 2>/dev/null || {
         rm -rf "$deb_tmp_dir"
         return 1
       }
     else
-      tar -oxf "$data_tar" -C "$dest_dir" 2>/dev/null || {
+      tar ${_tar_perm_flag} -oxf "$data_tar" -C "$dest_dir" 2>/dev/null || {
         rm -rf "$deb_tmp_dir"
         return 1
       }
     fi
+    find "$dest_dir" -type f \( -perm -4000 -o -perm -2000 \) -exec chmod ug-s {} + 2>/dev/null || true
     rm -rf "$deb_tmp_dir"
     return 0
   fi
@@ -459,11 +517,25 @@ sync_static_etc_axonwall() {
   dst_etc="$2"
   [ -d "$src_etc" ] || return 0
   mkdir -p "$dst_etc" 2>/dev/null || true
-  for item in nvim yara branding starship.toml release-signing.pub release-signing.d; do
+  for item in nvim yara branding starship.toml release-signing.pub; do
     if [ -e "${src_etc}/${item}" ]; then
       cp -af "${src_etc}/${item}" "${dst_etc}/" 2>/dev/null || true
     fi
   done
+  if [ -d "${src_etc}/release-signing.d" ]; then
+    mkdir -p "${dst_etc}/release-signing.d" 2>/dev/null || true
+    for _dst_pub in "${dst_etc}/release-signing.d/"*.pub; do
+      [ -e "$_dst_pub" ] || [ -L "$_dst_pub" ] || continue
+      _pub_name="$(basename "$_dst_pub")"
+      if [ ! -e "${src_etc}/release-signing.d/${_pub_name}" ]; then
+        rm -f "$_dst_pub" 2>/dev/null || true
+      fi
+    done
+    for _src_kentry in "${src_etc}/release-signing.d/"*; do
+      [ -e "$_src_kentry" ] || [ -L "$_src_kentry" ] || continue
+      cp -af "$_src_kentry" "${dst_etc}/release-signing.d/" 2>/dev/null || true
+    done
+  fi
 }
 
 # Ensure Debian batcat/fdfind and ZBM symlinks exist in target /usr/local/bin
@@ -513,11 +585,7 @@ apply_staged_tree() {
     for sbin_f in "${pkg_stage}/usr/sbin/"*; do
       if [ -e "$sbin_f" ] || [ -L "$sbin_f" ]; then
         bname="$(basename "$sbin_f")"
-        rm -f "${dest_root}/usr/sbin/${bname}" 2>/dev/null || true
-        cp -af "$sbin_f" "${dest_root}/usr/sbin/" 2>/dev/null || _apply_failed=1
-        if [ -f "${dest_root}/usr/sbin/${bname}" ] && [ ! -L "${dest_root}/usr/sbin/${bname}" ]; then
-          chmod 755 "${dest_root}/usr/sbin/${bname}" 2>/dev/null || true
-        fi
+        atomic_install_bin "$sbin_f" "${dest_root}/usr/sbin" "$bname" 2>/dev/null || _apply_failed=1
       fi
     done
   fi
@@ -527,11 +595,11 @@ apply_staged_tree() {
     for bin_f in "${pkg_stage}/usr/local/bin/"*; do
       if [ -e "$bin_f" ] || [ -L "$bin_f" ]; then
         bname="$(basename "$bin_f")"
-        rm -f "${dest_root}/usr/local/bin/${bname}" 2>/dev/null || true
-        cp -af "$bin_f" "${dest_root}/usr/local/bin/" 2>/dev/null || _apply_failed=1
-        if [ -f "${dest_root}/usr/local/bin/${bname}" ] && [ ! -L "${dest_root}/usr/local/bin/${bname}" ]; then
-          chmod 755 "${dest_root}/usr/local/bin/${bname}" 2>/dev/null || true
+        if [ -z "$dest_root" ] && [ "$bname" = "axonwall-update" ] && [ -f "$bin_f" ] && [ ! -L "$bin_f" ] && ! sh -n "$bin_f" 2>/dev/null; then
+          _apply_failed=1
+          continue
         fi
+        atomic_install_bin "$bin_f" "${dest_root}/usr/local/bin" "$bname" 2>/dev/null || _apply_failed=1
       fi
     done
   fi
@@ -739,7 +807,11 @@ candidate_is_standby_rootfs() {
   _cand="$1"
   _fstype="$(blkid -o value -s TYPE "$_cand" 2>/dev/null || true)"
   [ "$_fstype" = "ext4" ] || return 1
-  _probe="$(mktemp -d /tmp/axonwall-update-probe.XXXXXX 2>/dev/null || true)"
+  if [ -n "${WORK_DIR:-}" ] && [ -d "${WORK_DIR}" ]; then
+    _probe="$(mktemp -d "${WORK_DIR}/probe.XXXXXX" 2>/dev/null || true)"
+  else
+    return 1
+  fi
   [ -n "$_probe" ] && [ -d "$_probe" ] || return 1
   if mount -o ro "$_cand" "$_probe" 2>/dev/null; then
     if [ -e "${_probe}/sbin/init" ] && [ -d "${_probe}/etc" ] && [ -d "${_probe}/lib/modules" ]; then
@@ -753,168 +825,414 @@ candidate_is_standby_rootfs() {
   return 1
 }
 
-# 1. Detect target block device (skip when in Rolling Single-Root mode)
-TARGET_LABEL="axon_root_b"
-if [ "$TARGET_SLOT" = "A" ]; then
-  TARGET_LABEL="axon_root_a"
-fi
-TARGET_DEV=""
-if [ "$ROLLING_MODE" != "1" ] && [ "$ZBM_MODE" != "1" ] && [ "$BTRFS_MODE" != "1" ]; then
-  TARGET_DEV="$(resolve_label_dev "$TARGET_LABEL")"
-fi
+restart_quiesced_k3s() {
+  if [ -n "${_stopped_k3s_sysd:-}" ]; then
+    for _u in $_stopped_k3s_sysd; do
+      echo "[+] Restarting quiesced systemd unit: ${_u}..."
+      systemctl start "$_u" 2>/dev/null || echo "[!] WARNING: failed to restart ${_u}" >&2
+    done
+    _stopped_k3s_sysd=""
+  fi
+  if [ -n "${_stopped_k3s_rc:-}" ]; then
+    for _u in $_stopped_k3s_rc; do
+      echo "[+] Restarting quiesced OpenRC service: ${_u}..."
+      rc-service "$_u" start 2>/dev/null || echo "[!] WARNING: failed to restart ${_u}" >&2
+    done
+    _stopped_k3s_rc=""
+  fi
+}
 
-if [ -z "$TARGET_DEV" ] && [ "$ROLLING_MODE" != "1" ] && [ "$ZBM_MODE" != "1" ] && [ "$BTRFS_MODE" != "1" ]; then
-  # Fallback: identify unlabelled standby partition adjacent to running root partition
-  RUNNING_ROOT="$(findmnt -n -o SOURCE / 2>/dev/null || true)"
-  if [ -b "$RUNNING_ROOT" ]; then
-    ROOT_DISK="$(echo "$RUNNING_ROOT" | sed -E 's/p?[0-9]+$//')"
-    ROOT_PART_NUM="$(echo "$RUNNING_ROOT" | grep -oE '[0-9]+$')"
-    if [ "$TARGET_SLOT" = "B" ] && [ -n "$ROOT_PART_NUM" ]; then
-      SIBLING_DEV=""
-      if echo "$RUNNING_ROOT" | grep -q 'nvme\|mmcblk\|loop'; then
-        SIBLING_DEV="${ROOT_DISK}p$(( ROOT_PART_NUM + 1 ))"
-      else
-        SIBLING_DEV="${ROOT_DISK}$(( ROOT_PART_NUM + 1 ))"
+zbm_cleanup_fail() {
+  if [ -n "${ZBM_STAGE_MNT:-}" ] && [ -d "${ZBM_STAGE_MNT}" ]; then
+    umount "${ZBM_STAGE_MNT}" 2>/dev/null || umount -l "${ZBM_STAGE_MNT}" 2>/dev/null || true
+    rmdir "${ZBM_STAGE_MNT}" 2>/dev/null || true
+  fi
+  [ -n "${PKG_STAGE:-}" ] && rm -rf "${PKG_STAGE}" 2>/dev/null || true
+  if [ -n "${TARGET_BE_TMP_DS:-}" ] && zfs list -H -o name "$TARGET_BE_TMP_DS" >/dev/null 2>&1; then
+    zfs destroy -r "$TARGET_BE_TMP_DS" 2>/dev/null || true
+  fi
+  restart_quiesced_k3s
+}
+
+main() {
+  TARGET_SLOT="B"
+  TARGET_VERSION=""
+  VERSION_GIVEN=0
+  UPDATE_CHANNEL="stable"
+  FORCE_ROLLING=0
+  FORCE_ZBM=0
+  FORCE_BTRFS=0
+  APT_UPGRADE=0
+  ALLOW_UNSIGNED=0
+  ALLOW_DOWNGRADE=0
+
+  WORK_DIR=""
+  ZBM_STAGE_MNT=""
+  STAGE_DIR=""
+  SLOT_A_MNT=""
+  PKG_STAGE=""
+  TARGET_BE_TMP_DS=""
+  _stopped_k3s_sysd=""
+  _stopped_k3s_rc=""
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --slot)
+        [ $# -ge 2 ] || { echo "[-] Error: --slot requires an argument (A or B)." >&2; exit 1; }
+        TARGET_SLOT="$2"
+        shift 2
+        ;;
+      --version)
+        [ $# -ge 2 ] || { echo "[-] Error: --version requires an argument." >&2; exit 1; }
+        TARGET_VERSION="$2"
+        VERSION_GIVEN=1
+        shift 2
+        ;;
+      --channel)
+        [ $# -ge 2 ] || { echo "[-] Error: --channel requires an argument." >&2; exit 1; }
+        UPDATE_CHANNEL="$2"
+        shift 2
+        ;;
+      --rolling)
+        FORCE_ROLLING=1
+        shift
+        ;;
+      --zbm|--zfsbootmenu)
+        FORCE_ZBM=1
+        shift
+        ;;
+      --btrfs|--snapper)
+        FORCE_BTRFS=1
+        shift
+        ;;
+      --apt|--apt-upgrade)
+        APT_UPGRADE=1
+        shift
+        ;;
+      --allow-unsigned)
+        ALLOW_UNSIGNED=1
+        shift
+        ;;
+      --allow-downgrade)
+        ALLOW_DOWNGRADE=1
+        shift
+        ;;
+      --help|-h)
+        usage
+        exit 0
+        ;;
+      *)
+        # D-L1: unknown options used to be silently swallowed, so a typo
+        # like `--versoin 0.11.68 --slo C` ran a version-less update of
+        # the default slot B and exited 0. Fail loudly instead.
+        echo "[-] Error: unknown option '$1'. Valid options: --slot, --version, --channel, --rolling, --zbm, --btrfs, --apt, --allow-unsigned, --allow-downgrade, --help." >&2
+        exit 1
+        ;;
+    esac
+  done
+
+  CLEAN_VER="${TARGET_VERSION#v}"
+  if [ "$VERSION_GIVEN" = "1" ] && [ -z "$CLEAN_VER" ]; then
+    echo "[-] ERROR: --version requires a valid semantic version (e.g. 0.16.3)." >&2
+    exit 1
+  fi
+  if [ -n "$CLEAN_VER" ] && ! validate_semver "$CLEAN_VER"; then
+    echo "[-] ERROR: invalid --version '${TARGET_VERSION}' (must match ^[0-9]+\\.[0-9]+\\.[0-9]+([.-][0-9A-Za-z.-]+)?$ without '..' or path separators)." >&2
+    exit 1
+  fi
+
+  # Note: command substitution runs in a subshell, so a bare call would
+  # swallow detect_edition's exit 1 — the `|| exit 1` makes the failure
+  # propagate to this script.
+  EDITION="$(detect_edition)" || exit 1
+
+  # D-L3: "unknown" when the version file is absent -- the running
+  # version is genuinely unknown then; a stale literal (0.8.13) fed
+  # slot_versions.json and the download-abort comparison a wrong value.
+  RUNNING_VER="unknown"
+  if [ -f /etc/axonwall/version ]; then
+    _raw_running_ver="$(head -n1 /etc/axonwall/version | tr -d '\r\n ')"
+    _raw_running_ver="${_raw_running_ver#v}"
+    if [ -n "$_raw_running_ver" ]; then
+      RUNNING_VER="$_raw_running_ver"
+    fi
+  fi
+
+  if [ -n "$CLEAN_VER" ] && [ "$RUNNING_VER" != "unknown" ]; then
+    check_downgrade "$CLEAN_VER" "$RUNNING_VER" "$ALLOW_DOWNGRADE" || exit 1
+  fi
+
+  ZBM_MODE=0
+  if [ "$FORCE_ZBM" = "1" ]; then
+    ZBM_MODE=1
+  elif [ -f /etc/axonwall/install-mode ] && grep -qiE 'zbm|zfsbootmenu' /etc/axonwall/install-mode 2>/dev/null; then
+    ZBM_MODE=1
+  elif [ -f /var/lib/axonwall/install-mode ] && grep -qiE 'zbm|zfsbootmenu' /var/lib/axonwall/install-mode 2>/dev/null; then
+    ZBM_MODE=1
+  elif grep -qs -E 'zfs=zroot/ROOT|boot=zfs' /proc/cmdline 2>/dev/null; then
+    ZBM_MODE=1
+  elif command -v findmnt >/dev/null 2>&1 && findmnt -n -o FSTYPE / 2>/dev/null | grep -q 'zfs'; then
+    ZBM_MODE=1
+  fi
+
+  BTRFS_MODE=0
+  if [ "$ZBM_MODE" = "1" ]; then
+    BTRFS_MODE=0
+  elif [ "$FORCE_BTRFS" = "1" ]; then
+    BTRFS_MODE=1
+  elif [ -f /etc/axonwall/install-mode ] && grep -qiE 'btrfs|snapper' /etc/axonwall/install-mode 2>/dev/null; then
+    BTRFS_MODE=1
+  elif [ -f /var/lib/axonwall/install-mode ] && grep -qiE 'btrfs|snapper' /var/lib/axonwall/install-mode 2>/dev/null; then
+    BTRFS_MODE=1
+  elif grep -qs -E 'axon_btrfs|rootfstype=btrfs|subvol=@' /proc/cmdline 2>/dev/null; then
+    BTRFS_MODE=1
+  elif command -v findmnt >/dev/null 2>&1 && findmnt -n -o FSTYPE / 2>/dev/null | grep -q 'btrfs'; then
+    BTRFS_MODE=1
+  fi
+
+  ROLLING_MODE=0
+  if [ "$ZBM_MODE" = "1" ] || [ "$BTRFS_MODE" = "1" ]; then
+    ROLLING_MODE=0
+  elif [ "$FORCE_ROLLING" = "1" ]; then
+    ROLLING_MODE=1
+  elif [ -f /etc/axonwall/install-mode ] && grep -qi 'rolling' /etc/axonwall/install-mode 2>/dev/null; then
+    ROLLING_MODE=1
+  elif [ -f /var/lib/axonwall/install-mode ] && grep -qi 'rolling' /var/lib/axonwall/install-mode 2>/dev/null; then
+    ROLLING_MODE=1
+  elif [ ! -e /dev/disk/by-label/axon_root_a ] && [ ! -e /dev/disk/by-label/axon_root_b ] && ! grep -qs -E 'slot=[AB]|axon_root_[ab]' /proc/cmdline 2>/dev/null; then
+    ROLLING_MODE=1
+  fi
+
+  TARGET_SLOT="$(printf '%s' "$TARGET_SLOT" | tr '[:lower:]' '[:upper:]')"
+  if [ "$TARGET_SLOT" != "A" ] && [ "$TARGET_SLOT" != "B" ]; then
+    if [ "$ROLLING_MODE" = "1" ] || [ "$ZBM_MODE" = "1" ] || [ "$BTRFS_MODE" = "1" ]; then
+      TARGET_SLOT="A"
+    else
+      echo "[-] Error: Invalid target slot '${TARGET_SLOT}'. Must be 'A' or 'B'." >&2
+      exit 1
+    fi
+  fi
+
+  WORK_DIR="$(mktemp -d /run/axonwall-update.XXXXXX 2>/dev/null || true)"
+  if [ -z "$WORK_DIR" ] || [ ! -d "$WORK_DIR" ]; then
+    echo "[-] ERROR: failed to create secure workspace under /run." >&2
+    exit 1
+  fi
+  chmod 0700 "$WORK_DIR"
+  trap 'cleanup_work_dir' EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+
+  echo "================================================================================"
+  echo "Axonwall Appliance Firmware Updater"
+  if [ "$ZBM_MODE" = "1" ]; then
+    echo "  Install Mode  : ZFSBootMenu Root-on-ZFS (Boot Environments & Snapshots)"
+  elif [ "$BTRFS_MODE" = "1" ]; then
+    echo "  Install Mode  : Btrfs + Snapper Root (CoW Pre/Post Snapshots)"
+  elif [ "$ROLLING_MODE" = "1" ]; then
+    echo "  Install Mode  : Rolling Standard Linux (Single-Root /)"
+  else
+    echo "  Install Mode  : Dual-Root A/B (Target: Slot ${TARGET_SLOT})"
+  fi
+  echo "  Target Version: ${TARGET_VERSION:-latest}"
+  echo "  Channel       : ${UPDATE_CHANNEL}"
+  echo "  Edition       : ${EDITION}"
+  echo "================================================================================"
+
+  # Pre-Update OpenLDAP Directory Backup (protects against MDB version skew on rollback)
+  if command -v slapcat >/dev/null 2>&1 && [ -d /var/lib/axonwall/ldap/config/cn=config ]; then
+    BACKUP_TS="$(date -u +"%Y%m%dT%H%M%SZ" 2>/dev/null || echo "latest")"
+    mkdir -p /var/lib/axonwall/ldap/backups 2>/dev/null || true
+    echo "[+] Creating pre-update OpenLDAP LDIF snapshot in /var/lib/axonwall/ldap/backups/..."
+    # D-M8: this snapshot is what makes rollback possible after an
+    # LDAP-breaking update. A failed slapcat used to be swallowed (|| true)
+    # and the update proceeded with no snapshot at all. Fail closed: abort
+    # the update when either database cannot be dumped or its LDIF is
+    # missing afterwards. (An empty data LDIF is a valid backup of an empty
+    # directory, so existence — not size — is the check.)
+    _ldap_backup_failed=0
+    _ldap_config_ldif="/var/lib/axonwall/ldap/backups/pre-update-slot-${TARGET_SLOT}-config-${BACKUP_TS}.ldif"
+    _ldap_data_ldif="/var/lib/axonwall/ldap/backups/pre-update-slot-${TARGET_SLOT}-data-${BACKUP_TS}.ldif"
+    if ! slapcat -F /var/lib/axonwall/ldap/config -n 0 -l "$_ldap_config_ldif"; then
+      echo "[-] ERROR: slapcat failed to dump the OpenLDAP config database (cn=config)." >&2
+      _ldap_backup_failed=1
+    fi
+    if ! slapcat -F /var/lib/axonwall/ldap/config -n 1 -l "$_ldap_data_ldif"; then
+      echo "[-] ERROR: slapcat failed to dump the OpenLDAP data database." >&2
+      _ldap_backup_failed=1
+    fi
+    if [ "$_ldap_backup_failed" -eq 0 ]; then
+      chmod 0600 "$_ldap_config_ldif" "$_ldap_data_ldif" 2>/dev/null || true
+      if [ ! -f "$_ldap_config_ldif" ] || [ ! -f "$_ldap_data_ldif" ]; then
+        echo "[-] ERROR: pre-update OpenLDAP LDIF snapshot is incomplete (missing LDIF file)." >&2
+        _ldap_backup_failed=1
       fi
-      if [ -b "$SIBLING_DEV" ]; then
-        if candidate_is_standby_rootfs "$SIBLING_DEV"; then
-          echo "[!] Auto-labeling unlabelled standby partition ${SIBLING_DEV} as ${TARGET_LABEL}..."
-          e2label "$SIBLING_DEV" "$TARGET_LABEL" 2>/dev/null || tune2fs -L "$TARGET_LABEL" "$SIBLING_DEV" 2>/dev/null || true
-          TARGET_DEV="$(resolve_label_dev "$TARGET_LABEL")"
+    fi
+    if [ "$_ldap_backup_failed" -eq 1 ]; then
+      echo "[-] ERROR: refusing to update without a pre-update LDAP snapshot; rollback after an LDAP-breaking update would have nothing to restore. Fix slapcat/LDAP and re-run the updater." >&2
+      exit 1
+    fi
+  fi
+
+  # 1. Detect target block device (skip when in Rolling Single-Root mode)
+  TARGET_LABEL="axon_root_b"
+  if [ "$TARGET_SLOT" = "A" ]; then
+    TARGET_LABEL="axon_root_a"
+  fi
+  TARGET_DEV=""
+  if [ "$ROLLING_MODE" != "1" ] && [ "$ZBM_MODE" != "1" ] && [ "$BTRFS_MODE" != "1" ]; then
+    TARGET_DEV="$(resolve_label_dev "$TARGET_LABEL")"
+  fi
+
+  if [ -z "$TARGET_DEV" ] && [ "$ROLLING_MODE" != "1" ] && [ "$ZBM_MODE" != "1" ] && [ "$BTRFS_MODE" != "1" ]; then
+    # Fallback: identify unlabelled standby partition adjacent to running root partition
+    RUNNING_ROOT="$(findmnt -n -o SOURCE / 2>/dev/null || true)"
+    if [ -b "$RUNNING_ROOT" ]; then
+      ROOT_DISK="$(echo "$RUNNING_ROOT" | sed -E 's/p?[0-9]+$//')"
+      ROOT_PART_NUM="$(echo "$RUNNING_ROOT" | grep -oE '[0-9]+$')"
+      if [ "$TARGET_SLOT" = "B" ] && [ -n "$ROOT_PART_NUM" ]; then
+        SIBLING_DEV=""
+        if echo "$RUNNING_ROOT" | grep -q 'nvme\|mmcblk\|loop'; then
+          SIBLING_DEV="${ROOT_DISK}p$(( ROOT_PART_NUM + 1 ))"
         else
-          echo "[-] ERROR: adjacent partition ${SIBLING_DEV} does not look like a standby rootfs (not ext4, or missing /sbin/init, /etc, /lib/modules); refusing to relabel it as ${TARGET_LABEL}." >&2
+          SIBLING_DEV="${ROOT_DISK}$(( ROOT_PART_NUM + 1 ))"
         fi
-      fi
-    elif [ "$TARGET_SLOT" = "A" ] && [ -n "$ROOT_PART_NUM" ] && [ "$ROOT_PART_NUM" -gt 1 ]; then
-      SIBLING_DEV=""
-      if echo "$RUNNING_ROOT" | grep -q 'nvme\|mmcblk\|loop'; then
-        SIBLING_DEV="${ROOT_DISK}p$(( ROOT_PART_NUM - 1 ))"
-      else
-        SIBLING_DEV="${ROOT_DISK}$(( ROOT_PART_NUM - 1 ))"
-      fi
-      if [ -b "$SIBLING_DEV" ]; then
-        if candidate_is_standby_rootfs "$SIBLING_DEV"; then
-          echo "[!] Auto-labeling unlabelled standby partition ${SIBLING_DEV} as ${TARGET_LABEL}..."
-          e2label "$SIBLING_DEV" "$TARGET_LABEL" 2>/dev/null || tune2fs -L "$TARGET_LABEL" "$SIBLING_DEV" 2>/dev/null || true
-          TARGET_DEV="$(resolve_label_dev "$TARGET_LABEL")"
+        if [ -b "$SIBLING_DEV" ]; then
+          if candidate_is_standby_rootfs "$SIBLING_DEV"; then
+            echo "[!] Auto-labeling unlabelled standby partition ${SIBLING_DEV} as ${TARGET_LABEL}..."
+            e2label "$SIBLING_DEV" "$TARGET_LABEL" 2>/dev/null || tune2fs -L "$TARGET_LABEL" "$SIBLING_DEV" 2>/dev/null || true
+            TARGET_DEV="$(resolve_label_dev "$TARGET_LABEL")"
+          else
+            echo "[-] ERROR: adjacent partition ${SIBLING_DEV} does not look like a standby rootfs (not ext4, or missing /sbin/init, /etc, /lib/modules); refusing to relabel it as ${TARGET_LABEL}." >&2
+          fi
+        fi
+      elif [ "$TARGET_SLOT" = "A" ] && [ -n "$ROOT_PART_NUM" ] && [ "$ROOT_PART_NUM" -gt 1 ]; then
+        SIBLING_DEV=""
+        if echo "$RUNNING_ROOT" | grep -q 'nvme\|mmcblk\|loop'; then
+          SIBLING_DEV="${ROOT_DISK}p$(( ROOT_PART_NUM - 1 ))"
         else
-          echo "[-] ERROR: adjacent partition ${SIBLING_DEV} does not look like a standby rootfs (not ext4, or missing /sbin/init, /etc, /lib/modules); refusing to relabel it as ${TARGET_LABEL}." >&2
+          SIBLING_DEV="${ROOT_DISK}$(( ROOT_PART_NUM - 1 ))"
+        fi
+        if [ -b "$SIBLING_DEV" ]; then
+          if candidate_is_standby_rootfs "$SIBLING_DEV"; then
+            echo "[!] Auto-labeling unlabelled standby partition ${SIBLING_DEV} as ${TARGET_LABEL}..."
+            e2label "$SIBLING_DEV" "$TARGET_LABEL" 2>/dev/null || tune2fs -L "$TARGET_LABEL" "$SIBLING_DEV" 2>/dev/null || true
+            TARGET_DEV="$(resolve_label_dev "$TARGET_LABEL")"
+          else
+            echo "[-] ERROR: adjacent partition ${SIBLING_DEV} does not look like a standby rootfs (not ext4, or missing /sbin/init, /etc, /lib/modules); refusing to relabel it as ${TARGET_LABEL}." >&2
+          fi
         fi
       fi
     fi
   fi
-fi
 
-# 2. Attempt to fetch release package from GitHub Releases if online
-CLEAN_VER="${TARGET_VERSION#v}"
-DEB_TMP=""
-if [ -n "$CLEAN_VER" ] && command -v curl >/dev/null 2>&1; then
-  # D-M9: flavor-specific package name. The axonwall edition keeps the
-  # historic NGFW artifact name; vault and k3s-storage request their
-  # own package. There is deliberately no fallback to the NGFW package
-  # anywhere below — a failed flavor download leaves DEB_TMP empty and
-  # the E-M1 guard aborts the update instead of staging the wrong
-  # edition's payload.
-  case "$EDITION" in
-    vault) DEB_BASE="axonwall-vault" ;;
-    k3s-storage) DEB_BASE="axonwall-k3s-storage" ;;
-    minimal) DEB_BASE="axonwall-minimal" ;;
-    *) DEB_BASE="axonwall" ;;
-  esac
-  DEB_URL="https://github.com/axonwall/axonwall/releases/download/v${CLEAN_VER}/${DEB_BASE}_${CLEAN_VER}_amd64.deb"
-  SHA_URL="${DEB_URL}.sha256"
-  SIG_URL="${SHA_URL}.sig"
-  RELEASE_PUBKEY="/etc/axonwall/release-signing.pub"
-  CANDIDATE_DEB="/tmp/${DEB_BASE}_${CLEAN_VER}_amd64.deb"
-  echo "[+] Checking release artifact: ${DEB_URL}"
-  if curl -fsSL --connect-timeout 10 --max-time 180 -o "${CANDIDATE_DEB}" "${DEB_URL}" 2>/dev/null; then
-    # Fail closed: the .deb is only ever used after verification. A
-    # checksum that cannot be fetched discards the download -- a
-    # missing checksum must never mean "unverified is fine" for code
-    # that will run as root.
-    if ! curl -fsSL --connect-timeout 10 --max-time 30 -o "${CANDIDATE_DEB}.sha256" "${SHA_URL}" 2>/dev/null; then
-      echo "[-] ERROR: could not fetch SHA-256 checksum for ${DEB_URL}; discarding unverified download."
-      rm -f "${CANDIDATE_DEB}"
-    else
-      EXPECTED_HASH="$(awk '{print $1}' "${CANDIDATE_DEB}.sha256" | head -n 1)"
+  # 2. Attempt to fetch release package from GitHub Releases if online
+  DEB_TMP=""
+  if [ -n "$CLEAN_VER" ] && command -v curl >/dev/null 2>&1; then
+    # D-M9: flavor-specific package name. The axonwall edition keeps the
+    # historic NGFW artifact name; vault and k3s-storage request their
+    # own package. There is deliberately no fallback to the NGFW package
+    # anywhere below — a failed flavor download leaves DEB_TMP empty and
+    # the E-M1 guard aborts the update instead of staging the wrong
+    # edition's payload.
+    case "$EDITION" in
+      vault) DEB_BASE="axonwall-vault" ;;
+      k3s-storage) DEB_BASE="axonwall-k3s-storage" ;;
+      minimal) DEB_BASE="axonwall-minimal" ;;
+      *) DEB_BASE="axonwall" ;;
+    esac
+    EXPECTED_DEB_NAME="${DEB_BASE}_${CLEAN_VER}_amd64.deb"
+    DEB_URL="https://github.com/axonwall/axonwall/releases/download/v${CLEAN_VER}/${EXPECTED_DEB_NAME}"
+    SHA_URL="${DEB_URL}.sha256"
+    SIG_URL="${SHA_URL}.sig"
+    RELEASE_PUBKEY="/etc/axonwall/release-signing.pub"
+    CANDIDATE_DEB="${WORK_DIR}/${EXPECTED_DEB_NAME}"
+    echo "[+] Checking release artifact: ${DEB_URL}"
+    if curl -fsSL --proto '=https' --proto-redir '=https' --tlsv1.2 --connect-timeout 10 --max-time 180 -o "${CANDIDATE_DEB}" "${DEB_URL}" 2>/dev/null; then
+      # Fail closed: the .deb is only ever used after verification. A
+      # checksum that cannot be fetched discards the download -- a
+      # missing checksum must never mean "unverified is fine" for code
+      # that will run as root.
+      if ! curl -fsSL --proto '=https' --proto-redir '=https' --tlsv1.2 --connect-timeout 10 --max-time 30 -o "${CANDIDATE_DEB}.sha256" "${SHA_URL}" 2>/dev/null; then
+        echo "[-] ERROR: could not fetch SHA-256 checksum for ${DEB_URL}; discarding unverified download." >&2
+        rm -f "${CANDIDATE_DEB}"
+        exit 1
+      fi
+      if ! EXPECTED_HASH="$(verify_sha256_manifest "${CANDIDATE_DEB}.sha256" "${EXPECTED_DEB_NAME}")"; then
+        echo "[-] ERROR: SHA-256 manifest validation failed (expected 1 line binding ${EXPECTED_DEB_NAME}); discarding download." >&2
+        rm -f "${CANDIDATE_DEB}" "${CANDIDATE_DEB}.sha256"
+        exit 1
+      fi
       ACTUAL_HASH="$(sha256sum "${CANDIDATE_DEB}" | awk '{print $1}')"
       if [ -z "$EXPECTED_HASH" ] || [ "$EXPECTED_HASH" != "$ACTUAL_HASH" ]; then
-        echo "[-] Warning: SHA-256 mismatch for downloaded package, falling back to local image sync."
+        echo "[-] ERROR: SHA-256 mismatch for downloaded package ${EXPECTED_DEB_NAME}; discarding download." >&2
         rm -f "${CANDIDATE_DEB}" "${CANDIDATE_DEB}.sha256"
-      else
-        # E-M2 (round-3): verify the detached signature against the
-        # release-signing keyring — the legacy single pubkey plus any
-        # additional anchors in /etc/axonwall/release-signing.d/. The
-        # old code trusted exactly one key, so a release signed with a
-        # new key could never be downloaded (the new anchor ships
-        # inside the package the old key cannot verify) and rotation
-        # bricked updates fleet-wide until the pubkey was replaced out
-        # of band on every box. With a keyring, a transition release
-        # signed by the OLD key delivers the NEW anchor into the
-        # keyring, and the following release can be signed by the new
-        # key. See release-signing.d/README.md for the procedure.
-        # (Unmatched globs stay literal under /bin/sh; the -s test
-        # below skips them, so an empty keyring dir is safe.)
-        _sig_ok=0
-        _have_key=0
-        for _pubkey in "$RELEASE_PUBKEY" /etc/axonwall/release-signing.d/*.pub /usr/share/axonwall/release-signing.pub /usr/share/axonwall/release-signing.d/*.pub; do
-          [ -s "$_pubkey" ] && _have_key=1 && break
-        done
-        if [ "$_have_key" = "1" ]; then
-          if curl -fsSL --connect-timeout 10 --max-time 30 -o "${CANDIDATE_DEB}.sha256.sig" "${SIG_URL}" 2>/dev/null; then
-            for _pubkey in "$RELEASE_PUBKEY" /etc/axonwall/release-signing.d/*.pub /usr/share/axonwall/release-signing.pub /usr/share/axonwall/release-signing.d/*.pub; do
-              [ -s "$_pubkey" ] || continue
-              if openssl dgst -sha256 -verify "$_pubkey" -signature "${CANDIDATE_DEB}.sha256.sig" "${CANDIDATE_DEB}.sha256" >/dev/null 2>&1; then
-                _sig_ok=1
-                break
-              fi
-            done
-          fi
-          if [ "$_sig_ok" = "1" ]; then
-            echo "[+] Verified SHA-256 integrity hash and release signature: ${ACTUAL_HASH}"
-            DEB_TMP="${CANDIDATE_DEB}"
-          else
-            echo "[-] ERROR: release signature verification failed for ${DEB_URL}; discarding download."
-            rm -f "${CANDIDATE_DEB}" "${CANDIDATE_DEB}.sha256" "${CANDIDATE_DEB}.sha256.sig"
-          fi
-        elif [ "$ALLOW_UNSIGNED" = "1" ]; then
-          echo "[!] Warning: no release signing key installed (--allow-unsigned given); relying on SHA-256 + TLS only."
-          echo "[+] Verified SHA-256 integrity hash: ${ACTUAL_HASH}"
+        exit 1
+      fi
+      # E-M2 (round-3): verify the detached signature against the
+      # release-signing keyring — the legacy single pubkey plus any
+      # additional anchors in /etc/axonwall/release-signing.d/. The
+      # old code trusted exactly one key, so a release signed with a
+      # new key could never be downloaded (the new anchor ships
+      # inside the package the old key cannot verify) and rotation
+      # bricked updates fleet-wide until the pubkey was replaced out
+      # of band on every box. With a keyring, a transition release
+      # signed by the OLD key delivers the NEW anchor into the
+      # keyring, and the following release can be signed by the new
+      # key. See release-signing.d/README.md for the procedure.
+      # (Unmatched globs stay literal under /bin/sh; the -s test
+      # below skips them, so an empty keyring dir is safe.)
+      _sig_ok=0
+      _have_key=0
+      for _pubkey in "$RELEASE_PUBKEY" /etc/axonwall/release-signing.d/*.pub /usr/share/axonwall/release-signing.pub /usr/share/axonwall/release-signing.d/*.pub; do
+        [ -s "$_pubkey" ] && _have_key=1 && break
+      done
+      if [ "$_have_key" = "1" ]; then
+        if curl -fsSL --proto '=https' --proto-redir '=https' --tlsv1.2 --connect-timeout 10 --max-time 30 -o "${CANDIDATE_DEB}.sha256.sig" "${SIG_URL}" 2>/dev/null; then
+          for _pubkey in "$RELEASE_PUBKEY" /etc/axonwall/release-signing.d/*.pub /usr/share/axonwall/release-signing.pub /usr/share/axonwall/release-signing.d/*.pub; do
+            [ -s "$_pubkey" ] || continue
+            if openssl dgst -sha256 -verify "$_pubkey" -signature "${CANDIDATE_DEB}.sha256.sig" "${CANDIDATE_DEB}.sha256" >/dev/null 2>&1; then
+              _sig_ok=1
+              break
+            fi
+          done
+        fi
+        if [ "$_sig_ok" = "1" ]; then
+          echo "[+] Verified SHA-256 integrity hash and release signature: ${ACTUAL_HASH}"
           DEB_TMP="${CANDIDATE_DEB}"
         else
-          echo "[-] ERROR: no release signing key found (checked ${RELEASE_PUBKEY}, /etc/axonwall/release-signing.d/*.pub, /usr/share/axonwall/release-signing.pub, /usr/share/axonwall/release-signing.d/*.pub); refusing unsigned update (pass --allow-unsigned to override)." >&2
+          echo "[-] ERROR: release signature verification failed for ${DEB_URL}; discarding download." >&2
           rm -f "${CANDIDATE_DEB}" "${CANDIDATE_DEB}.sha256" "${CANDIDATE_DEB}.sha256.sig"
           exit 1
         fi
+      elif [ "$ALLOW_UNSIGNED" = "1" ]; then
+        echo "[!] Warning: no release signing key installed (--allow-unsigned given); relying on SHA-256 + TLS only."
+        echo "[+] Verified SHA-256 integrity hash: ${ACTUAL_HASH}"
+        DEB_TMP="${CANDIDATE_DEB}"
+      else
+        echo "[-] ERROR: no release signing key found (checked ${RELEASE_PUBKEY}, /etc/axonwall/release-signing.d/*.pub, /usr/share/axonwall/release-signing.pub, /usr/share/axonwall/release-signing.d/*.pub); refusing unsigned update (pass --allow-unsigned to override)." >&2
+        rm -f "${CANDIDATE_DEB}" "${CANDIDATE_DEB}.sha256" "${CANDIDATE_DEB}.sha256.sig"
+        exit 1
       fi
+    else
+      rm -f "${CANDIDATE_DEB}" 2>/dev/null || true
     fi
   fi
-fi
 
-# Capture running version and active slot before mounting or modifying anything
-RUNNING_ACTIVE_SLOT="A"
-if grep -qs -E 'axon_root_b|slot=B' /proc/cmdline 2>/dev/null; then
-  RUNNING_ACTIVE_SLOT="B"
-fi
-# D-L3: "unknown" when the version file is absent -- the running
-# version is genuinely unknown then; a stale literal (0.8.13) fed
-# slot_versions.json and the download-abort comparison a wrong value.
-RUNNING_VER="unknown"
-if [ -f /etc/axonwall/version ]; then
-  RUNNING_VER="$(head -n1 /etc/axonwall/version | tr -d '\r\n ')"
-fi
+  # Capture active slot before mounting or modifying anything
+  RUNNING_ACTIVE_SLOT="A"
+  if grep -qs -E 'axon_root_b|slot=B' /proc/cmdline 2>/dev/null; then
+    RUNNING_ACTIVE_SLOT="B"
+  fi
 
-# E-M1 (round-3): a missing /etc/axonwall/version must fail closed, not
-# proceed. The old condition required the file to exist before aborting
-# on a failed download / bad signature, so a box without the file silently
-# staged the running tree and armed it as the requested new version.
-# RUNNING_VER already defaults to 0.8.13 when the file is missing, so
-# dropping the file-existence conjunct aborts whenever a different
-# version was requested but no verified package was obtained.
-if [ -z "$DEB_TMP" ] && [ -n "$CLEAN_VER" ] && [ "$CLEAN_VER" != "$RUNNING_VER" ]; then
-  echo "[-] ERROR: Could not download or verify release package for v${CLEAN_VER} (currently running v${RUNNING_VER}). Aborting firmware update." >&2
-  exit 1
-fi
+  # E-M1 (round-3): a missing /etc/axonwall/version must fail closed, not
+  # proceed. The old condition required the file to exist before aborting
+  # on a failed download / bad signature, so a box without the file silently
+  # staged the running tree and armed it as the requested new version.
+  if [ -z "$DEB_TMP" ] && [ -n "$CLEAN_VER" ] && [ "$CLEAN_VER" != "$RUNNING_VER" ]; then
+    echo "[-] ERROR: Could not download or verify release package for v${CLEAN_VER} (currently running v${RUNNING_VER}). Aborting firmware update." >&2
+    exit 1
+  fi
 
 # 3. Check if running in ZFSBootMenu, Dual-Root, or Rolling Single-Disk mode
 if [ "$ZBM_MODE" = "1" ]; then
@@ -968,39 +1286,10 @@ if [ "$ZBM_MODE" = "1" ]; then
   if command -v zfs >/dev/null 2>&1; then
     _stopped_k3s_sysd=""
     _stopped_k3s_rc=""
-    ZBM_STAGE_MNT="/tmp/axonwall-zbm-stage-${CLEAN_VER}"
+    ZBM_STAGE_MNT="${WORK_DIR}/zbm-stage"
     PKG_STAGE=""
     TARGET_BE_TMP="${TARGET_BE}.tmp"
     TARGET_BE_TMP_DS="${PARENT_DS}/${TARGET_BE_TMP}"
-
-    restart_quiesced_k3s() {
-      if [ -n "$_stopped_k3s_sysd" ]; then
-        for _u in $_stopped_k3s_sysd; do
-          echo "[+] Restarting quiesced systemd unit: ${_u}..."
-          systemctl start "$_u" 2>/dev/null || echo "[!] WARNING: failed to restart ${_u}" >&2
-        done
-        _stopped_k3s_sysd=""
-      fi
-      if [ -n "$_stopped_k3s_rc" ]; then
-        for _u in $_stopped_k3s_rc; do
-          echo "[+] Restarting quiesced OpenRC service: ${_u}..."
-          rc-service "$_u" start 2>/dev/null || echo "[!] WARNING: failed to restart ${_u}" >&2
-        done
-        _stopped_k3s_rc=""
-      fi
-    }
-
-    zbm_cleanup_fail() {
-      if [ -n "${ZBM_STAGE_MNT:-}" ] && [ -d "${ZBM_STAGE_MNT}" ]; then
-        umount "${ZBM_STAGE_MNT}" 2>/dev/null || umount -l "${ZBM_STAGE_MNT}" 2>/dev/null || true
-        rmdir "${ZBM_STAGE_MNT}" 2>/dev/null || true
-      fi
-      [ -n "${PKG_STAGE:-}" ] && rm -rf "${PKG_STAGE}" 2>/dev/null || true
-      if [ -n "${TARGET_BE_TMP_DS:-}" ] && zfs list -H -o name "$TARGET_BE_TMP_DS" >/dev/null 2>&1; then
-        zfs destroy -r "$TARGET_BE_TMP_DS" 2>/dev/null || true
-      fi
-      restart_quiesced_k3s
-    }
 
     # Quiesce K3s (etcd / SQLite WAL on zroot/ROOT/*) before snapshot/clone
     if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
@@ -1063,7 +1352,7 @@ if [ "$ZBM_MODE" = "1" ]; then
 
     if [ -n "$DEB_TMP" ] && [ -f "$DEB_TMP" ]; then
       echo "[+] Extracting firmware payload into ${TARGET_BE_DS}..."
-      PKG_STAGE="/tmp/axonwall-stage-${CLEAN_VER}"
+      PKG_STAGE="${WORK_DIR}/pkg-stage"
       rm -rf "${PKG_STAGE}"
       mkdir -p "${PKG_STAGE}"
       if ! extract_deb "${DEB_TMP}" "${PKG_STAGE}"; then
@@ -1087,10 +1376,11 @@ if [ "$ZBM_MODE" = "1" ]; then
           if [ -e "$bin_f" ] || [ -L "$bin_f" ]; then
             bname="$(basename "$bin_f")"
             if [ ! -e "/usr/local/bin/${bname}" ] || [ "$bname" = "axonwall-update" ]; then
-              cp -af "$bin_f" /usr/local/bin/ 2>/dev/null || true
-              if [ -f "/usr/local/bin/${bname}" ] && [ ! -L "/usr/local/bin/${bname}" ]; then
-                chmod 755 "/usr/local/bin/${bname}" 2>/dev/null || true
+              if [ "$bname" = "axonwall-update" ] && [ -f "$bin_f" ] && [ ! -L "$bin_f" ] && ! sh -n "$bin_f" 2>/dev/null; then
+                echo "[!] WARNING: staged axonwall-update failed sh -n syntax check; keeping live /usr/local/bin/axonwall-update." >&2
+                continue
               fi
+              atomic_install_bin "$bin_f" "/usr/local/bin" "$bname" 2>/dev/null || true
             fi
           fi
         done
@@ -1262,7 +1552,7 @@ elif [ -n "$TARGET_DEV" ] && [ -e "$TARGET_DEV" ]; then
   fi
   echo "[+] Detected Dual-Root target partition: ${TARGET_DEV} (${TARGET_LABEL})"
   echo "[+] Mounting standby partition to staging directory..."
-  STAGE_DIR="/tmp/axonwall-update-slot-${TARGET_SLOT}"
+  STAGE_DIR="${WORK_DIR}/slot-${TARGET_SLOT}"
   mkdir -p "${STAGE_DIR}"
   # E1: staging-success flag. Only the mount-ok block below may set it;
   # the grubenv arming after that block is gated on it.
@@ -1350,7 +1640,7 @@ elif [ -n "$TARGET_DEV" ] && [ -e "$TARGET_DEV" ]; then
 
     echo "[+] Updating application packages on standby partition..."
     if [ -n "$DEB_TMP" ] && [ -f "$DEB_TMP" ]; then
-      PKG_STAGE="/tmp/axonwall-stage-${CLEAN_VER}"
+      PKG_STAGE="${WORK_DIR}/pkg-stage"
       rm -rf "${PKG_STAGE}"
       mkdir -p "${PKG_STAGE}"
       if extract_deb "${DEB_TMP}" "${PKG_STAGE}"; then
@@ -1366,10 +1656,9 @@ elif [ -n "$TARGET_DEV" ] && [ -e "$TARGET_DEV" ]; then
         fi
         if [ -f "${STAGE_DIR}/usr/local/bin/axonwall-update" ]; then
           if sh -n "${STAGE_DIR}/usr/local/bin/axonwall-update" 2>/dev/null; then
-            cp -f "${STAGE_DIR}/usr/local/bin/axonwall-update" /usr/local/bin/axonwall-update 2>/dev/null || true
-            chmod 755 /usr/local/bin/axonwall-update 2>/dev/null || true
-          else
-            cp -f /usr/local/bin/axonwall-update "${STAGE_DIR}/usr/local/bin/axonwall-update" 2>/dev/null || true
+            atomic_install_bin "${STAGE_DIR}/usr/local/bin/axonwall-update" "/usr/local/bin" "axonwall-update" 2>/dev/null || true
+          elif [ -f /usr/local/bin/axonwall-update ]; then
+            atomic_install_bin "/usr/local/bin/axonwall-update" "${STAGE_DIR}/usr/local/bin" "axonwall-update" 2>/dev/null || true
           fi
         fi
         if [ -d "${PKG_STAGE}/usr/local/bin" ]; then
@@ -1377,10 +1666,7 @@ elif [ -n "$TARGET_DEV" ] && [ -e "$TARGET_DEV" ]; then
             if [ -e "$bin_f" ] || [ -L "$bin_f" ]; then
               bname="$(basename "$bin_f")"
               if [ ! -e "/usr/local/bin/${bname}" ]; then
-                cp -af "$bin_f" /usr/local/bin/ 2>/dev/null || true
-                if [ -f "/usr/local/bin/${bname}" ] && [ ! -L "/usr/local/bin/${bname}" ]; then
-                  chmod 755 "/usr/local/bin/${bname}" 2>/dev/null || true
-                fi
+                atomic_install_bin "$bin_f" "/usr/local/bin" "$bname" 2>/dev/null || true
               fi
             fi
           done
@@ -1527,7 +1813,7 @@ elif [ -n "$TARGET_DEV" ] && [ -e "$TARGET_DEV" ]; then
     SLOT_A_DEV="$(resolve_label_dev "axon_root_a")"
     MIRROR_OK=0
     if [ -n "$SLOT_A_DEV" ] && [ -b "$SLOT_A_DEV" ]; then
-      SLOT_A_MNT="/tmp/axonwall-grubenv-slot-a"
+      SLOT_A_MNT="${WORK_DIR}/grubenv-slot-a"
       mkdir -p "$SLOT_A_MNT" 2>/dev/null || true
       if mount "$SLOT_A_DEV" "$SLOT_A_MNT" 2>/dev/null; then
         if [ -d "$SLOT_A_MNT/boot/grub" ]; then
@@ -1588,7 +1874,7 @@ elif [ "$BTRFS_MODE" = "1" ]; then
   fi
 
   if [ -n "$DEB_TMP" ] && [ -f "$DEB_TMP" ]; then
-    PKG_STAGE="/tmp/axonwall-stage-${CLEAN_VER}"
+    PKG_STAGE="${WORK_DIR}/pkg-stage"
     rm -rf "${PKG_STAGE}"
     mkdir -p "${PKG_STAGE}"
     if ! extract_deb "${DEB_TMP}" "${PKG_STAGE}"; then
@@ -1606,10 +1892,11 @@ elif [ "$BTRFS_MODE" = "1" ]; then
         if [ -e "$bin_f" ] || [ -L "$bin_f" ]; then
           bname="$(basename "$bin_f")"
           if [ ! -e "/usr/local/bin/${bname}" ] || [ "$bname" = "axonwall-update" ] || [ "$bname" = "axonwall-btrfs-grub" ]; then
-            cp -af "$bin_f" /usr/local/bin/ 2>/dev/null || true
-            if [ -f "/usr/local/bin/${bname}" ] && [ ! -L "/usr/local/bin/${bname}" ]; then
-              chmod 755 "/usr/local/bin/${bname}" 2>/dev/null || true
+            if [ "$bname" = "axonwall-update" ] && [ -f "$bin_f" ] && [ ! -L "$bin_f" ] && ! sh -n "$bin_f" 2>/dev/null; then
+              echo "[!] WARNING: staged axonwall-update failed sh -n syntax check; keeping live /usr/local/bin/axonwall-update." >&2
+              continue
             fi
+            atomic_install_bin "$bin_f" "/usr/local/bin" "$bname" 2>/dev/null || true
           fi
         fi
       done
@@ -1671,7 +1958,7 @@ else
   fi
 
   if [ -n "$DEB_TMP" ] && [ -f "$DEB_TMP" ]; then
-    PKG_STAGE="/tmp/axonwall-stage-${CLEAN_VER}"
+    PKG_STAGE="${WORK_DIR}/pkg-stage"
     rm -rf "${PKG_STAGE}"
     mkdir -p "${PKG_STAGE}"
     # E2-1: mirror the ZBM branch — a failed extraction must fail the
@@ -1708,3 +1995,6 @@ fi
 
 rm -f "${DEB_TMP:-}" "${DEB_TMP:-}.sha256" "${DEB_TMP:-}.sha256.sig" 2>/dev/null || true
 echo "[+] Firmware update process completed successfully."
+}
+
+main "$@"; exit $?

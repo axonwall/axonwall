@@ -300,6 +300,42 @@ export function importVyosConfig(configText: string): ImportReport {
     return { value: trimmed, negated: false };
   };
 
+  const parseVyosEndpoint = (
+    node: any,
+    defaultAddr: string,
+  ): { addr: string; port: string; negatedAddr: boolean; negatedPort: boolean } => {
+    let addr = defaultAddr;
+    let port = '';
+    let negatedAddr = false;
+    let negatedPort = false;
+    if (!node || typeof node !== 'object') {
+      return { addr, port, negatedAddr, negatedPort };
+    }
+    if (node.address) {
+      const parsed = parseVyosNegation(node.address);
+      addr = parsed.value || defaultAddr;
+      negatedAddr = parsed.negated && addr !== 'any' && addr !== 'wan_ip';
+    } else if (node.group?.['address-group']) {
+      const parsed = parseVyosNegation(node.group['address-group']);
+      addr = parsed.value ? `$${parsed.value.replace(/[^a-zA-Z0-9_]/g, '_')}` : defaultAddr;
+      negatedAddr = parsed.negated && addr !== 'any' && addr !== 'wan_ip';
+    } else if (node.group?.['network-group']) {
+      const parsed = parseVyosNegation(node.group['network-group']);
+      addr = parsed.value ? `$${parsed.value.replace(/[^a-zA-Z0-9_]/g, '_')}` : defaultAddr;
+      negatedAddr = parsed.negated && addr !== 'any' && addr !== 'wan_ip';
+    }
+    if (node.port) {
+      const parsed = parseVyosNegation(node.port);
+      port = parsed.value.replace(/:/g, '-');
+      if (parsed.negated) negatedPort = true;
+    } else if (node.group?.['port-group']) {
+      const parsed = parseVyosNegation(node.group['port-group']);
+      port = parsed.value ? `$${parsed.value.replace(/[^a-zA-Z0-9_]/g, '_')}` : '';
+      if (parsed.negated) negatedPort = true;
+    }
+    return { addr, port, negatedAddr, negatedPort };
+  };
+
   let sortOrder = 10;
   const fwChains = root.firewall?.name || root.firewall?.ipv4?.name || {};
   for (const [chainName, chainData] of Object.entries<any>(fwChains)) {
@@ -322,62 +358,15 @@ export function importVyosConfig(configText: string): ImportReport {
       else if (p === 'udp') proto = 'udp';
       else if (p.includes('icmp')) proto = 'icmp';
 
-      let src = 'any';
-      let srcPort = '';
-      let negatedSrc = false;
-      let negatedPort = false;
-      if (r.source) {
-        if (r.source.address) {
-          const parsed = parseVyosNegation(r.source.address);
-          src = parsed.value || 'any';
-          negatedSrc = parsed.negated && src !== 'any';
-        } else if (r.source.group?.['address-group']) {
-          const parsed = parseVyosNegation(r.source.group['address-group']);
-          src = parsed.value ? `$${parsed.value.replace(/[^a-zA-Z0-9_]/g, '_')}` : 'any';
-          negatedSrc = parsed.negated && src !== 'any';
-        } else if (r.source.group?.['network-group']) {
-          const parsed = parseVyosNegation(r.source.group['network-group']);
-          src = parsed.value ? `$${parsed.value.replace(/[^a-zA-Z0-9_]/g, '_')}` : 'any';
-          negatedSrc = parsed.negated && src !== 'any';
-        }
-        if (r.source.port) {
-          const parsed = parseVyosNegation(r.source.port);
-          srcPort = parsed.value;
-          if (parsed.negated) negatedPort = true;
-        } else if (r.source.group?.['port-group']) {
-          const parsed = parseVyosNegation(r.source.group['port-group']);
-          srcPort = parsed.value ? `$${parsed.value.replace(/[^a-zA-Z0-9_]/g, '_')}` : '';
-          if (parsed.negated) negatedPort = true;
-        }
-      }
-
-      let dst = 'any';
-      let dstPort = '';
-      let negatedDst = false;
-      if (r.destination) {
-        if (r.destination.address) {
-          const parsed = parseVyosNegation(r.destination.address);
-          dst = parsed.value || 'any';
-          negatedDst = parsed.negated && dst !== 'any';
-        } else if (r.destination.group?.['address-group']) {
-          const parsed = parseVyosNegation(r.destination.group['address-group']);
-          dst = parsed.value ? `$${parsed.value.replace(/[^a-zA-Z0-9_]/g, '_')}` : 'any';
-          negatedDst = parsed.negated && dst !== 'any';
-        } else if (r.destination.group?.['network-group']) {
-          const parsed = parseVyosNegation(r.destination.group['network-group']);
-          dst = parsed.value ? `$${parsed.value.replace(/[^a-zA-Z0-9_]/g, '_')}` : 'any';
-          negatedDst = parsed.negated && dst !== 'any';
-        }
-        if (r.destination.port) {
-          const parsed = parseVyosNegation(r.destination.port);
-          dstPort = parsed.value;
-          if (parsed.negated) negatedPort = true;
-        } else if (r.destination.group?.['port-group']) {
-          const parsed = parseVyosNegation(r.destination.group['port-group']);
-          dstPort = parsed.value ? `$${parsed.value.replace(/[^a-zA-Z0-9_]/g, '_')}` : '';
-          if (parsed.negated) negatedPort = true;
-        }
-      }
+      const parsedSrc = parseVyosEndpoint(r.source, 'any');
+      const parsedDst = parseVyosEndpoint(r.destination, 'any');
+      const src = parsedSrc.addr;
+      const srcPort = parsedSrc.port;
+      const negatedSrc = parsedSrc.negatedAddr;
+      const dst = parsedDst.addr;
+      const dstPort = parsedDst.port;
+      const negatedDst = parsedDst.negatedAddr;
+      const negatedPort = parsedSrc.negatedPort || parsedDst.negatedPort;
 
       const hasNegation = negatedSrc || negatedDst || negatedPort;
       const ruleIndex = rules.length;
@@ -456,19 +445,31 @@ export function importVyosConfig(configText: string): ImportReport {
   for (const [rId, d] of Object.entries<any>(dnatRules)) {
     if (typeof d !== 'object' || !d) continue;
     const iface = extractVyosIface(d['inbound-interface']);
+    const dnatSrc = parseVyosEndpoint(d.source, 'any');
+    const dnatDst = parseVyosEndpoint(d.destination, 'wan_ip');
+    const isExclude = d.exclude !== undefined;
+    const hasNatReview =
+      dnatSrc.negatedAddr || dnatDst.negatedAddr || dnatSrc.negatedPort || dnatDst.negatedPort || isExclude;
+    const baseDesc = d.description || `DNAT Rule ${rId}`;
+    if (hasNatReview) {
+      warnings.push(
+        `VyOS DNAT rule "${baseDesc}" uses ${isExclude ? 'exclude' : 'negated source/destination/port'} which cannot be safely activated as a standard forward; imported with enabled: false.`,
+      );
+    }
+
     nat.push({
       type: 'dnat',
       interface: iface,
       protocol: normalizeVyosNatProto(d.protocol),
-      source: 'any',
-      sourcePort: '',
-      destination: 'wan_ip',
-      destinationPort: String(d.destination?.port || ''),
+      source: dnatSrc.addr,
+      sourcePort: dnatSrc.port,
+      destination: dnatDst.addr,
+      destinationPort: dnatDst.port,
       targetIp: d.translation?.address || '',
-      targetPort: String(d.translation?.port || ''),
+      targetPort: String(d.translation?.port || '').replace(/:/g, '-'),
       log: d.log === 'enable',
-      enabled: d.disable === undefined,
-      description: d.description || `DNAT Rule ${rId}`,
+      enabled: hasNatReview ? false : d.disable === undefined,
+      description: hasNatReview ? `[REVIEW: ${isExclude ? 'NAT exclude' : 'Negated NAT'}] ${baseDesc}` : baseDesc,
       sortOrder: natSort,
     });
     natSort += 10;
@@ -480,18 +481,31 @@ export function importVyosConfig(configText: string): ImportReport {
     if (typeof s !== 'object' || !s) continue;
     const iface = extractVyosIface(s['outbound-interface']);
     const isMasq = s.translation?.address === 'masquerade';
+    const snatSrc = parseVyosEndpoint(s.source, 'any');
+    const snatDst = parseVyosEndpoint(s.destination, 'any');
+    const isExclude = s.exclude !== undefined;
+    const hasNatReview =
+      snatSrc.negatedAddr || snatDst.negatedAddr || snatSrc.negatedPort || snatDst.negatedPort || isExclude;
+    const baseDesc = s.description || `SNAT Rule ${rId}`;
+    if (hasNatReview) {
+      warnings.push(
+        `VyOS SNAT rule "${baseDesc}" uses ${isExclude ? 'exclude' : 'negated source/destination/port'}; imported with enabled: false.`,
+      );
+    }
+
     nat.push({
       type: isMasq ? 'masquerade' : 'snat',
       interface: iface,
-      protocol: 'any',
-      source: s.source?.address || 'any',
-      sourcePort: '',
-      destination: 'any',
-      destinationPort: '',
+      protocol: s.protocol ? normalizeVyosNatProto(s.protocol) : 'any',
+      source: snatSrc.addr,
+      sourcePort: snatSrc.port,
+      destination: snatDst.addr,
+      destinationPort: snatDst.port,
       targetIp: !isMasq ? s.translation?.address : undefined,
+      ...(s.translation?.port ? { targetPort: String(s.translation.port).replace(/:/g, '-') } : {}),
       log: s.log === 'enable',
-      enabled: s.disable === undefined,
-      description: s.description || `SNAT Rule ${rId}`,
+      enabled: hasNatReview ? false : s.disable === undefined,
+      description: hasNatReview ? `[REVIEW: ${isExclude ? 'NAT exclude' : 'Negated NAT'}] ${baseDesc}` : baseDesc,
       sortOrder: natSort,
     });
     natSort += 10;

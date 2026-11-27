@@ -87,13 +87,15 @@ cleanup_secrets() {
   if [ -n "${CONFIG_FILE:-}" ] && [ -f "${CONFIG_FILE:-}" ]; then
     shred -u "$CONFIG_FILE" 2>/dev/null || rm -f "$CONFIG_FILE" 2>/dev/null || true
   fi
-  for _sec_f in /tmp/axonwall-k3s* /tmp/axonwall-luks* /mnt/slot_a/tmp/.axonwall_pw_install.tmp /mnt/slot_a/run/axonwall-luks-enroll.key; do
+  for _sec_f in ${TEMP_LUKS_KEY:-} ${PW_TMP:-} /tmp/axonwall-k3s* /tmp/axonwall-luks* /run/axonwall-luks* /run/axonwall-pw* /mnt/slot_a/tmp/.axonwall_pw_install.tmp /mnt/slot_a/run/axonwall-luks-enroll.key /mnt/slot_a/run/axonwall-pw*; do
     if [ -f "$_sec_f" ]; then
       shred -u "$_sec_f" 2>/dev/null || rm -f "$_sec_f" 2>/dev/null || true
     fi
   done
   K3S_JOIN_TOKEN=""
-  unset K3S_JOIN_TOKEN
+  LUKS_PASSPHRASE=""
+  ADMIN_PASSWORD=""
+  unset K3S_JOIN_TOKEN LUKS_PASSPHRASE ADMIN_PASSWORD
 }
 
 on_install_exit() {
@@ -841,6 +843,7 @@ elif [ "$MODE" = "unattended" ]; then
     fi
 
     ci_luks_pw="$(grep -E '^[[:space:]]*luks_passphrase:' "$CI_FILE" 2>/dev/null | head -n1 | sed -e 's/.*luks_passphrase:[[:space:]]*//' -e 's/^["'\'']//' -e 's/["'\'']$//' || true)"
+    [ "$ci_luks_pw" = "CHANGE_ME_ON_DEPLOY" ] && ci_luks_pw=""
     if [ -n "$ci_luks_pw" ]; then
       LUKS_PASSPHRASE="$ci_luks_pw"
     fi
@@ -1845,14 +1848,17 @@ TEMP_LUKS_KEY=""
 if [ -n "$DATA_DEV" ]; then
   if [ "${LUKS_ENABLED:-0}" = "1" ] && command -v cryptsetup >/dev/null 2>&1; then
     ui_echo "[+] Initializing LUKS2 AES-XTS-512 encryption on ${DATA_DEV}..."
-    TEMP_LUKS_KEY="/tmp/axonwall-luks.key"
-    rm -f "$TEMP_LUKS_KEY"
-    if [ -n "$LUKS_PASSPHRASE" ]; then
-      printf '%s' "$LUKS_PASSPHRASE" > "$TEMP_LUKS_KEY"
-    else
-      dd if=/dev/urandom of="$TEMP_LUKS_KEY" bs=32 count=1 2>/dev/null
-    fi
-    chmod 0400 "$TEMP_LUKS_KEY"
+    mkdir -p /run
+    TEMP_LUKS_KEY="$(umask 077 && mktemp /run/axonwall-luks.XXXXXX)"
+    (
+      umask 077
+      if [ -n "$LUKS_PASSPHRASE" ]; then
+        printf '%s' "$LUKS_PASSPHRASE" > "$TEMP_LUKS_KEY"
+      else
+        dd if=/dev/urandom of="$TEMP_LUKS_KEY" bs=32 count=1 2>/dev/null
+      fi
+      chmod 0400 "$TEMP_LUKS_KEY"
+    )
 
     cryptsetup luksFormat --type luks2 --batch-mode --cipher aes-xts-plain64 -s 512 -d "$TEMP_LUKS_KEY" "$DATA_DEV"
     cryptsetup open -d "$TEMP_LUKS_KEY" "$DATA_DEV" axon_crypt_data
@@ -2393,15 +2399,18 @@ elif [ "${INSTALL_EDITION:-axonwall}" = "k3s-storage" ]; then
 
   # Write mode-0600 k3s-storage.env with safely single-quoted shell values
   _esc_sq() { printf '%s' "$1" | sed "s/'/'\\\\''/g"; }
-  {
-    printf "K3S_ROLE='%s'\n" "$(_esc_sq "${K3S_ROLE:-server}")"
-    printf "K3S_SERVER_URL='%s'\n" "$(_esc_sq "${K3S_SERVER_URL:-}")"
-    printf "K3S_JOIN_TOKEN='%s'\n" "$(_esc_sq "${K3S_JOIN_TOKEN:-}")"
-    printf "ZFS_ARC_MAX_MB='%s'\n" "$(_esc_sq "${ZFS_ARC_MAX_MB:-0}")"
-  } > /mnt/slot_a/etc/axonwall/k3s-storage.env
-  chmod 0600 /mnt/slot_a/etc/axonwall/k3s-storage.env
-  cp -f /mnt/slot_a/etc/axonwall/k3s-storage.env /mnt/data/etc-axonwall/k3s-storage.env 2>/dev/null || true
-  chmod 0600 /mnt/data/etc-axonwall/k3s-storage.env 2>/dev/null || true
+  (
+    umask 077
+    {
+      printf "K3S_ROLE='%s'\n" "$(_esc_sq "${K3S_ROLE:-server}")"
+      printf "K3S_SERVER_URL='%s'\n" "$(_esc_sq "${K3S_SERVER_URL:-}")"
+      printf "K3S_JOIN_TOKEN='%s'\n" "$(_esc_sq "${K3S_JOIN_TOKEN:-}")"
+      printf "ZFS_ARC_MAX_MB='%s'\n" "$(_esc_sq "${ZFS_ARC_MAX_MB:-0}")"
+    } > /mnt/slot_a/etc/axonwall/k3s-storage.env
+    chmod 0600 /mnt/slot_a/etc/axonwall/k3s-storage.env
+    cp -f /mnt/slot_a/etc/axonwall/k3s-storage.env /mnt/data/etc-axonwall/k3s-storage.env 2>/dev/null || true
+    chmod 0600 /mnt/data/etc-axonwall/k3s-storage.env 2>/dev/null || true
+  )
 
   # Strip NGFW / Web UI / Controller stack (keep /usr/sbin/axonwall-satellite inert on disk)
   for fw_unit in axonwall-firstboot.service axonwalld.service axonwall-controller.service axonwall-ui.service headscale.service axonwall-satellite.service; do
@@ -2899,14 +2908,23 @@ fi
 # Configure Admin & Root Credentials
 CUSTOM_PW_SET=1
 if [ -z "$ADMIN_PASSWORD" ]; then
-  ADMIN_PASSWORD="axonwall"
+  ADMIN_PASSWORD="$(openssl rand -hex 16 2>/dev/null || od -An -tx1 -N16 /dev/urandom | tr -d ' \n')"
+  if [ "${#ADMIN_PASSWORD}" -lt 32 ]; then
+    ui_echo "[-] ERROR: CSPRNG failed to generate initial administrator password."
+    exit 1
+  fi
   CUSTOM_PW_SET=0
 fi
 
+PW_TMP=""
 if [ -n "$ADMIN_PASSWORD" ]; then
-  PW_TMP="/mnt/slot_a/tmp/.axonwall_pw_install.tmp"
-  printf '%s' "$ADMIN_PASSWORD" > "$PW_TMP"
-  chmod 0600 "$PW_TMP"
+  mkdir -p /run
+  PW_TMP="$(umask 077 && mktemp /run/axonwall-pw.XXXXXX)"
+  (
+    umask 077
+    printf '%s' "$ADMIN_PASSWORD" > "$PW_TMP"
+    chmod 0600 "$PW_TMP"
+  )
   SCRYPT_HASH=""
   case "$ADMIN_PASSWORD" in
     scrypt\$*)
@@ -2939,18 +2957,24 @@ except Exception:
       fi
       ;;
   esac
-  rm -f "$PW_TMP"
+  shred -u "$PW_TMP" 2>/dev/null || rm -f "$PW_TMP"
+  PW_TMP=""
 
   # Provision admin credentials for ALL editions (axonwall, k3s-storage, vault)
   mkdir -p /mnt/slot_a/etc/axonwall /mnt/data/etc-axonwall 2>/dev/null || true
-  if [ -n "$SCRYPT_HASH" ]; then
-    printf 'LOCAL_ADMIN_USER=%s\nLOCAL_ADMIN_PASSWORD=%s\n' "${ADMIN_USER:-admin}" "$SCRYPT_HASH" > /mnt/slot_a/etc/axonwall/admin.env
-  else
-    printf 'LOCAL_ADMIN_USER=%s\nLOCAL_ADMIN_PASSWORD=%s\n' "${ADMIN_USER:-admin}" "$ADMIN_PASSWORD" > /mnt/slot_a/etc/axonwall/admin.env
-  fi
-  chmod 0600 /mnt/slot_a/etc/axonwall/admin.env 2>/dev/null || true
-  cp -a /mnt/slot_a/etc/axonwall/admin.env /mnt/data/etc-axonwall/admin.env 2>/dev/null || true
-  chmod 0600 /mnt/data/etc-axonwall/admin.env 2>/dev/null || true
+  (
+    umask 077
+    if [ -n "$SCRYPT_HASH" ]; then
+      printf 'LOCAL_ADMIN_USER=%s\nLOCAL_ADMIN_PASSWORD=%s\n' "${ADMIN_USER:-admin}" "$SCRYPT_HASH" > /mnt/slot_a/etc/axonwall/admin.env
+    else
+      printf 'LOCAL_ADMIN_USER=%s\nLOCAL_ADMIN_PASSWORD=%s\n' "${ADMIN_USER:-admin}" "$ADMIN_PASSWORD" > /mnt/slot_a/etc/axonwall/admin.env
+    fi
+    chmod 0600 /mnt/slot_a/etc/axonwall/admin.env 2>/dev/null || true
+    chroot /mnt/slot_a chown axonwall:axonwall /etc/axonwall/admin.env 2>/dev/null || true
+    cp -a /mnt/slot_a/etc/axonwall/admin.env /mnt/data/etc-axonwall/admin.env 2>/dev/null || true
+    chmod 0600 /mnt/data/etc-axonwall/admin.env 2>/dev/null || true
+    chroot /mnt/slot_a chown axonwall:axonwall /var/lib/axonwall/etc-axonwall/admin.env 2>/dev/null || true
+  )
 
   if [ "$CUSTOM_PW_SET" -eq 1 ]; then
     rm -f /mnt/slot_a/etc/axonwall/initial-admin-password /mnt/data/etc-axonwall/initial-admin-password
@@ -2960,25 +2984,42 @@ except Exception:
     ui_echo "[+] Provisioned custom administrator credentials for '${ADMIN_USER:-admin}'."
   else
     rm -f /mnt/slot_a/etc/axonwall/.password_changed /mnt/data/.password_changed
-    printf '%s\n' "$ADMIN_PASSWORD" > /mnt/slot_a/etc/axonwall/initial-admin-password
-    chmod 0600 /mnt/slot_a/etc/axonwall/initial-admin-password
-    printf '%s\n' "$ADMIN_PASSWORD" > /mnt/data/etc-axonwall/initial-admin-password 2>/dev/null || true
-    chmod 0600 /mnt/data/etc-axonwall/initial-admin-password 2>/dev/null || true
-    ui_echo "[+] Provisioned default factory credentials (${ADMIN_USER:-admin} / axonwall — password change required on first login)."
+    (
+      umask 077
+      printf '%s\n' "$ADMIN_PASSWORD" > /mnt/slot_a/etc/axonwall/initial-admin-password
+      chown root:root /mnt/slot_a/etc/axonwall/initial-admin-password 2>/dev/null || true
+      chmod 0600 /mnt/slot_a/etc/axonwall/initial-admin-password
+      printf '%s\n' "$ADMIN_PASSWORD" > /mnt/data/etc-axonwall/initial-admin-password 2>/dev/null || true
+      chown root:root /mnt/data/etc-axonwall/initial-admin-password 2>/dev/null || true
+      chmod 0600 /mnt/data/etc-axonwall/initial-admin-password 2>/dev/null || true
+    )
+    ui_echo "[+] Provisioned random initial administrator credentials for '${ADMIN_USER:-admin}' (see /etc/axonwall/initial-admin-password — password change required on first login)."
   fi
 
   case "$ADMIN_PASSWORD" in
     scrypt\$*)
       if [ -f /etc/axonwall/.password_changed ] && [ -f /etc/shadow ] && [ -f /mnt/slot_a/etc/shadow ]; then
-        for _u in root admin axonwall; do
+        for _u in root admin; do
           _live_hash="$(awk -F: -v u="$_u" '$1 == u {print $2; exit}' /etc/shadow 2>/dev/null || true)"
           case "$_live_hash" in
             ''|'!'|'*'|'!*'|'!!') continue ;;
           esac
           if grep -q "^${_u}:" /mnt/slot_a/etc/shadow 2>/dev/null; then
-            LIVE_HASH="$_live_hash" awk -F: -v OFS=: -v u="$_u" '$1 == u {$2 = ENVIRON["LIVE_HASH"]} {print}' /mnt/slot_a/etc/shadow > /mnt/slot_a/etc/shadow.tmp && \
-              chmod 0640 /mnt/slot_a/etc/shadow.tmp 2>/dev/null && \
-              mv /mnt/slot_a/etc/shadow.tmp /mnt/slot_a/etc/shadow
+            (
+              umask 077
+              _shadow_tmp="$(mktemp /mnt/slot_a/etc/shadow.XXXXXX)"
+              if LIVE_HASH="$_live_hash" awk -F: -v OFS=: -v u="$_u" '$1 == u {$2 = ENVIRON["LIVE_HASH"]} {print}' /mnt/slot_a/etc/shadow > "$_shadow_tmp"; then
+                if chroot /mnt/slot_a chown root:shadow "/etc/$(basename "$_shadow_tmp")" 2>/dev/null || chown root:shadow "$_shadow_tmp" 2>/dev/null; then
+                  chmod 0640 "$_shadow_tmp" 2>/dev/null || true
+                else
+                  chown root:root "$_shadow_tmp" 2>/dev/null || true
+                  chmod 0600 "$_shadow_tmp" 2>/dev/null || true
+                fi
+                mv -f "$_shadow_tmp" /mnt/slot_a/etc/shadow
+              else
+                rm -f "$_shadow_tmp"
+              fi
+            )
           fi
         done
       fi
@@ -2989,9 +3030,6 @@ except Exception:
       printf 'root:%s\n' "$ADMIN_PASSWORD" | chroot /mnt/slot_a "$_chpw_bin" 2>/dev/null || true
       if grep -q '^admin:' /mnt/slot_a/etc/passwd 2>/dev/null; then
         printf 'admin:%s\n' "$ADMIN_PASSWORD" | chroot /mnt/slot_a "$_chpw_bin" 2>/dev/null || true
-      fi
-      if grep -q '^axonwall:' /mnt/slot_a/etc/passwd 2>/dev/null; then
-        printf 'axonwall:%s\n' "$ADMIN_PASSWORD" | chroot /mnt/slot_a "$_chpw_bin" 2>/dev/null || true
       fi
       ;;
   esac

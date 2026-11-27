@@ -1,10 +1,12 @@
 import { XMLParser } from 'fast-xml-parser';
-import type {
-  DesiredState,
-  Interface,
-  Alias,
-  FirewallRule,
-  NatRule,
+import {
+  isValidFirewallEndpoint,
+  isValidPortSpec,
+  type DesiredState,
+  type Interface,
+  type Alias,
+  type FirewallRule,
+  type NatRule,
 } from '../../schemas/index.js';
 import type { ImportReport, ImportReviewItem } from '../types.js';
 
@@ -77,6 +79,25 @@ export const FIREWALLD_SERVICES: Record<string, FirewalldServiceDef> = {
 // Fix standard LDAPS port 636
 FIREWALLD_SERVICES.ldaps.ports = '636';
 
+interface ParsedRichRule {
+  family?: string;
+  sourceAddress?: string;
+  sourceIpset?: string;
+  sourceNot?: boolean;
+  destinationAddress?: string;
+  destinationIpset?: string;
+  destinationNot?: boolean;
+  serviceName?: string;
+  port?: string;
+  portProtocol?: string;
+  protocolValue?: string;
+  forwardPort?: { port: string; protocol: string; toPort?: string; toAddr?: string };
+  hasLog?: boolean;
+  hasMasquerade?: boolean;
+  action?: 'accept' | 'drop' | 'reject' | 'mark';
+  rawSummary?: string;
+}
+
 interface ParsedZone {
   name: string;
   target: string; // default, ACCEPT, DROP, %%REJECT%%
@@ -88,7 +109,7 @@ interface ParsedZone {
   protocols: string[];
   masquerade: boolean;
   forwardPorts: { port: string; protocol: string; toPort?: string; toAddr?: string }[];
-  richRules: string[];
+  richRules: ParsedRichRule[];
   icmpBlocks: string[];
 }
 
@@ -124,15 +145,125 @@ function sanitizeAliasName(raw: string): string {
   return raw.replace(/[^a-zA-Z0-9_]/g, '_');
 }
 
+function parseRichRuleText(richText: string): ParsedRichRule {
+  const text = richText.trim().replace(/\s+/g, ' ');
+  if (!text) return {};
+
+  const negatedSrc = /\bsource\s+not\s+/i.test(text);
+  const negatedDst = /\bdestination\s+not\s+/i.test(text);
+  const srcMatch = text.match(/\bsource\s+(?:not\s+)?address=["']([^"']+)["']/i);
+  const srcIpsetMatch = text.match(/\bsource\s+(?:not\s+)?ipset=["']([^"']+)["']/i);
+  const dstMatch = text.match(/\bdestination\s+(?:not\s+)?address=["']([^"']+)["']/i);
+  const dstIpsetMatch = text.match(/\bdestination\s+(?:not\s+)?ipset=["']([^"']+)["']/i);
+  const svcMatch = text.match(/\bservice\s+name=["']([^"']+)["']/i);
+  const portMatch = text.match(/\bport\s+port=["']([^"']+)["']\s+protocol=["']([^"']+)["']/i)
+    || text.match(/\bport\s+protocol=["']([^"']+)["']\s+port=["']([^"']+)["']/i);
+  const protoMatch = text.match(/\bprotocol\s+value=["']([^"']+)["']/i);
+  const fwdMatch = text.match(/\bforward-port\s+([^\n]+)/i);
+
+  // Strip quoted attribute values so log prefix="accept" / prefix="drop" cannot spoof actions.
+  const unquoted = text.replace(/"[^"]*"|'[^']*'/g, ' ');
+  const hasLog = /\blog\b/i.test(unquoted);
+  const hasMasq = /\bmasquerade\b/i.test(unquoted);
+
+  let action: ParsedRichRule['action'];
+  if (/\bdrop\b/i.test(unquoted)) action = 'drop';
+  else if (/\breject\b/i.test(unquoted)) action = 'reject';
+  else if (/\baccept\b/i.test(unquoted)) action = 'accept';
+  else if (/\bmark\b/i.test(unquoted)) action = 'mark';
+
+  let port: string | undefined;
+  let portProtocol: string | undefined;
+  if (portMatch) {
+    const isPortFirst = /port\s+port=/i.test(portMatch[0]);
+    port = isPortFirst ? portMatch[1] : portMatch[2];
+    portProtocol = isPortFirst ? portMatch[2] : portMatch[1];
+  }
+
+  let forwardPort: ParsedRichRule['forwardPort'];
+  if (fwdMatch) {
+    const attrs = fwdMatch[1]!;
+    forwardPort = {
+      port: attrs.match(/port=["']([^"']+)["']/i)?.[1] || '',
+      protocol: attrs.match(/protocol=["']([^"']+)["']/i)?.[1] || 'tcp',
+      toPort: attrs.match(/to-port=["']([^"']+)["']/i)?.[1],
+      toAddr: attrs.match(/to-addr=["']([^"']+)["']/i)?.[1],
+    };
+  }
+
+  return {
+    sourceAddress: srcMatch?.[1],
+    sourceIpset: srcIpsetMatch?.[1],
+    sourceNot: negatedSrc,
+    destinationAddress: dstMatch?.[1],
+    destinationIpset: dstIpsetMatch?.[1],
+    destinationNot: negatedDst,
+    serviceName: svcMatch?.[1],
+    port,
+    portProtocol,
+    protocolValue: protoMatch?.[1],
+    forwardPort,
+    hasLog,
+    hasMasquerade: hasMasq,
+    action,
+    rawSummary: text,
+  };
+}
+
+function isXmlInvertFlag(node: any): boolean {
+  if (!node || typeof node !== 'object') return false;
+  const inv = node['@_invert'];
+  if (inv === true || inv === '' || inv === '1' || inv === 1 || String(inv).toLowerCase() === 'true' || String(inv).toLowerCase() === 'yes') {
+    return true;
+  }
+  return node['@_not'] !== undefined || node['@_NOT'] !== undefined || node.not !== undefined;
+}
+
+function parseXmlRichRuleElement(r: any): ParsedRichRule {
+  const srcObj = Array.isArray(r.source) ? r.source[0] : r.source;
+  const dstObj = Array.isArray(r.destination) ? r.destination[0] : r.destination;
+  const svcObj = Array.isArray(r.service) ? r.service[0] : r.service;
+  const portObj = Array.isArray(r.port) ? r.port[0] : r.port;
+  const protoObj = Array.isArray(r.protocol) ? r.protocol[0] : r.protocol;
+  const fpObj = Array.isArray(r['forward-port']) ? r['forward-port'][0] : r['forward-port'];
+
+  let action: ParsedRichRule['action'];
+  if (r.drop !== undefined) action = 'drop';
+  else if (r.reject !== undefined) action = 'reject';
+  else if (r.accept !== undefined) action = 'accept';
+  else if (r.mark !== undefined) action = 'mark';
+
+  return {
+    family: r['@_family'] !== undefined ? String(r['@_family']) : undefined,
+    sourceAddress: srcObj?.['@_address'] !== undefined ? String(srcObj['@_address']) : undefined,
+    sourceIpset: srcObj?.['@_ipset'] !== undefined ? String(srcObj['@_ipset']) : undefined,
+    sourceNot: isXmlInvertFlag(srcObj),
+    destinationAddress: dstObj?.['@_address'] !== undefined ? String(dstObj['@_address']) : undefined,
+    destinationIpset: dstObj?.['@_ipset'] !== undefined ? String(dstObj['@_ipset']) : undefined,
+    destinationNot: isXmlInvertFlag(dstObj),
+    serviceName: svcObj?.['@_name'] !== undefined ? String(svcObj['@_name']) : undefined,
+    port: portObj?.['@_port'] !== undefined ? String(portObj['@_port']) : undefined,
+    portProtocol: portObj?.['@_protocol'] !== undefined ? String(portObj['@_protocol']) : 'tcp',
+    protocolValue: protoObj?.['@_value'] !== undefined ? String(protoObj['@_value']) : undefined,
+    forwardPort: fpObj
+      ? {
+          port: fpObj['@_port'] !== undefined ? String(fpObj['@_port']) : '',
+          protocol: fpObj['@_protocol'] !== undefined ? String(fpObj['@_protocol']) : 'tcp',
+          toPort: fpObj['@_to-port'] !== undefined ? String(fpObj['@_to-port']) : undefined,
+          toAddr: fpObj['@_to-addr'] !== undefined ? String(fpObj['@_to-addr']) : undefined,
+        }
+      : undefined,
+    hasLog: r.log !== undefined,
+    hasMasquerade: r.masquerade !== undefined,
+    action,
+  };
+}
+
 /**
- * Parses a firewalld rich rule string into a FirewallRule or NatRule
- * Example:
- *   rule family="ipv4" source address="192.168.10.0/24" service name="ssh" log prefix="SSH: " accept
- *   rule family="ipv4" source address="203.0.113.5" port port="8080" protocol="tcp" drop
- *   rule family="ipv4" forward-port port="80" protocol="tcp" to-port="8080" to-addr="192.168.1.50"
+ * Converts a structurally parsed firewalld rich rule into a FirewallRule or NatRule
  */
 function parseRichRule(
-  richText: string,
+  rr: ParsedRichRule,
   ifaceName: string,
   sortOrder: number,
   natSortOrder: number,
@@ -140,30 +271,33 @@ function parseRichRule(
   warnings: string[],
   ruleIndex = 0,
 ): { rule?: FirewallRule; natRule?: NatRule; reviewItem?: ImportReviewItem } {
-  const text = richText.trim().replace(/\s+/g, ' ');
-  if (!text) return {};
-
-  const negatedSrc = /source\s+not\s+/i.test(text);
-  const negatedDst = /destination\s+not\s+/i.test(text);
-  const srcMatch = text.match(/source\s+(?:not\s+)?address=["']([^"']+)["']/i);
-  const srcIpsetMatch = text.match(/source\s+(?:not\s+)?ipset=["']([^"']+)["']/i);
-  const dstMatch = text.match(/destination\s+(?:not\s+)?address=["']([^"']+)["']/i);
-  const svcMatch = text.match(/service\s+name=["']([^"']+)["']/i);
-  const portMatch = text.match(/port\s+port=["']([^"']+)["']\s+protocol=["']([^"']+)["']/i)
-    || text.match(/port\s+protocol=["']([^"']+)["']\s+port=["']([^"']+)["']/i);
-  const protoMatch = text.match(/protocol\s+value=["']([^"']+)["']/i);
-  const fwdMatch = text.match(/forward-port\s+([^\n]+)/i);
-  const hasLog = /\blog\b/i.test(text);
-  const hasMasq = /\bmasquerade\b/i.test(text);
-
-  const source = srcMatch
-    ? srcMatch[1]
-    : srcIpsetMatch
-      ? `$${sanitizeAliasName(srcIpsetMatch[1])}`
+  const rawSource = rr.sourceAddress
+    ? rr.sourceAddress.trim()
+    : rr.sourceIpset
+      ? `$${sanitizeAliasName(rr.sourceIpset)}`
       : 'any';
-  const destination = dstMatch ? dstMatch[1] : 'any';
+  const rawDestination = rr.destinationAddress
+    ? rr.destinationAddress.trim()
+    : rr.destinationIpset
+      ? `$${sanitizeAliasName(rr.destinationIpset)}`
+      : 'any';
 
-  if (hasMasq) {
+  const sourceValid = rawSource === 'any' || isValidFirewallEndpoint(rawSource);
+  const destinationValid = rawDestination === 'any' || isValidFirewallEndpoint(rawDestination);
+  const source = sourceValid ? rawSource : 'any';
+  const destination = destinationValid ? rawDestination : 'any';
+  const hasInvalidMatch = !sourceValid || !destinationValid;
+
+  const negatedSrc = Boolean(rr.sourceNot) && source !== 'any';
+  const negatedDst = Boolean(rr.destinationNot) && destination !== 'any';
+
+  if (rr.hasMasquerade) {
+    const natReview = negatedSrc || negatedDst || hasInvalidMatch;
+    if (natReview) {
+      warnings.push(
+        `Firewalld rich rule masquerade (${ifaceName}) uses negated or invalid source/destination match; imported with enabled: false.`,
+      );
+    }
     return {
       natRule: {
         type: 'masquerade',
@@ -173,21 +307,29 @@ function parseRichRule(
         sourcePort: '',
         destination,
         destinationPort: '',
-        log: hasLog,
-        enabled: true,
-        description: `Rich Rule Masquerade (${ifaceName})`,
+        log: Boolean(rr.hasLog),
+        enabled: !natReview,
+        description: natReview ? `[REVIEW: Negated/invalid NAT] Rich Rule Masquerade (${ifaceName})` : `Rich Rule Masquerade (${ifaceName})`,
         sortOrder: natSortOrder,
       },
     };
   }
 
-  if (fwdMatch) {
-    const attrs = fwdMatch[1];
-    const pPort = attrs.match(/port=["']([^"']+)["']/i)?.[1] || '';
-    const pProto = attrs.match(/protocol=["']([^"']+)["']/i)?.[1] || 'tcp';
-    const toPort = attrs.match(/to-port=["']([^"']+)["']/i)?.[1] || pPort;
-    const toAddr = attrs.match(/to-addr=["']([^"']+)["']/i)?.[1] || '127.0.0.1';
-
+  if (rr.forwardPort) {
+    const pPort = (rr.forwardPort.port || '').replace(':', '-').trim();
+    const pProto = (rr.forwardPort.protocol || 'tcp').trim();
+    const toPort = (rr.forwardPort.toPort || pPort).replace(':', '-').trim();
+    const toAddr = (rr.forwardPort.toAddr || '127.0.0.1').trim();
+    if (!pPort || !isValidPortSpec(pPort) || (toPort && !isValidPortSpec(toPort)) || !isValidFirewallEndpoint(toAddr)) {
+      warnings.push(`Skipped firewalld rich rule forward-port on "${ifaceName}" with missing or invalid port/target.`);
+      return {};
+    }
+    const natReview = negatedSrc || negatedDst || hasInvalidMatch;
+    if (natReview) {
+      warnings.push(
+        `Firewalld rich rule forward-port (${pProto.toUpperCase()}/${pPort} -> ${toAddr}:${toPort}) uses negated or invalid source/destination match; imported with enabled: false.`,
+      );
+    }
     return {
       natRule: {
         type: 'dnat',
@@ -199,62 +341,94 @@ function parseRichRule(
         destinationPort: pPort,
         targetIp: toAddr,
         targetPort: toPort,
-        log: hasLog,
-        enabled: true,
-        description: `Rich Rule Forward ${pProto.toUpperCase()}/${pPort} -> ${toAddr}:${toPort}`,
+        log: Boolean(rr.hasLog),
+        enabled: !natReview,
+        description: natReview
+          ? `[REVIEW: Negated/invalid NAT] Rich Rule Forward ${pProto.toUpperCase()}/${pPort} -> ${toAddr}:${toPort}`
+          : `Rich Rule Forward ${pProto.toUpperCase()}/${pPort} -> ${toAddr}:${toPort}`,
         sortOrder: natSortOrder,
       },
     };
   }
 
-  let action: FirewallRule['action'] = 'pass';
-  if (/\bdrop\b/i.test(text)) action = 'block';
-  else if (/\breject\b/i.test(text)) action = 'reject';
-  else if (/\baccept\b/i.test(text)) action = 'pass';
-
   let protocol: FirewallRule['protocol'] = 'any';
   let destinationPort = '';
   let descDetail = 'Rich Rule';
+  let hasInvalidPort = false;
 
-  if (svcMatch) {
-    const svcName = svcMatch[1].toLowerCase();
+  if (rr.serviceName) {
+    const svcName = rr.serviceName.toLowerCase().trim();
     const svcDef = customServices.get(svcName) || FIREWALLD_SERVICES[svcName];
     if (svcDef) {
       protocol = svcDef.protocol;
       destinationPort = svcDef.ports;
       descDetail = `Rich Rule: ${svcName}`;
     } else {
-      warnings.push(`Unknown firewalld service "${svcName}" in rich rule; imported with protocol 'any'.`);
-      descDetail = `Rich Rule: service ${svcName}`;
+      warnings.push(
+        `Unknown firewalld service "${svcName}" in rich rule — skipped rather than expanding to protocol 'any'.`,
+      );
+      return {};
     }
-  } else if (portMatch) {
-    // Handle both attribute orders
-    const isPortFirst = /port\s+port=/i.test(portMatch[0]);
-    const rawPort = isPortFirst ? portMatch[1] : portMatch[2];
-    const rawProto = isPortFirst ? portMatch[2] : portMatch[1];
+  } else if (rr.port) {
+    const rawProto = (rr.portProtocol || 'tcp').trim();
+    const normPort = rr.port.trim().replace(':', '-');
     protocol = normalizeProtocol(rawProto);
-    destinationPort = rawPort.replace(':', '-');
-    descDetail = `Rich Rule: ${rawProto.toUpperCase()}/${destinationPort}`;
-  } else if (protoMatch) {
-    protocol = normalizeProtocol(protoMatch[1]);
-    descDetail = `Rich Rule: proto ${protoMatch[1]}`;
+    if (isValidPortSpec(normPort)) {
+      destinationPort = normPort;
+    } else {
+      hasInvalidPort = true;
+    }
+    descDetail = `Rich Rule: ${rawProto.toUpperCase()}/${normPort}`;
+  } else if (rr.protocolValue) {
+    protocol = normalizeProtocol(rr.protocolValue);
+    descDetail = `Rich Rule: proto ${rr.protocolValue}`;
   }
 
-  const hasNegation = (negatedSrc && source !== 'any') || (negatedDst && destination !== 'any');
+  let action: FirewallRule['action'];
+  let hasUnsupportedAction = false;
+  if (rr.action === 'drop') {
+    action = 'block';
+  } else if (rr.action === 'reject') {
+    action = 'reject';
+  } else if (rr.action === 'accept') {
+    action = 'pass';
+  } else {
+    action = 'block';
+    hasUnsupportedAction = true;
+  }
+
+  const hasNegation = negatedSrc || negatedDst;
+  const needsReview = hasNegation || hasUnsupportedAction || hasInvalidMatch || hasInvalidPort;
   const baseDesc = `${descDetail} (${ifaceName})`;
-  const finalDesc = hasNegation ? `[REVIEW: Negated match] ${baseDesc}` : baseDesc;
+  const reviewLabels: string[] = [];
+  if (hasUnsupportedAction) {
+    reviewLabels.push(rr.action === 'mark' ? 'Unsupported mark action' : 'Missing/unknown rich rule action');
+  }
+  if (hasNegation) reviewLabels.push('Negated match');
+  if (hasInvalidMatch || hasInvalidPort) reviewLabels.push('Invalid endpoint/port');
+  const finalDesc = reviewLabels.length > 0 ? `[REVIEW: ${reviewLabels.join('; ')}] ${baseDesc}` : baseDesc;
 
   let reviewItem: ImportReviewItem | undefined;
-  if (hasNegation) {
+  if (needsReview) {
     const reason: ImportReviewItem['reason'] =
-      negatedSrc && negatedDst
-        ? 'negated_both'
-        : negatedSrc
-          ? 'negated_source'
-          : 'negated_destination';
-    const matchSummary = `${action.toUpperCase()} ${protocol} from ${negatedSrc ? `!${source}` : source} to ${negatedDst ? `!${destination}` : destination}`;
-    const explanation = `Firewalld rich rule "${baseDesc}" uses an inverted (not) ${reason === 'negated_both' ? 'source and destination' : reason === 'negated_source' ? 'source' : 'destination'} match (${matchSummary}). Imported with enabled: false so it cannot silently activate with inverted semantics.`;
-    const suggestedResolution = `Split into an explicit preceding rule matching ${negatedSrc ? source : destination} with the opposite action, followed by a broader rule matching 'any', then enable the reviewed rules.`;
+      hasNegation && !hasUnsupportedAction && !hasInvalidMatch && !hasInvalidPort
+        ? negatedSrc && negatedDst
+          ? 'negated_both'
+          : negatedSrc
+            ? 'negated_source'
+            : 'negated_destination'
+        : 'manual_review';
+    const matchSummary =
+      rr.rawSummary ||
+      `${hasUnsupportedAction ? (rr.action || 'NO_ACTION').toUpperCase() : action.toUpperCase()} ${protocol} from ${negatedSrc ? `!${rawSource}` : rawSource} to ${negatedDst ? `!${rawDestination}` : rawDestination}`;
+    const explanation = hasUnsupportedAction
+      ? `Firewalld rich rule "${baseDesc}" has ${rr.action ? `unsupported action "${rr.action}"` : 'no terminal accept/drop/reject action'} (${matchSummary}). Imported fail-closed with action: block and enabled: false.`
+      : hasInvalidMatch || hasInvalidPort
+        ? `Firewalld rich rule "${baseDesc}" contains invalid address/port syntax (${matchSummary}). Imported fail-closed with action: block and enabled: false.`
+        : `Firewalld rich rule "${baseDesc}" uses an inverted (not) ${reason === 'negated_both' ? 'source and destination' : reason === 'negated_source' ? 'source' : 'destination'} match (${matchSummary}). Imported with enabled: false so it cannot silently activate with inverted semantics.`;
+    const suggestedResolution = hasUnsupportedAction || hasInvalidMatch || hasInvalidPort
+      ? `Verify the intended action and valid endpoints/ports in firewalld before enabling.`
+      : `Split into an explicit preceding rule matching ${negatedSrc ? source : destination} with the opposite action, followed by a broader rule matching 'any', then enable the reviewed rules.`;
     warnings.push(explanation + ' ' + suggestedResolution);
     reviewItem = {
       ruleId: `rule-${ruleIndex + 1}`,
@@ -274,11 +448,13 @@ function parseRichRule(
       quick: true,
       protocol,
       source,
+      ...(negatedSrc ? { invertSource: true } : {}),
       sourcePort: '',
       destination,
+      ...(negatedDst ? { invertDestination: true } : {}),
       destinationPort,
-      log: hasLog,
-      enabled: !hasNegation,
+      log: Boolean(rr.hasLog),
+      enabled: !needsReview,
       description: finalDesc,
       sortOrder,
     },
@@ -299,6 +475,7 @@ function parseFirewalldXml(
   const parser = new XMLParser({
     ignoreAttributes: false,
     attributeNamePrefix: '@_',
+    processEntities: false,
     isArray: (name) =>
       [
         'zone',
@@ -502,50 +679,14 @@ function parseFirewalldXml(
     if (z.rule) {
       for (const r of z.rule) {
         if (typeof r === 'string') {
-          parsedZone.richRules.push(r);
+          const parsedText = parseRichRuleText(r);
+          if (Object.keys(parsedText).length > 0) {
+            parsedZone.richRules.push(parsedText);
+          }
           continue;
         }
         if (!r || typeof r !== 'object') continue;
-        // Reconstruct rich rule string from XML <rule> element
-        const parts: string[] = ['rule'];
-        if (r['@_family']) parts.push(`family="${r['@_family']}"`);
-        const srcObj = Array.isArray(r.source) ? r.source[0] : r.source;
-        const srcNot = srcObj?.['@_not'] !== undefined || srcObj?.['@_NOT'] !== undefined || srcObj?.not !== undefined ? 'not ' : '';
-        if (srcObj?.['@_address']) parts.push(`source ${srcNot}address="${srcObj['@_address']}"`);
-        else if (srcObj?.['@_ipset']) parts.push(`source ${srcNot}ipset="${srcObj['@_ipset']}"`);
-
-        const dstObj = Array.isArray(r.destination) ? r.destination[0] : r.destination;
-        const dstNot = dstObj?.['@_not'] !== undefined || dstObj?.['@_NOT'] !== undefined || dstObj?.not !== undefined ? 'not ' : '';
-        if (dstObj?.['@_address']) parts.push(`destination ${dstNot}address="${dstObj['@_address']}"`);
-
-        const svcObj = Array.isArray(r.service) ? r.service[0] : r.service;
-        if (svcObj?.['@_name']) parts.push(`service name="${svcObj['@_name']}"`);
-
-        const portObj = Array.isArray(r.port) ? r.port[0] : r.port;
-        if (portObj?.['@_port']) {
-          parts.push(`port port="${portObj['@_port']}" protocol="${portObj['@_protocol'] || 'tcp'}"`);
-        }
-
-        const protoObj = Array.isArray(r.protocol) ? r.protocol[0] : r.protocol;
-        if (protoObj?.['@_value']) {
-          parts.push(`protocol value="${protoObj['@_value']}"`);
-        }
-
-        const fpObj = Array.isArray(r['forward-port']) ? r['forward-port'][0] : r['forward-port'];
-        if (fpObj?.['@_port']) {
-          let fpStr = `forward-port port="${fpObj['@_port']}" protocol="${fpObj['@_protocol'] || 'tcp'}"`;
-          if (fpObj['@_to-port']) fpStr += ` to-port="${fpObj['@_to-port']}"`;
-          if (fpObj['@_to-addr']) fpStr += ` to-addr="${fpObj['@_to-addr']}"`;
-          parts.push(fpStr);
-        }
-
-        if (r.log !== undefined) parts.push('log');
-        if (r.masquerade !== undefined) parts.push('masquerade');
-        if (r.accept !== undefined) parts.push('accept');
-        else if (r.drop !== undefined) parts.push('drop');
-        else if (r.reject !== undefined) parts.push('reject');
-
-        parsedZone.richRules.push(parts.join(' '));
+        parsedZone.richRules.push(parseXmlRichRuleElement(r));
       }
     }
 
@@ -598,6 +739,15 @@ function parseFirewalldXml(
 
     zones.set(targetZoneName, z);
   }
+}
+
+function parseFirewalldForwardPortSpec(spec: string): { port: string; protocol: string; toPort?: string; toAddr?: string } | null {
+  const pPort = spec.match(/port=([0-9]+(?:-[0-9]+)?)/i)?.[1] || '';
+  if (!pPort) return null;
+  const pProto = spec.match(/proto=([a-z]+)/i)?.[1]?.toLowerCase() || 'tcp';
+  const toPort = spec.match(/toport=([0-9]+(?:-[0-9]+)?)/i)?.[1];
+  const toAddr = spec.match(/toaddr=([0-9a-fA-F.:]+)/i)?.[1];
+  return { port: pPort, protocol: pProto, toPort, toAddr };
 }
 
 /**
@@ -661,18 +811,17 @@ function parseFirewalldText(
         z.masquerade = true;
       }
       for (const m of trimmed.matchAll(/--add-forward-port(?:=|\s+)([^\s'"]+)/g)) {
-        const spec = m[1];
-        const pPort = spec.match(/port=([0-9:-]+)/i)?.[1]?.replace(':', '-') || '';
-        const pProto = spec.match(/proto=([a-z]+)/i)?.[1]?.toLowerCase() || 'tcp';
-        const toPort = spec.match(/toport=([0-9:-]+)/i)?.[1]?.replace(':', '-');
-        const toAddr = spec.match(/toaddr=([0-9a-fA-F.:]+)/i)?.[1];
-        if (pPort) {
-          z.forwardPorts.push({ port: pPort, protocol: pProto, toPort, toAddr });
+        const parsedFp = parseFirewalldForwardPortSpec(m[1]!);
+        if (parsedFp) {
+          z.forwardPorts.push(parsedFp);
         }
       }
       const richCmdMatch = trimmed.match(/--add-rich-rule(?:=|\s+)(['"])(.*?)\1/);
       if (richCmdMatch?.[2]) {
-        z.richRules.push(richCmdMatch[2]);
+        const parsedText = parseRichRuleText(richCmdMatch[2]);
+        if (Object.keys(parsedText).length > 0) {
+          z.richRules.push(parsedText);
+        }
       }
       continue;
     }
@@ -694,16 +843,16 @@ function parseFirewalldText(
 
     // Multi-line continuations for `rich rules:` or `forward-ports:`
     if (inRichRules && trimmed.startsWith('rule ')) {
-      currentZone.richRules.push(trimmed);
+      const parsedText = parseRichRuleText(trimmed);
+      if (Object.keys(parsedText).length > 0) {
+        currentZone.richRules.push(parsedText);
+      }
       continue;
     }
     if (inForwardPorts && trimmed.startsWith('port=')) {
-      const pPort = trimmed.match(/port=([0-9:-]+)/i)?.[1]?.replace(':', '-') || '';
-      const pProto = trimmed.match(/proto=([a-z]+)/i)?.[1]?.toLowerCase() || 'tcp';
-      const toPort = trimmed.match(/toport=([0-9:-]+)/i)?.[1]?.replace(':', '-');
-      const toAddr = trimmed.match(/toaddr=([0-9a-fA-F.:]+)/i)?.[1];
-      if (pPort) {
-        currentZone.forwardPorts.push({ port: pPort, protocol: pProto, toPort, toAddr });
+      const parsedFp = parseFirewalldForwardPortSpec(trimmed);
+      if (parsedFp) {
+        currentZone.forwardPorts.push(parsedFp);
       }
       continue;
     }
@@ -771,12 +920,9 @@ function parseFirewalldText(
         inForwardPorts = true;
         if (val) {
           for (const spec of val.split(/\s+/)) {
-            const pPort = spec.match(/port=([0-9:-]+)/i)?.[1]?.replace(':', '-') || '';
-            const pProto = spec.match(/proto=([a-z]+)/i)?.[1]?.toLowerCase() || 'tcp';
-            const toPort = spec.match(/toport=([0-9:-]+)/i)?.[1]?.replace(':', '-');
-            const toAddr = spec.match(/toaddr=([0-9a-fA-F.:]+)/i)?.[1];
-            if (pPort) {
-              currentZone.forwardPorts.push({ port: pPort, protocol: pProto, toPort, toAddr });
+            const parsedFp = parseFirewalldForwardPortSpec(spec);
+            if (parsedFp) {
+              currentZone.forwardPorts.push(parsedFp);
             }
           }
         }
@@ -787,7 +933,10 @@ function parseFirewalldText(
       } else if (key === 'rich rules') {
         inRichRules = true;
         if (val.startsWith('rule ')) {
-          currentZone.richRules.push(val);
+          const parsedText = parseRichRuleText(val);
+          if (Object.keys(parsedText).length > 0) {
+            currentZone.richRules.push(parsedText);
+          }
         }
       }
     }

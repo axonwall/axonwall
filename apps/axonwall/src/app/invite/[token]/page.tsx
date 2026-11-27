@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import { useParams } from 'next/navigation';
 import {
@@ -19,22 +19,10 @@ import {
   Terminal,
 } from 'lucide-react';
 import { Logo } from '@/components/Logo';
+import { fetchInvitePreview, type InvitePreviewData } from '@/lib/invite-preview';
 import { isAbsoluteHttpHref, safeAppHref } from '@/lib/safe-href';
 
-interface InvitePreview {
-  status: 'valid' | 'expired' | 'used' | 'revoked' | 'invalid';
-  username?: string;
-  displayName?: string;
-  mode?: 'onboard' | 'reset';
-  expiresAt?: string;
-  createStarterKey?: boolean;
-  requiresPin?: boolean;
-  magicDnsDomain?: string;
-  minPasswordLength?: number;
-  portalUrl?: string;
-  loginUrl?: string;
-  portalLoginUrl?: string;
-}
+type InvitePreview = InvitePreviewData;
 
 interface RedeemedData {
   username: string;
@@ -52,11 +40,14 @@ interface RedeemedData {
 
 type QrMode = 'command' | 'authkey' | 'server';
 
-const WELCOME_STORAGE_KEY = 'axonwall_mesh_welcome';
-
 export default function InviteRedeemPage() {
   const params = useParams<{ token: string }>();
-  const token = typeof params?.token === 'string' ? params.token : '';
+  const routeToken = typeof params?.token === 'string' ? params.token : '';
+  const tokenRef = useRef<string>(routeToken);
+  if (routeToken && !tokenRef.current) {
+    tokenRef.current = routeToken;
+  }
+  const token = tokenRef.current;
 
   const [preview, setPreview] = useState<InvitePreview | null>(null);
   const [loading, setLoading] = useState(true);
@@ -75,22 +66,20 @@ export default function InviteRedeemPage() {
   const [copiedId, setCopiedId] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!token) {
+    const currentToken = tokenRef.current;
+    if (typeof window !== 'undefined' && window.location.pathname !== '/invite') {
+      window.history.replaceState(null, '', '/invite');
+    }
+    if (!currentToken) {
       setPreview({ status: 'invalid' });
       setLoading(false);
       return;
     }
     let active = true;
     setLoading(true);
-    fetch(`/api/v1/vpn/mesh/invites/preview?token=${encodeURIComponent(token)}`, {
-      cache: 'no-store',
-    })
-      .then(async (res) => {
-        const json = await res.json().catch(() => null);
-        if (!res.ok || json?.status !== 'ok') {
-          throw new Error(json?.error || `Failed to verify invite link (HTTP ${res.status})`);
-        }
-        if (active) setPreview(json.data);
+    fetchInvitePreview(currentToken)
+      .then((data) => {
+        if (active) setPreview(data);
       })
       .catch((err: any) => {
         if (active) setLoadError(err?.message || 'Unable to check invite link');
@@ -102,7 +91,7 @@ export default function InviteRedeemPage() {
     return () => {
       active = false;
     };
-  }, [token]);
+  }, []);
 
   const qrPayload = useMemo(() => {
     if (!redeemedData) return '';
@@ -179,20 +168,6 @@ export default function InviteRedeemPage() {
       const json = await res.json().catch(() => null);
       if (!res.ok || json?.status !== 'ok') {
         throw new Error(json?.error || `Activation failed (HTTP ${res.status})`);
-      }
-
-      if (json.starterKey) {
-        try {
-          sessionStorage.setItem(
-            WELCOME_STORAGE_KEY,
-            JSON.stringify({
-              starterKey: json.starterKey,
-              serverUrl: json.serverUrl || '',
-              magicDnsDomain: json.magicDnsDomain || '',
-              username: json.username || preview?.username || '',
-            })
-          );
-        } catch {}
       }
 
       setRedeemedData({

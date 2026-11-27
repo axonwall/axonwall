@@ -1453,7 +1453,7 @@ export function compileVowEnablerEnv(config: VowConfig, baseDn = 'dc=axonwall,dc
  * Compiles the `.vow/authz.yaml` CASL authorization store configuration.
  */
 export function compileVowAuthzYaml(config: VowConfig, baseDn = 'dc=axonwall,dc=local'): string {
-  const role = config.defaultRole || 'admin';
+  const role = config.defaultRole || 'viewer';
   const ldap = config.ldapAuth ?? {
     enabled: true,
     autoBindLocalLdap: true,

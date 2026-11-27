@@ -5,3 +5,4 @@ After=network.target
 [Service]
 Type=oneshot
 ExecStart=/usr/local/bin/axonwall-rotate-hub-cert --if-needed
+LimitCORE=0

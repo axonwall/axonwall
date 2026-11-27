@@ -1,4 +1,8 @@
 {{- if .Values.ingress.enabled }}
+{{- $requireTls := ternary .Values.ingress.requireTls true (hasKey .Values.ingress "requireTls") -}}
+{{- if and $requireTls (not .Values.ingress.tlsSecretName) -}}
+{{- fail "ingress.enabled=true requires ingress.tlsSecretName so UI sessions and ingest tokens are protected by TLS (set ingress.requireTls=false only if TLS is terminated upstream)" -}}
+{{- end -}}
 {{- $fullname := include "axonwall-analytics.fullname" . -}}
 apiVersion: networking.k8s.io/v1
 kind: Ingress
@@ -15,6 +19,8 @@ spec:
   {{- if .Values.ingress.className }}
   ingressClassName: {{ .Values.ingress.className | quote }}
   {{- end }}
+  # TLS is strongly enforced via ingress.requireTls=true (default); set ingress.tlsSecretName
+  # to a valid Kubernetes TLS Secret whenever ingress.enabled=true.
   {{- if .Values.ingress.tlsSecretName }}
   tls:
     - hosts:

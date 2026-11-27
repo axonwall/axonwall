@@ -18,16 +18,18 @@ import { logger } from '../utils/logger.js';
 export async function saveEvidenceFile(networkCidr, hostIp, fileName, content) {
   await ensureVigilanteConfig();
   const hostDir = getHostEvidenceDir(networkCidr, hostIp);
-  await fs.mkdir(hostDir, { recursive: true });
+  await fs.mkdir(hostDir, { recursive: true, mode: 0o700 });
+  await fs.chmod(hostDir, 0o700).catch(() => {});
 
   const safeFileName = path.basename(fileName);
-  const filePath = path.join(hostDir, safeFileName);
+  const filePath = resolvePathInside(hostDir, safeFileName);
 
   const dataStr = typeof content === 'string'
     ? content
     : JSON.stringify(content, null, 2);
 
-  await fs.writeFile(filePath, dataStr, 'utf8');
+  await fs.writeFile(filePath, dataStr, { encoding: 'utf8', mode: 0o600 });
+  await fs.chmod(filePath, 0o600);
   logger.info('EVIDENCE:SAVE', `Saved evidence artifact: ${filePath} (${dataStr.length} bytes)`);
 
   // Automatically sign if GPG is configured
@@ -61,7 +63,8 @@ export async function saveEvidenceFile(networkCidr, hostIp, fileName, content) {
 export async function saveTriageBundle(networkCidr, hostIp, bundle = {}) {
   await ensureVigilanteConfig();
   const hostDir = getHostEvidenceDir(networkCidr, hostIp);
-  await fs.mkdir(hostDir, { recursive: true });
+  await fs.mkdir(hostDir, { recursive: true, mode: 0o700 });
+  await fs.chmod(hostDir, 0o700).catch(() => {});
 
   const savedFiles = [];
   const timestamp = new Date().toISOString();
@@ -350,7 +353,13 @@ export async function listHostEvidence(networkCidr, hostIp) {
  */
 export async function readEvidenceContent(target) {
   const targetPath = typeof target === 'string' ? target : (target?.filePath || target?.path);
-  return await fs.readFile(targetPath, 'utf8');
+  if (!targetPath || typeof targetPath !== 'string') {
+    throw new Error('Evidence target path is required');
+  }
+  const evidenceDir = getVigilanteEvidenceDir();
+  const safePath = resolvePathInside(evidenceDir, targetPath);
+  assertPathStrictlyInside(evidenceDir, safePath);
+  return await fs.readFile(safePath, 'utf8');
 }
 
 /**

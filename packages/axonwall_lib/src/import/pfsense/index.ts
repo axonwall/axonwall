@@ -45,6 +45,53 @@ function normalizeXmlPort(raw: unknown, aliasMap: Map<string, string>): string {
   return s.replace(/:/g, '-');
 }
 
+function parseXmlEndpoint(
+  endpoint: any,
+  aliasMap: Map<string, string>,
+  defaultAddr: string,
+  mapWanIp = false,
+): { addr: string; port: string; negated: boolean } {
+  let addr = defaultAddr;
+  let port = '';
+  let negated = false;
+
+  if (typeof endpoint === 'string') {
+    const rawAddr = endpoint.trim();
+    if (rawAddr) {
+      const aliasMatch = aliasMap.get(rawAddr);
+      addr = aliasMatch ? `$${aliasMatch}` : rawAddr;
+    }
+    return { addr, port, negated };
+  }
+
+  if (endpoint && typeof endpoint === 'object') {
+    if (endpoint.any !== undefined) {
+      addr = defaultAddr;
+    } else if (endpoint.network) {
+      const rawNet = String(endpoint.network).trim();
+      if (rawNet === '(self)') {
+        addr = 'self';
+      } else if (mapWanIp && (rawNet.toLowerCase() === 'wanip' || rawNet.toLowerCase() === 'wan_ip')) {
+        addr = 'wan_ip';
+      } else {
+        addr = `$${rawNet.replace(/[^a-zA-Z0-9_]/g, '_')}`;
+      }
+    } else if (endpoint.address) {
+      const rawAddr = String(endpoint.address).trim();
+      const aliasMatch = aliasMap.get(rawAddr);
+      addr = aliasMatch ? `$${aliasMatch}` : rawAddr;
+    }
+    if (endpoint.not !== undefined && addr !== 'any' && addr !== 'wan_ip') {
+      negated = true;
+    }
+    if (endpoint.port) {
+      port = normalizeXmlPort(endpoint.port, aliasMap);
+    }
+  }
+
+  return { addr, port, negated };
+}
+
 export function importPfsenseConfig(xmlContent: string): ImportReport {
   const warnings: string[] = [];
   const reviewItems: ImportReviewItem[] = [];
@@ -52,6 +99,7 @@ export function importPfsenseConfig(xmlContent: string): ImportReport {
     ignoreAttributes: false,
     attributeNamePrefix: '@_',
     parseTagValue: false,
+    processEntities: false,
     isArray: (name) => {
       return [
         'alias',
@@ -195,7 +243,26 @@ export function importPfsenseConfig(xmlContent: string): ImportReport {
     const rawRules = Array.isArray(root.filter.rule) ? root.filter.rule : [root.filter.rule];
     let sortOrder = 10;
     for (const r of rawRules) {
-      const action = r.type === 'block' ? 'block' : r.type === 'reject' ? 'reject' : 'pass';
+      const rawType = String(r.type ?? '').trim().toLowerCase();
+      if (rawType === 'match') {
+        warnings.push(
+          `Skipped non-terminal pfSense "match" rule${r.descr ? ` ("${r.descr}")` : ''}: queue/tag match rules do not pass or block traffic.`,
+        );
+        continue;
+      }
+      let action: 'pass' | 'block' | 'reject';
+      let hasUnknownType = false;
+      if (rawType === 'pass') {
+        action = 'pass';
+      } else if (rawType === 'block') {
+        action = 'block';
+      } else if (rawType === 'reject') {
+        action = 'reject';
+      } else {
+        action = 'block';
+        hasUnknownType = true;
+      }
+
       let iface = r.interface ? String(r.interface).toLowerCase() : 'any';
       if (r.floating === 'yes' || r.floating === '1') {
         iface = 'any';
@@ -209,59 +276,40 @@ export function importPfsenseConfig(xmlContent: string): ImportReport {
       else if (rawProto.includes('icmp')) proto = 'icmp';
       else if (rawProto === 'esp') proto = 'esp';
 
-      // Source parsing
-      let src = 'any';
-      let srcPort = '';
-      let negatedSrc = false;
-      if (r.source) {
-        if (r.source.any !== undefined) {
-          src = 'any';
-        } else if (r.source.network) {
-          const rawNet = String(r.source.network);
-          src = rawNet === '(self)' ? 'self' : `$${rawNet.replace(/[^a-zA-Z0-9_]/g, '_')}`;
-        } else if (r.source.address) {
-          const rawAddr = String(r.source.address).trim();
-          const aliasMatch = aliasMap.get(rawAddr);
-          src = aliasMatch ? `$${aliasMatch}` : rawAddr;
-        }
-        if (r.source.not !== undefined && src !== 'any') {
-          negatedSrc = true;
-        }
-        if (r.source.port) {
-          srcPort = normalizeXmlPort(r.source.port, aliasMap);
-        }
-      }
-
-      // Destination parsing
-      let dst = 'any';
-      let dstPort = '';
-      let negatedDst = false;
-      if (r.destination) {
-        if (r.destination.any !== undefined) {
-          dst = 'any';
-        } else if (r.destination.network) {
-          const rawNet = String(r.destination.network);
-          dst = rawNet === '(self)' ? 'self' : `$${rawNet.replace(/[^a-zA-Z0-9_]/g, '_')}`;
-        } else if (r.destination.address) {
-          const rawAddr = String(r.destination.address).trim();
-          const aliasMatch = aliasMap.get(rawAddr);
-          dst = aliasMatch ? `$${aliasMatch}` : rawAddr;
-        }
-        if (r.destination.not !== undefined && dst !== 'any') {
-          negatedDst = true;
-        }
-        if (r.destination.port) {
-          dstPort = normalizeXmlPort(r.destination.port, aliasMap);
-        }
-      }
+      // Source & destination parsing
+      const parsedSrc = parseXmlEndpoint(r.source, aliasMap, 'any');
+      const parsedDst = parseXmlEndpoint(r.destination, aliasMap, 'any');
+      const src = parsedSrc.addr;
+      const srcPort = parsedSrc.port;
+      const negatedSrc = parsedSrc.negated;
+      const dst = parsedDst.addr;
+      const dstPort = parsedDst.port;
+      const negatedDst = parsedDst.negated;
 
       const hasNegation = negatedSrc || negatedDst;
       const ruleIndex = rules.length;
       const baseDescr = r.descr ? String(r.descr) : '';
-      const finalDescr = hasNegation
-        ? `[REVIEW: Negated match] ${baseDescr}`.trim()
-        : baseDescr;
-      const isEnabled = hasNegation ? false : !isXmlFlagSet(r.disabled);
+      const reviewPrefixes: string[] = [];
+      if (hasUnknownType) reviewPrefixes.push(`Unknown rule type "${rawType || 'missing'}"`);
+      if (hasNegation) reviewPrefixes.push('Negated match');
+      const finalDescr =
+        reviewPrefixes.length > 0 ? `[REVIEW: ${reviewPrefixes.join('; ')}] ${baseDescr}`.trim() : baseDescr;
+      const isEnabled = hasNegation || hasUnknownType ? false : !isXmlFlagSet(r.disabled);
+
+      if (hasUnknownType) {
+        const matchSummary = `TYPE=${rawType || 'missing'} ${proto} from ${src} to ${dst}`;
+        const explanation = `pfSense rule "${baseDescr || sortOrder}" has unrecognized or missing <type> "${rawType || 'missing'}" (${matchSummary}). Imported fail-closed with action: block and enabled: false.`;
+        const suggestedResolution = `Verify the intended rule action (pass, block, or reject) in pfSense before enabling.`;
+        warnings.push(explanation + ' ' + suggestedResolution);
+        reviewItems.push({
+          ruleId: String(r.tracker || `rule-${ruleIndex + 1}`),
+          ruleIndex,
+          reason: 'manual_review',
+          originalMatchSummary: matchSummary,
+          explanation,
+          suggestedResolution,
+        });
+      }
 
       if (hasNegation) {
         const reason: ImportReviewItem['reason'] =
@@ -320,19 +368,31 @@ export function importPfsenseConfig(xmlContent: string): ImportReport {
       const rawNatProto = String(n.protocol || 'tcp').toLowerCase();
       let natProto = rawNatProto === 'tcp/udp' || rawNatProto === 'tcp_udp' ? 'tcp_udp' : rawNatProto === 'icmpv6' ? 'ipv6-icmp' : rawNatProto;
       if (!validNatProtos.has(natProto)) natProto = 'tcp';
+
+      const dnatSrc = parseXmlEndpoint(n.source, aliasMap, 'any');
+      const dnatDst = parseXmlEndpoint(n.destination, aliasMap, 'wan_ip', true);
+      const isNoRdr = n.nordr !== undefined && isXmlFlagSet(n.nordr);
+      const hasNatReview = dnatSrc.negated || dnatDst.negated || isNoRdr;
+      const baseNatDescr = n.descr ? String(n.descr) : '';
+      if (hasNatReview) {
+        warnings.push(
+          `pfSense DNAT rule "${baseNatDescr || natSort}" uses ${isNoRdr ? '<nordr/> exclusion' : 'negated source/destination matching'} which cannot be safely activated as a standard forward; imported with enabled: false.`,
+        );
+      }
+
       nat.push({
         type: 'dnat',
         interface: iface,
         protocol: natProto as any,
-        source: 'any',
-        sourcePort: '',
-        destination: 'wan_ip',
+        source: dnatSrc.addr,
+        sourcePort: dnatSrc.port,
+        destination: dnatDst.addr,
         destinationPort: normalizeXmlPort(n.destination?.port || localPort || '', aliasMap),
         targetIp: n.target ? String(n.target) : '',
         targetPort: normalizeXmlPort(localPort || '', aliasMap),
         log: isXmlFlagSet(n.log),
-        enabled: !isXmlFlagSet(n.disabled),
-        description: n.descr ? String(n.descr) : '',
+        enabled: hasNatReview ? false : !isXmlFlagSet(n.disabled),
+        description: hasNatReview ? `[REVIEW: ${isNoRdr ? 'No-RDR' : 'Negated NAT'}] ${baseNatDescr}`.trim() : baseNatDescr,
         sortOrder: natSort,
       });
       natSort += 10;
@@ -344,28 +404,29 @@ export function importPfsenseConfig(xmlContent: string): ImportReport {
     const rawOutbound = Array.isArray(root.nat.outbound.rule) ? root.nat.outbound.rule : [root.nat.outbound.rule];
     for (const o of rawOutbound) {
       const iface = (o.interface || 'wan').toLowerCase();
-      let src = 'any';
-      if (o.source?.network) {
-        const rawNet = String(o.source.network).trim();
-        src = rawNet === '(self)' ? 'self' : `$${rawNet.replace(/[^a-zA-Z0-9_]/g, '_')}`;
-      } else if (o.source?.address) {
-        const rawAddr = String(o.source.address).trim();
-        const aliasMatch = aliasMap.get(rawAddr);
-        src = aliasMatch ? `$${aliasMatch}` : rawAddr;
+      const outSrc = parseXmlEndpoint(o.source, aliasMap, 'any');
+      const outDst = parseXmlEndpoint(o.destination, aliasMap, 'any');
+      const isNoNat = o.nonat !== undefined && isXmlFlagSet(o.nonat);
+      const hasOutReview = outSrc.negated || outDst.negated || isNoNat;
+      const baseOutDescr = o.descr ? String(o.descr) : 'Outbound NAT';
+      if (hasOutReview) {
+        warnings.push(
+          `pfSense Outbound NAT rule "${baseOutDescr}" uses ${isNoNat ? '<nonat/> exclusion' : 'negated source/destination matching'}; imported with enabled: false.`,
+        );
       }
 
       nat.push({
         type: o.target ? 'snat' : 'masquerade',
         interface: iface,
         protocol: 'any',
-        source: src,
-        sourcePort: '',
-        destination: 'any',
-        destinationPort: '',
+        source: outSrc.addr,
+        sourcePort: outSrc.port,
+        destination: outDst.addr,
+        destinationPort: outDst.port,
         targetIp: o.target ? String(o.target) : undefined,
         log: isXmlFlagSet(o.log),
-        enabled: !isXmlFlagSet(o.disabled),
-        description: o.descr ? String(o.descr) : 'Outbound NAT',
+        enabled: hasOutReview ? false : !isXmlFlagSet(o.disabled),
+        description: hasOutReview ? `[REVIEW: ${isNoNat ? 'No-NAT' : 'Negated NAT'}] ${baseOutDescr}` : baseOutDescr,
         sortOrder: natSort,
       });
       natSort += 10;

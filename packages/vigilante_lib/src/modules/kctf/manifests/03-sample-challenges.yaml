@@ -15,14 +15,14 @@ spec:
     ports:
       - name: http
         port: 8080
-        targetPort: 80
+        targetPort: 8080
         protocol: TCP
   podTemplate:
     template:
       spec:
         containers:
           - name: challenge
-            image: nginx:alpine
+            image: nginxinc/nginx-unprivileged:1.27.4-alpine
             env:
               - name: CTF_FLAG
                 value: "VIGILANTE{kctf_w3b_1nj3ct10n_succ3ss}"
@@ -48,11 +48,24 @@ spec:
         kctf.dev/challenge: web-flag-leak
         kctf.dev/category: web
     spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 101
+        runAsGroup: 101
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: challenge
-          image: nginx:alpine
+          image: nginxinc/nginx-unprivileged:1.27.4-alpine
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
           ports:
-            - containerPort: 80
+            - containerPort: 8080
           env:
             - name: CTF_FLAG
               value: "VIGILANTE{kctf_w3b_1nj3ct10n_succ3ss}"
@@ -68,7 +81,7 @@ spec:
   type: ClusterIP
   ports:
     - port: 8080
-      targetPort: 80
+      targetPort: 8080
       name: http
   selector:
     app.kubernetes.io/name: chal-web-flag-leak
@@ -115,9 +128,22 @@ spec:
         kctf.dev/challenge: pwn-nsjail-echo
         kctf.dev/category: pwn
     spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: challenge
-          image: busybox:latest
+          image: busybox:1.36@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
           command: ["sh", "-c"]
           args:
             - |
@@ -185,9 +211,22 @@ spec:
         kctf.dev/challenge: crypto-oracle-rsa
         kctf.dev/category: crypto
     spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: challenge
-          image: busybox:latest
+          image: busybox:1.36@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
           command: ["sh", "-c"]
           args:
             - |
@@ -231,7 +270,7 @@ spec:
     ports:
       - name: http
         port: 9001
-        targetPort: 80
+        targetPort: 8080
         protocol: TCP
 ---
 apiVersion: apps/v1
@@ -255,11 +294,24 @@ spec:
         kctf.dev/challenge: rev-crackme-license
         kctf.dev/category: rev
     spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 101
+        runAsGroup: 101
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: challenge
-          image: nginx:alpine
+          image: nginxinc/nginx-unprivileged:1.27.4-alpine
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
           ports:
-            - containerPort: 80
+            - containerPort: 8080
           env:
             - name: FLAG
               value: "VIGILANTE{s3r14l_k3y_v3r1f13d_0x99}"
@@ -275,7 +327,7 @@ spec:
   type: ClusterIP
   ports:
     - port: 9001
-      targetPort: 80
+      targetPort: 8080
       name: http
   selector:
     app.kubernetes.io/name: chal-rev-crackme-license
@@ -298,7 +350,7 @@ spec:
     ports:
       - name: http
         port: 9101
-        targetPort: 80
+        targetPort: 8080
         protocol: TCP
 ---
 apiVersion: apps/v1
@@ -322,11 +374,24 @@ spec:
         kctf.dev/challenge: forensics-pcap-extract
         kctf.dev/category: forensics
     spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 101
+        runAsGroup: 101
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: challenge
-          image: nginx:alpine
+          image: nginxinc/nginx-unprivileged:1.27.4-alpine
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
           ports:
-            - containerPort: 80
+            - containerPort: 8080
           env:
             - name: FLAG
               value: "VIGILANTE{pcap_dns_tunn3l_3xf1l}"
@@ -342,7 +407,7 @@ spec:
   type: ClusterIP
   ports:
     - port: 9101
-      targetPort: 80
+      targetPort: 8080
       name: http
   selector:
     app.kubernetes.io/name: chal-forensics-pcap-extract
@@ -389,9 +454,22 @@ spec:
         kctf.dev/challenge: misc-pyjail-escape
         kctf.dev/category: misc
     spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: challenge
-          image: busybox:latest
+          image: busybox:1.36@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
           command: ["sh", "-c"]
           args:
             - |
@@ -459,9 +537,22 @@ spec:
         kctf.dev/challenge: ad-service-vault
         kctf.dev/category: ad
     spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: challenge
-          image: busybox:latest
+          image: busybox:1.36@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
           command: ["sh", "-c"]
           args:
             - |
@@ -529,9 +620,22 @@ spec:
         kctf.dev/challenge: koth-citadel-hill
         kctf.dev/category: koth
     spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: challenge
-          image: busybox:latest
+          image: busybox:1.36@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
           command: ["sh", "-c"]
           args:
             - |

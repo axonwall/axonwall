@@ -221,10 +221,10 @@ export const FullCloudInitSchema = z.object({
   fqdn: z.string().optional(),
   manage_etc_hosts: z.boolean().optional(),
   timezone: z.string().optional(),
-  user: z.string().optional(),
+  user: z.string().regex(LINUX_USERNAME, 'Invalid Linux username format').optional(),
   password: z.string().optional(),
   ssh_pwauth: z.boolean().optional(),
-  ssh_authorized_keys: z.array(z.string()).optional(),
+  ssh_authorized_keys: z.array(z.string().regex(OPENSSH_PUBKEY, 'Invalid OpenSSH public key format')).optional(),
   package_upgrade: z.boolean().optional(),
   chpasswd: z
     .object({
@@ -1049,6 +1049,72 @@ function isSecretKeyName(key: string): boolean {
   return RECURSIVE_SECRET_KEY_PATTERN.test(key);
 }
 
+const SENSITIVE_QUERY_PARAM_RE =
+  /^(?:token|secret|pass|passwd|password|pwd|key|apikey|api_key|auth|access_token|refresh_token|sig|signature|x-amz-signature|x-amz-credential|x-amz-security-token|code|bearer|sas)$/i;
+
+function isUrlOrEndpointKey(key: string): boolean {
+  if (NON_SECRET_KEYS.has(key)) return false;
+  return (
+    key.endsWith('Url') ||
+    key.endsWith('URL') ||
+    key.endsWith('Uri') ||
+    key.endsWith('URI') ||
+    key.endsWith('Endpoint') ||
+    key === 'endpoint' ||
+    key === 'url'
+  );
+}
+
+function redactUrlCredentials(raw: string, key: string): string {
+  const trimmed = raw.trim();
+  if (!trimmed || trimmed === REDACTED_SECRET_PLACEHOLDER) return raw;
+
+  // Mask URI userinfo (`scheme://user:pass@host`) including multi-endpoint DSNs
+  let out = raw.replace(
+    /([a-zA-Z][a-zA-Z0-9+.-]*:\/\/)([^/@?#\s,]+)(@)/g,
+    `$1${REDACTED_SECRET_PLACEHOLDER}$3`,
+  );
+
+  const isWebhookOrCustomUpdate = key === 'webhookUrl' || key === 'customUpdateUrl';
+
+  try {
+    const parsed = new URL(out);
+    if (parsed.username || parsed.password) {
+      parsed.username = REDACTED_SECRET_PLACEHOLDER;
+      if (parsed.password) parsed.password = REDACTED_SECRET_PLACEHOLDER;
+    }
+    if (parsed.search) {
+      const nextParams = new URLSearchParams();
+      for (const [pk, pv] of parsed.searchParams.entries()) {
+        if (isWebhookOrCustomUpdate || SENSITIVE_QUERY_PARAM_RE.test(pk)) {
+          nextParams.append(pk, pv ? REDACTED_SECRET_PLACEHOLDER : '');
+        } else {
+          nextParams.append(pk, pv);
+        }
+      }
+      parsed.search = nextParams.toString();
+    }
+    if (key === 'webhookUrl') {
+      // Slack (/services/T.../B.../secret), Discord (/webhooks/id/secret), Teams/generic webhook paths
+      parsed.pathname = parsed.pathname.replace(
+        /(\/(?:services|webhooks?|hooks)\/).+$/i,
+        `$1${REDACTED_SECRET_PLACEHOLDER}`,
+      );
+    }
+    out = parsed.toString();
+  } catch {
+    // Fallback regex redaction for non-standard DSNs or templates (e.g. ?token=%t)
+    out = out.replace(/([?&])([^=&#]+)=([^&#]*)/g, (m, sep, pk, pv) => {
+      if (isWebhookOrCustomUpdate || SENSITIVE_QUERY_PARAM_RE.test(pk)) {
+        return `${sep}${pk}=${pv ? REDACTED_SECRET_PLACEHOLDER : ''}`;
+      }
+      return m;
+    });
+  }
+
+  return out;
+}
+
 function redactSecretFieldsRecursively(node: unknown, seen = new Set<object>()): void {
   if (!node || typeof node !== 'object') return;
   if (seen.has(node)) return;
@@ -1071,6 +1137,8 @@ function redactSecretFieldsRecursively(node: unknown, seen = new Set<object>()):
         isSecretKeyName(key)
       ) {
         record[key] = REDACTED_SECRET_PLACEHOLDER;
+      } else if (val.length > 0 && isUrlOrEndpointKey(key)) {
+        record[key] = redactUrlCredentials(val, key);
       }
     } else if (val && typeof val === 'object') {
       redactSecretFieldsRecursively(val, seen);
@@ -1330,6 +1398,9 @@ export function prepareDesiredStateForCloudInit(
           cloned.librenms.snmpDefaults.community = REDACTED_SECRET_PLACEHOLDER;
         }
       }
+    }
+    if (cloned.k3s?.externalDatastoreEndpoint) {
+      cloned.k3s.externalDatastoreEndpoint = REDACTED_SECRET_PLACEHOLDER;
     }
     if (cloned.topology && Array.isArray(cloned.topology.peers)) {
       for (const peer of cloned.topology.peers) {
@@ -1804,7 +1875,8 @@ export function buildNoCloudIso(
   dirOffset += dotDotRecord.length;
 
   for (const f of files) {
-    const filePx = buildRockRidgePxEntry(0o100644, 1);
+    const fileMode = f.posixName === 'user-data' ? 0o100600 : 0o100644;
+    const filePx = buildRockRidgePxEntry(fileMode, 1);
     const fileNm = buildRockRidgeNmEntry(f.posixName);
     const su = new Uint8Array(filePx.length + fileNm.length);
     su.set(filePx, 0);

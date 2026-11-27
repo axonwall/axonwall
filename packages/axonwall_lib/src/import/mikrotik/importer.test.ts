@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { importMikrotikConfig } from './index.js';
 import { compileNftables } from '../../compile/nft/index.js';
+import { DesiredStateSchema } from '../../schemas/index.js';
 
 const SAMPLE_MIKROTIK_RSC = `
 # RouterOS 7.15.2
@@ -77,5 +78,45 @@ describe('MikroTik RouterOS Importer', () => {
 
     const { nftScript } = compileNftables(report.state);
     expect(nftScript).toContain('table inet axonwall');
+    expect(() => DesiredStateSchema.parse(report.state)).not.toThrow();
+  });
+
+  it('preserves DNAT and SNAT source/destination/port filters and disables negated NAT [SEC-H20]', () => {
+    const rsc = `
+/ip firewall address-list
+add address=203.0.113.0/24 list=trusted_partners
+/ip firewall nat
+add action=dst-nat chain=dstnat in-interface=ether1 protocol=tcp src-address-list=trusted_partners src-port=1024-65535 dst-address=198.51.100.10 dst-port=8443 to-addresses=192.168.88.50 to-ports=443 comment="Filtered DNAT"
+add action=dst-nat chain=dstnat in-interface=ether1 protocol=tcp src-address=!10.0.0.0/8 dst-port=80 to-addresses=192.168.88.51 to-ports=80 comment="Negated DNAT"
+add action=src-nat chain=srcnat out-interface=ether1 protocol=udp src-address=192.168.88.10 src-port=5060 dst-address=198.51.100.200 dst-port=5060 to-addresses=198.51.100.1 to-ports=5060 comment="Filtered SNAT"
+`;
+    const report = importMikrotikConfig(rsc);
+    expect(report.natRulesCount).toBe(3);
+
+    const dnat = report.state.nat[0]!;
+    expect(dnat.type).toBe('dnat');
+    expect(dnat.source).toBe('$trusted_partners');
+    expect(dnat.sourcePort).toBe('1024-65535');
+    expect(dnat.destination).toBe('198.51.100.10');
+    expect(dnat.destinationPort).toBe('8443');
+    expect(dnat.targetIp).toBe('192.168.88.50');
+    expect(dnat.targetPort).toBe('443');
+    expect(dnat.enabled).toBe(true);
+
+    const negatedDnat = report.state.nat[1]!;
+    expect(negatedDnat.enabled).toBe(false);
+    expect(report.warnings.length).toBeGreaterThanOrEqual(1);
+
+    const snat = report.state.nat[2]!;
+    expect(snat.type).toBe('snat');
+    expect(snat.protocol).toBe('udp');
+    expect(snat.source).toBe('192.168.88.10');
+    expect(snat.sourcePort).toBe('5060');
+    expect(snat.destination).toBe('198.51.100.200');
+    expect(snat.destinationPort).toBe('5060');
+    expect(snat.targetIp).toBe('198.51.100.1');
+    expect(snat.targetPort).toBe('5060');
+
+    expect(() => DesiredStateSchema.parse(report.state)).not.toThrow();
   });
 });

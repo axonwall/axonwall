@@ -5,26 +5,51 @@ function sanitizeSnmpToken(raw: string): string {
   return raw.split(/[\r\n]/)[0].trim().replace(/[\r\n"\\]/g, '');
 }
 
+function isWildcardAddress(addr: string): boolean {
+  const lower = addr.toLowerCase();
+  return lower === '0.0.0.0' || lower === '::' || lower === '::0' || lower === '0:0:0:0:0:0:0:0';
+}
+
+function getValidSnmpV3Users(config: SnmpPluginConfig) {
+  return (config.v3Users ?? [])
+    .map((u) => ({
+      user: sanitizeSnmpToken(u.username).replace(/\s+/g, ''),
+      authProtocol: u.authProtocol || 'SHA-256',
+      authPass: sanitizeSnmpToken(u.authPassword),
+      privProtocol: u.privProtocol || 'AES',
+      privPass: sanitizeSnmpToken(u.privPassword),
+      securityLevel: u.securityLevel === 'authNoPriv' ? 'authNoPriv' : 'authPriv',
+    }))
+    .filter((u) => u.user && u.authPass.length >= 8 && (u.securityLevel === 'authNoPriv' || u.privPass.length >= 8));
+}
+
 /**
  * Compiles Net-SNMP snmpd configuration (/etc/snmp/snmpd.conf).
- * Supports SNMPv2c and SNMPv3 (USM authPriv / authNoPriv) as well as interface bind addresses.
+ * Defaults to SNMPv3 authPriv bound to loopback/LAN only (never 0.0.0.0).
+ * USM createUser credentials are written separately to 0o600 /var/lib/snmp/snmpd.conf.
  */
-export function compileSnmpd(config: SnmpPluginConfig): string {
+export function compileSnmpd(config: SnmpPluginConfig, defaultBindAddresses?: string[]): string {
   const lines: string[] = [];
-  const safeCommunity = sanitizeSnmpToken(config.community).replace(/\s+/g, '');
+  const safeCommunity = sanitizeSnmpToken(config.community || '').replace(/\s+/g, '');
   const safeLocation = config.sysLocation.split(/[\r\n]/)[0].trim();
   const safeContact = config.sysContact.split(/[\r\n]/)[0].trim();
   const port = Math.max(1, Math.min(65535, Number(config.listenPort) || 161));
-  const version = config.version === 'v3' ? 'v3' : 'v2c';
+  const version = config.version === 'v2c' ? 'v2c' : 'v3';
 
-  const validBindAddrs = (config.bindAddresses ?? [])
+  const configuredBindAddrs = (config.bindAddresses ?? [])
     .map((a) => a.trim())
-    .filter((a) => isValidIPv4(a) || isValidIPv6(a));
+    .filter((a) => (isValidIPv4(a) || isValidIPv6(a)) && !isWildcardAddress(a));
+
+  const fallbackBindAddrs = (defaultBindAddresses ?? [])
+    .map((a) => a.trim())
+    .filter((a) => (isValidIPv4(a) || isValidIPv6(a)) && !isWildcardAddress(a));
+
+  const validBindAddrs = configuredBindAddrs.length > 0 ? configuredBindAddrs : fallbackBindAddrs;
 
   const agentAddrSpec =
     validBindAddrs.length > 0
       ? validBindAddrs.map((ip) => (ip.includes(':') ? `udp6:[${ip}]:${port}` : `udp:${ip}:${port}`)).join(',')
-      : `udp:${port},udp6:[::1]:${port}`;
+      : `udp:127.0.0.1:${port},udp6:[::1]:${port}`;
 
   lines.push('# /etc/snmp/snmpd.conf - Managed by Axonwall SNMP Plugin');
   lines.push(`agentAddress ${agentAddrSpec}`);
@@ -38,18 +63,11 @@ export function compileSnmpd(config: SnmpPluginConfig): string {
   lines.push('view   all         included   .1');
 
   if (version === 'v3') {
-    for (const u of config.v3Users ?? []) {
-      const user = sanitizeSnmpToken(u.username).replace(/\s+/g, '');
-      const authPass = sanitizeSnmpToken(u.authPassword);
-      const privPass = sanitizeSnmpToken(u.privPassword);
-      if (!user || authPass.length < 8) continue;
+    for (const u of getValidSnmpV3Users(config)) {
       if (u.securityLevel === 'authNoPriv') {
-        lines.push(`createUser ${user} ${u.authProtocol} "${authPass}"`);
-        lines.push(`rouser ${user} auth -V all`);
+        lines.push(`rouser ${u.user} auth -V all`);
       } else {
-        if (privPass.length < 8) continue;
-        lines.push(`createUser ${user} ${u.authProtocol} "${authPass}" ${u.privProtocol} "${privPass}"`);
-        lines.push(`rouser ${user} priv -V all`);
+        lines.push(`rouser ${u.user} priv -V all`);
       }
     }
   } else if (safeCommunity) {
@@ -57,5 +75,30 @@ export function compileSnmpd(config: SnmpPluginConfig): string {
   }
   lines.push('');
 
+  return lines.join('\n');
+}
+
+/**
+ * Compiles Net-SNMP persistent USM user credentials (/var/lib/snmp/snmpd.conf, 0o600).
+ * Returns empty string when SNMPv3 is inactive or has no valid users.
+ */
+export function compileSnmpdPersistentUsers(config: SnmpPluginConfig): string {
+  const version = config.version === 'v2c' ? 'v2c' : 'v3';
+  if (version !== 'v3') return '';
+
+  const users = getValidSnmpV3Users(config);
+  if (users.length === 0) return '';
+
+  const lines: string[] = [
+    '# /var/lib/snmp/snmpd.conf - Managed by Axonwall SNMP Plugin (0600)',
+  ];
+  for (const u of users) {
+    if (u.securityLevel === 'authNoPriv') {
+      lines.push(`createUser ${u.user} ${u.authProtocol} "${u.authPass}"`);
+    } else {
+      lines.push(`createUser ${u.user} ${u.authProtocol} "${u.authPass}" ${u.privProtocol} "${u.privPass}"`);
+    }
+  }
+  lines.push('');
   return lines.join('\n');
 }

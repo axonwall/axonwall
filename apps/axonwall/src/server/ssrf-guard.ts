@@ -6,11 +6,14 @@ import net from 'node:net';
 export interface SsrfGuardOptions {
   allowHttp?: boolean;
   allowPrivate?: boolean;
+  maxResponseBytes?: number;
   resolveDns?: (
     hostname: string,
     options: { all: true; verbatim?: boolean }
   ) => Promise<Array<{ address: string; family: number }>>;
 }
+
+const DEFAULT_MAX_RESPONSE_BYTES = 10 * 1024 * 1024;
 
 function expandIpv6Hextets(ip: string): number[] | null {
   const clean = ip.trim().replace(/^\[|\]$/g, '').split('%')[0]?.trim().toLowerCase() || '';
@@ -102,8 +105,21 @@ export function isDisallowedSsrfIp(ip: string, options?: { allowPrivate?: boolea
   ) {
     return true;
   }
-  // Link-local fe80::/10 & multicast ff00::/8
-  if ((h[0]! & 0xffc0) === 0xfe80 || (h[0]! & 0xff00) === 0xff00) return true;
+  // Link-local fe80::/10, deprecated site-local fec0::/10, & multicast ff00::/8
+  if ((h[0]! & 0xffc0) === 0xfe80 || (h[0]! & 0xffc0) === 0xfec0 || (h[0]! & 0xff00) === 0xff00) {
+    return true;
+  }
+
+  // Transition / tunneling IPv6 prefixes that can smuggle or encapsulate private/loopback IPv4:
+  // NAT64 local-use 64:ff9b:1::/48, 6to4 2002::/16, Teredo 2001::/32, SIIT ::ffff:0:0:0/96
+  if (
+    (h[0] === 0x0064 && h[1] === 0xff9b && h[2] === 0x0001) ||
+    h[0] === 0x2002 ||
+    (h[0] === 0x2001 && h[1] === 0x0000) ||
+    (h[0] === 0 && h[1] === 0 && h[2] === 0 && h[3] === 0 && h[4] === 0xffff && h[5] === 0)
+  ) {
+    return true;
+  }
 
   // IPv4-mapped ::ffff:0:0/96 or IPv4-compatible ::/96 (excluding ::1) or NAT64 64:ff9b::/96
   const isV4Mapped = h[0] === 0 && h[1] === 0 && h[2] === 0 && h[3] === 0 && h[4] === 0 && h[5] === 0xffff;
@@ -126,6 +142,48 @@ export function isDisallowedSsrfIp(ip: string, options?: { allowPrivate?: boolea
   }
 
   return false;
+}
+
+/**
+ * Returns true when the IP literal is a loopback address (127.0.0.0/8, ::1, or IPv4-mapped loopback).
+ */
+export function isLoopbackSsrfIp(ip: string): boolean {
+  const clean = (ip || '').trim().replace(/^\[|\]$/g, '').split('%')[0]?.trim().toLowerCase() || '';
+  if (!clean) return false;
+  if (net.isIPv4(clean)) {
+    return clean.startsWith('127.');
+  }
+  const h = expandIpv6Hextets(clean);
+  if (!h) return false;
+  if (h[0] === 0 && h[1] === 0 && h[2] === 0 && h[3] === 0 && h[4] === 0 && h[5] === 0 && h[6] === 0 && h[7] === 1) {
+    return true;
+  }
+  const isV4Mapped = h[0] === 0 && h[1] === 0 && h[2] === 0 && h[3] === 0 && h[4] === 0 && h[5] === 0xffff;
+  if (isV4Mapped) {
+    return ((h[6]! >> 8) & 0xff) === 127;
+  }
+  return false;
+}
+
+/**
+ * Builds a Node DNS lookup callback pinned to validated addresses from assertSafeOutboundUrl.
+ */
+export function createPinnedLookup(
+  addresses: Array<{ address: string; family: number }>
+): (hostname: string, opts: any, cb?: any) => void {
+  const pinned = addresses[0]!;
+  return (_hostname: string, opts: any, cb?: any) => {
+    const callback = typeof opts === 'function' ? opts : cb;
+    if (typeof callback !== 'function') return;
+    if (opts && typeof opts === 'object' && opts.all) {
+      callback(
+        null,
+        addresses.map((a) => ({ address: a.address, family: a.family }))
+      );
+    } else {
+      callback(null, pinned.address, pinned.family);
+    }
+  };
 }
 
 const BLOCKED_METADATA_HOSTS = new Set([
@@ -238,11 +296,17 @@ export async function ssrfSafeFetch(
     body?: string;
     signal?: AbortSignal;
     timeoutMs?: number;
+    maxResponseBytes?: number;
   } = {},
   options?: SsrfGuardOptions
 ): Promise<SsrfSafeResponse> {
   const { url, addresses } = await assertSafeOutboundUrl(rawUrl, options);
-  const pinned = addresses[0]!;
+  const maxBytesRaw = init.maxResponseBytes ?? options?.maxResponseBytes ?? DEFAULT_MAX_RESPONSE_BYTES;
+  const maxResponseBytes =
+    typeof maxBytesRaw === 'number' && Number.isFinite(maxBytesRaw) && maxBytesRaw > 0
+      ? Math.floor(maxBytesRaw)
+      : DEFAULT_MAX_RESPONSE_BYTES;
+  const pinnedLookup = createPinnedLookup(addresses);
   const isHttps = url.protocol === 'https:';
   const transport = isHttps ? https : http;
   const hostHeader = url.port ? `${url.hostname}:${url.port}` : url.hostname;
@@ -255,6 +319,14 @@ export async function ssrfSafeFetch(
   }
 
   return new Promise<SsrfSafeResponse>((resolve, reject) => {
+    let settled = false;
+    const fail = (err: Error) => {
+      if (settled) return;
+      settled = true;
+      init.signal?.removeEventListener('abort', onAbort);
+      reject(err);
+    };
+
     if (init.signal?.aborted) {
       reject(new Error('Request aborted'));
       return;
@@ -270,27 +342,47 @@ export async function ssrfSafeFetch(
         headers: reqHeaders,
         timeout: init.timeoutMs ?? 15000,
         ...(isHttps ? { servername: url.hostname.replace(/^\[|\]$/g, '') } : {}),
-        lookup: (_hostname: string, opts: any, cb?: any) => {
-          const callback = typeof opts === 'function' ? opts : cb;
-          if (typeof callback !== 'function') return;
-          if (opts && typeof opts === 'object' && opts.all) {
-            callback(null, [{ address: pinned.address, family: pinned.family }]);
-          } else {
-            callback(null, pinned.address, pinned.family);
-          }
-        },
+        lookup: pinnedLookup,
       },
       (res) => {
         const status = res.statusCode || 0;
         if (status >= 300 && status < 400) {
           res.resume();
-          reject(new Error(`Outbound HTTP redirect (${status}) blocked by SSRF policy`));
+          fail(new Error(`Outbound HTTP redirect (${status}) blocked by SSRF policy`));
           return;
         }
+        const contentLengthHeader = res.headers['content-length'];
+        const declaredLen =
+          typeof contentLengthHeader === 'string'
+            ? Number(contentLengthHeader)
+            : Array.isArray(contentLengthHeader)
+              ? Number(contentLengthHeader[0])
+              : NaN;
+        if (Number.isFinite(declaredLen) && declaredLen > maxResponseBytes) {
+          res.destroy();
+          req.destroy();
+          fail(new Error(`Outbound response exceeded maxResponseBytes limit (${maxResponseBytes} bytes)`));
+          return;
+        }
+
         const chunks: Buffer[] = [];
-        res.on('data', (chunk: Buffer) => chunks.push(chunk));
-        res.on('error', (err) => reject(err));
+        let totalBytes = 0;
+        res.on('data', (chunk: Buffer) => {
+          const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+          totalBytes += buf.length;
+          if (totalBytes > maxResponseBytes) {
+            res.destroy();
+            req.destroy();
+            fail(new Error(`Outbound response exceeded maxResponseBytes limit (${maxResponseBytes} bytes)`));
+            return;
+          }
+          chunks.push(buf);
+        });
+        res.on('error', (err) => fail(err instanceof Error ? err : new Error(String(err))));
         res.on('end', () => {
+          if (settled) return;
+          settled = true;
+          init.signal?.removeEventListener('abort', onAbort);
           const rawText = Buffer.concat(chunks).toString('utf8');
           resolve({
             ok: status >= 200 && status < 300,
@@ -305,16 +397,19 @@ export async function ssrfSafeFetch(
     );
 
     const onAbort = () => {
-      req.destroy(new Error('Request aborted'));
+      const err = new Error('Request aborted');
+      req.destroy(err);
+      fail(err);
     };
     init.signal?.addEventListener('abort', onAbort, { once: true });
 
     req.on('timeout', () => {
-      req.destroy(new Error('Outbound request timed out'));
+      const err = new Error('Outbound request timed out');
+      req.destroy(err);
+      fail(err);
     });
     req.on('error', (err) => {
-      init.signal?.removeEventListener('abort', onAbort);
-      reject(err);
+      fail(err instanceof Error ? err : new Error(String(err)));
     });
     req.on('close', () => {
       init.signal?.removeEventListener('abort', onAbort);

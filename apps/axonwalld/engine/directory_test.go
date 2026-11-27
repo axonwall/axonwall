@@ -572,3 +572,77 @@ func TestHAPKIExpiredNodeCertRegenerated(t *testing.T) {
 		}
 	})
 }
+
+func TestDirectoryNSSMirrorBlocksPrivilegedAndLowGIDGroups(t *testing.T) {
+	tmp := t.TempDir()
+	prevPasswd, prevGroup, prevShadow, prevState := etcPasswdPath, etcGroupPath, etcShadowPath, mirroredNSSStatePath
+	etcPasswdPath = filepath.Join(tmp, "passwd")
+	etcGroupPath = filepath.Join(tmp, "group")
+	etcShadowPath = filepath.Join(tmp, "shadow")
+	mirroredNSSStatePath = filepath.Join(tmp, "mirrored-nss.json")
+	t.Cleanup(func() {
+		etcPasswdPath = prevPasswd
+		etcGroupPath = prevGroup
+		etcShadowPath = prevShadow
+		mirroredNSSStatePath = prevState
+	})
+
+	_ = os.WriteFile(etcPasswdPath, []byte("root:x:0:0:root:/root:/bin/bash\naxonwall-api:x:999:999::/var/lib/axonwall:/bin/false\n"), 0644)
+	_ = os.WriteFile(etcGroupPath, []byte(
+		"root:x:0:\n"+
+			"sudo:x:27:localadmin\n"+
+			"shadow:x:42:\n"+
+			"axonwall-api:x:999:\n"+
+			"lowgidlocal:x:500:\n",
+	), 0644)
+	_ = os.WriteFile(etcShadowPath, []byte("root:*:19723:0:99999:7:::\n"), 0640)
+
+	dm := &DirectoryManager{}
+	dm.applyLocalNSSMirror("",
+		[]LocalUser{
+			{Username: "mallory", UID: 10050, GID: 10050, Comment: "Mallory", HomeDir: "/home/mallory", Shell: "/bin/bash"},
+			{Username: "axonwall-api", UID: 10051, GID: 10051, Comment: "Spoof", HomeDir: "/tmp", Shell: "/bin/bash"},
+		},
+		[]LocalGroup{
+			{Name: "root", GID: 10050, Members: []string{"mallory"}},
+			{Name: "sudo", GID: 10051, Members: []string{"mallory"}},
+			{Name: "shadow", GID: 10052, Members: []string{"mallory"}},
+			{Name: "axonwall-api", GID: 10053, Members: []string{"mallory"}},
+			{Name: "lowgidlocal", GID: 10054, Members: []string{"mallory"}},
+			{Name: "wheel", GID: 10055, Members: []string{"mallory"}},
+			{Name: "evilpriv", GID: 501, Members: []string{"mallory"}},
+			{Name: "netops", GID: 10060, Members: []string{"mallory"}},
+		},
+	)
+
+	grBytes, err := os.ReadFile(etcGroupPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gr := string(grBytes)
+	for _, protectedLine := range []string{
+		"root:x:0:",
+		"sudo:x:27:localadmin",
+		"shadow:x:42:",
+		"axonwall-api:x:999:",
+		"lowgidlocal:x:500:",
+	} {
+		if !strings.Contains(gr, protectedLine+"\n") {
+			t.Fatalf("expected protected local group line %q to remain unmodified:\n%s", protectedLine, gr)
+		}
+	}
+	if strings.Contains(gr, "wheel:") || strings.Contains(gr, "evilpriv:") {
+		t.Fatalf("expected privileged/low-GID LDAP groups not to be added:\n%s", gr)
+	}
+	if !strings.Contains(gr, "netops:x:10060:mallory\n") {
+		t.Fatalf("expected legitimate LDAP group netops to be mirrored:\n%s", gr)
+	}
+
+	pwBytes, err := os.ReadFile(etcPasswdPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(pwBytes), "axonwall-api:x:999:999::/var/lib/axonwall:/bin/false") {
+		t.Fatalf("expected system user axonwall-api to remain unmodified:\n%s", string(pwBytes))
+	}
+}

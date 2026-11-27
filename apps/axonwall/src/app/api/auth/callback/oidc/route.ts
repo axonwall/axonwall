@@ -16,12 +16,28 @@ import {
   roleFromGroups,
 } from '../../../../../server/oidc';
 
-function fail(publicOrigin: string, message: string) {
-  const response = NextResponse.redirect(
-    new URL(`/login?error=${encodeURIComponent(message)}`, publicOrigin)
-  );
+function relativeRedirect(location: string): NextResponse {
+  return new NextResponse(null, {
+    status: 302,
+    headers: { Location: location, 'Cache-Control': 'no-store' },
+  });
+}
+
+function fail(code: string) {
+  const response = relativeRedirect(`/login?error=${encodeURIComponent(code)}`);
   response.cookies.set(OIDC_STATE_COOKIE, '', { path: '/api/auth', maxAge: 0 });
   return response;
+}
+
+function safeFallbackOrigin(nextUrlOrigin: string): string {
+  try {
+    const u = new URL(nextUrlOrigin);
+    const h = u.hostname.toLowerCase();
+    if (h === 'localhost' || h === '127.0.0.1' || h === '[::1]') {
+      return u.origin;
+    }
+  } catch {}
+  return 'https://axonwall.local';
 }
 
 function safeEqual(a: string, b: string): boolean {
@@ -34,11 +50,11 @@ export async function GET(request: NextRequest) {
   const cfg = await getOidcConfig();
   const publicOrigin = resolvePublicOrigin(
     request.headers,
-    request.nextUrl.origin,
+    safeFallbackOrigin(request.nextUrl.origin),
     cfg?.redirectUri
   );
   if (!cfg) {
-    return fail(publicOrigin, 'SSO is not configured');
+    return fail('sso_not_configured');
   }
 
   const { searchParams } = new URL(request.url);
@@ -51,13 +67,20 @@ export async function GET(request: NextRequest) {
   // Identity and role never come from query parameters -- they are read
   // from the provider-verified ID token below.
   if (!code || !state || !cookieValue) {
-    return fail(publicOrigin, 'Invalid SSO callback');
+    return fail('sso_invalid_callback');
   }
   const cookieParts = cookieValue.split('.');
   const expectedState = cookieParts[0];
   const expectedNonce = cookieParts[1];
-  if (cookieParts.length !== 2 || !expectedState || !expectedNonce || !safeEqual(state, expectedState)) {
-    return fail(publicOrigin, 'Invalid SSO state');
+  const codeVerifier = cookieParts[2];
+  if (
+    cookieParts.length !== 3 ||
+    !expectedState ||
+    !expectedNonce ||
+    !codeVerifier ||
+    !safeEqual(state, expectedState)
+  ) {
+    return fail('sso_invalid_state');
   }
 
   try {
@@ -68,36 +91,34 @@ export async function GET(request: NextRequest) {
       discovery,
       code,
       redirectUri,
-      expectedNonce
+      expectedNonce,
+      codeVerifier
     );
 
-    const verifiedEmail =
-      claims.email_verified !== false && typeof claims.email === 'string' && claims.email
-        ? claims.email.trim()
-        : '';
-    const email =
-      verifiedEmail ||
-      (typeof claims.preferred_username === 'string' && claims.preferred_username.trim()) ||
-      '';
-    let username =
-      verifiedEmail ||
-      (typeof claims.preferred_username === 'string' && claims.preferred_username.trim()) ||
-      (typeof claims.sub === 'string' && claims.sub ? `oidc:${claims.sub}` : 'oidc:sso-user');
-    if (username.toLowerCase() === 'admin' || username.toLowerCase() === 'root') {
-      username = `oidc:${username}`;
+    if (claims.email_verified !== true || typeof claims.email !== 'string' || !claims.email.trim()) {
+      return fail('sso_email_unverified');
     }
+    const email = claims.email.trim();
+    const rawIdentity =
+      email ||
+      (typeof claims.preferred_username === 'string' && claims.preferred_username.trim()) ||
+      (typeof claims.sub === 'string' && claims.sub.trim()) ||
+      'sso-user';
+    const username = rawIdentity.toLowerCase().startsWith('oidc:')
+      ? rawIdentity
+      : `oidc:${rawIdentity}`;
 
     // Map the verified IdP group claim to an Axonwall RBAC role
     const claimKey = cfg.groupClaim || 'groups';
     const rawGroups = (claims as Record<string, unknown>)[claimKey] ?? claims.groups;
     const role = roleFromGroups(rawGroups, cfg.roleMappings);
     if (!role) {
-      return fail(publicOrigin, 'Your SSO account is not authorized for any Axonwall role');
+      return fail('sso_unauthorized');
     }
     const roleObj = DEFAULT_ROLES[role];
 
     const session: UserSession = {
-      userId: `sso-${claims.sub}`,
+      userId: `oidc:${claims.sub}`,
       username,
       displayName:
         (typeof claims.name === 'string' && claims.name) || `${username} (SSO)`,
@@ -112,7 +133,7 @@ export async function GET(request: NextRequest) {
     const token = await mintSupabaseToken(session, getJwtSecret());
 
     const targetPath = isVpnPortalOnlyUser(session) ? '/vpn' : '/lobby';
-    const response = NextResponse.redirect(new URL(targetPath, publicOrigin));
+    const response = relativeRedirect(targetPath);
     response.cookies.set(SESSION_COOKIE, token, {
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production' && process.env.AXONWALL_INSECURE_HTTP !== '1',
@@ -124,6 +145,6 @@ export async function GET(request: NextRequest) {
 
     return response;
   } catch {
-    return fail(publicOrigin, 'SSO sign-in failed');
+    return fail('sso_failed');
   }
 }

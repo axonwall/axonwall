@@ -67,6 +67,7 @@ while [[ $# -gt 0 ]]; do
       exit 0
       ;;
     -s|--server)
+      [[ $# -ge 2 ]] || { echo "Option $1 requires an argument" >&2; exit 1; }
       SERVER_OVERRIDE="$2"
       shift 2
       ;;
@@ -75,15 +76,18 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     -c|--context)
+      [[ $# -ge 2 ]] || { echo "Option $1 requires an argument" >&2; exit 1; }
       CONTEXT_NAME="$2"
       CLUSTER_NAME="$2"
       shift 2
       ;;
     -u|--user)
+      [[ $# -ge 2 ]] || { echo "Option $1 requires an argument" >&2; exit 1; }
       USER_NAME="$2"
       shift 2
       ;;
     -o|--output)
+      [[ $# -ge 2 ]] || { echo "Option $1 requires an argument" >&2; exit 1; }
       DEFAULT_KUBECONFIG="$2"
       shift 2
       ;;
@@ -96,6 +100,7 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     --port)
+      [[ $# -ge 2 ]] || { echo "Option $1 requires an argument" >&2; exit 1; }
       SSH_PORT="$2"
       shift 2
       ;;
@@ -118,7 +123,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 # Temporary files cleanup
-TMP_DIR="$(mktemp -d /tmp/axonwall-kubeconfig.XXXXXX)"
+TMP_DIR="$(umask 077 && mktemp -d /tmp/axonwall-kubeconfig.XXXXXX)"
 trap 'rm -rf "${TMP_DIR}"' EXIT
 
 RAW_YAML="${TMP_DIR}/raw.yaml"
@@ -141,11 +146,9 @@ if [[ -z "${TARGET_HOST}" ]]; then
     if command -v sudo >/dev/null 2>&1; then
       echo "Elevating with sudo to read ${LOCAL_K3S_CONFIG}..."
       sudo cat "${LOCAL_K3S_CONFIG}" > "${RAW_YAML}"
-      # Also ensure the axonwall-api group can read it in the future
-      if getent group axonwall-api >/dev/null 2>&1; then
-        sudo chown :axonwall-api "${LOCAL_K3S_CONFIG}" 2>/dev/null || true
-        sudo chmod 0640 "${LOCAL_K3S_CONFIG}" 2>/dev/null || true
-      fi
+      # Keep /etc/rancher/k3s/k3s.yaml strictly root:root 0600 (never grant
+      # group axonwall-api read access to cluster-admin credentials). API or
+      # non-root consumers must use a dedicated, RBAC-scoped ServiceAccount token.
     else
       echo "Error: Cannot read ${LOCAL_K3S_CONFIG} and sudo is not available." >&2
       exit 1
@@ -160,7 +163,7 @@ else
   fi
 
   echo "Fetching K3s configuration from ${SSH_TARGET}..."
-  ssh -p "${SSH_PORT}" "${SSH_TARGET}" "sudo cat /etc/rancher/k3s/k3s.yaml 2>/dev/null || cat /etc/rancher/k3s/k3s.yaml" > "${RAW_YAML}"
+  ssh -p "${SSH_PORT}" -- "${SSH_TARGET}" "sudo cat /etc/rancher/k3s/k3s.yaml 2>/dev/null || cat /etc/rancher/k3s/k3s.yaml" > "${RAW_YAML}"
 fi
 
 if [[ ! -s "${RAW_YAML}" ]]; then
@@ -242,28 +245,31 @@ if [[ "${PRINT_ONLY}" == "true" ]]; then
 fi
 
 TARGET_DIR="$(dirname "${DEFAULT_KUBECONFIG}")"
-mkdir -p "${TARGET_DIR}"
-chmod 700 "${TARGET_DIR}"
+if [[ ! -d "${TARGET_DIR}" ]]; then
+  mkdir -p -m 700 "${TARGET_DIR}"
+  chmod 700 "${TARGET_DIR}"
+fi
 
 if [[ -f "${DEFAULT_KUBECONFIG}" ]] && [[ -s "${DEFAULT_KUBECONFIG}" ]] && [[ "${OVERWRITE}" == "false" ]]; then
-  # Backup existing config
+  # Backup existing config with 0600 permissions before merge
   BACKUP_PATH="${DEFAULT_KUBECONFIG}.bak.$(date +%Y%m%d%H%M%S)"
-  cp "${DEFAULT_KUBECONFIG}" "${BACKUP_PATH}"
+  install -m 0600 "${DEFAULT_KUBECONFIG}" "${BACKUP_PATH}"
   echo "Existing kubeconfig backed up to: ${BACKUP_PATH}"
 
   if command -v kubectl >/dev/null 2>&1; then
     echo "Merging context '${CONTEXT_NAME}' into ${DEFAULT_KUBECONFIG}..."
     MERGED_CONF="${TMP_DIR}/merged.yaml"
-    KUBECONFIG="${PROCESSED_YAML}:${DEFAULT_KUBECONFIG}" kubectl config view --flatten > "${MERGED_CONF}"
+    ( umask 077 && KUBECONFIG="${PROCESSED_YAML}:${DEFAULT_KUBECONFIG}" kubectl config view --flatten > "${MERGED_CONF}" )
+    chmod 0600 "${MERGED_CONF}"
     mv "${MERGED_CONF}" "${DEFAULT_KUBECONFIG}"
     kubectl --kubeconfig="${DEFAULT_KUBECONFIG}" config use-context "${CONTEXT_NAME}" >/dev/null 2>&1 || true
   else
     # Simple replace if kubectl is not available locally
-    cp "${PROCESSED_YAML}" "${DEFAULT_KUBECONFIG}"
+    install -m 0600 "${PROCESSED_YAML}" "${DEFAULT_KUBECONFIG}"
   fi
 else
   echo "Writing credentials to ${DEFAULT_KUBECONFIG}..."
-  cp "${PROCESSED_YAML}" "${DEFAULT_KUBECONFIG}"
+  install -m 0600 "${PROCESSED_YAML}" "${DEFAULT_KUBECONFIG}"
 fi
 
 chmod 600 "${DEFAULT_KUBECONFIG}"

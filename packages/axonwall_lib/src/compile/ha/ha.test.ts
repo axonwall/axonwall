@@ -146,4 +146,26 @@ describe('High Availability & Distributed SQLite Sync Compilers', () => {
     expect(() => compileLitestreamConfig(undefinedSyncConfig)).not.toThrow();
     expect(compileSqliteSyncConfig(undefinedSyncConfig).enabled).toBe(false);
   });
+
+  it('strips braces from keepalived auth_pass and does not fall back SQLite sync authToken to VRRP authPassword', () => {
+    const braceHa: HighAvailabilityConfig = {
+      ...baseHaConfig,
+      vrrpInstances: [
+        {
+          ...baseHaConfig.vrrpInstances[0]!,
+          authPassword: 'a{b}c!1\n',
+        },
+      ],
+      sqliteSync: {
+        ...baseHaConfig.sqliteSync,
+        authToken: '',
+      },
+    };
+    const ka = compileKeepalived(braceHa, 'axon-node-1');
+    expect(ka).toContain('auth_pass abc!1');
+    expect(ka).not.toContain('a{b}c');
+
+    const syncCfg = compileSqliteSyncConfig(braceHa, '10.0.99.1');
+    expect(syncCfg.authToken).toBe('');
+  });
 });

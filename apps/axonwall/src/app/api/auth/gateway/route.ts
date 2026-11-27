@@ -1,7 +1,22 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSession } from '@/server/auth';
-import { isPasswordChangeEnforced } from '@/server/auth-guard';
-import { getCurrentDesiredState } from '@/server/agent';
+import { isConsoleUser, isPasswordChangeEnforced, isVpnPortalOnlyUser } from '@/server/auth-guard';
+import { getDesiredStateInternal } from '@/server/desired-state-internal';
+import { checkPluginApiGuard } from '@/server/plugin-guard';
+
+function normalizeGatewayHost(raw: string | null): string {
+  if (!raw) return '';
+  const first = raw.split(',')[0]?.trim() || '';
+  const noScheme = first.replace(/^https?:\/\//i, '');
+  let hostPart = noScheme;
+  if (hostPart.startsWith('[')) {
+    const closeIdx = hostPart.indexOf(']');
+    hostPart = closeIdx > 0 ? hostPart.slice(1, closeIdx) : hostPart;
+  } else {
+    hostPart = hostPart.split(':')[0] || '';
+  }
+  return hostPart.trim().replace(/\.+$/, '').toLowerCase();
+}
 
 export async function GET(req: NextRequest) {
   try {
@@ -17,6 +32,23 @@ export async function GET(req: NextRequest) {
     if (session.source === 'service_token') {
       return NextResponse.json(
         { error: 'Forbidden: Service tokens cannot authenticate ZeroTrust gateway sessions' },
+        { status: 403 }
+      );
+    }
+    if (isVpnPortalOnlyUser(session) || !isConsoleUser(session)) {
+      return NextResponse.json(
+        { error: 'Forbidden: VPN self-service accounts cannot access ZeroTrust gateway applications' },
+        { status: 403 }
+      );
+    }
+
+    const guard = await checkPluginApiGuard('identity-aware-proxy');
+    if (guard) return guard;
+
+    const state = await getDesiredStateInternal().catch(() => null);
+    if (!state?.zeroTrust?.enabled) {
+      return NextResponse.json(
+        { error: 'Forbidden: Zero-Trust Identity-Aware Proxy is disabled' },
         { status: 403 }
       );
     }
@@ -45,43 +77,39 @@ export async function GET(req: NextRequest) {
       }
     }
 
-    // Check roles based on headers passed by reverse proxy (X-Forwarded-Host or Host)
+    // Check roles and app identity based on headers passed by reverse proxy (X-Forwarded-Host or Host)
     const rawHost = req.headers.get('x-forwarded-host') || req.headers.get('host');
-    if (!rawHost && !hasExplicitRolesParam) {
+    if (!rawHost) {
       return NextResponse.json({ error: 'Missing Host' }, { status: 400 });
     }
 
-    const host = (rawHost || '').replace(/^https?:\/\//i, '').split(':')[0].trim().toLowerCase();
-    if (!host && !hasExplicitRolesParam) {
+    const host = normalizeGatewayHost(rawHost);
+    if (!host) {
       return NextResponse.json({ error: 'Invalid Host' }, { status: 400 });
     }
 
-    if (host) {
-      const state = await getCurrentDesiredState();
-      const matchedApp = state.zeroTrust?.apps?.find(
-        (a) => a.publicHostname.replace(/^https?:\/\//i, '').split(':')[0].trim().toLowerCase() === host
-      );
+    const appId = searchParams.get('app_id')?.trim() || '';
+    const matchedApp = state.zeroTrust.apps?.find(
+      (a) =>
+        normalizeGatewayHost(a.publicHostname) === host &&
+        (a.id ? a.id === appId : !appId)
+    );
 
-      if (matchedApp && !matchedApp.enabled) {
-        return NextResponse.json({ error: 'Forbidden: Application not configured or disabled' }, { status: 403 });
-      }
+    if (!matchedApp || !matchedApp.enabled) {
+      return NextResponse.json({ error: 'Forbidden: Application not configured or disabled' }, { status: 403 });
+    }
 
-      if (!matchedApp && !hasExplicitRolesParam) {
-        return NextResponse.json({ error: 'Forbidden: Application not configured or disabled' }, { status: 403 });
-      }
-
-      if (matchedApp && !matchedApp.allowAnyAuthenticated) {
-        // Fail closed (audit B-S3): an app with no role list admits only
-        // admins rather than every authenticated session; open access is
-        // the explicit allowAnyAuthenticated choice instead.
-        const effectiveRoles =
-          matchedApp.allowedRoles && matchedApp.allowedRoles.length > 0 ? matchedApp.allowedRoles : ['admin'];
-        const userRoles = Array.isArray(session.roles) ? session.roles : [];
-        const hasRole =
-          userRoles.includes('admin') || userRoles.some((r) => effectiveRoles.includes(r as any));
-        if (!hasRole) {
-          return NextResponse.json({ error: 'Forbidden: Insufficient privileges' }, { status: 403 });
-        }
+    if (!matchedApp.allowAnyAuthenticated) {
+      // Fail closed (audit B-S3): an app with no role list admits only
+      // admins rather than every authenticated session; open access is
+      // the explicit allowAnyAuthenticated choice instead.
+      const effectiveRoles =
+        matchedApp.allowedRoles && matchedApp.allowedRoles.length > 0 ? matchedApp.allowedRoles : ['admin'];
+      const userRoles = Array.isArray(session.roles) ? session.roles : [];
+      const hasRole =
+        userRoles.includes('admin') || userRoles.some((r) => effectiveRoles.includes(r as any));
+      if (!hasRole) {
+        return NextResponse.json({ error: 'Forbidden: Insufficient privileges' }, { status: 403 });
       }
     }
 

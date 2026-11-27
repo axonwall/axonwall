@@ -6,7 +6,9 @@ metadata:
   name: {{ include "openvas.fullname" . }}
   namespace: {{ template "openvas.namespace" . }}
   annotations:
+    {{- if not (hasKey (.Values.ingress.annotations | default dict) "traefik.ingress.kubernetes.io/router.entrypoints") }}
     traefik.ingress.kubernetes.io/router.entrypoints: websecure
+    {{- end }}
     {{- with .Values.ingress.annotations }}
     {{- toYaml . | nindent 4 }}
     {{- end }}

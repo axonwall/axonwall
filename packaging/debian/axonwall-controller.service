@@ -23,12 +23,20 @@ Environment=NODE_ENV=production
 ExecStart=/usr/bin/node dist/index.js
 Restart=always
 RestartSec=5s
+LimitCORE=0
 
 ProtectSystem=strict
-ProtectHome=false
+ProtectHome=true
 PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
 NoNewPrivileges=true
+CapabilityBoundingSet=
+RestrictSUIDSGID=true
+LockPersonality=true
 ReadWritePaths=/var/lib/axonwall /etc/axonwall -/run/headscale -/run/axonwall
+InaccessiblePaths=-/var/lib/axonwall/secrets -/var/lib/axonwall/ldap -/var/lib/axonwall/headscale -/var/lib/axonwall/vault -/var/lib/axonwall/home
 
 [Install]
 WantedBy=multi-user.target

@@ -132,9 +132,12 @@ const fs = require("fs");
 const path = require("path");
 const http = require("http");
 
+const isNonRoot = typeof process.getuid === "function" && process.getuid() !== 0;
+const devLibOverride = isNonRoot
+  ? (process.env.AXONWALL_DEV_LIB_DIR || process.env.AXONWALL_LIB_DIR || "").trim()
+  : "";
 const libCandidates = [
-  "@axonwall/lib",
-  path.resolve(process.cwd(), "packages/axonwall_lib"),
+  ...(devLibOverride ? [path.resolve(devLibOverride)] : []),
   "/opt/axonwall/packages/axonwall_lib",
   "/opt/axonwall/node_modules/@axonwall/lib",
   "/opt/axonwall/apps/axonwall/node_modules/@axonwall/lib",
@@ -143,16 +146,10 @@ const libCandidates = [
 async function loadLib() {
   for (const base of libCandidates) {
     try {
-      if (base.startsWith("/")) {
-        if (!fs.existsSync(base)) continue;
-        const imp = await import(path.join(base, "dist/import/index.js"));
-        const nft = await import(path.join(base, "dist/compile/nft/index.js"));
-        if (imp.importFirewallConfig && nft.compileNftables) return { imp, nft };
-      } else {
-        const imp = await import("@axonwall/lib/import");
-        const nft = await import("@axonwall/lib/compile/nft");
-        if (imp.importFirewallConfig && nft.compileNftables) return { imp, nft };
-      }
+      if (!path.isAbsolute(base) || !fs.existsSync(base)) continue;
+      const imp = await import(path.join(base, "dist/import/index.js"));
+      const nft = await import(path.join(base, "dist/compile/nft/index.js"));
+      if (imp.importFirewallConfig && nft.compileNftables) return { imp, nft };
     } catch {}
   }
   const pnpmRoot = "/opt/axonwall/node_modules/.pnpm";
@@ -246,26 +243,36 @@ function applyViaAgentSocket(files, confirmTimeoutSeconds) {
 fi
 
 if [ -z "$RESPONSE" ]; then
+  TMP_IMP_SRC=""
+  TMP_IMP_BODY=""
+  cleanup_import_tmp() {
+    rm -f "${TMP_IMP_SRC:-}" "${TMP_IMP_BODY:-}"
+  }
+  trap cleanup_import_tmp EXIT INT TERM
+
   if [ -z "$API_TOKEN" ] && [ -z "$API_COOKIE" ] && [ "$API_HOST_EXPLICIT" = "false" ] && [ -x /usr/local/bin/axonwallctl ]; then
-    TMP_IMP_SRC="$(mktemp /tmp/axonwall-import-XXXXXX)"
-    trap 'rm -f "$TMP_IMP_SRC"' EXIT
-    printf '%s' "$CONFIG_CONTENT" > "$TMP_IMP_SRC"
+    TMP_IMP_SRC="$(umask 077 && mktemp /tmp/axonwall-import-XXXXXX)"
+    ( umask 077 && printf '%s' "$CONFIG_CONTENT" > "$TMP_IMP_SRC" && chmod 0600 "$TMP_IMP_SRC" )
+    rc=0
     if [ "$VENDOR" != "auto" ]; then
       if [ "$DO_APPLY" = "true" ]; then
-        exec /usr/local/bin/axonwallctl import "$TMP_IMP_SRC" --vendor "$VENDOR" --apply
+        /usr/local/bin/axonwallctl import "$TMP_IMP_SRC" --vendor "$VENDOR" --apply || rc=$?
       else
-        exec /usr/local/bin/axonwallctl import "$TMP_IMP_SRC" --vendor "$VENDOR"
+        /usr/local/bin/axonwallctl import "$TMP_IMP_SRC" --vendor "$VENDOR" || rc=$?
       fi
     else
       if [ "$DO_APPLY" = "true" ]; then
-        exec /usr/local/bin/axonwallctl import "$TMP_IMP_SRC" --apply
+        /usr/local/bin/axonwallctl import "$TMP_IMP_SRC" --apply || rc=$?
       else
-        exec /usr/local/bin/axonwallctl import "$TMP_IMP_SRC"
+        /usr/local/bin/axonwallctl import "$TMP_IMP_SRC" || rc=$?
       fi
     fi
+    exit "$rc"
   fi
 
-  JSON_PAYLOAD="$(printf '%s' "$CONFIG_CONTENT" | node -e '
+  TMP_IMP_BODY="$(umask 077 && mktemp /tmp/axonwall-import-XXXXXX)"
+  chmod 0600 "$TMP_IMP_BODY"
+  printf '%s' "$CONFIG_CONTENT" | node -e '
 const fs = require("fs");
 const config = fs.readFileSync(0, "utf8");
 console.log(JSON.stringify({
@@ -274,19 +281,30 @@ console.log(JSON.stringify({
   apply: process.argv[2] === "true",
   confirmTimeoutSeconds: 120,
 }));
-' "$VENDOR" "$DO_APPLY")"
+' "$VENDOR" "$DO_APPLY" > "$TMP_IMP_BODY"
 
-  set -- curl -s -S -X POST "${API_HOST}/api/v1/import" -H "Content-Type: application/json"
-  if [ -n "$API_TOKEN" ]; then
-    set -- "$@" -H "Authorization: Bearer ${API_TOKEN}"
-  fi
-  if [ -n "$API_COOKIE" ]; then
-    case "$API_COOKIE" in
-      *=*) set -- "$@" -H "Cookie: ${API_COOKIE}" ;;
-      *) set -- "$@" -H "Cookie: axonwall_session=${API_COOKIE}" ;;
-    esac
-  fi
-  RESPONSE="$(printf '%s' "$JSON_PAYLOAD" | "$@" --data-binary @-)"
+  CURL_CFG="$(AXONWALL_CURL_TOKEN="$API_TOKEN" AXONWALL_CURL_COOKIE="$API_COOKIE" node -e '
+const esc = (s) => {
+  if (/[\r\n\0]/.test(s)) {
+    console.error("Error: Auth token/cookie contains invalid control characters.");
+    process.exit(2);
+  }
+  return s.replace(/\\/g, "\\\\").replace(/"/g, "\\\"");
+};
+const lines = ["header = \"Content-Type: application/json\""];
+const tok = process.env.AXONWALL_CURL_TOKEN || "";
+if (tok) {
+  lines.push(`header = "Authorization: Bearer ${esc(tok)}"`);
+}
+const cki = process.env.AXONWALL_CURL_COOKIE || "";
+if (cki) {
+  const cookieVal = cki.includes("=") ? cki : `axonwall_session=${cki}`;
+  lines.push(`header = "Cookie: ${esc(cookieVal)}"`);
+}
+process.stdout.write(lines.join("\n") + "\n");
+')"
+  RESPONSE="$(printf '%s' "$CURL_CFG" | curl -s -S -X POST --config - --data-binary "@${TMP_IMP_BODY}" -- "${API_HOST}/api/v1/import")"
+  CURL_CFG=""
 fi
 
 printf '%s' "$RESPONSE" | node -e '

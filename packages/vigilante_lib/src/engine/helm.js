@@ -2,7 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { getVigilanteValuesDir, getInstanceValuesDir, sanitizePathComponent } from './config.js';
+import { getVigilanteValuesDir, getInstanceValuesDir, sanitizePathComponent, assertDnsLabel, resolvePathInside } from './config.js';
 
 const tempDirsByArgs = new WeakMap();
 
@@ -76,6 +76,9 @@ export async function resolveChartValuesArgs({
 }) {
   const args = [];
   const cwd = process.cwd();
+  const cleanNamespace = (namespace !== null && namespace !== undefined && namespace !== '')
+    ? assertDnsLabel(namespace, 'namespace')
+    : 'default';
 
   // Rendered values go to a private per-call temp directory with sanitized
   // filenames: moduleId/chartName are data, and embedding them raw in a
@@ -99,7 +102,7 @@ export async function resolveChartValuesArgs({
       const renderedContent = renderTemplate(rawContent, {
         domain,
         tlsSecretName,
-        namespace,
+        namespace: cleanNamespace,
         clusterName,
         replacements
       });
@@ -115,6 +118,18 @@ export async function resolveChartValuesArgs({
 
   // 2. Discover user custom override files
   const candidatePaths = [];
+  const pushScopedCandidates = (baseDir) => {
+    if (cleanNamespace && cleanNamespace !== 'default') {
+      candidatePaths.push(resolvePathInside(baseDir, cleanNamespace, moduleId, `${chartName}.yaml`));
+      candidatePaths.push(resolvePathInside(baseDir, cleanNamespace, moduleId, `${chartName}.yml`));
+      candidatePaths.push(resolvePathInside(baseDir, cleanNamespace, `${chartName}.yaml`));
+      candidatePaths.push(resolvePathInside(baseDir, cleanNamespace, `${chartName}.yml`));
+    }
+    candidatePaths.push(resolvePathInside(baseDir, moduleId, `${chartName}.yaml`));
+    candidatePaths.push(resolvePathInside(baseDir, moduleId, `${chartName}.yml`));
+    candidatePaths.push(resolvePathInside(baseDir, `${chartName}.yaml`));
+    candidatePaths.push(resolvePathInside(baseDir, `${chartName}.yml`));
+  };
 
   // A. Explicit CLI file passed
   if (customValuesPath) {
@@ -123,69 +138,22 @@ export async function resolveChartValuesArgs({
 
   // B. Instance values dir: $XDG_CONFIG_HOME/.vigilante/instances/<clusterName>/values/<namespace>/<module>/<chart>.yaml
   if (clusterName) {
-    const instValuesDir = getInstanceValuesDir(clusterName);
-    if (namespace && namespace !== 'default') {
-      candidatePaths.push(path.resolve(instValuesDir, namespace, moduleId, `${chartName}.yaml`));
-      candidatePaths.push(path.resolve(instValuesDir, namespace, moduleId, `${chartName}.yml`));
-      candidatePaths.push(path.resolve(instValuesDir, namespace, `${chartName}.yaml`));
-      candidatePaths.push(path.resolve(instValuesDir, namespace, `${chartName}.yml`));
-    }
-    candidatePaths.push(path.resolve(instValuesDir, moduleId, `${chartName}.yaml`));
-    candidatePaths.push(path.resolve(instValuesDir, moduleId, `${chartName}.yml`));
-    candidatePaths.push(path.resolve(instValuesDir, `${chartName}.yaml`));
-    candidatePaths.push(path.resolve(instValuesDir, `${chartName}.yml`));
+    pushScopedCandidates(getInstanceValuesDir(clusterName));
   }
 
   // C. Explicit CLI directory passed
   if (customValuesDir) {
-    if (namespace && namespace !== 'default') {
-      candidatePaths.push(path.resolve(cwd, customValuesDir, namespace, moduleId, `${chartName}.yaml`));
-      candidatePaths.push(path.resolve(cwd, customValuesDir, namespace, moduleId, `${chartName}.yml`));
-      candidatePaths.push(path.resolve(cwd, customValuesDir, namespace, `${chartName}.yaml`));
-      candidatePaths.push(path.resolve(cwd, customValuesDir, namespace, `${chartName}.yml`));
-    }
-    candidatePaths.push(path.resolve(cwd, customValuesDir, moduleId, `${chartName}.yaml`));
-    candidatePaths.push(path.resolve(cwd, customValuesDir, moduleId, `${chartName}.yml`));
-    candidatePaths.push(path.resolve(cwd, customValuesDir, `${chartName}.yaml`));
-    candidatePaths.push(path.resolve(cwd, customValuesDir, `${chartName}.yml`));
+    pushScopedCandidates(path.resolve(cwd, customValuesDir));
   }
 
   // D. Workspace ./values/<namespace>/<module>/<chart>.yaml or ./values/<module>/<chart>.yaml
-  if (namespace && namespace !== 'default') {
-    candidatePaths.push(path.resolve(cwd, 'values', namespace, moduleId, `${chartName}.yaml`));
-    candidatePaths.push(path.resolve(cwd, 'values', namespace, moduleId, `${chartName}.yml`));
-    candidatePaths.push(path.resolve(cwd, 'values', namespace, `${chartName}.yaml`));
-    candidatePaths.push(path.resolve(cwd, 'values', namespace, `${chartName}.yml`));
-  }
-  candidatePaths.push(path.resolve(cwd, 'values', moduleId, `${chartName}.yaml`));
-  candidatePaths.push(path.resolve(cwd, 'values', moduleId, `${chartName}.yml`));
-  candidatePaths.push(path.resolve(cwd, 'values', `${chartName}.yaml`));
-  candidatePaths.push(path.resolve(cwd, 'values', `${chartName}.yml`));
+  pushScopedCandidates(path.resolve(cwd, 'values'));
 
   // E. Workspace ./config/values/<namespace>/<module>/<chart>.yaml
-  if (namespace && namespace !== 'default') {
-    candidatePaths.push(path.resolve(cwd, 'config', 'values', namespace, moduleId, `${chartName}.yaml`));
-    candidatePaths.push(path.resolve(cwd, 'config', 'values', namespace, moduleId, `${chartName}.yml`));
-    candidatePaths.push(path.resolve(cwd, 'config', 'values', namespace, `${chartName}.yaml`));
-    candidatePaths.push(path.resolve(cwd, 'config', 'values', namespace, `${chartName}.yml`));
-  }
-  candidatePaths.push(path.resolve(cwd, 'config', 'values', moduleId, `${chartName}.yaml`));
-  candidatePaths.push(path.resolve(cwd, 'config', 'values', moduleId, `${chartName}.yml`));
-  candidatePaths.push(path.resolve(cwd, 'config', 'values', `${chartName}.yaml`));
-  candidatePaths.push(path.resolve(cwd, 'config', 'values', `${chartName}.yml`));
+  pushScopedCandidates(path.resolve(cwd, 'config', 'values'));
 
   // F. XDG User Directory: $XDG_CONFIG_HOME/vigilante/values/<namespace>/<module>/<chart>.yaml
-  const xdgValuesDir = getVigilanteValuesDir();
-  if (namespace && namespace !== 'default') {
-    candidatePaths.push(path.resolve(xdgValuesDir, namespace, moduleId, `${chartName}.yaml`));
-    candidatePaths.push(path.resolve(xdgValuesDir, namespace, moduleId, `${chartName}.yml`));
-    candidatePaths.push(path.resolve(xdgValuesDir, namespace, `${chartName}.yaml`));
-    candidatePaths.push(path.resolve(xdgValuesDir, namespace, `${chartName}.yml`));
-  }
-  candidatePaths.push(path.resolve(xdgValuesDir, moduleId, `${chartName}.yaml`));
-  candidatePaths.push(path.resolve(xdgValuesDir, moduleId, `${chartName}.yml`));
-  candidatePaths.push(path.resolve(xdgValuesDir, `${chartName}.yaml`));
-  candidatePaths.push(path.resolve(xdgValuesDir, `${chartName}.yml`));
+  pushScopedCandidates(getVigilanteValuesDir());
 
   // Find first existing user custom file
   let appliedCustom = false;
@@ -199,7 +167,7 @@ export async function resolveChartValuesArgs({
       const renderedUserContent = renderTemplate(rawUserContent, {
         domain,
         tlsSecretName,
-        namespace,
+        namespace: cleanNamespace,
         clusterName,
         replacements
       });

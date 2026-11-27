@@ -6,10 +6,9 @@ on:
     tags: [ 'v*' ]
   workflow_dispatch:
 
-# Default token is read-only; the single build job below re-grants
-# contents: write, which only its two release-publish steps need.
-# (Splitting the release steps into their own job so the build itself
-# runs read-only is the remaining step -- audit finding C6.)
+# Default token is read-only. The root build job runs with contents: read and
+# zero access to AXONWALL_RELEASE_SIGNING_KEY; tag signing and publishing are
+# isolated in the dedicated non-root `sign-and-release` job under `environment: release`.
 permissions:
   contents: read
 
@@ -57,7 +56,7 @@ jobs:
           fi
 
       - name: Cache pnpm store
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.pnpm-store
@@ -81,8 +80,8 @@ jobs:
             go.sum
             apps/**/go.sum
 
-      - name: Ensure Go toolchain can auto-resolve newer versions
-        run: echo "GOTOOLCHAIN=auto" >> "$GITHUB_ENV"
+      - name: Pin Go toolchain to local installation
+        run: echo "GOTOOLCHAIN=local" >> "$GITHUB_ENV"
 
       - name: Verify Go
         run: go version
@@ -222,18 +221,6 @@ jobs:
         run: |
           ./scripts/build-docs-bundle.sh
 
-      - name: Sign Debian Package & Docs Bundle Checksums (if signing key configured)
-        env:
-          AXONWALL_RELEASE_SIGNING_KEY: ${{ secrets.AXONWALL_RELEASE_SIGNING_KEY }}
-        if: env.AXONWALL_RELEASE_SIGNING_KEY != ''
-        run: |
-          key_file="$(mktemp)"
-          trap 'rm -f "$key_file"' EXIT
-          printf '%s' "$AXONWALL_RELEASE_SIGNING_KEY" > "$key_file"
-          for sha in packaging/debian/output/*.deb.sha256 packaging/docs/output/*.tar.gz.sha256; do
-            openssl dgst -sha256 -sign "$key_file" -out "${sha}.sig" "$sha"
-          done
-
       - name: Upload Debian Package Artifact
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -241,7 +228,6 @@ jobs:
           path: |
             packaging/debian/output/*.deb
             packaging/debian/output/*.deb.sha256
-            packaging/debian/output/*.deb.sha256.sig
           retention-days: 7
 
       - name: Upload Offline Documentation Bundle Artifact
@@ -251,7 +237,6 @@ jobs:
           path: |
             packaging/docs/output/*.tar.gz
             packaging/docs/output/*.tar.gz.sha256
-            packaging/docs/output/*.tar.gz.sha256.sig
           retention-days: 7
 
       - name: Build Hybrid Appliance ISO (Unified NGFW, Vault & K3s Storage Editions)
@@ -359,20 +344,6 @@ jobs:
           sudo bash -c 'if [ -d packaging/alpine/output ]; then cd packaging/alpine/output && for iso in *.iso; do if [ -f "$iso" ] && [ ! -s "${iso}.sha256" ]; then sha256sum "$iso" > "${iso}.sha256" && chmod 644 "${iso}.sha256"; fi; done; fi'
           sudo chown -R $USER:$USER packaging/iso/output packaging/debian/output packaging/cloud-image/output packaging/edge-uki/output packaging/alpine/output 2>/dev/null || true
 
-      - name: Sign ISO, Cloud Image & Edge UKI Checksums (if signing key configured)
-        env:
-          AXONWALL_RELEASE_SIGNING_KEY: ${{ secrets.AXONWALL_RELEASE_SIGNING_KEY }}
-        if: env.AXONWALL_RELEASE_SIGNING_KEY != ''
-        run: |
-          key_file="$(mktemp)"
-          trap 'rm -f "$key_file"' EXIT
-          printf '%s' "$AXONWALL_RELEASE_SIGNING_KEY" > "$key_file"
-          for sha in packaging/iso/output/*.iso.sha256 packaging/alpine/output/*.iso.sha256 packaging/cloud-image/output/*.qcow2.sha256 packaging/edge-uki/output/*.sha256; do
-            if [ -f "$sha" ]; then
-              openssl dgst -sha256 -sign "$key_file" -out "${sha}.sig" "$sha"
-            fi
-          done
-
       - name: Upload Super-Slim Edge NGFW UKI Artifact (release handoff)
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -380,10 +351,8 @@ jobs:
           path: |
             packaging/edge-uki/output/axonwall-edge-sku-vm-virtio.efi
             packaging/edge-uki/output/axonwall-edge-sku-vm-virtio.efi.sha256
-            packaging/edge-uki/output/axonwall-edge-sku-vm-virtio.efi.sha256.sig
             packaging/edge-uki/output/axonwall-edge-sku-vm-virtio-initramfs.cpio.gz
             packaging/edge-uki/output/axonwall-edge-sku-vm-virtio-initramfs.cpio.gz.sha256
-            packaging/edge-uki/output/axonwall-edge-sku-vm-virtio-initramfs.cpio.gz.sha256.sig
           retention-days: 7
 
       - name: Upload ISO Checksum Artifact
@@ -400,7 +369,6 @@ jobs:
           path: |
             packaging/iso/output/axonwall-debian13-amd64.iso
             packaging/iso/output/axonwall-debian13-amd64.iso.sha256
-            packaging/iso/output/axonwall-debian13-amd64.iso.sha256.sig
           retention-days: 1
 
       - name: Upload Alpine ISO Artifact (release handoff)
@@ -410,7 +378,6 @@ jobs:
           path: |
             packaging/alpine/output/*.iso
             packaging/alpine/output/*.iso.sha256
-            packaging/alpine/output/*.iso.sha256.sig
           retention-days: 1
 
       - name: Upload Cloud Appliance QCOW2 Artifact (release handoff)
@@ -420,15 +387,174 @@ jobs:
           path: |
             packaging/cloud-image/output/*.qcow2
             packaging/cloud-image/output/*.qcow2.sha256
-            packaging/cloud-image/output/*.qcow2.sha256.sig
           retention-days: 1
 
 
-  release:
-    name: Publish Release Artifacts
+  sign-and-release:
+    name: Sign & Publish Release Artifacts
     needs: build-iso
-    if: startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/main'
+    if: startsWith(github.ref, 'refs/tags/v')
+    environment: release
     runs-on: ubuntu-24.04
+    defaults:
+      run:
+        shell: bash
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download Debian Package Artifact
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: axonwall-debian-package
+          path: packaging/debian/output
+
+      - name: Download Offline Documentation Bundle Artifact
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: axonwall-docs-bundle
+          path: packaging/docs/output
+
+      - name: Download Super-Slim Edge NGFW UKI Artifact
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: axonwall-edge-uki
+          path: packaging/edge-uki/output
+
+      - name: Download Debian ISO Artifact
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: axonwall-debian-iso
+          path: packaging/iso/output
+
+      - name: Download Alpine ISO Artifact
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: axonwall-alpine-iso
+          path: packaging/alpine/output
+
+      - name: Download Cloud Appliance QCOW2 Artifact
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: axonwall-cloud-qcow2
+          path: packaging/cloud-image/output
+
+      - name: Stage & Verify Mandatory Release Artifacts & Checksums
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          rm -rf release-assets
+          mkdir -p release-assets
+          for req in \
+            packaging/iso/output/axonwall-debian13-amd64.iso \
+            packaging/iso/output/axonwall-debian13-amd64.iso.sha256 \
+            packaging/edge-uki/output/axonwall-edge-sku-vm-virtio.efi \
+            packaging/edge-uki/output/axonwall-edge-sku-vm-virtio.efi.sha256 \
+            packaging/edge-uki/output/axonwall-edge-sku-vm-virtio-initramfs.cpio.gz \
+            packaging/edge-uki/output/axonwall-edge-sku-vm-virtio-initramfs.cpio.gz.sha256; do
+            test -s "$req" || { echo "::error::Missing required release artifact: $req"; exit 1; }
+            cp -v "$req" release-assets/
+          done
+          for glob_dir_pat in \
+            "packaging/alpine/output/*.iso" \
+            "packaging/alpine/output/*.iso.sha256" \
+            "packaging/cloud-image/output/*.qcow2" \
+            "packaging/cloud-image/output/*.qcow2.sha256" \
+            "packaging/debian/output/*.deb" \
+            "packaging/debian/output/*.deb.sha256" \
+            "packaging/docs/output/*.tar.gz" \
+            "packaging/docs/output/*.tar.gz.sha256"; do
+            matched=0
+            for f in $glob_dir_pat; do
+              if [ -s "$f" ]; then
+                matched=1
+                cp -v "$f" release-assets/
+              fi
+            done
+            if [ "$matched" -eq 0 ]; then
+              echo "::error::Missing required release artifact matching: $glob_dir_pat"
+              exit 1
+            fi
+          done
+          (
+            cd release-assets
+            for sha in *.sha256; do
+              sha256sum -c "$sha"
+            done
+          )
+
+      - name: Sign Release Checksums & Verify Signatures
+        env:
+          AXONWALL_RELEASE_SIGNING_KEY: ${{ secrets.AXONWALL_RELEASE_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          if [ -z "${AXONWALL_RELEASE_SIGNING_KEY:-}" ]; then
+            echo "::error::AXONWALL_RELEASE_SIGNING_KEY secret is missing or empty; refusing to publish unsigned release."
+            exit 1
+          fi
+          umask 077
+          key_file="$(mktemp)"
+          trap 'rm -f "$key_file"' EXIT
+          printf '%s' "$AXONWALL_RELEASE_SIGNING_KEY" > "$key_file"
+
+          signed_count=0
+          for sha in \
+            release-assets/*.deb.sha256 \
+            release-assets/*.tar.gz.sha256 \
+            release-assets/*.iso.sha256 \
+            release-assets/*.qcow2.sha256 \
+            release-assets/*.efi.sha256 \
+            release-assets/*.cpio.gz.sha256; do
+            openssl dgst -sha256 -sign "$key_file" -out "${sha}.sig" "$sha"
+            signed_count=$((signed_count + 1))
+          done
+          if [ "$signed_count" -eq 0 ]; then
+            echo "::error::No .sha256 files were signed in release-assets/."
+            exit 1
+          fi
+
+          for req_sig in \
+            release-assets/axonwall-debian13-amd64.iso.sha256.sig \
+            release-assets/axonwall-edge-sku-vm-virtio.efi.sha256.sig \
+            release-assets/axonwall-edge-sku-vm-virtio-initramfs.cpio.gz.sha256.sig; do
+            test -s "$req_sig" || { echo "::error::Missing required signature: $req_sig"; exit 1; }
+          done
+          for glob_pat in \
+            "release-assets/*.deb.sha256" \
+            "release-assets/*.tar.gz.sha256" \
+            "release-assets/axonwall-alpine-*.iso.sha256" \
+            "release-assets/*.qcow2.sha256"; do
+            matched=0
+            for sha in $glob_pat; do
+              matched=1
+              test -s "${sha}.sig" || { echo "::error::Missing required signature for $sha"; exit 1; }
+            done
+            if [ "$matched" -eq 0 ]; then
+              echo "::error::Missing checksum files matching required pattern: $glob_pat"
+              exit 1
+            fi
+          done
+          for sha in release-assets/*.sha256; do
+            test -s "${sha}.sig" || { echo "::error::Unsigned checksum file in release-assets/: $sha"; exit 1; }
+          done
+
+      - name: Release Distribution Artifacts (on tag)
+        uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3.0.4
+        with:
+          fail_on_unmatched_files: true
+          files: |
+            release-assets/*
+
+
+  release-rolling:
+    name: Publish Rolling Latest Pre-Release (main)
+    needs: build-iso
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        shell: bash
     permissions:
       contents: write
 
@@ -472,6 +598,7 @@ jobs:
       - name: Stage & Verify Mandatory Release Artifacts
         run: |
           set -euo pipefail
+          shopt -s nullglob
           rm -rf release-assets
           mkdir -p release-assets
           for req in \
@@ -505,29 +632,8 @@ jobs:
               exit 1
             fi
           done
-          for sig in \
-            packaging/debian/output/*.deb.sha256.sig \
-            packaging/docs/output/*.tar.gz.sha256.sig \
-            packaging/iso/output/axonwall-debian13-amd64.iso.sha256.sig \
-            packaging/alpine/output/*.iso.sha256.sig \
-            packaging/cloud-image/output/*.qcow2.sha256.sig \
-            packaging/edge-uki/output/axonwall-edge-sku-vm-virtio.efi.sha256.sig \
-            packaging/edge-uki/output/axonwall-edge-sku-vm-virtio-initramfs.cpio.gz.sha256.sig; do
-            if [ -s "$sig" ]; then
-              cp -v "$sig" release-assets/
-            fi
-          done
-
-      - name: Release Distribution Artifacts (on tag)
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3.0.4
-        with:
-          fail_on_unmatched_files: true
-          files: |
-            release-assets/*
 
       - name: Publish Rolling Latest Pre-Release (on main)
-        if: github.ref == 'refs/heads/main'
         uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3.0.4
         with:
           fail_on_unmatched_files: true

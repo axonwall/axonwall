@@ -1,0 +1,135 @@
+{{- if .Values.networkPolicy.enabled }}
+{{- $fullname := include "axonwall-analytics.fullname" . -}}
+{{- $ns := include "axonwall-analytics.namespace" . -}}
+{{- if .Values.victoriametrics.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fullname }}-vm-ingress
+  namespace: {{ $ns }}
+  labels:
+    {{- include "axonwall-analytics.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: victoriametrics
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/instance: {{ .Release.Name }}
+            matchExpressions:
+              - key: app.kubernetes.io/component
+                operator: In
+                values:
+                  - collector
+                  - obs-proxy
+                  - librenms
+      ports:
+        - protocol: TCP
+          port: 8428
+---
+{{- end }}
+{{- if .Values.victorialogs.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fullname }}-vl-ingress
+  namespace: {{ $ns }}
+  labels:
+    {{- include "axonwall-analytics.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: victorialogs
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/instance: {{ .Release.Name }}
+            matchExpressions:
+              - key: app.kubernetes.io/component
+                operator: In
+                values:
+                  - collector
+                  - obs-proxy
+                  - librenms
+      ports:
+        - protocol: TCP
+          port: 9428
+---
+{{- end }}
+{{- if .Values.clickhouse.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fullname }}-clickhouse-ingress
+  namespace: {{ $ns }}
+  labels:
+    {{- include "axonwall-analytics.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: clickhouse
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/instance: {{ .Release.Name }}
+            matchExpressions:
+              - key: app.kubernetes.io/component
+                operator: In
+                values:
+                  - collector
+                  - obs-proxy
+                  - librenms
+      ports:
+        - protocol: TCP
+          port: 8123
+        - protocol: TCP
+          port: 9000
+---
+{{- end }}
+{{- if .Values.librenms.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fullname }}-librenms-ingress
+  namespace: {{ $ns }}
+  labels:
+    {{- include "axonwall-analytics.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: librenms
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/instance: {{ .Release.Name }}
+            matchExpressions:
+              - key: app.kubernetes.io/component
+                operator: In
+                values:
+                  - collector
+                  - obs-proxy
+                  - librenms
+      ports:
+        - protocol: TCP
+          port: 3306
+        - protocol: TCP
+          port: 8000
+{{- end }}
+{{- end }}

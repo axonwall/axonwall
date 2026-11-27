@@ -91,11 +91,10 @@ printf '%s\n' "${AXONWALL_EDITION}" > /etc/axonwall/edition
 case "$1" in
     configure)
         # 1. Create system users and groups.
-        # D-M9: axonwall-api is the shared group — the vault's
-        # axonwall-vault user is a member via its sysusers file, and
-        # /etc/axonwall is group-owned by it in every edition — so it
-        # is created for all editions. The NGFW service identities
-        # are axonwall-only; the vault identity is vault-only.
+        # D-M9: axonwall-api is the shared group for the NGFW control plane
+        # (UI/controller/daemon) and /etc/axonwall on non-vault editions.
+        # Vault uses its own axonwall-vault identity without axonwall-api
+        # membership, and headscale uses its own axonwall-headscale identity.
         if ! getent group axonwall-api >/dev/null 2>&1; then
             groupadd --system axonwall-api
         fi
@@ -125,8 +124,9 @@ case "$1" in
         usermod -a -G axonwall-api axonwall 2>/dev/null || true
         usermod -a -G axonwall-api axonwall-controller 2>/dev/null || true
 
-        # Headscale identity split (B-12 follow-up): headscale runs as
-        # its own user on standard axonwall only (minimal installs it on demand).
+        # Headscale identity split (B-12 follow-up / SEC-H25): headscale runs
+        # strictly as axonwall-headscale:axonwall-headscale (not in axonwall-api).
+        # UI/controller join axonwall-headscale solely for config/socket access.
         if [ "${AXONWALL_EDITION}" = "axonwall" ]; then
             if ! getent group axonwall-headscale >/dev/null 2>&1; then
                 groupadd --system axonwall-headscale
@@ -136,10 +136,14 @@ case "$1" in
                     --no-create-home --shell /usr/sbin/nologin \
                     --comment "Axonwall Headscale Service User" axonwall-headscale
             fi
+            usermod -a -G axonwall-headscale axonwall 2>/dev/null || true
+            usermod -a -G axonwall-headscale axonwall-controller 2>/dev/null || true
+            gpasswd -d axonwall-headscale axonwall-api >/dev/null 2>&1 || true
         fi
         elif [ "${AXONWALL_EDITION}" = "vault" ]; then
         # Vault service identity (packaging/vault/axonwall-vault.sysusers):
-        # SeaweedFS runs as axonwall-vault, a member of axonwall-api.
+        # SeaweedFS runs isolated as axonwall-vault:axonwall-vault without
+        # membership in axonwall-api (SEC-H25).
         if ! getent group axonwall-vault >/dev/null 2>&1; then
             groupadd --system axonwall-vault
         fi
@@ -148,7 +152,7 @@ case "$1" in
                 --no-create-home --shell /usr/sbin/nologin \
                 --comment "Axonwall Vault Service User" axonwall-vault
         fi
-        usermod -a -G axonwall-api axonwall-vault 2>/dev/null || true
+        gpasswd -d axonwall-vault axonwall-api >/dev/null 2>&1 || true
         fi
 
         # 2. Ensure directories exist with strict permissions
@@ -158,9 +162,15 @@ case "$1" in
         # for the axonwall edition only; the vault data dir only for
         # vault. A flavor install must not conjure NGFW state dirs.
         mkdir -p /var/lib/axonwall /var/log/axonwall /run/axonwall /etc/axonwall/certs
-        chown root:axonwall-api /var/lib/axonwall /etc/axonwall
+        chown root:axonwall-api /var/lib/axonwall
         chmod 3775 /var/lib/axonwall
-        chmod 1770 /etc/axonwall 2>/dev/null || true
+        if [ "${AXONWALL_EDITION}" = "vault" ]; then
+            chown root:axonwall-vault /etc/axonwall
+            chmod 0750 /etc/axonwall 2>/dev/null || true
+        else
+            chown root:axonwall-api /etc/axonwall
+            chmod 1770 /etc/axonwall 2>/dev/null || true
+        fi
         chown root:axonwall-api /var/log/axonwall
         chmod 1770 /var/log/axonwall
         if [ "${AXONWALL_EDITION}" = "axonwall" ] || [ "${AXONWALL_EDITION}" = "minimal" ]; then
@@ -174,7 +184,7 @@ case "$1" in
         chown -R axonwall:axonwall /var/cache/axonwall-ui
         chmod 0750 /var/cache/axonwall-ui
         chown -R axonwall:axonwall-api /var/lib/axonwall/bundles /var/lib/axonwall/etc-axonwall /var/lib/axonwall/gitops /var/lib/axonwall/captures /var/lib/axonwall/backups
-        chmod 3775 /var/lib/axonwall/etc-axonwall /var/lib/axonwall/gitops /var/lib/axonwall/captures /var/lib/axonwall/backups 2>/dev/null || true
+        chmod 3770 /var/lib/axonwall/etc-axonwall /var/lib/axonwall/gitops /var/lib/axonwall/captures /var/lib/axonwall/backups 2>/dev/null || true
         for f in /var/lib/axonwall/state.json /var/lib/axonwall/slot_versions.json /var/lib/axonwall/session-epoch /var/lib/axonwall/revoked-jtis /var/lib/axonwall/.password_changed /var/lib/axonwall/mcp-keys.json /var/lib/axonwall/mcp-settings.json /var/lib/axonwall/mcp-audit.jsonl; do
             if [ -e "$f" ]; then
                 chown axonwall:axonwall-api "$f" 2>/dev/null || true
@@ -184,14 +194,19 @@ case "$1" in
         if [ "${AXONWALL_EDITION}" = "axonwall" ]; then
             mkdir -p /var/lib/axonwall/headscale /run/headscale
             chown -R axonwall-headscale:axonwall-headscale /var/lib/axonwall/headscale
-            chown axonwall-headscale:axonwall-api /run/headscale
-            chmod 770 /var/lib/axonwall/headscale /run/headscale
+            chown axonwall-headscale:axonwall-headscale /run/headscale
+            chmod 0700 /var/lib/axonwall/headscale
+            chmod 0770 /run/headscale
+            if [ -S /run/headscale/headscale.sock ]; then
+                chown axonwall-headscale:axonwall-headscale /run/headscale/headscale.sock 2>/dev/null || true
+                chmod 0770 /run/headscale/headscale.sock 2>/dev/null || true
+            fi
             # Headscale's config can carry the OIDC client secret: group
-            # axonwall-api only (the service runs with that group, and the
-            # UI/controller CLI callers are members) instead of the
-            # UI-shared axonwall identity.
+            # axonwall-headscale only (headscale runs with that group, and the
+            # UI/controller CLI callers are members), keeping axonwall-headscale
+            # isolated from axonwall-api.
             if [ -f /etc/headscale/config.yaml ]; then
-                chown root:axonwall-api /etc/headscale/config.yaml 2>/dev/null || true
+                chown root:axonwall-headscale /etc/headscale/config.yaml 2>/dev/null || true
                 chmod 0640 /etc/headscale/config.yaml 2>/dev/null || true
             fi
         fi
@@ -254,9 +269,18 @@ case "$1" in
         chown root:root /var/lib/axonwall/home /home 2>/dev/null || true
         chmod 0755 /var/lib/axonwall/home /home 2>/dev/null || true
 
-        chown root:axonwall-api /etc/axonwall /etc/axonwall/certs
-        chmod 1770 /etc/axonwall
-        chmod 0750 /etc/axonwall/certs
+        if [ "${AXONWALL_EDITION}" = "vault" ]; then
+            chown root:axonwall-vault /etc/axonwall /etc/axonwall/certs
+            chmod 0750 /etc/axonwall /etc/axonwall/certs
+            if [ -f /etc/axonwall/seaweedfs-s3.json ]; then
+                chown root:axonwall-vault /etc/axonwall/seaweedfs-s3.json 2>/dev/null || true
+                chmod 0640 /etc/axonwall/seaweedfs-s3.json 2>/dev/null || true
+            fi
+        else
+            chown root:axonwall-api /etc/axonwall /etc/axonwall/certs
+            chmod 1770 /etc/axonwall
+            chmod 0750 /etc/axonwall/certs
+        fi
         if [ -f /etc/axonwall/admin.env ]; then
             chown axonwall /etc/axonwall/admin.env 2>/dev/null || true
             chmod 0600 /etc/axonwall/admin.env 2>/dev/null || true
@@ -292,12 +316,15 @@ case "$1" in
             # and re-runs dpkg --configure.
             if command -v openssl >/dev/null 2>&1; then
                 SAN="DNS:$(hostname 2>/dev/null || echo axonwall),DNS:axonwall.local,DNS:localhost,IP:127.0.0.1"
-                openssl req -x509 -newkey rsa:2048 -nodes \
-                    -keyout /etc/axonwall/certs/hub.key \
-                    -out /etc/axonwall/certs/hub.crt \
-                    -days 3650 \
-                    -subj "/O=Axonwall/OU=Appliance/CN=$(hostname 2>/dev/null || echo axonwall)" \
-                    -addext "subjectAltName=${SAN}" || { echo "Error: TLS certificate generation failed; fix the PKI and re-run dpkg --configure." >&2; exit 1; }
+                (
+                    umask 077
+                    openssl req -x509 -newkey rsa:2048 -nodes \
+                        -keyout /etc/axonwall/certs/hub.key \
+                        -out /etc/axonwall/certs/hub.crt \
+                        -days 3650 \
+                        -subj "/O=Axonwall/OU=Appliance/CN=$(hostname 2>/dev/null || echo axonwall)" \
+                        -addext "subjectAltName=${SAN}"
+                ) || { echo "Error: TLS certificate generation failed; fix the PKI and re-run dpkg --configure." >&2; exit 1; }
             else
                 echo "Error: openssl is required to generate the hub TLS certificate pair but is not installed; fix the install and re-run dpkg --configure." >&2
                 exit 1
@@ -342,40 +369,48 @@ case "$1" in
                 exit 1
             fi
 
-            cat << ENV_EOF > /etc/axonwall/axonwall.env
+            (
+                umask 077
+                cat << ENV_EOF > /etc/axonwall/axonwall.env
 JWT_SECRET=${JWT_SECRET}
 LOCAL_ADMIN_USER=admin
 LOCAL_ADMIN_PASSWORD=${ADMIN_PASS}
 AGENT_SOCKET_PATH=/run/axonwall/agent.sock
 AGENT_API_SOCKET=/run/axonwall/agent-api.sock
 ENV_EOF
-            chmod 0600 /etc/axonwall/axonwall.env
-            chown axonwall /etc/axonwall/axonwall.env
+                chown axonwall:axonwall /etc/axonwall/axonwall.env
+                chmod 0600 /etc/axonwall/axonwall.env
 
-            cat << ENV_EOF > /etc/axonwall/controller.env
+                cat << ENV_EOF > /etc/axonwall/controller.env
 AXONWALL_ZTP_TOKEN=${ZTP_TOKEN}
 ENV_EOF
-            chmod 0640 /etc/axonwall/controller.env
-            chown root:axonwall-controller /etc/axonwall/controller.env
+                chown root:axonwall-controller /etc/axonwall/controller.env
+                chmod 0640 /etc/axonwall/controller.env
 
-            # No public default (audit C9): the generated admin password
-            # is random; surface it to the operator only, exactly like
-            # firstboot does. No .password_changed marker is planted, so
-            # the first login still forces a change.
-            printf '%s\n' "$ADMIN_PASS" > /etc/axonwall/initial-admin-password
-            chmod 0600 /etc/axonwall/initial-admin-password
-            chown root:root /etc/axonwall/initial-admin-password
+                # No public default (audit C9): the generated admin password
+                # is random; surface it to the operator only, exactly like
+                # firstboot does. No .password_changed marker is planted, so
+                # the first login still forces a change.
+                printf '%s\n' "$ADMIN_PASS" > /etc/axonwall/initial-admin-password
+                chown root:root /etc/axonwall/initial-admin-password
+                chmod 0600 /etc/axonwall/initial-admin-password
+            )
         fi
 
         # 4b. B-12 migration for upgrades: split the ZTP token out of a
         # monolith axonwall.env written before the service-identity split,
         # and re-assert the split ownership (idempotent).
         if [ -f /etc/axonwall/axonwall.env ]; then
-            chown axonwall /etc/axonwall/axonwall.env 2>/dev/null || true
+            chown axonwall:axonwall /etc/axonwall/axonwall.env 2>/dev/null || true
             chmod 0600 /etc/axonwall/axonwall.env 2>/dev/null || true
             if [ ! -f /etc/axonwall/controller.env ] && grep -q '^AXONWALL_ZTP_TOKEN=' /etc/axonwall/axonwall.env; then
-                grep '^AXONWALL_ZTP_TOKEN=' /etc/axonwall/axonwall.env > /etc/axonwall/controller.env || true
-                sed -i '/^AXONWALL_ZTP_TOKEN=/d' /etc/axonwall/axonwall.env
+                (
+                    umask 077
+                    grep '^AXONWALL_ZTP_TOKEN=' /etc/axonwall/axonwall.env > /etc/axonwall/controller.env || true
+                    chown root:axonwall-controller /etc/axonwall/controller.env 2>/dev/null || true
+                    chmod 0640 /etc/axonwall/controller.env 2>/dev/null || true
+                    sed -i '/^AXONWALL_ZTP_TOKEN=/d' /etc/axonwall/axonwall.env
+                )
             fi
         fi
         if [ -f /etc/axonwall/controller.env ]; then
@@ -492,13 +527,24 @@ ENV_EOF
             minimal) UNITS="axonwalld.service axonwall-controller.service axonwall-ui.service axonwall-console.service axonwall-hub-cert-renew.service axonwall-hub-cert-renew.timer" ;;
             vault) UNITS="axonwall-console.service seaweedfs.service axonwall-vault-firstboot.service axonwall-vault-provision.service axonwall-hub-cert-renew.service axonwall-hub-cert-renew.timer" ;;
             k3s-storage) UNITS="axonwall-console.service k3s.service k3s-agent.service axonwall-k3s-firstboot.service axonwall-k3s-verify.service axonwall-hub-cert-renew.service axonwall-hub-cert-renew.timer" ;;
-            *) UNITS="axonwalld.service axonwall-controller.service axonwall-ui.service axonwall-console.service axonwall-hub-cert-renew.service axonwall-hub-cert-renew.timer" ;;
+            *) UNITS="axonwalld.service axonwall-controller.service axonwall-ui.service axonwall-console.service headscale.service k3s.service axonwall-hub-cert-renew.service axonwall-hub-cert-renew.timer" ;;
         esac
         for unit in ${UNITS}; do
             if [ -f "/etc/systemd/system/${unit}" ] && [ ! -L "/etc/systemd/system/${unit}" ] && [ -f "/lib/systemd/system/${unit}" ]; then
                 cp "/lib/systemd/system/${unit}" "/etc/systemd/system/${unit}" 2>/dev/null || true
             fi
         done
+
+        # 5c-bis. Apply kernel hardening sysctl profile (SEC-M31) cleanly on live hosts
+        if [ -f /etc/sysctl.d/95-axonwall-kernel-hardening.conf ]; then
+            if [ -x /usr/lib/systemd/systemd-sysctl ]; then
+                /usr/lib/systemd/systemd-sysctl /etc/sysctl.d/95-axonwall-kernel-hardening.conf >/dev/null 2>&1 || true
+            elif [ -x /lib/systemd/systemd-sysctl ]; then
+                /lib/systemd/systemd-sysctl /etc/sysctl.d/95-axonwall-kernel-hardening.conf >/dev/null 2>&1 || true
+            elif command -v sysctl >/dev/null 2>&1; then
+                sysctl -p /etc/sysctl.d/95-axonwall-kernel-hardening.conf >/dev/null 2>&1 || true
+            fi
+        fi
 
         # 5d. Configure Axonwall Plymouth graphical boot theme when plymouth is installed
         if [ -x /usr/sbin/plymouth-set-default-theme ] && [ -f /usr/share/plymouth/themes/axonwall/axonwall.plymouth ]; then
@@ -567,6 +613,12 @@ ENV_EOF
                     if ! systemctl restart --no-block axonwalld.service axonwall-controller.service axonwall-ui.service ssh.service chrony.service; then
                         echo "Error: failed to restart Axonwall services; dpkg configure failed. Fix systemd and re-run dpkg --configure." >&2
                         exit 1
+                    fi
+                    if systemctl is-active --quiet headscale.service 2>/dev/null; then
+                        if ! systemctl restart --no-block headscale.service; then
+                            echo "Error: failed to restart headscale.service; dpkg configure failed. Fix systemd and re-run dpkg --configure." >&2
+                            exit 1
+                        fi
                     fi
                     ;;
             esac

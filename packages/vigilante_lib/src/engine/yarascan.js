@@ -444,6 +444,87 @@ function scanForCsConfigWithKey(buf, key) {
   return { settings };
 }
 
+const CONTAINER_CGROUP_RE = /(kubepods|docker|containerd|cri-o|crio|podman|libpod|lxc|ecs|fargate)/i;
+
+/**
+ * Validate that a target PID is safe to inspect from live /proc (forbids MCP server's
+ * own PID, host PID 1 / parent PID, and any non-container host-sensitive process).
+ * @param {number|string} pid
+ * @param {Object} [options={}]
+ * @returns {Promise<number>} Validated PID
+ */
+export async function assertSafeLiveContainerPid(pid, options = {}) {
+  const procRoot = options.procRoot || '/proc';
+  const allowMockMissing = Boolean(options.allowMockMissing);
+  const numPid = Number(pid);
+
+  if (!Number.isInteger(numPid) || numPid <= 0) {
+    throw new Error(`Invalid process ID '${pid}': expected a positive integer`);
+  }
+  if (numPid === process.pid) {
+    throw new Error(
+      `Forbidden process ID '${numPid}': reading the Vigilante/MCP server's own process (/proc/${numPid}) is prohibited`
+    );
+  }
+  if (numPid === 1 || (Number.isInteger(process.ppid) && process.ppid > 1 && numPid === process.ppid)) {
+    throw new Error(
+      `Forbidden process ID '${numPid}': reading host init or parent process (/proc/${numPid}) is prohibited`
+    );
+  }
+
+  const isLiveHostProc = path.resolve(procRoot) === '/proc';
+  if (!isLiveHostProc) {
+    return numPid;
+  }
+
+  const procDir = path.join(procRoot, String(numPid));
+  let dirExists = false;
+  try {
+    await fs.access(procDir);
+    dirExists = true;
+  } catch {
+    dirExists = false;
+  }
+
+  if (!dirExists) {
+    if (allowMockMissing) {
+      return numPid;
+    }
+    throw new Error(`Forbidden or unavailable process ID '${numPid}': /proc/${numPid} does not exist`);
+  }
+
+  let inContainerCgroup = false;
+  try {
+    const cgroup = await fs.readFile(path.join(procDir, 'cgroup'), 'utf8');
+    if (CONTAINER_CGROUP_RE.test(cgroup)) {
+      inContainerCgroup = true;
+    }
+  } catch {
+    // Unreadable cgroup cannot prove container membership
+  }
+
+  let inDistinctPidNamespace = false;
+  try {
+    const [selfNs, targetNs] = await Promise.all([
+      fs.readlink('/proc/self/ns/pid'),
+      fs.readlink(path.join(procDir, 'ns', 'pid'))
+    ]);
+    if (selfNs && targetNs && selfNs !== targetNs) {
+      inDistinctPidNamespace = true;
+    }
+  } catch {
+    // Unreadable PID namespace (e.g. privileged host daemon) fails closed
+  }
+
+  if (!inContainerCgroup && !inDistinctPidNamespace) {
+    throw new Error(
+      `Forbidden process ID '${numPid}': target is a non-container or host-sensitive process (container isolation required)`
+    );
+  }
+
+  return numPid;
+}
+
 /**
  * Scan process memory given a PID or simulated memory chunks
  * @param {number|string} pid
@@ -473,9 +554,13 @@ export async function scanProcessMemory(pid, rules = [], options = {}) {
   // Attempt to read readable /proc/<pid>/maps regions from /proc/<pid>/mem
   if (!bufferToScan) {
     const procBase = options.procRoot || '/proc';
+    await assertSafeLiveContainerPid(numPid, { procRoot: procBase, allowMockMissing: false });
     const memPath = path.join(procBase, String(numPid), 'mem');
     const mapsPath = path.join(procBase, String(numPid), 'maps');
     if (fsSync.existsSync(mapsPath)) {
+      if (fsSync.lstatSync(mapsPath).isSymbolicLink()) {
+        throw new Error(`Refusing symlinked maps file '${mapsPath}'`);
+      }
       const mapsContent = await fs.readFile(mapsPath, 'utf8');
       const regions = [];
       for (const line of mapsContent.split(/\r?\n/)) {
@@ -495,6 +580,9 @@ export async function scanProcessMemory(pid, rules = [], options = {}) {
       }
 
       if (regions.length > 0 && fsSync.existsSync(memPath)) {
+        if (fsSync.lstatSync(memPath).isSymbolicLink()) {
+          throw new Error(`Refusing symlinked mem file '${memPath}'`);
+        }
         const chunks = [];
         let totalRead = 0;
         const fh = await fs.open(memPath, 'r');

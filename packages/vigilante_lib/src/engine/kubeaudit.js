@@ -11,7 +11,25 @@ import {
 } from './config.js';
 import { autoSignIfConfigured } from './gpg.js';
 import { saveEvidenceFile } from './evidence.js';
+import { assertSafeScanTarget, classifyIpRange } from './ssrf.js';
 import { logger } from '../utils/logger.js';
+
+const METADATA_HOSTNAMES = new Set([
+  'metadata.google.internal',
+  'metadata.goog',
+  'metadata',
+  'instance-data',
+  '169.254.169.254'
+]);
+
+function assertSafeKubeHunterRemoteSync(remoteHost) {
+  const cleanHost = assertCliTarget(remoteHost, 'kube-hunter remote target');
+  const bare = cleanHost.split('/')[0].replace(/^\[|\]$/g, '').split('%')[0].replace(/\.+$/, '').toLowerCase();
+  if (METADATA_HOSTNAMES.has(bare) || classifyIpRange(bare) === 'metadata') {
+    throw new Error(`Blocked SSRF kube-hunter remote target: '${remoteHost}' is forbidden`);
+  }
+  return cleanHost;
+}
 
 export const KUBEAUDIT_PROFILES = [
   {
@@ -37,7 +55,7 @@ export const KUBEAUDIT_PROFILES = [
     description: 'Actively probe Kubernetes cluster endpoints, kubelets, and etcd for exposure',
     tool: 'kube-hunter',
     buildArgs: (remoteHost, opts = {}) => {
-      const cleanHost = assertCliTarget(remoteHost, 'kube-hunter remote target');
+      const cleanHost = assertSafeKubeHunterRemoteSync(remoteHost);
       const a = ['--remote', cleanHost, '--report', 'json'];
       if (opts.active) a.push('--active');
       return a;
@@ -173,11 +191,25 @@ export function parseKubeHunterOutput(rawJson) {
  * @returns {Promise<object>}
  */
 export async function runKubeAudit(target = 'cluster', profileId = 'kube-bench', opts = {}) {
-  await ensureVigilanteConfig();
   const safeTarget = assertCliTarget(target, 'target');
+  const profile = KUBEAUDIT_PROFILES.find((p) => p.id === profileId) || KUBEAUDIT_PROFILES[0];
+  if (profile.tool === 'kube-hunter') {
+    await assertSafeScanTarget(safeTarget, {
+      label: 'kube-hunter remote target',
+      allowPrivate: opts.allowPrivate ?? true,
+      allowLoopback: opts.allowLoopback ?? true,
+      allowMetadata: false,
+      dnsLookup: opts.dnsLookup,
+      failOnDnsError: opts.failOnDnsError
+    });
+    profile.buildArgs(safeTarget, opts);
+  } else {
+    profile.buildArgs(opts);
+  }
+
+  await ensureVigilanteConfig();
   const targetComponent = sanitizePathComponent(safeTarget);
   const kubeauditDir = getVigilanteKubeAuditDir();
-  const profile = KUBEAUDIT_PROFILES.find((p) => p.id === profileId) || KUBEAUDIT_PROFILES[0];
   const tools = await checkKubeAuditToolsInstalled();
 
   const timestamp = new Date().toISOString();

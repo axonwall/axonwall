@@ -8,11 +8,14 @@ import {
   resolveHeadscaleUsername,
 } from '@/server/headscale';
 import { buildQuickConnectCommand, resolveHeadscaleNetworkInfo } from '@/server/headscale-network';
+import { checkPluginApiGuard } from '@/server/plugin-guard';
 
 export async function POST(req: NextRequest) {
   try {
     const session = await getSession();
     assertMeshSelfServicePermitted(session);
+    const pluginGuard = await checkPluginApiGuard('headscale');
+    if (pluginGuard) return pluginGuard;
     const ownerUser = resolveHeadscaleUsername(session);
     const network = await resolveHeadscaleNetworkInfo(req);
     if (!network.enabled) {

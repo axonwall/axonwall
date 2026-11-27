@@ -39,9 +39,13 @@ ZFS_ARC_MAX_MB=0
 
 cleanup_secrets() {
   shred -u /var/lib/partman/axonwall-luks.pass /var/lib/partman/axonwall-k3s.token 2>/dev/null || rm -f /var/lib/partman/axonwall-luks.pass /var/lib/partman/axonwall-k3s.token 2>/dev/null || true
-  rm -f /tmp/axonwall-luks* /tmp/axonwall-k3s* /target/run/axonwall-luks* /target/tmp/axonwall-luks* 2>/dev/null || true
+  if [ -n "${TEMP_KEY:-}" ] && [ -f "${TEMP_KEY:-}" ]; then
+    shred -u "$TEMP_KEY" 2>/dev/null || rm -f "$TEMP_KEY" 2>/dev/null || true
+  fi
+  rm -f /tmp/axonwall-luks* /tmp/axonwall-k3s* /run/axonwall-luks* /target/run/axonwall-luks* /target/tmp/axonwall-luks* 2>/dev/null || true
   K3S_JOIN_TOKEN=""
-  unset K3S_JOIN_TOKEN
+  LUKS_PASSPHRASE=""
+  unset K3S_JOIN_TOKEN LUKS_PASSPHRASE
 }
 trap cleanup_secrets EXIT INT TERM
 
@@ -260,14 +264,17 @@ if [ "$LUKS_ENABLED" = "1" ] && [ -b "$DATA_DEV" ] && command -v cryptsetup >/de
     umount /target/var/lib/axonwall 2>/dev/null || true
   fi
 
-  TEMP_KEY="/tmp/axonwall-luks.key"
-  rm -f "$TEMP_KEY"
-  if [ -n "$LUKS_PASSPHRASE" ]; then
-    printf '%s' "$LUKS_PASSPHRASE" > "$TEMP_KEY"
-  else
-    dd if=/dev/urandom of="$TEMP_KEY" bs=32 count=1 2>/dev/null
-  fi
-  chmod 0400 "$TEMP_KEY"
+  mkdir -p /run
+  TEMP_KEY="$(umask 077 && mktemp /run/axonwall-luks.XXXXXX)"
+  (
+    umask 077
+    if [ -n "$LUKS_PASSPHRASE" ]; then
+      printf '%s' "$LUKS_PASSPHRASE" > "$TEMP_KEY"
+    else
+      dd if=/dev/urandom of="$TEMP_KEY" bs=32 count=1 2>/dev/null
+    fi
+    chmod 0400 "$TEMP_KEY"
+  )
 
   if cryptsetup luksFormat --type luks2 --batch-mode --cipher aes-xts-plain64 -s 512 -d "$TEMP_KEY" "$DATA_DEV"; then
     # D2-M3: a failed open after a successful format used to be
@@ -315,15 +322,15 @@ if [ "$LUKS_ENABLED" = "1" ] && [ -b "$DATA_DEV" ] && command -v cryptsetup >/de
       if [ "$LUKS_TPM2" = "1" ] && command -v in-target >/dev/null 2>&1; then
         echo "[+] Enrolling hardware TPM 2.0 PCR policy for automated unlock..."
         mkdir -p /target/run
-        cp "$TEMP_KEY" /target/run/axonwall-luks-enroll.key
-        chmod 0400 /target/run/axonwall-luks-enroll.key
-        if in-target systemd-cryptenroll --tpm2-device=auto --tpm2-pcrs=0,2,7 --unlock-key-file=/run/axonwall-luks-enroll.key "$DATA_DEV" 2>/dev/null; then
+        _enroll_key="$(umask 077 && mktemp /target/run/axonwall-luks-enroll.XXXXXX)"
+        ( umask 077 && cp "$TEMP_KEY" "$_enroll_key" && chmod 0400 "$_enroll_key" )
+        if in-target systemd-cryptenroll --tpm2-device=auto --tpm2-pcrs=0,2,7 --unlock-key-file="/run/$(basename "$_enroll_key")" "$DATA_DEV" 2>/dev/null; then
           TPM2_SUCCESS=1
           echo "[+] Successfully enrolled TPM 2.0 token."
         else
           echo "[-] Warning: TPM 2.0 enrollment failed. Falling back to passphrase unlock at boot."
         fi
-        rm -f /target/run/axonwall-luks-enroll.key
+        shred -u "$_enroll_key" 2>/dev/null || rm -f "$_enroll_key"
       fi
 
       if [ "$TPM2_SUCCESS" = "1" ]; then
@@ -683,15 +690,18 @@ elif [ "${INSTALL_EDITION:-axonwall}" = "k3s-storage" ]; then
   fi
 
   _esc_sq() { printf '%s' "$1" | sed "s/'/'\\\\''/g"; }
-  {
-    printf "K3S_ROLE='%s'\n" "$(_esc_sq "${K3S_ROLE:-server}")"
-    printf "K3S_SERVER_URL='%s'\n" "$(_esc_sq "${K3S_SERVER_URL:-}")"
-    printf "K3S_JOIN_TOKEN='%s'\n" "$(_esc_sq "${K3S_JOIN_TOKEN:-}")"
-    printf "ZFS_ARC_MAX_MB='%s'\n" "$(_esc_sq "${ZFS_ARC_MAX_MB:-0}")"
-  } > /target/etc/axonwall/k3s-storage.env
-  chmod 0600 /target/etc/axonwall/k3s-storage.env
-  cp -f /target/etc/axonwall/k3s-storage.env /target/var/lib/axonwall/etc-axonwall/k3s-storage.env 2>/dev/null || true
-  chmod 0600 /target/var/lib/axonwall/etc-axonwall/k3s-storage.env 2>/dev/null || true
+  (
+    umask 077
+    {
+      printf "K3S_ROLE='%s'\n" "$(_esc_sq "${K3S_ROLE:-server}")"
+      printf "K3S_SERVER_URL='%s'\n" "$(_esc_sq "${K3S_SERVER_URL:-}")"
+      printf "K3S_JOIN_TOKEN='%s'\n" "$(_esc_sq "${K3S_JOIN_TOKEN:-}")"
+      printf "ZFS_ARC_MAX_MB='%s'\n" "$(_esc_sq "${ZFS_ARC_MAX_MB:-0}")"
+    } > /target/etc/axonwall/k3s-storage.env
+    chmod 0600 /target/etc/axonwall/k3s-storage.env
+    cp -f /target/etc/axonwall/k3s-storage.env /target/var/lib/axonwall/etc-axonwall/k3s-storage.env 2>/dev/null || true
+    chmod 0600 /target/var/lib/axonwall/etc-axonwall/k3s-storage.env 2>/dev/null || true
+  )
 
   for fw_unit in axonwall-firstboot.service axonwalld.service axonwall-controller.service axonwall-ui.service headscale.service axonwall-satellite.service; do
     rm -f "/target/etc/systemd/system/${fw_unit}" "/target/etc/systemd/system/multi-user.target.wants/${fw_unit}"

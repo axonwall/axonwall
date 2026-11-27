@@ -41,7 +41,7 @@ export async function POST(req: Request) {
     if (!authRes.success || !authRes.session) {
       return NextResponse.json(
         { success: false, error: authRes.error || 'Authentication failed' },
-        { status: 401 }
+        { status: authRes.statusCode === 429 ? 429 : 401 }
       );
     }
 

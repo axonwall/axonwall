@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { importFirewalldConfig } from './index.js';
 import { compileNftables } from '../../compile/nft/index.js';
+import { DesiredStateSchema } from '../../schemas/index.js';
 
 const SAMPLE_FIREWALLD_XML = `<?xml version="1.0" encoding="utf-8"?>
 <ipset type="hash:net" name="trusted_admins">
@@ -106,5 +107,112 @@ describe('Linux firewalld Importer', () => {
     const richDrop = report.state.rules.find((r) => r.source === '203.0.113.42');
     expect(richDrop).toBeDefined();
     expect(richDrop?.action).toBe('block');
+    expect(() => DesiredStateSchema.parse(report.state)).not.toThrow();
+  });
+
+  it('fails closed on missing/unsupported rich rule actions and prefix quote spoofing [SEC-H20]', () => {
+    const cli = `
+public (active)
+  interfaces: eth0
+  rich rules:
+    rule family="ipv4" source address="198.51.100.10" log prefix="accept"
+    rule family="ipv4" source address="198.51.100.11" port port="8080" protocol="tcp" mark set="1"
+`;
+    const xml = `<?xml version="1.0" encoding="utf-8"?>
+<zone name="public" target="default">
+  <interface name="eth0"/>
+  <rule family="ipv4">
+    <source address="198.51.100.12"/>
+    <log prefix="AUDIT: "/>
+  </rule>
+</zone>`;
+
+    for (const input of [cli, xml]) {
+      const report = importFirewalldConfig(input);
+      expect(report.rulesCount).toBeGreaterThanOrEqual(1);
+      for (const r of report.state.rules) {
+        expect(r.action).toBe('block');
+        expect(r.enabled).toBe(false);
+      }
+      expect(report.reviewItems?.length).toBeGreaterThanOrEqual(1);
+      expect(report.warnings.length).toBeGreaterThanOrEqual(1);
+      expect(() => DesiredStateSchema.parse(report.state)).not.toThrow();
+    }
+  });
+
+  it('never expands unknown service name="..." to protocol any / empty destinationPort [SEC-H20]', () => {
+    const xml = `<?xml version="1.0" encoding="utf-8"?>
+<zone name="public" target="default">
+  <interface name="eth0"/>
+  <service name="totally_unknown_app"/>
+  <rule family="ipv4">
+    <source address="198.51.100.5"/>
+    <service name="proprietary_custom_daemon"/>
+    <accept/>
+  </rule>
+</zone>`;
+    const report = importFirewalldConfig(xml);
+    expect(report.rulesCount).toBe(0);
+    expect(report.warnings.some((w) => w.includes('totally_unknown_app'))).toBe(true);
+    expect(report.warnings.some((w) => w.includes('proprietary_custom_daemon'))).toBe(true);
+    expect(() => DesiredStateSchema.parse(report.state)).not.toThrow();
+  });
+
+  it('parses XML <rule> elements structurally without quote-breakout attribute injection [SEC-H20]', () => {
+    const xml = `<?xml version="1.0" encoding="utf-8"?>
+<zone name="public" target="default">
+  <interface name="eth0"/>
+  <rule family="ipv4">
+    <source address='198.51.100.1" accept'/>
+    <drop/>
+  </rule>
+  <rule family="ipv4">
+    <source address="203.0.113.20"/>
+    <log prefix='LOG" accept'/>
+  </rule>
+</zone>`;
+    const report = importFirewalldConfig(xml);
+    // Neither rule can inject an active 'pass' action
+    const activePass = report.state.rules.filter((r) => r.enabled && r.action === 'pass');
+    expect(activePass).toHaveLength(0);
+    expect(report.state.rules.every((r) => r.action === 'block' && r.enabled === false)).toBe(true);
+    expect(() => DesiredStateSchema.parse(report.state)).not.toThrow();
+  });
+
+  it('emits invertSource and invertDestination on negated rich rules while keeping them disabled [SEC-H20]', () => {
+    const xml = `<?xml version="1.0" encoding="utf-8"?>
+<zone name="public" target="default">
+  <interface name="eth0"/>
+  <rule family="ipv4">
+    <source invert="True" address="10.0.0.0/8"/>
+    <destination not="yes" address="192.168.1.0/24"/>
+    <service name="ssh"/>
+    <accept/>
+  </rule>
+</zone>`;
+    const report = importFirewalldConfig(xml);
+    expect(report.rulesCount).toBe(1);
+    const rule = report.state.rules[0]!;
+    expect(rule.source).toBe('10.0.0.0/8');
+    expect(rule.invertSource).toBe(true);
+    expect(rule.destination).toBe('192.168.1.0/24');
+    expect(rule.invertDestination).toBe(true);
+    expect(rule.enabled).toBe(false);
+    expect(report.reviewItems?.[0]?.reason).toBe('negated_both');
+    expect(() => DesiredStateSchema.parse(report.state)).not.toThrow();
+  });
+
+  it('disables XML entity expansion against XXE / Billion Laughs [SEC-L10]', () => {
+    const xxeXml = `<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE zone [
+  <!ENTITY evil "EXPANDED_FIREWALLD_SECRET">
+]>
+<zone name="public" target="default">
+  <short>&evil;</short>
+  <interface name="eth0"/>
+</zone>`;
+    const report = importFirewalldConfig(xxeXml);
+    expect(report.state.interfaces[0]?.description).not.toContain('EXPANDED_FIREWALLD_SECRET');
+    expect(JSON.stringify(report.state)).not.toContain('EXPANDED_FIREWALLD_SECRET');
   });
 });

@@ -486,12 +486,30 @@ export function compileNetBoxBundle(state: Partial<DesiredState>): CompiledNetBo
   const bindDn = ldap.bindDn?.trim() || `cn=svc-netbox,ou=services,${baseDn}`;
   const podLdapUrl = rewritePodLdapUrl(ldap.url || 'ldap://127.0.0.1:389', lanIp);
 
+  const allowedHosts = Array.from(
+    new Set(
+      [
+        domain,
+        'netbox',
+        `netbox.${namespace}.svc.cluster.local`,
+        'localhost',
+        '127.0.0.1',
+        ...(lanIp ? [lanIp] : []),
+      ].filter(Boolean),
+    ),
+  );
+  const useXForwardedHost = Boolean(
+    (config as { trustedProxy?: boolean; useXForwardedHost?: boolean }).trustedProxy ||
+      (config as { useXForwardedHost?: boolean }).useXForwardedHost,
+  );
+  const csrfOrigins = [`https://${domain}`, `http://${domain}`, `http://127.0.0.1:${config.servicePort}`];
+
   const extraPy = [
     '# Axonwall-managed NetBox runtime overrides',
-    `ALLOWED_HOSTS = [${JSON.stringify(domain)}, 'localhost', '127.0.0.1', '*']`,
-    `CSRF_TRUSTED_ORIGINS = ['https://${domain}', 'http://${domain}', 'http://127.0.0.1:${config.servicePort}']`,
+    `ALLOWED_HOSTS = ${JSON.stringify(allowedHosts)}`,
+    `CSRF_TRUSTED_ORIGINS = ${JSON.stringify(csrfOrigins)}`,
     "SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')",
-    'USE_X_FORWARDED_HOST = True',
+    `USE_X_FORWARDED_HOST = ${useXForwardedHost ? 'True' : 'False'}`,
     'METRICS_ENABLED = True',
     `TIME_ZONE = ${JSON.stringify(state.system?.timezone || 'UTC')}`,
     '',
@@ -508,7 +526,7 @@ export function compileNetBoxBundle(state: Partial<DesiredState>): CompiledNetBo
         `AUTH_LDAP_BIND_DN = ${JSON.stringify(bindDn)}`,
         "AUTH_LDAP_BIND_PASSWORD = os.environ.get('AUTH_LDAP_BIND_PASSWORD', '')",
         'AUTH_LDAP_CONNECTION_OPTIONS = {ldap.OPT_REFERRALS: 0}',
-        'AUTH_LDAP_START_TLS = False',
+        `AUTH_LDAP_START_TLS = ${Boolean((ldap as { startTls?: boolean }).startTls) ? 'True' : 'False'}`,
         '',
         'AUTH_LDAP_USER_SEARCH = LDAPSearch(',
         `    ${JSON.stringify(`ou=users,${baseDn}`)},`,

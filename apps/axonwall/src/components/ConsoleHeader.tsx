@@ -3,13 +3,17 @@
 import { Shield, Clock, RotateCcw, CheckCircle2, LogOut, UserCheck, Loader2 } from 'lucide-react';
 import { logoutAction } from '../server/auth';
 import { confirmActiveRuleset, rollbackActiveRuleset, getAgentStatus } from '../server/agent';
-import type { UserSession } from '@axonwall/lib/rbac';
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import { ThemeSwitcher } from './ThemeSwitcher';
 
+export interface ConsoleHeaderSessionSummary {
+  displayName: string;
+  primaryRole: string;
+}
+
 interface ConsoleHeaderProps {
-  session: UserSession | null;
+  session: ConsoleHeaderSessionSummary | null;
   pendingConfirm?: boolean;
   confirmDeadlineUnix?: number;
   // R4-C-H1: true when axonwalld did not answer — the header shows a
@@ -270,9 +274,9 @@ export function ConsoleHeader({
           {session && (
             <div className="flex items-center gap-2 text-xs text-slate-300">
               <UserCheck className="w-4 h-4 text-emerald-400" />
-              <span>{session.displayName || session.username}</span>
+              <span>{session.displayName}</span>
               <span className="bg-slate-800 px-1.5 py-0.5 rounded text-slate-400 border border-slate-700">
-                {session.roles[0] || 'admin'}
+                {session.primaryRole}
               </span>
             </div>
           )}

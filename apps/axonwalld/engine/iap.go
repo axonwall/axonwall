@@ -18,9 +18,70 @@ import (
 // caddyPidFile records the PID of the caddy child so a daemon restart can
 // find (and stop) a caddy it did not spawn, and so liveness can be checked
 // without trusting the in-memory handle alone (A-M43).
-const caddyPidFile = "/run/axonwall/caddy.pid"
+var (
+	caddyPidFile     = "/run/axonwall/caddy.pid"
+	caddyAdminSocket = "/run/axonwall/caddy-admin.sock"
+	iapCaddyfilePath = "/etc/axonwall/Caddyfile"
+	iapRunDir        = "/run/axonwall"
+)
 
-const caddyAdminSocket = "/run/axonwall/caddy-admin.sock"
+func enforceCaddyAdminSocketPerms(sockPath string) error {
+	return os.Chmod(sockPath, 0600)
+}
+
+func validateZeroTrustApp(app ZeroTrustApp) error {
+	pubHost := strings.TrimSpace(app.PublicHostname)
+	if pubHost == "" || strings.ContainsAny(pubHost, "\n\r{}; \t#\"'\\/?") {
+		return fmt.Errorf("invalid characters in zero trust app hostname")
+	}
+	for _, r := range pubHost {
+		if r < 0x20 || r == 0x7f {
+			return fmt.Errorf("invalid characters in zero trust app hostname")
+		}
+	}
+
+	rawUpstream := app.InternalUpstream
+	if strings.TrimSpace(rawUpstream) == "" || rawUpstream != strings.TrimSpace(rawUpstream) {
+		return fmt.Errorf("invalid zero trust app upstream")
+	}
+	if strings.ContainsAny(rawUpstream, "\n\r{}; \t#\"'\\") {
+		return fmt.Errorf("invalid characters in zero trust app upstream")
+	}
+	for _, r := range rawUpstream {
+		if r < 0x20 || r == 0x7f {
+			return fmt.Errorf("invalid characters in zero trust app upstream")
+		}
+	}
+	lowerRaw := strings.ToLower(rawUpstream)
+	if strings.Contains(lowerRaw, "unix/") || strings.Contains(lowerRaw, ".sock") || strings.Contains(lowerRaw, "/run/axonwall") {
+		return fmt.Errorf("disallowed unix socket upstream in zero trust app")
+	}
+	u, err := url.Parse(rawUpstream)
+	if err != nil {
+		return fmt.Errorf("invalid zero trust app upstream URL: %w", err)
+	}
+	scheme := strings.ToLower(u.Scheme)
+	if scheme != "http" && scheme != "https" {
+		return fmt.Errorf("zero trust app upstream scheme %q must be http or https", u.Scheme)
+	}
+	if u.User != nil {
+		return fmt.Errorf("embedded credentials are disallowed in zero trust app upstream")
+	}
+	host := strings.TrimSpace(u.Hostname())
+	if u.Host == "" || host == "" || strings.EqualFold(host, "unix") {
+		return fmt.Errorf("zero trust app upstream must specify a valid host")
+	}
+	if p := u.Port(); p != "" {
+		portNum, perr := strconv.Atoi(p)
+		if perr != nil || portNum < 1 || portNum > 65535 {
+			return fmt.Errorf("invalid port %q in zero trust app upstream", p)
+		}
+	}
+	if (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" {
+		return fmt.Errorf("zero trust app upstream must not include path, query, or fragment")
+	}
+	return nil
+}
 
 type ZeroTrustApp struct {
 	ID               string   `json:"id"`
@@ -61,18 +122,18 @@ func (m *IAPManager) ApplyConfig(configJSON []byte) error {
 		if !app.Enabled {
 			continue
 		}
-		if strings.ContainsAny(app.PublicHostname, "\n\r{}; \t#\"'\\") || strings.ContainsAny(app.InternalUpstream, "\n\r{}; \t#\"'\\") {
-			return fmt.Errorf("invalid characters in zero trust app hostname or upstream")
+		if err := validateZeroTrustApp(app); err != nil {
+			return err
 		}
 	}
 
 	caddyfileContent := m.generateCaddyfile(config)
 
-	caddyfilePath := "/etc/axonwall/Caddyfile"
+	caddyfilePath := iapCaddyfilePath
 	if err := os.MkdirAll(filepath.Dir(caddyfilePath), 0750); err != nil {
 		return fmt.Errorf("failed to create config dir: %w", err)
 	}
-	_ = os.MkdirAll("/run/axonwall", 0750)
+	_ = os.MkdirAll(iapRunDir, 0750)
 
 	if err := os.WriteFile(caddyfilePath, []byte(caddyfileContent), 0640); err != nil {
 		return fmt.Errorf("failed to write Caddyfile: %w", err)
@@ -85,18 +146,18 @@ func (m *IAPManager) generateCaddyfile(config ZeroTrustConfig) string {
 	var out string
 
 	out += "{\n"
-	out += "\tadmin unix//run/axonwall/caddy-admin.sock\n"
+	out += fmt.Sprintf("\tadmin unix/%s\n", caddyAdminSocket)
 	out += "}\n\n"
 
 	for _, app := range config.Apps {
 		if !app.Enabled {
 			continue
 		}
-		if strings.ContainsAny(app.PublicHostname, "\n\r{}; \t#\"'\\") || strings.ContainsAny(app.InternalUpstream, "\n\r{}; \t#\"'\\") {
+		if err := validateZeroTrustApp(app); err != nil {
 			continue
 		}
 
-		out += fmt.Sprintf("%s {\n", app.PublicHostname)
+		out += fmt.Sprintf("%s {\n", strings.TrimSpace(app.PublicHostname))
 		out += fmt.Sprintf("\tforward_auth http://localhost:3000 {\n")
 		out += fmt.Sprintf("\t\turi /api/auth/gateway?app_id=%s&roles=%s\n", url.QueryEscape(app.ID), url.QueryEscape(strings.Join(app.AllowedRoles, ",")))
 		out += fmt.Sprintf("\t\tcopy_headers X-Remote-User X-Remote-Roles\n")
@@ -121,11 +182,14 @@ func (m *IAPManager) ReloadCaddy(configPath string) error {
 	if m.caddyAliveLocked() {
 		// Running: reload via unix admin socket; fallback to process
 		// restart if reload fails.
-		reloadCmd := exec.Command("caddy", "reload", "--config", configPath, "--adapter", "caddyfile", "--address", "unix//run/axonwall/caddy-admin.sock")
+		reloadCmd := exec.Command("caddy", "reload", "--config", configPath, "--adapter", "caddyfile", "--address", "unix/"+caddyAdminSocket)
 		if out, err := reloadCmd.CombinedOutput(); err != nil {
 			log.Printf("Warning: caddy reload failed (%v: %s), restarting process", err, string(out))
 			m.killCaddyLocked()
 			return m.startCaddyLocked(configPath)
+		}
+		if err := enforceCaddyAdminSocketPerms(caddyAdminSocket); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("failed to secure caddy admin socket permissions: %w", err)
 		}
 		log.Printf("Reloaded Caddy IAP configuration")
 		return nil
@@ -186,7 +250,7 @@ func (m *IAPManager) startCaddyLocked(configPath string) error {
 		log.Printf("Warning: Failed to start Caddy (IAP): %v", err)
 		return err
 	}
-	_ = os.MkdirAll(filepath.Dir(caddyPidFile), 0755)
+	_ = os.MkdirAll(filepath.Dir(caddyPidFile), 0750)
 	_ = os.WriteFile(caddyPidFile, []byte(strconv.Itoa(m.cmd.Process.Pid)), 0644)
 
 	// A-M43: cmd.Start() succeeding does not mean caddy stays up (a
@@ -203,6 +267,10 @@ func (m *IAPManager) startCaddyLocked(configPath string) error {
 			return fmt.Errorf("caddy exited during startup (check for a port conflict or bad config)")
 		}
 		if _, err := os.Stat(caddyAdminSocket); err == nil {
+			if err := enforceCaddyAdminSocketPerms(caddyAdminSocket); err != nil {
+				m.killCaddyLocked()
+				return fmt.Errorf("failed to restrict caddy admin socket permissions: %w", err)
+			}
 			log.Printf("Started Caddy IAP proxy on port 443")
 			return nil
 		}

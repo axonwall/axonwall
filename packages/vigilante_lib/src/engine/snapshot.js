@@ -82,32 +82,117 @@ export async function captureContainerVolatiles(pid, options = {}) {
   return volatiles;
 }
 
+const DEFAULT_DIFF_MAX_FILES = 10000;
+const DEFAULT_DIFF_MAX_TOTAL_BYTES = 512 * 1024 * 1024; // 512 MiB
+
+/**
+ * Stream-hash a file with SHA-256 while enforcing a remaining byte budget.
+ * @private
+ */
+function streamSha256(filePath, maxBytes) {
+  return new Promise((resolve, reject) => {
+    const hash = crypto.createHash('sha256');
+    let bytesRead = 0;
+    let settled = false;
+    const stream = fsSync.createReadStream(filePath);
+    stream.on('data', (chunk) => {
+      bytesRead += chunk.length;
+      if (bytesRead > maxBytes) {
+        if (!settled) {
+          settled = true;
+          const err = new Error('BYTE_BUDGET_EXCEEDED');
+          err.code = 'BYTE_BUDGET_EXCEEDED';
+          stream.destroy();
+          reject(err);
+        }
+        return;
+      }
+      hash.update(chunk);
+    });
+    stream.on('end', () => {
+      if (!settled) {
+        settled = true;
+        resolve({ sha256: hash.digest('hex'), bytesRead });
+      }
+    });
+    stream.on('error', (err) => {
+      if (!settled) {
+        settled = true;
+        reject(err);
+      }
+    });
+  });
+}
+
 /**
  * Scan a container's overlayfs upper directory and compute file differential manifest
  * @param {string} rootfsDir Path to container rootfs or overlayfs upper layer
  * @param {Object} [options={}]
+ * @param {number} [options.maxFiles=10000] Maximum number of files to hash
+ * @param {number} [options.maxTotalBytes=536870912] Total byte budget across all hashed files
  * @returns {Promise<Object>} Differential disk manifest
  */
 export async function captureContainerDiff(rootfsDir, options = {}) {
+  const maxFiles = options.maxFiles !== undefined
+    ? Math.max(0, Math.floor(Number(options.maxFiles)))
+    : DEFAULT_DIFF_MAX_FILES;
+  const maxTotalBytes = options.maxTotalBytes !== undefined
+    ? Math.max(0, Number(options.maxTotalBytes))
+    : DEFAULT_DIFF_MAX_TOTAL_BYTES;
+
+  if (!Number.isFinite(maxFiles) || !Number.isFinite(maxTotalBytes)) {
+    throw new Error('Invalid captureContainerDiff cap: maxFiles and maxTotalBytes must be finite numbers');
+  }
+
   const manifest = [];
   let totalFiles = 0;
+  let totalBytes = 0;
   let addedCount = 0;
   let suspiciousCount = 0;
+  let truncated = false;
+  let truncatedReason = null;
 
-  if (fsSync.existsSync(rootfsDir)) {
+  if (rootfsDir && fsSync.existsSync(rootfsDir)) {
     async function traverse(currentDir, relPath = '') {
+      if (truncated) return;
       const entries = await fs.readdir(currentDir, { withFileTypes: true });
       for (const entry of entries) {
+        if (truncated) break;
         const fullPath = path.join(currentDir, entry.name);
         const relative = path.join(relPath, entry.name);
 
         if (entry.isDirectory()) {
           await traverse(fullPath, relative);
         } else if (entry.isFile()) {
+          if (totalFiles >= maxFiles) {
+            truncated = true;
+            truncatedReason = `Reached maxFiles cap (${maxFiles})`;
+            break;
+          }
+
+          const stat = await fs.lstat(fullPath);
+          if (stat.isSymbolicLink() || !stat.isFile()) continue;
+
+          if (totalBytes + stat.size > maxTotalBytes) {
+            truncated = true;
+            truncatedReason = `Reached maxTotalBytes budget (${maxTotalBytes} bytes)`;
+            break;
+          }
+
+          let hashed;
+          try {
+            hashed = await streamSha256(fullPath, maxTotalBytes - totalBytes);
+          } catch (err) {
+            if (err && err.code === 'BYTE_BUDGET_EXCEEDED') {
+              truncated = true;
+              truncatedReason = `Reached maxTotalBytes budget (${maxTotalBytes} bytes)`;
+              break;
+            }
+            throw err;
+          }
+
           totalFiles++;
-          const stat = await fs.stat(fullPath);
-          const buf = await fs.readFile(fullPath);
-          const sha256 = crypto.createHash('sha256').update(buf).digest('hex');
+          totalBytes += hashed.bytesRead;
 
           // Whiteout file in overlayfs starts with .wh.
           const isWhiteout = entry.name.startsWith('.wh.');
@@ -121,8 +206,8 @@ export async function captureContainerDiff(rootfsDir, options = {}) {
 
           manifest.push({
             path: relative,
-            size: stat.size,
-            sha256,
+            size: hashed.bytesRead,
+            sha256: hashed.sha256,
             isWhiteout,
             isSuspicious,
             modifiedAt: stat.mtime.toISOString()
@@ -141,10 +226,16 @@ export async function captureContainerDiff(rootfsDir, options = {}) {
   return {
     rootfsDir,
     timestamp: new Date().toISOString(),
+    truncated,
+    truncatedReason,
     summary: {
       totalFiles,
+      totalBytes,
       addedOrModified: addedCount,
-      suspiciousFiles: suspiciousCount
+      suspiciousFiles: suspiciousCount,
+      truncated,
+      maxFiles,
+      maxTotalBytes
     },
     files: manifest
   };

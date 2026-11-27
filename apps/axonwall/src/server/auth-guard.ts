@@ -115,7 +115,7 @@ export function assertActionPermitted(
     throw new Error('Unauthorized');
   }
   const mustChangePassword = isPasswordChangeEnforced(session);
-  if (mustChangePassword && requiredRole && requiredRole !== 'readonly') {
+  if (mustChangePassword) {
     throw new Error('Forbidden: Password change required before performing this action');
   }
 

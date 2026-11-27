@@ -9,6 +9,11 @@ import { getCurrentDesiredState } from '@/server/agent';
 import { getWireGuardServerPublicKey } from '@/server/wg';
 import { useDesiredStateApply } from '@/lib/use-desired-state-apply';
 import { mergeWireGuardPeers } from '@/lib/state-preservation';
+import {
+  buildWireGuardClientProfile,
+  hasControlOrNewline,
+  isValidCidr,
+} from '@/lib/shell-quote';
 import type { DesiredState } from '@axonwall/lib/schemas';
 
 export default function WireGuardPage() {
@@ -127,19 +132,34 @@ export default function WireGuardPage() {
       );
       return;
     }
+    const cleanPeerName = peerName.trim();
+    if (!cleanPeerName || hasControlOrNewline(cleanPeerName)) {
+      setStatusMsg('Error: Peer name cannot contain control characters or line breaks.');
+      return;
+    }
+    const parsedAllowedIps = peerAllowedIps
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+    if (parsedAllowedIps.length === 0 || parsedAllowedIps.some((cidr) => !isValidCidr(cidr))) {
+      setStatusMsg('Error: Allowed IPs must be valid comma-separated CIDR blocks.');
+      return;
+    }
+    const cleanEndpoint = peerEndpoint.trim();
+    if (cleanEndpoint && hasControlOrNewline(cleanEndpoint)) {
+      setStatusMsg('Error: Endpoint cannot contain control characters or line breaks.');
+      return;
+    }
     const nextWg = {
       ...serverConfig,
       enabled: true,
       peers: [
         ...serverConfig.peers,
         {
-          name: peerName.trim(),
+          name: cleanPeerName,
           publicKey: key,
-          allowedIps: peerAllowedIps
-            .split(',')
-            .map((s) => s.trim())
-            .filter(Boolean),
-          endpoint: peerEndpoint.trim() || undefined,
+          allowedIps: parsedAllowedIps,
+          endpoint: cleanEndpoint || undefined,
           persistentKeepalive: 25,
           enabled: true,
         },
@@ -169,27 +189,23 @@ export default function WireGuardPage() {
       setSelectedClientConf(null);
       return;
     }
-    // The server never stores a peer's private key, so no real PrivateKey
-    // value exists to emit. Emit a commented instruction instead of a fake
-    // key value; the profile is incomplete until the device's own private
-    // key is pasted in (see the warning on the export card).
-    const conf = `# Axonwall WireGuard Client Profile: ${peerNameStr}
-[Interface]
-# PrivateKey: paste the private key generated on this device below.
-# The server never stores it, so this profile cannot connect until you add it.
-# PrivateKey = <paste-this-device-private-key-here>
-Address = ${allowedIp}
-DNS = ${serverConfig.address.split('/')[0]}
-
-[Peer]
-PublicKey = ${serverConfig.publicKey}
-Endpoint = ${(fullState as any)?.system?.hostname || 'vpn'}.${(fullState as any)?.system?.domain || 'axonwall.local'}:${serverConfig.listenPort}
-AllowedIPs = 0.0.0.0/0, ::/0
-PersistentKeepalive = 25
-`;
+    const result = buildWireGuardClientProfile({
+      peerName: peerNameStr,
+      allowedIp,
+      serverAddress: serverConfig.address,
+      serverPublicKey: serverConfig.publicKey,
+      listenPort: serverConfig.listenPort,
+      systemHostname: (fullState as any)?.system?.hostname,
+      systemDomain: (fullState as any)?.system?.domain,
+    });
+    if (!result.ok) {
+      setClientConfError(result.error);
+      setSelectedClientConf(null);
+      return;
+    }
     setStatusMsg(null);
     setClientConfError(null);
-    setSelectedClientConf(conf);
+    setSelectedClientConf(result.conf);
   }
 
   function handleCopy() {

@@ -58,17 +58,25 @@ if [ ! -s "${CONF_DIR}/admin.env" ] && [ ! -s "${CONF_DIR}/initial-admin-passwor
         cp -f /var/lib/axonwall/etc-axonwall/admin.env "${CONF_DIR}/admin.env"
         chmod 0600 "${CONF_DIR}/admin.env"
     else
-        log "no administrator credentials found; establishing default factory credentials (admin / axonwall)"
-        printf 'axonwall\n' > "${CONF_DIR}/initial-admin-password"
-        chmod 0600 "${CONF_DIR}/initial-admin-password"
-        cp -f "${CONF_DIR}/initial-admin-password" /var/lib/axonwall/etc-axonwall/initial-admin-password 2>/dev/null || true
-        chmod 0600 /var/lib/axonwall/etc-axonwall/initial-admin-password 2>/dev/null || true
+        _init_pw="$(openssl rand -hex 16 2>/dev/null || od -An -tx1 -N16 /dev/urandom | tr -d ' \n')"
+        [ "${#_init_pw}" -ge 32 ] || die "CSPRNG failed to generate initial administrator password"
+        log "no administrator credentials found; generated random initial credentials (see ${CONF_DIR}/initial-admin-password)"
+        (
+            umask 077
+            printf '%s\n' "$_init_pw" > "${CONF_DIR}/initial-admin-password"
+            chown root:root "${CONF_DIR}/initial-admin-password" 2>/dev/null || true
+            chmod 0600 "${CONF_DIR}/initial-admin-password"
+            printf '%s\n' "$_init_pw" > /var/lib/axonwall/etc-axonwall/initial-admin-password 2>/dev/null || true
+            chown root:root /var/lib/axonwall/etc-axonwall/initial-admin-password 2>/dev/null || true
+            chmod 0600 /var/lib/axonwall/etc-axonwall/initial-admin-password 2>/dev/null || true
+        )
         if command -v chpasswd >/dev/null 2>&1; then
-            printf 'root:axonwall\n' | chpasswd 2>/dev/null || true
+            printf 'root:%s\n' "$_init_pw" | chpasswd 2>/dev/null || true
             if grep -q '^admin:' /etc/passwd 2>/dev/null; then
-                printf 'admin:axonwall\n' | chpasswd 2>/dev/null || true
+                printf 'admin:%s\n' "$_init_pw" | chpasswd 2>/dev/null || true
             fi
         fi
+        unset _init_pw
     fi
 fi
 

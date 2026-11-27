@@ -108,11 +108,12 @@ type NetFlowManager struct {
 	inboundMu        sync.Mutex
 	inboundClosed    bool
 	inboundConns     map[net.Conn]struct{}
-	metaMu           sync.Mutex
-	metaClient       *http.Client
-	metaTransport    *http.Transport
-	metaClientKey    string
-	exportQueue      *TelemetryQueue
+	metaMu            sync.Mutex
+	metaClient        *http.Client
+	metaTransport     *http.Transport
+	metaClientKey     string
+	allowLoopbackHTTP bool
+	exportQueue       *TelemetryQueue
 
 	replMu    sync.RWMutex
 	replConns map[string]*net.UDPConn
@@ -1569,6 +1570,19 @@ func (m *NetFlowManager) closeMetaHTTPClient() {
 	}
 }
 
+func (m *NetFlowManager) SetAllowLoopbackHTTPForTest(allow bool) {
+	m.metaMu.Lock()
+	m.allowLoopbackHTTP = allow
+	tr := m.metaTransport
+	m.metaClient = nil
+	m.metaTransport = nil
+	m.metaClientKey = ""
+	m.metaMu.Unlock()
+	if tr != nil {
+		tr.CloseIdleConnections()
+	}
+}
+
 func (m *NetFlowManager) getMetadataHTTPClient(bundle *NetFlowRuntimeBundle, targetURL string) (*http.Client, error) {
 	useTLS := strings.HasPrefix(targetURL, "https://")
 	key := "http"
@@ -1576,6 +1590,7 @@ func (m *NetFlowManager) getMetadataHTTPClient(bundle *NetFlowRuntimeBundle, tar
 		key = fmt.Sprintf("https|%v|%s|%v", bundle.UseHaMtls, bundle.TLSCACert, bundle.TLSInsecureSkipVerify)
 	}
 	m.metaMu.Lock()
+	allowLoopback := m.allowLoopbackHTTP
 	if m.metaClient != nil && m.metaClientKey == key {
 		c := m.metaClient
 		m.metaMu.Unlock()
@@ -1588,27 +1603,21 @@ func (m *NetFlowManager) getMetadataHTTPClient(bundle *NetFlowRuntimeBundle, tar
 		oldTr.CloseIdleConnections()
 	}
 
-	var tr *http.Transport
+	var tlsConf *tls.Config
 	if useTLS {
-		tlsConf, terr := buildTLSConfigFromBundleParams(bundle.UseHaMtls, bundle.TLSCACert, "", "", "", bundle.TLSInsecureSkipVerify, false, false)
+		var terr error
+		tlsConf, terr = buildTLSConfigFromBundleParams(bundle.UseHaMtls, bundle.TLSCACert, "", "", "", bundle.TLSInsecureSkipVerify, false, false)
 		if terr != nil {
 			return nil, terr
 		}
-		tr = &http.Transport{
-			TLSClientConfig: tlsConf,
-			MaxIdleConns:    4,
-			IdleConnTimeout: 60 * time.Second,
-		}
-	} else {
-		tr = &http.Transport{
-			MaxIdleConns:    4,
-			IdleConnTimeout: 60 * time.Second,
-		}
 	}
-	c := &http.Client{
-		Timeout:   5 * time.Second,
-		Transport: tr,
-	}
+	c, tr := newSafeHTTPClient(SafeHTTPClientOptions{
+		Timeout:         5 * time.Second,
+		AllowLoopback:   allowLoopback,
+		TLSClientConfig: tlsConf,
+		MaxIdleConns:    4,
+		IdleConnTimeout: 60 * time.Second,
+	})
 
 	m.metaMu.Lock()
 	if m.metaClient != nil && m.metaClientKey == key {
@@ -2100,6 +2109,12 @@ func (m *NetFlowManager) triggerRuleAlertLocked(rule NetFlowAlertRulePayload, cu
 }
 
 func postAlertWebhook(webhookURL string, rule NetFlowAlertRulePayload, culpritIP, summary string) {
+	client, tr := newSafeHTTPClient(SafeHTTPClientOptions{Timeout: 4 * time.Second})
+	defer tr.CloseIdleConnections()
+	_ = postAlertWebhookWithClient(webhookURL, rule, culpritIP, summary, client)
+}
+
+func postAlertWebhookWithClient(webhookURL string, rule NetFlowAlertRulePayload, culpritIP, summary string, client *http.Client) error {
 	payload, _ := json.Marshal(map[string]any{
 		"source":    "axonwall-netflow-collector",
 		"timestamp": time.Now().UTC().Format(time.RFC3339),
@@ -2111,14 +2126,20 @@ func postAlertWebhook(webhookURL string, rule NetFlowAlertRulePayload, culpritIP
 	})
 	req, err := http.NewRequest(http.MethodPost, webhookURL, bytes.NewReader(payload))
 	if err != nil {
-		return
+		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	client := &http.Client{Timeout: 4 * time.Second}
-	resp, err := client.Do(req)
-	if err == nil {
-		_ = resp.Body.Close()
+	if client == nil {
+		var tr *http.Transport
+		client, tr = newSafeHTTPClient(SafeHTTPClientOptions{Timeout: 4 * time.Second})
+		defer tr.CloseIdleConnections()
 	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	_ = resp.Body.Close()
+	return nil
 }
 
 func (m *NetFlowManager) dispatchRemoteEdgeMitigation(exporterIP, culpritIP string, ttlSec int, reason string) {

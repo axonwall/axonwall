@@ -273,32 +273,36 @@ export function watchPodsWide({
 export function openInSystemPager(content, filenameHint = 'output.txt') {
   if (!content) return;
   const pager = process.env.PAGER || 'less -R';
-  const tmpFile = path.join(os.tmpdir(), `vigilante-${Date.now()}-${sanitizePathComponent(filenameHint)}`);
+  let tmpDir = null;
 
   try {
-    fsSync.writeFileSync(tmpFile, content, 'utf8');
+    tmpDir = fsSync.mkdtempSync(path.join(os.tmpdir(), 'vigilante-pager-'), { mode: 0o700 });
+    fsSync.chmodSync(tmpDir, 0o700);
+    const tmpFile = path.join(tmpDir, sanitizePathComponent(filenameHint));
+    fsSync.writeFileSync(tmpFile, content, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
+
+    runInteractiveTerminal(() => {
+      try {
+        const parts = pager.trim().split(/\s+/);
+        const bin = parts[0];
+        const args = [...parts.slice(1), tmpFile];
+        spawnSync(bin, args, {
+          stdio: 'inherit'
+        });
+      } catch (err) {
+        logger.error('PODS:PAGER', `Failed to open pager: ${err.message}`, err);
+      }
+    });
   } catch (err) {
     logger.warn('PODS:PAGER', `Could not write temporary file: ${err.message}`);
-    return;
-  }
-
-  runInteractiveTerminal(() => {
-    try {
-      const parts = pager.trim().split(/\s+/);
-      const bin = parts[0];
-      const args = [...parts.slice(1), tmpFile];
-      spawnSync(bin, args, {
-        stdio: 'inherit'
-      });
-    } catch (err) {
-      logger.error('PODS:PAGER', `Failed to open pager: ${err.message}`, err);
+  } finally {
+    if (tmpDir) {
+      try {
+        fsSync.rmSync(tmpDir, { recursive: true, force: true });
+      } catch {
+        // Ignore cleanup error
+      }
     }
-  });
-
-  try {
-    fsSync.unlinkSync(tmpFile);
-  } catch {
-    // Ignore cleanup error
   }
 }
 

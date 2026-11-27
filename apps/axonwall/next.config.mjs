@@ -40,23 +40,25 @@ if ((!isProduction || process.env.AXONWALL_DEV === '1') && !fs.existsSync('/etc/
 
 const buildCspHeader = (frameAncestors) => `
   default-src 'self';
-  script-src 'self' 'unsafe-eval' 'unsafe-inline';
+  script-src 'self' 'unsafe-inline'${isProduction ? '' : " 'unsafe-eval'"};
   style-src 'self' 'unsafe-inline';
   img-src 'self' blob: data:;
   font-src 'self';
+  connect-src 'self';
+  frame-src 'self';
   object-src 'none';
   base-uri 'self';
   form-action 'self';
   frame-ancestors ${frameAncestors};
   ${isProduction ? 'upgrade-insecure-requests;' : ''}
-`.replace(/\n/g, '');
+`.replace(/\s+/g, ' ').trim();
 
 const buildSecurityHeaders = (frameAncestors, xFrameOptions) => {
   const headers = [
     { key: 'Content-Security-Policy', value: buildCspHeader(frameAncestors) },
     { key: 'X-Content-Type-Options', value: 'nosniff' },
     { key: 'X-Frame-Options', value: xFrameOptions },
-    { key: 'X-XSS-Protection', value: '1; mode=block' },
+    { key: 'X-XSS-Protection', value: '0' },
     { key: 'Referrer-Policy', value: 'strict-origin-when-cross-origin' },
     { key: 'Permissions-Policy', value: 'camera=(), microphone=(), geolocation=()' },
   ];

@@ -84,8 +84,16 @@ function writeRevocationFileAtomic(filePath: string, content: string, mode = 0o6
   }
 }
 
-function normalizeEpochUserKey(username: string): string {
-  return username.trim().toLowerCase();
+function normalizeEpochUserKey(username: string, source?: string): string {
+  const cleanUser = username.trim().toLowerCase();
+  if (!cleanUser) return '';
+  if (source === 'oidc' && !cleanUser.startsWith('oidc:')) {
+    return `oidc:${cleanUser}`;
+  }
+  if (source === 'ldap' && !cleanUser.startsWith('ldap:')) {
+    return `ldap:${cleanUser}`;
+  }
+  return cleanUser;
 }
 
 function readUserEpochMap(): Map<string, number> {
@@ -105,8 +113,8 @@ function readUserEpochMap(): Map<string, number> {
   return combined;
 }
 
-export function currentUserSessionEpoch(username: string): number {
-  const key = normalizeEpochUserKey(username);
+export function currentUserSessionEpoch(username: string, source?: string): number {
+  const key = normalizeEpochUserKey(username, source);
   if (!key) return 0;
   const epoch = readUserEpochMap().get(key) ?? 0;
   if (epoch > (memoryUserEpochs.get(key) ?? 0)) {
@@ -116,8 +124,8 @@ export function currentUserSessionEpoch(username: string): number {
 }
 
 /** Invalidate outstanding sessions for a single user (e.g. self-service password reset/change). */
-export function bumpUserSessionEpoch(username: string): number {
-  const key = normalizeEpochUserKey(username);
+export function bumpUserSessionEpoch(username: string, source?: string): number {
+  const key = normalizeEpochUserKey(username, source);
   if (!key) return 0;
   const combined = readUserEpochMap();
   const nextVal = Math.max(Date.now(), (combined.get(key) ?? 0) + 1);
@@ -156,7 +164,7 @@ export function currentSessionEpoch(): number {
 /** Stamp a session with the current global and per-user epochs before it is minted. */
 export function stampSessionEpoch(session: UserSession): void {
   session.sessionEpoch = currentSessionEpoch();
-  session.userSessionEpoch = currentUserSessionEpoch(session.username);
+  session.userSessionEpoch = currentUserSessionEpoch(session.username, session.source);
 }
 
 /** Invalidate every outstanding session (password change). */
@@ -231,7 +239,7 @@ export function revokeTokenJti(jti: string, expSec?: number): void {
 /** True when a decoded session has been revoked or predates the epoch. */
 export function isSessionRevoked(session: UserSession): boolean {
   if ((session.sessionEpoch ?? 0) !== currentSessionEpoch()) return true;
-  if ((session.userSessionEpoch ?? 0) < currentUserSessionEpoch(session.username)) return true;
+  if ((session.userSessionEpoch ?? 0) < currentUserSessionEpoch(session.username, session.source)) return true;
   if (session.jti && readRevokedJtiMap().has(session.jti)) return true;
   return false;
 }

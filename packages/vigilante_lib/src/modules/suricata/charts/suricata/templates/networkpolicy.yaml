@@ -1,0 +1,41 @@
+{{- if .Values.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "suricata.fullname" . }}
+  namespace: {{ include "suricata.namespace" . }}
+  labels:
+    {{- include "suricata.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "suricata.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  policyTypes:
+    - Ingress
+    - Egress
+  {{- with .Values.networkPolicy.allowIngressFrom }}
+  ingress:
+    - from:
+        {{- toYaml . | nindent 8 }}
+  {{- else }}
+  ingress: []
+  {{- end }}
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    {{- range .Values.networkPolicy.allowEgressCidrs }}
+    - to:
+        - ipBlock:
+            cidr: {{ . | quote }}
+            except:
+              - 169.254.169.254/32
+    {{- end }}
+{{- end }}

@@ -17,15 +17,16 @@ export async function initCtfWorkspace({
   challenges = []
 } = {}) {
   const absTargetDir = path.resolve(targetDir);
-  await fs.mkdir(absTargetDir, { recursive: true });
+  await fs.mkdir(absTargetDir, { recursive: true, mode: 0o700 });
+  await fs.chmod(absTargetDir, 0o700).catch(() => {});
 
   const categories = ['web', 'pwn', 'crypto', 'rev', 'forensics', 'misc'];
   for (const cat of categories) {
-    await fs.mkdir(path.join(absTargetDir, cat), { recursive: true });
+    await fs.mkdir(path.join(absTargetDir, cat), { recursive: true, mode: 0o700 });
   }
 
   // Create writeups directory
-  await fs.mkdir(path.join(absTargetDir, 'writeups'), { recursive: true });
+  await fs.mkdir(path.join(absTargetDir, 'writeups'), { recursive: true, mode: 0o700 });
 
   // Save workspace configuration
   const configData = {
@@ -37,11 +38,13 @@ export async function initCtfWorkspace({
     challengesCount: challenges.length
   };
 
+  const ctfConfigPath = path.join(absTargetDir, '.vigilante-ctf.json');
   await fs.writeFile(
-    path.join(absTargetDir, '.vigilante-ctf.json'),
+    ctfConfigPath,
     JSON.stringify(configData, null, 2),
-    'utf8'
+    { encoding: 'utf8', mode: 0o600 }
   );
+  await fs.chmod(ctfConfigPath, 0o600);
 
   // Scaffold challenge directories
   const scaffolded = [];
@@ -210,7 +213,8 @@ export async function generateSignedWriteup({
   outputDir = './ctf-workspace/writeups'
 }) {
   const absOutputDir = path.resolve(outputDir);
-  await fs.mkdir(absOutputDir, { recursive: true });
+  await fs.mkdir(absOutputDir, { recursive: true, mode: 0o700 });
+  await fs.chmod(absOutputDir, 0o700).catch(() => {});
 
   const safeChal = sanitizePathComponent(String(challengeId).toLowerCase(), 'challengeId');
   const filename = `writeup-${safeChal}.md`;
@@ -240,7 +244,8 @@ ${exploitScript || '# Working exploit script'}
 *Generated and cryptographically sealed via Vigilante CTF Operator.*
 `;
 
-  await fs.writeFile(filePath, writeupMarkdown, 'utf8');
+  await fs.writeFile(filePath, writeupMarkdown, { encoding: 'utf8', mode: 0o600 });
+  await fs.chmod(filePath, 0o600);
 
   // Attempt GPG signature
   let signaturePath = null;
@@ -287,7 +292,8 @@ export async function recordSolveSession({
   }
 
   const absDir = path.resolve(outputDir);
-  await fs.mkdir(absDir, { recursive: true });
+  await fs.mkdir(absDir, { recursive: true, mode: 0o700 });
+  await fs.chmod(absDir, 0o700).catch(() => {});
 
   const safeChal = sanitizePathComponent(String(challengeId).toLowerCase(), 'challengeId');
   const filename = `session-${safeChal}-${Date.now()}.cast`;
@@ -312,7 +318,8 @@ export async function recordSolveSession({
   lines.push(JSON.stringify([durationMs / 1000, 'o', '\r\n[+] Exploit finished. Session terminated.\r\n']));
 
   const castContent = lines.join('\n') + '\n';
-  await fs.writeFile(filePath, castContent, 'utf8');
+  await fs.writeFile(filePath, castContent, { encoding: 'utf8', mode: 0o600 });
+  await fs.chmod(filePath, 0o600);
 
   logger.info('CTF_CLIENT:RECORDER', `Recorded solve replay session to ${filePath}`);
   return {
@@ -341,7 +348,8 @@ export async function sealSolveEvidence({
   }
 
   const absDir = path.resolve(outputDir);
-  await fs.mkdir(absDir, { recursive: true });
+  await fs.mkdir(absDir, { recursive: true, mode: 0o700 });
+  await fs.chmod(absDir, 0o700).catch(() => {});
 
   // 1. Calculate cryptographic SHA-256 hashes of all artifacts
   const solveScriptHash = crypto.createHash('sha256').update(solveScriptContent || '').digest('hex');
@@ -402,7 +410,8 @@ export async function sealSolveEvidence({
     merkleRoot
   };
 
-  await fs.writeFile(manifestFile, JSON.stringify(fullSealRecord, null, 2), 'utf8');
+  await fs.writeFile(manifestFile, JSON.stringify(fullSealRecord, null, 2), { encoding: 'utf8', mode: 0o600 });
+  await fs.chmod(manifestFile, 0o600);
 
   // 5. Attempt GPG signature if enabled
   let isSigned = false;

@@ -88,6 +88,10 @@ describe('LibreNMS K3s Monitoring Plugin & Compiler', () => {
     expect(compiled.k3sManifestsYaml).toContain('librenms-dispatcher');
     expect(compiled.k3sManifestsYaml).toContain('librenms-syslogng');
     expect(compiled.k3sManifestsYaml).toContain('librenms-snmptrapd');
+    expect(compiled.k3sManifestsYaml).toContain('--requirepass "$VALKEY_PASSWORD"');
+    expect(compiled.k3sManifestsYaml).toContain('name: REDIS_PASSWORD');
+    expect(compiled.k3sManifestsYaml).toContain('kind: NetworkPolicy');
+    expect(compiled.k3sManifestsYaml).toContain('name: librenms-valkey-ingress');
 
     const plan = buildLibreNmsEnrollmentPlan(state);
     expect(plan.snmpEnabledOnLocal).toBe(true);

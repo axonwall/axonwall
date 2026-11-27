@@ -96,20 +96,27 @@ spec:
       annotations:
         checksum/secret: {{ include (print $.Template.BasePath "/secrets.yaml") . | sha256sum }}
     spec:
+      automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
         runAsUser: 1001
         runAsGroup: 1001
         fsGroup: 1001
         fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
       initContainers:
         - name: render-collector-config
-          image: "{{ .Values.controller.image.repository }}:{{ .Values.controller.image.tag }}"
+          image: "{{ .Values.controller.image.repository }}:{{ .Values.controller.image.tag }}{{- if .Values.controller.image.digest }}@{{ .Values.controller.image.digest }}{{- end }}"
           imagePullPolicy: {{ .Values.global.imagePullPolicy }}
           securityContext:
+            runAsNonRoot: true
             allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
             capabilities:
               drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
           env:
             - name: CLICKHOUSE_PASSWORD
               valueFrom:
@@ -136,7 +143,7 @@ spec:
               mountPath: /etc/axonwall/managed
       containers:
         - name: axonwalld
-          image: "{{ .Values.collector.axonwalld.image.repository }}:{{ .Values.collector.axonwalld.image.tag }}"
+          image: "{{ .Values.collector.axonwalld.image.repository }}:{{ .Values.collector.axonwalld.image.tag }}{{- if .Values.collector.axonwalld.image.digest }}@{{ .Values.collector.axonwalld.image.digest }}{{- end }}"
           imagePullPolicy: {{ .Values.global.imagePullPolicy }}
           args:
             - "--mode=collector"
@@ -145,9 +152,12 @@ spec:
             - "--bundle-dir"
             - "/var/lib/axonwall/bundles"
           securityContext:
+            runAsNonRoot: true
             allowPrivilegeEscalation: false
             capabilities:
               drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
           env:
             - name: AXONWALL_MODE
               value: "collector"
@@ -192,12 +202,15 @@ spec:
               readOnly: true
         {{- if .Values.collector.ui.enabled }}
         - name: axonwall-ui
-          image: "{{ .Values.collector.ui.image.repository }}:{{ .Values.collector.ui.image.tag }}"
+          image: "{{ .Values.collector.ui.image.repository }}:{{ .Values.collector.ui.image.tag }}{{- if .Values.collector.ui.image.digest }}@{{ .Values.collector.ui.image.digest }}{{- end }}"
           imagePullPolicy: {{ .Values.global.imagePullPolicy }}
           securityContext:
+            runAsNonRoot: true
             allowPrivilegeEscalation: false
             capabilities:
               drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
           env:
             - name: NODE_ENV
               value: "production"
@@ -275,12 +288,15 @@ spec:
         {{- end }}
         {{- if .Values.controller.enabled }}
         - name: axonwall-controller
-          image: "{{ .Values.controller.image.repository }}:{{ .Values.controller.image.tag }}"
+          image: "{{ .Values.controller.image.repository }}:{{ .Values.controller.image.tag }}{{- if .Values.controller.image.digest }}@{{ .Values.controller.image.digest }}{{- end }}"
           imagePullPolicy: {{ .Values.global.imagePullPolicy }}
           securityContext:
+            runAsNonRoot: true
             allowPrivilegeEscalation: false
             capabilities:
               drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
           env:
             - name: NODE_ENV
               value: "production"

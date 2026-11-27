@@ -4,6 +4,7 @@ import {
   type NetFlowConfig,
 } from '../../schemas/index.js';
 import { isPluginEnabled } from '../../plugins/index.js';
+import { isValidIPv4, isValidIPv6 } from '../../util/index.js';
 
 export interface NetFlowInterfaceHint {
   name: string;
@@ -559,10 +560,14 @@ export function formatBps(bps: number): string {
 }
 
 function escapeCsvCell(raw: string): string {
-  if (raw.includes(',') || raw.includes('"') || raw.includes('\n')) {
-    return `"${raw.replace(/"/g, '""')}"`;
+  let clean = String(raw ?? '').replace(/[\r\n]+/g, ' ');
+  if (/^\s*[=+\-@\t\r]/.test(clean)) {
+    clean = `'${clean}`;
   }
-  return raw;
+  if (clean.includes(',') || clean.includes('"')) {
+    return `"${clean.replace(/"/g, '""')}"`;
+  }
+  return clean;
 }
 
 export function buildFlowExportCsv(flows: NetFlowRecordView[]): string {
@@ -616,14 +621,24 @@ export function buildFlowExportCsv(flows: NetFlowRecordView[]): string {
 }
 
 export function buildTcpdumpFilter(flow: NetFlowRecordView): string {
+  const srcIp = String(flow.srcIp ?? '').trim();
+  const dstIp = String(flow.dstIp ?? '').trim();
+  if (!(isValidIPv4(srcIp) || isValidIPv6(srcIp))) {
+    throw new Error(`Invalid source IP for tcpdump filter: ${flow.srcIp}`);
+  }
+  if (!(isValidIPv4(dstIp) || isValidIPv6(dstIp))) {
+    throw new Error(`Invalid destination IP for tcpdump filter: ${flow.dstIp}`);
+  }
+
   const parts: string[] = [];
   if (flow.protocol === 6) parts.push('tcp');
   else if (flow.protocol === 17) parts.push('udp');
   else if (flow.protocol === 1) parts.push('icmp');
 
-  parts.push(`host ${flow.srcIp} and host ${flow.dstIp}`);
-  if ((flow.protocol === 6 || flow.protocol === 17) && flow.dstPort > 0) {
-    parts.push(`port ${flow.dstPort}`);
+  parts.push(`host ${srcIp} and host ${dstIp}`);
+  const dstPort = Number(flow.dstPort);
+  if ((flow.protocol === 6 || flow.protocol === 17) && Number.isInteger(dstPort) && dstPort >= 1 && dstPort <= 65535) {
+    parts.push(`port ${dstPort}`);
   }
   return parts.join(' and ');
 }

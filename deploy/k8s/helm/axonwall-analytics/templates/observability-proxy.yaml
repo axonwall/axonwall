@@ -11,6 +11,7 @@ metadata:
 data:
   proxy.js: |
     const http = require('node:http');
+    const path = require('node:path');
     const crypto = require('node:crypto');
 
     const expectedToken = (process.env.AXONWALL_OBSERVABILITY_TOKEN || '').trim();
@@ -25,9 +26,56 @@ data:
       return crypto.timingSafeEqual(a, b);
     }
 
+    function normalizeAndValidatePath(rawUrl) {
+      if (typeof rawUrl !== 'string' || !rawUrl.startsWith('/') || rawUrl.startsWith('//') || rawUrl.includes('\\') || rawUrl.includes('\0')) {
+        return null;
+      }
+      const rawPath = rawUrl.split(/[?#]/, 1)[0];
+      if (rawPath.split('/').some((s) => s === '.' || s === '..')) {
+        return null;
+      }
+      let decoded = rawPath;
+      for (let i = 0; i < 3; i++) {
+        let next;
+        try {
+          next = decodeURIComponent(decoded);
+        } catch {
+          return null;
+        }
+        if (next.includes('\0') || next.includes('\\')) {
+          return null;
+        }
+        if (next.split('/').some((s) => s === '.' || s === '..')) {
+          return null;
+        }
+        if (next === decoded) break;
+        decoded = next;
+      }
+      let parsed;
+      try {
+        parsed = new URL(rawUrl, 'http://localhost');
+      } catch {
+        return null;
+      }
+      if (parsed.origin !== 'http://localhost') {
+        return null;
+      }
+      const normPath = path.posix.normalize(parsed.pathname);
+      if (!normPath.startsWith('/') || normPath.split('/').some((s) => s === '.' || s === '..')) {
+        return null;
+      }
+      return { normPath, search: parsed.search || '' };
+    }
+
     const server = http.createServer((req, res) => {
-      const reqUrl = req.url || '/';
-      if (reqUrl === '/healthz') {
+      const validated = normalizeAndValidatePath(req.url || '/');
+      if (!validated) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Invalid request path' }));
+        return;
+      }
+      const { normPath, search } = validated;
+      if (normPath === '/healthz') {
         res.writeHead(200, { 'Content-Type': 'text/plain' });
         res.end('ok');
         return;
@@ -47,9 +95,9 @@ data:
       }
 
       let upstream = null;
-      if (reqUrl === '/vm' || reqUrl.startsWith('/vm/') || reqUrl.startsWith('/vm?')) {
+      if (normPath === '/vm' || normPath.startsWith('/vm/')) {
         upstream = vmTarget;
-      } else if (reqUrl === '/vl' || reqUrl.startsWith('/vl/') || reqUrl.startsWith('/vl?')) {
+      } else if (normPath === '/vl' || normPath.startsWith('/vl/')) {
         upstream = vlTarget;
       }
       if (!upstream) {
@@ -67,7 +115,7 @@ data:
         {
           hostname: target.hostname,
           port: target.port,
-          path: reqUrl,
+          path: normPath + search,
           method: req.method,
           headers,
         },
@@ -111,19 +159,26 @@ spec:
       annotations:
         checksum/secret: {{ include (print $.Template.BasePath "/secrets.yaml") . | sha256sum }}
     spec:
+      automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
         runAsUser: 1001
         runAsGroup: 1001
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: obs-proxy
-          image: "{{ .Values.controller.image.repository }}:{{ .Values.controller.image.tag }}"
+          image: "{{ .Values.controller.image.repository }}:{{ .Values.controller.image.tag }}{{- if .Values.controller.image.digest }}@{{ .Values.controller.image.digest }}{{- end }}"
           imagePullPolicy: {{ .Values.global.imagePullPolicy }}
           command: ["node", "/etc/axonwall/obs-proxy/proxy.js"]
           securityContext:
+            runAsNonRoot: true
             allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
             capabilities:
               drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
           env:
             - name: PROXY_PORT
               value: "8480"

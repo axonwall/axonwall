@@ -19,12 +19,24 @@ spec:
       labels:
         {{- include "openvas.selectorLabels" . | nindent 8 }}
     spec:
+      automountServiceAccountToken: false
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
       initContainers:
         - name: pg-init
           image: {{ .Values.psgvm.image.repository }}:{{ .Values.psgvm.image.tag }}
           imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+              add:
+                - CHOWN
+                - DAC_OVERRIDE
+                - FOWNER
+                - SETUID
+                - SETGID
           command: ["/bin/sh", "-c", "/init-scripts/init-postgres.sh"]
           env:
             - name: POSTGRES_VERSION
@@ -44,6 +56,11 @@ spec:
         - name: notus-data
           image: registry.community.greenbone.net/community/notus-data
           imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
           volumeMounts:
             - name: shared-storage
               mountPath: /mnt
@@ -52,6 +69,11 @@ spec:
         - name: scap-data
           image: registry.community.greenbone.net/community/scap-data
           imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
           volumeMounts:
             - name: gvmd-storage
               mountPath: /mnt
@@ -60,6 +82,11 @@ spec:
         - name: cert-bund-data
           image: registry.community.greenbone.net/community/cert-bund-data
           imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
           volumeMounts:
             - name: gvmd-storage
               mountPath: /mnt
@@ -68,6 +95,11 @@ spec:
         - name: dfn-cert-data
           image: registry.community.greenbone.net/community/dfn-cert-data
           imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
           volumeMounts:
             - name: gvmd-storage
               mountPath: /mnt
@@ -76,6 +108,11 @@ spec:
         - name: data-objects
           image: registry.community.greenbone.net/community/data-objects
           imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
           env:
             - name: FEED_RELEASE
               value: "{{ .Values.FEED_RELEASE }}"
@@ -87,6 +124,11 @@ spec:
         - name: report-formats
           image: registry.community.greenbone.net/community/report-formats
           imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
           env:
             - name: FEED_RELEASE
               value: "{{ .Values.FEED_RELEASE }}"
@@ -98,6 +140,11 @@ spec:
         - name: gpg-data
           image: registry.community.greenbone.net/community/gpg-data
           imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
           volumeMounts:
             - name: openvas-storage
               mountPath: /mnt
@@ -106,6 +153,11 @@ spec:
         - name: vulnerability-tests
           image: registry.community.greenbone.net/community/vulnerability-tests
           imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
           env:
             - name: FEED_RELEASE
               value: "{{ .Values.FEED_RELEASE }}"
@@ -118,6 +170,11 @@ spec:
         - name: configure-openvas
           image: registry.community.greenbone.net/community/openvas-scanner:stable
           imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
           volumeMounts:
             - name: openvas-storage
               mountPath: /mnt
@@ -130,17 +187,22 @@ spec:
             - |
               printf "table_driven_lsc = yes\nopenvasd_server = http://127.0.0.1:81\n" > /mnt/openvas.conf
               if [ -f /etc/openvas/openvas_log.conf ]; then
-                sed "s/127/{{ .Values.logLevel }}/" /etc/openvas/openvas_log.conf | sed 's/gvm/openvas/' > /mnt/openvas_log.conf
+                sed "s/127/{{ int .Values.logLevel }}/" /etc/openvas/openvas_log.conf | sed 's/gvm/openvas/' > /mnt/openvas_log.conf
               fi
               chmod 644 /mnt/openvas.conf 2>/dev/null || true
               mkdir -p /var/log/openvas
               touch /var/log/openvas/openvas.log
-              chmod 666 /var/log/openvas/openvas.log 2>/dev/null || true
+              chmod 0640 /var/log/openvas/openvas.log 2>/dev/null || true
 
       containers:
         - name: redis-server
           image: registry.community.greenbone.net/community/redis-server
           imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
           volumeMounts:
             - name: shared-storage
               mountPath: /run/redis
@@ -164,6 +226,17 @@ spec:
         - name: pg-gvm
           image: {{ .Values.psgvm.image.repository }}:{{ .Values.psgvm.image.tag }}
           imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+              add:
+                - CHOWN
+                - DAC_OVERRIDE
+                - FOWNER
+                - SETUID
+                - SETGID
           volumeMounts:
             - name: psql-storage
               mountPath: /var/lib/postgresql
@@ -194,6 +267,17 @@ spec:
         - name: gvmd
           image: registry.community.greenbone.net/community/gvmd:stable
           imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+              add:
+                - CHOWN
+                - DAC_OVERRIDE
+                - FOWNER
+                - SETUID
+                - SETGID
           env:
             - name: ADMIN_USERNAME
               valueFrom:
@@ -252,6 +336,11 @@ spec:
         - name: gsa
           image: registry.community.greenbone.net/community/gsa:stable
           imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
           ports:
             - name: gsa
               containerPort: 9392
@@ -283,6 +372,11 @@ spec:
         - name: openvas
           image: registry.community.greenbone.net/community/openvas-scanner:stable
           imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
           volumeMounts:
             - name: openvas-storage
               mountPath: /etc/openvas
@@ -298,6 +392,11 @@ spec:
         - name: openvasd
           image: registry.community.greenbone.net/community/openvas-scanner:stable
           imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
           ports:
             - name: openvasd
               containerPort: 81
@@ -334,9 +433,14 @@ spec:
           image: {{ .Values.ospd.image.repository }}:{{ .Values.ospd.image.tag }}
           imagePullPolicy: IfNotPresent
           securityContext:
+            allowPrivilegeEscalation: false
             capabilities:
-              add: ["NET_ADMIN", "NET_RAW"]
-          command: ["ospd-openvas", "-f", "--config", "/etc/gvm/ospd-openvas.conf", "--notus-feed-dir", "/var/lib/notus/advisories", "-m", "666"]
+              drop:
+                - ALL
+              add:
+                - NET_ADMIN
+                - NET_RAW
+          command: ["ospd-openvas", "-f", "--config", "/etc/gvm/ospd-openvas.conf", "--notus-feed-dir", "/var/lib/notus/advisories", "-m", "660"]
           readinessProbe:
             exec:
               command:
@@ -373,6 +477,11 @@ spec:
         - name: gvm-tools
           image: registry.community.greenbone.net/community/gvm-tools
           imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
           volumeMounts:
             - name: gvmd-socket
               mountPath: /run/gvmd

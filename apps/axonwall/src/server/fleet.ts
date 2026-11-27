@@ -6,7 +6,10 @@ import { getSession } from './auth';
 import { assertActionPermitted } from './auth-guard';
 import { getAgentToken } from './agent-client';
 import { getDesiredStateInternal } from './desired-state-internal';
-import { assertSafeOutboundUrl } from './ssrf-guard';
+import { assertPluginEnabled } from './plugin-guard';
+import { assertSafeOutboundUrl, createPinnedLookup } from './ssrf-guard';
+
+const MAX_FLEET_RESPONSE_BYTES = 10 * 1024 * 1024;
 
 export interface LiveFleetSatellite {
   id: string;
@@ -70,12 +73,14 @@ async function requestControllerJson<T>(
   timeoutMs = 4000
 ): Promise<FleetApiEnvelope<T>> {
   let parsed: URL;
+  let addresses: Array<{ address: string; family: number }>;
   try {
-    const { url } = await assertSafeOutboundUrl(`${baseUrl}${reqPath}`, {
+    const resolved = await assertSafeOutboundUrl(`${baseUrl}${reqPath}`, {
       allowHttp: true,
       allowPrivate: true,
     });
-    parsed = url;
+    parsed = resolved.url;
+    addresses = resolved.addresses;
   } catch (err: any) {
     return { reachable: false, error: err?.message || 'Invalid controller URL' };
   }
@@ -109,6 +114,7 @@ async function requestControllerJson<T>(
         method,
         headers,
         timeout: timeoutMs,
+        lookup: createPinnedLookup(addresses),
         ...(isHttps && isLoopbackHost(parsed.hostname) ? { rejectUnauthorized: false } : {}),
       },
       (res) => {
@@ -118,14 +124,24 @@ async function requestControllerJson<T>(
           finish({ reachable: false, status, error: `Controller redirect (${status}) blocked by SSRF policy` });
           return;
         }
-        let raw = '';
-        res.on('data', (chunk) => {
-          raw += chunk;
+        const chunks: Buffer[] = [];
+        let totalBytes = 0;
+        res.on('data', (chunk: Buffer) => {
+          const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+          totalBytes += buf.length;
+          if (totalBytes > MAX_FLEET_RESPONSE_BYTES) {
+            res.destroy();
+            req.destroy();
+            finish({ reachable: false, error: 'Controller response exceeded maximum allowed size' });
+            return;
+          }
+          chunks.push(buf);
         });
         res.on('error', (err: any) => {
           finish({ reachable: false, error: err?.message || 'Controller response stream failed' });
         });
         res.on('end', () => {
+          const raw = Buffer.concat(chunks).toString('utf8');
           let json: any = null;
           try {
             json = raw ? JSON.parse(raw) : null;
@@ -165,6 +181,7 @@ export async function getLiveFleetSatellitesAction(): Promise<
 > {
   const session = await getSession();
   assertActionPermitted(session);
+  await assertPluginEnabled('fleet-controller');
   const { baseUrl, token } = await resolveControllerConnection();
   const res = await requestControllerJson<LiveFleetSatellite[] | { satellites?: LiveFleetSatellite[] }>(
     baseUrl,
@@ -186,6 +203,7 @@ export async function getLiveFleetSatellitesAction(): Promise<
 export async function getLiveFleetFlowsAction(): Promise<FleetApiEnvelope<Record<string, unknown>>> {
   const session = await getSession();
   assertActionPermitted(session);
+  await assertPluginEnabled('fleet-controller');
   const { baseUrl, token } = await resolveControllerConnection();
   return await requestControllerJson<Record<string, unknown>>(
     baseUrl,
@@ -202,6 +220,7 @@ export async function triggerFleetSyncAction(
 ): Promise<FleetApiEnvelope<{ syncedCount?: number; syncedSatellites?: number; message?: string }>> {
   const session = await getSession();
   assertActionPermitted(session, 'admin');
+  await assertPluginEnabled('fleet-controller');
   const { baseUrl, token } = await resolveControllerConnection();
   // Controller /api/v1/fleet/sync expects an empty body to re-sync from on-disk /etc/axonwall/state.json.
   const res = await requestControllerJson<{
@@ -226,6 +245,7 @@ export async function blockFleetTargetAction(
 ): Promise<FleetApiEnvelope<{ blockedCount?: number; message?: string }>> {
   const session = await getSession();
   assertActionPermitted(session, 'admin');
+  await assertPluginEnabled('fleet-controller');
   const cleanTarget = target.trim();
   const isMac = MAC_TARGET_RE.test(cleanTarget);
   const { baseUrl, token } = await resolveControllerConnection();
@@ -244,6 +264,7 @@ export async function unblockFleetTargetAction(
 ): Promise<FleetApiEnvelope<{ unblockedCount?: number; message?: string }>> {
   const session = await getSession();
   assertActionPermitted(session, 'admin');
+  await assertPluginEnabled('fleet-controller');
   const cleanTarget = target.trim();
   const isMac = MAC_TARGET_RE.test(cleanTarget);
   const { baseUrl, token } = await resolveControllerConnection();

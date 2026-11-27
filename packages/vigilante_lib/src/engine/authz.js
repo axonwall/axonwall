@@ -160,6 +160,19 @@ export function hashPassword(password) {
 }
 
 /**
+ * Constant-time string comparison via crypto.timingSafeEqual
+ */
+function constantTimeEqualStrings(a, b) {
+  if (typeof a !== 'string' || typeof b !== 'string') {
+    return false;
+  }
+  const bufA = Buffer.from(a, 'utf8');
+  const bufB = Buffer.from(b, 'utf8');
+  if (bufA.length !== bufB.length) return false;
+  return crypto.timingSafeEqual(bufA, bufB);
+}
+
+/**
  * Constant-time verification of password or token against stored tokenHash
  */
 export function verifyPasswordOrToken(secret, tokenHash) {
@@ -169,20 +182,14 @@ export function verifyPasswordOrToken(secret, tokenHash) {
   try {
     if (tokenHash.startsWith('sha256:')) {
       const computed = hashToken(secret);
-      const a = Buffer.from(computed);
-      const b = Buffer.from(tokenHash);
-      if (a.length !== b.length) return false;
-      return crypto.timingSafeEqual(a, b);
+      return constantTimeEqualStrings(computed, tokenHash);
     }
     if (tokenHash.startsWith('scrypt:')) {
       const parts = tokenHash.split(':');
       if (parts.length !== 3) return false;
       const [, salt, expectedHashHex] = parts;
       const derived = crypto.scryptSync(secret, salt, 64);
-      const a = Buffer.from(derived.toString('hex'));
-      const b = Buffer.from(expectedHashHex);
-      if (a.length !== b.length) return false;
-      return crypto.timingSafeEqual(a, b);
+      return constantTimeEqualStrings(derived.toString('hex'), expectedHashHex);
     }
   } catch {
     return false;
@@ -372,13 +379,18 @@ export async function createSession(principalId, filePath = getVigilanteAuthzFil
  * Resolve principal from raw session token
  */
 export function resolvePrincipalBySession(store, rawSessionToken) {
-  if (!rawSessionToken || !store || !Array.isArray(store.sessions)) {
+  if (!rawSessionToken || typeof rawSessionToken !== 'string' || !store || !Array.isArray(store.sessions)) {
     return { principal: null, expired: false };
   }
   const idHash = hashToken(rawSessionToken);
   const now = Date.now();
 
-  const session = store.sessions.find(s => s.idHash === idHash);
+  let session = null;
+  for (const s of store.sessions) {
+    if (s && typeof s.idHash === 'string' && constantTimeEqualStrings(s.idHash, idHash) && !session) {
+      session = s;
+    }
+  }
   if (!session) {
     return { principal: null, expired: false };
   }
@@ -395,12 +407,15 @@ export function resolvePrincipalBySession(store, rawSessionToken) {
  * Revoke a session token
  */
 export async function revokeSession(rawSessionToken, filePath = getVigilanteAuthzFile()) {
+  if (!rawSessionToken || typeof rawSessionToken !== 'string') return;
   return withAuthzLock(filePath, async () => {
     const loaded = loadAuthzStore(filePath, { forceReload: true });
     if (loaded.state !== 'ready' || !loaded.store) return;
     const idHash = hashToken(rawSessionToken);
     const before = loaded.store.sessions.length;
-    loaded.store.sessions = loaded.store.sessions.filter(s => s.idHash !== idHash);
+    loaded.store.sessions = loaded.store.sessions.filter(
+      s => !s || typeof s.idHash !== 'string' || !constantTimeEqualStrings(s.idHash, idHash)
+    );
     if (loaded.store.sessions.length !== before) {
       await saveAuthzStore(loaded.store, filePath);
     }

@@ -8,7 +8,7 @@ import {
 } from './config.js';
 import { autoSignIfConfigured } from './gpg.js';
 import { saveEvidenceFile } from './evidence.js';
-import { assertSafeOutboundTarget } from './ssrf.js';
+import { assertSafeOutboundTarget, safeFetch, readResponseWithLimit } from './ssrf.js';
 import { logger } from '../utils/logger.js';
 
 export const ZAP_PROFILES = [
@@ -38,30 +38,43 @@ export const ZAP_PROFILES = [
  * @param {string} [apiKey='']
  * @returns {Promise<{ reachable: boolean, version: string }>}
  */
-export async function checkZapAvailable(zapBaseUrl = 'http://zap.vigilante.local', apiKey = '') {
-  const { url: safeBaseUrl } = await assertSafeOutboundTarget(zapBaseUrl, {
+export async function checkZapAvailable(zapBaseUrl = 'http://zap.vigilante.local', apiKey = '', opts = {}) {
+  const isDefaultUrl = zapBaseUrl === 'http://zap.vigilante.local';
+  const validatedTarget = await assertSafeOutboundTarget(zapBaseUrl, {
     label: 'ZAP base URL',
     allowPrivate: true,
     allowLoopback: true,
-    allowMetadata: false
+    allowMetadata: false,
+    dnsLookup: opts.dnsLookup,
+    failOnDnsError: opts.failOnDnsError ?? !isDefaultUrl
   });
-  const baseStr = safeBaseUrl.toString().replace(/\/+$/, '');
+  if (!validatedTarget.addresses || validatedTarget.addresses.length === 0) {
+    return { reachable: false, version: 'offline / emulation' };
+  }
+  const baseStr = validatedTarget.url.toString().replace(/\/+$/, '');
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 2000);
   try {
     const headers = {};
     if (apiKey) headers['X-ZAP-API-Key'] = apiKey;
 
-    const res = await fetch(`${baseStr}/JSON/core/view/version/`, {
+    const res = await safeFetch(`${baseStr}/JSON/core/view/version/`, {
       signal: controller.signal,
       redirect: 'error',
       headers
+    }, {
+      validatedTarget,
+      allowPrivate: true,
+      allowLoopback: true,
+      allowMetadata: false,
+      maxBytes: opts.maxBytes
     });
 
     if (res.ok) {
-      const data = await res.json();
+      const data = JSON.parse(await readResponseWithLimit(res, opts.maxBytes));
       return { reachable: true, version: data.version || 'unknown' };
     }
+    await res.body?.cancel?.().catch(() => {});
   } catch {
     // unreachable
   } finally {
@@ -82,7 +95,9 @@ export async function runZapScan(targetUrl, profileId = 'spider', opts = {}) {
     label: 'ZAP targetUrl',
     allowPrivate: opts.allowPrivate,
     allowLoopback: opts.allowLoopback,
-    allowMetadata: false
+    allowMetadata: false,
+    dnsLookup: opts.dnsLookup,
+    failOnDnsError: opts.failOnDnsError
   });
   const normalizedTargetUrl = safeTarget.toString();
 
@@ -90,13 +105,16 @@ export async function runZapScan(targetUrl, profileId = 'spider', opts = {}) {
   const zapDir = getVigilanteZapDir();
   const profile = ZAP_PROFILES.find((p) => p.id === profileId) || ZAP_PROFILES[0];
   const zapBaseUrl = opts.zapBaseUrl || 'http://zap.vigilante.local';
-  const { url: safeZapBase } = await assertSafeOutboundTarget(zapBaseUrl, {
+  const isDefaultZapBase = zapBaseUrl === 'http://zap.vigilante.local';
+  const safeZapTarget = await assertSafeOutboundTarget(zapBaseUrl, {
     label: 'ZAP base URL',
     allowPrivate: true,
     allowLoopback: true,
-    allowMetadata: false
+    allowMetadata: false,
+    dnsLookup: opts.dnsLookup,
+    failOnDnsError: opts.failOnDnsError ?? !isDefaultZapBase
   });
-  const cleanZapBase = safeZapBase.toString().replace(/\/+$/, '');
+  const cleanZapBase = safeZapTarget.url.toString().replace(/\/+$/, '');
   const apiKey = opts.apiKey || '';
 
   const timestamp = new Date().toISOString();
@@ -104,7 +122,7 @@ export async function runZapScan(targetUrl, profileId = 'spider', opts = {}) {
   let alerts = [];
   let urls = [];
 
-  const zapStatus = await checkZapAvailable(cleanZapBase, apiKey);
+  const zapStatus = await checkZapAvailable(cleanZapBase, apiKey, opts);
 
   if (zapStatus.reachable) {
     try {
@@ -112,16 +130,23 @@ export async function runZapScan(targetUrl, profileId = 'spider', opts = {}) {
       if (apiKey) headers['X-ZAP-API-Key'] = apiKey;
 
       const fetchZapJson = async (endpoint) => {
-        const res = await fetch(`${cleanZapBase}${endpoint}`, {
+        const res = await safeFetch(`${cleanZapBase}${endpoint}`, {
           method: 'GET',
           redirect: 'error',
           signal: AbortSignal.timeout(5000),
           headers
+        }, {
+          validatedTarget: safeZapTarget,
+          allowPrivate: true,
+          allowLoopback: true,
+          allowMetadata: false,
+          maxBytes: opts.maxBytes
         });
         if (!res.ok) {
+          await res.body?.cancel?.().catch(() => {});
           throw new Error(`ZAP API ${endpoint} returned HTTP ${res.status}`);
         }
-        return res.json();
+        return JSON.parse(await readResponseWithLimit(res, opts.maxBytes));
       };
 
       // Start spider (also primes URL tree for active scan)

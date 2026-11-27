@@ -1,10 +1,19 @@
 package engine
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/json"
+	"encoding/pem"
+	"math/big"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -227,5 +236,139 @@ func TestEnrollPKIClientVerifiedHTTPSOnly(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusOK || hits != 1 {
 		t.Fatalf("expected one verified HTTPS request, got status=%d hits=%d", resp.StatusCode, hits)
+	}
+}
+
+func TestSqliteSyncFailClosedOnCorruptOrExpiredPKI(t *testing.T) {
+	origCA, origCert, origKey := syncHAPKICACertPath, syncHAPKINodeCertPath, syncHAPKINodeKeyPath
+	t.Cleanup(func() {
+		syncHAPKICACertPath = origCA
+		syncHAPKINodeCertPath = origCert
+		syncHAPKINodeKeyPath = origKey
+	})
+
+	// Helper to reserve an ephemeral port for startMasterServer error checks.
+	freePort := func(t *testing.T) int {
+		t.Helper()
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		p := ln.Addr().(*net.TCPAddr).Port
+		_ = ln.Close()
+		return p
+	}
+
+	// 1. Missing all enrollment certs (os.ErrNotExist): falls back to http for bootstrap enrollment.
+	missingDir := t.TempDir()
+	syncHAPKICACertPath = filepath.Join(missingDir, "ca.crt")
+	syncHAPKINodeCertPath = filepath.Join(missingDir, "node.crt")
+	syncHAPKINodeKeyPath = filepath.Join(missingDir, "node.key")
+
+	mMissing := newMTLSManager()
+	_, schemeMissing := mMissing.peerClient(2 * time.Second)
+	if schemeMissing != "http" {
+		t.Fatalf("expected http fallback when enrollment PKI is absent, got %q", schemeMissing)
+	}
+
+	// 2. Corrupt node certificate when PKI files exist: fail closed (never downgrade to http).
+	pki := makeTestPKI(t)
+	syncHAPKICACertPath = pki.caCert
+	syncHAPKINodeCertPath = pki.nodeCert
+	syncHAPKINodeKeyPath = pki.nodeKey
+
+	// Valid PKI works over https.
+	mValid := newMTLSManager()
+	_, schemeValid := mValid.peerClient(2 * time.Second)
+	if schemeValid != "https" {
+		t.Fatalf("expected https with valid PKI, got %q", schemeValid)
+	}
+
+	// Corrupt node.crt -> peerClient stays https & fails requests, startMasterServer refuses cleartext fallback.
+	if err := os.WriteFile(pki.nodeCert, []byte("not-a-valid-pem-cert"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	clientCorrupt, schemeCorrupt := mValid.peerClient(2 * time.Second)
+	if schemeCorrupt != "https" {
+		t.Fatalf("expected fail-closed https scheme on corrupt PKI, got %q", schemeCorrupt)
+	}
+	if _, err := clientCorrupt.Get("https://127.0.0.1:1/api/v1/sync/status"); err == nil || !strings.Contains(err.Error(), "fail-closed") {
+		t.Fatalf("expected fail-closed error from corrupt peerClient, got: %v", err)
+	}
+	mMasterCorrupt := newMTLSManager()
+	mMasterCorrupt.cfg.LocalAddress = "127.0.0.1"
+	mMasterCorrupt.cfg.ListenPort = freePort(t)
+	mMasterCorrupt.mu.Lock()
+	errMasterCorrupt := mMasterCorrupt.startMasterServer()
+	mMasterCorrupt.mu.Unlock()
+	if errMasterCorrupt == nil {
+		mMasterCorrupt.Stop()
+		t.Fatal("expected startMasterServer to fail closed on corrupt PKI instead of downgrading to token-http")
+	}
+
+	// 3. Partial PKI (node.crt present without node.key): fail closed.
+	pkiPartial := makeTestPKI(t)
+	syncHAPKICACertPath = pkiPartial.caCert
+	syncHAPKINodeCertPath = pkiPartial.nodeCert
+	syncHAPKINodeKeyPath = pkiPartial.nodeKey
+	if err := os.Remove(pkiPartial.nodeKey); err != nil {
+		t.Fatal(err)
+	}
+	clientPartial, schemePartial := mValid.peerClient(2 * time.Second)
+	if schemePartial != "https" {
+		t.Fatalf("expected https fail-closed when node.key removed, got %q", schemePartial)
+	}
+	if _, err := clientPartial.Get("https://127.0.0.1:1/api/v1/sync/status"); err == nil {
+		t.Fatal("expected fail-closed error when node.key removed")
+	}
+
+	// 4. Expired node certificate: fail closed on both peerClient and startMasterServer.
+	pkiExpired := makeTestPKI(t)
+	syncHAPKICACertPath = pkiExpired.caCert
+	syncHAPKINodeCertPath = pkiExpired.nodeCert
+	syncHAPKINodeKeyPath = pkiExpired.nodeKey
+
+	caBytes, _ := os.ReadFile(pkiExpired.caCert)
+	caBlock, _ := pem.Decode(caBytes)
+	caCert, _ := x509.ParseCertificate(caBlock.Bytes)
+	caKeyBytes, _ := os.ReadFile(pkiExpired.caKey)
+	caKeyBlock, _ := pem.Decode(caKeyBytes)
+	caKey, _ := x509.ParseECPrivateKey(caKeyBlock.Bytes)
+	expKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	serial, _ := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 64))
+	tmpl := &x509.Certificate{
+		SerialNumber: serial,
+		Subject:      pkix.Name{CommonName: "expired-node"},
+		NotBefore:    time.Now().Add(-48 * time.Hour),
+		NotAfter:     time.Now().Add(-2 * time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, caCert, &expKey.PublicKey, caKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyDER, _ := x509.MarshalECPrivateKey(expKey)
+	_ = os.WriteFile(pkiExpired.nodeCert, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0644)
+	_ = os.WriteFile(pkiExpired.nodeKey, pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}), 0600)
+
+	clientExp, schemeExp := mValid.peerClient(2 * time.Second)
+	if schemeExp != "https" {
+		t.Fatalf("expected https fail-closed on expired node cert, got %q", schemeExp)
+	}
+	if _, err := clientExp.Get("https://127.0.0.1:1/api/v1/sync/status"); err == nil || !strings.Contains(err.Error(), "expired") {
+		t.Fatalf("expected expired error from fail-closed peerClient, got: %v", err)
+	}
+	mMasterExp := newMTLSManager()
+	mMasterExp.cfg.LocalAddress = "127.0.0.1"
+	mMasterExp.cfg.ListenPort = freePort(t)
+	mMasterExp.mu.Lock()
+	errMasterExp := mMasterExp.startMasterServer()
+	mMasterExp.mu.Unlock()
+	if errMasterExp == nil || !strings.Contains(errMasterExp.Error(), "expired") {
+		if errMasterExp == nil {
+			mMasterExp.Stop()
+		}
+		t.Fatalf("expected startMasterServer to fail closed on expired cert, got: %v", errMasterExp)
 	}
 }

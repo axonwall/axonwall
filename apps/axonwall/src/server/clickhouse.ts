@@ -1,25 +1,49 @@
+import http from 'node:http';
+import https from 'node:https';
 import { createClient, type ClickHouseClient } from '@clickhouse/client';
 import type { DesiredState } from '@axonwall/lib/schemas';
 import { getSession } from './auth';
 import { assertActionPermitted } from './auth-guard';
 import { getDesiredStateInternal } from './desired-state-internal';
-import { assertSafeOutboundUrl } from './ssrf-guard';
+import { assertSafeOutboundUrl, createPinnedLookup } from './ssrf-guard';
 
-let client: ClickHouseClient | null = null;
+async function createPinnedClickHouseClient(opts: {
+  url: string;
+  username: string;
+  password: string;
+  database: string;
+}): Promise<ClickHouseClient> {
+  const { url, addresses } = await assertSafeOutboundUrl(opts.url, {
+    allowHttp: true,
+    allowPrivate: true,
+  });
+  const isHttps = url.protocol === 'https:';
+  const lookup = createPinnedLookup(addresses);
+  const agent = isHttps ? new https.Agent({ lookup }) : new http.Agent({ lookup });
 
-function getEnvClient(): ClickHouseClient | null {
-  if (!process.env.CLICKHOUSE_URL || !process.env.CLICKHOUSE_PASSWORD) {
-    return null;
-  }
-  if (!client) {
-    client = createClient({
-      url: process.env.CLICKHOUSE_URL,
-      username: process.env.CLICKHOUSE_USER || 'admin',
-      password: process.env.CLICKHOUSE_PASSWORD,
-      database: process.env.CLICKHOUSE_DB || 'axonwall',
+  // Reject 3xx HTTP redirects at the transport level to prevent SSRF redirect bypasses.
+  const origAddRequest = (agent as any).addRequest.bind(agent);
+  (agent as any).addRequest = (req: http.ClientRequest, reqOpts: unknown) => {
+    req.once('response', (res: http.IncomingMessage) => {
+      const status = res.statusCode ?? 0;
+      if (status >= 300 && status < 400) {
+        res.resume();
+        req.destroy(new Error(`ClickHouse HTTP redirect (${status}) blocked by SSRF policy`));
+      }
     });
-  }
-  return client;
+    return origAddRequest(req, reqOpts);
+  };
+
+  return createClient({
+    url: url.toString(),
+    username: opts.username,
+    password: opts.password,
+    database: opts.database,
+    http_agent: agent,
+    clickhouse_settings: {
+      max_http_get_redirects: '0',
+    },
+  });
 }
 
 function buildStateClickHouseConfig(state?: DesiredState | null): {
@@ -88,6 +112,9 @@ export async function queryDataLakeMetrics(cfg?: {
   username?: string;
   password?: string;
 }): Promise<DataLakeMetricsSnapshot> {
+  const session = await getSession();
+  assertActionPermitted(session, 'readonly');
+
   const envUrl = process.env.CLICKHOUSE_URL?.trim();
   const envPass = process.env.CLICKHOUSE_PASSWORD;
   const useEnv = Boolean(envUrl && envPass);
@@ -108,8 +135,14 @@ export async function queryDataLakeMetrics(cfg?: {
 
   const database = (useEnv ? process.env.CLICKHOUSE_DB : cfg?.database)?.trim() || 'axonwall';
   const targetUrl = useEnv ? envUrl! : cfg!.url!.trim();
+  let ch: ClickHouseClient;
   try {
-    await assertSafeOutboundUrl(targetUrl, { allowHttp: true, allowPrivate: true });
+    ch = await createPinnedClickHouseClient({
+      url: targetUrl,
+      username: (useEnv ? process.env.CLICKHOUSE_USER?.trim() : cfg?.username?.trim()) || 'admin',
+      password: (useEnv ? envPass : cfg?.password) || '',
+      database,
+    });
   } catch (err: any) {
     return {
       configured: true,
@@ -122,14 +155,6 @@ export async function queryDataLakeMetrics(cfg?: {
       averageCompression: 'N/A',
     };
   }
-  const ch = useEnv
-    ? getEnvClient()!
-    : createClient({
-        url: targetUrl,
-        username: cfg?.username?.trim() || 'admin',
-        password: cfg?.password || '',
-        database,
-      });
 
   try {
     const result = await ch.query({
@@ -198,11 +223,9 @@ export async function queryDataLakeMetrics(cfg?: {
       averageCompression: 'N/A',
     };
   } finally {
-    if (!useEnv) {
-      try {
-        await ch.close();
-      } catch {}
-    }
+    try {
+      await ch.close();
+    } catch {}
   }
 }
 
@@ -225,35 +248,29 @@ export async function getTopFlows(options?: {
   const session = await getSession();
   assertActionPermitted(session);
 
-  const envClient = getEnvClient();
-  const state = envClient ? null : await getDesiredStateInternal().catch(() => null);
+  const hasEnv = Boolean(process.env.CLICKHOUSE_URL?.trim() && process.env.CLICKHOUSE_PASSWORD);
+  const state = hasEnv ? null : await getDesiredStateInternal().catch(() => null);
   const resolved = buildStateClickHouseConfig(state);
-  if (!envClient && !resolved) {
+  if (!resolved) {
     return [];
   }
 
   const limit = Math.max(1, Math.min(200, Math.floor(options?.limit ?? 10)));
   const windowHours = Math.max(1, Math.min(24 * 90, Math.floor(options?.windowHours ?? 24)));
   const nodeId = options?.nodeId?.trim() || '';
-  const targetUrl = (envClient ? process.env.CLICKHOUSE_URL?.trim() : resolved?.url) || '';
-  if (!targetUrl) {
-    return [];
-  }
+  let ch: ClickHouseClient;
   try {
-    await assertSafeOutboundUrl(targetUrl, { allowHttp: true, allowPrivate: true });
+    ch = await createPinnedClickHouseClient({
+      url: resolved.url,
+      username: resolved.username,
+      password: resolved.password,
+      database: resolved.database,
+    });
   } catch (err) {
     console.error('ClickHouse SSRF guard blocked query:', err);
     return [];
   }
-  const ch =
-    envClient ??
-    createClient({
-      url: resolved!.url,
-      username: resolved!.username,
-      password: resolved!.password,
-      database: resolved!.database,
-    });
-  const tableName = (resolved?.table || 'netflow_flows').replace(/[^a-zA-Z0-9_]/g, '') || 'netflow_flows';
+  const tableName = (resolved.table || 'netflow_flows').replace(/[^a-zA-Z0-9_]/g, '') || 'netflow_flows';
 
   try {
     try {
@@ -298,10 +315,8 @@ export async function getTopFlows(options?: {
     console.error('ClickHouse query error:', err);
     return [];
   } finally {
-    if (!envClient) {
-      try {
-        await ch.close();
-      } catch {}
-    }
+    try {
+      await ch.close();
+    } catch {}
   }
 }

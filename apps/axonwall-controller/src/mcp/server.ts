@@ -26,12 +26,16 @@ import {
   validateVirtWorkloadSafety,
   validateZfsResourcePath,
   getMcpServerStatus,
+  IMMUTABLE_PROTECTED_CIDRS_V4,
+  IMMUTABLE_PROTECTED_CIDRS_V6,
+  RFC1918_AND_ULA_CIDRS,
+  cidrOverlaps,
   type McpApiKey,
   type McpGuardContext,
   type McpScope,
 } from '@axonwall/lib/mcp';
 import { DesiredStateSchema, inferInterfaceRole, type BpfTokenDelegationSpec, type DesiredState } from '@axonwall/lib/schemas';
-import { importFirewallConfig, mergeFirewallConfigs } from '@axonwall/lib/import';
+import { importFirewallConfig, mergeFirewallConfigs, type MergeOptions } from '@axonwall/lib/import';
 import { compileNftables } from '@axonwall/lib/compile/nft';
 import { compileLxcContainer } from '@axonwall/lib/compile/virt';
 import { serializeDesiredStateToYamlFiles } from '@axonwall/lib/yaml';
@@ -413,6 +417,169 @@ function suricataEvePath(): string {
   return process.env.AXONWALL_SURICATA_EVE_PATH?.trim() || '/var/log/suricata/eve.json';
 }
 
+const MANAGEMENT_AND_ANTILOCKOUT_PORTS = [22, 80, 443, 2966, 3000, 9876] as const;
+const PROTECTED_SYSTEM_ZFS_POOLS_BASE = ['rpool', 'bpool', 'zroot'] as const;
+
+function isWanOrFloatingOrAnyInterface(ifaceName: string | undefined, state: DesiredState): boolean {
+  const ruleIface = (ifaceName || 'any').trim().toLowerCase();
+  const matchedIface = (state.interfaces ?? []).find((i) => i.name.toLowerCase() === ruleIface);
+  const isWanIface = matchedIface ? inferInterfaceRole(matchedIface) === 'wan' : /^wan\d*$/i.test(ruleIface);
+  return ruleIface === 'wan' || ruleIface === 'any' || ruleIface === 'floating' || isWanIface;
+}
+
+function isCidrWhollyInternal(normalizedCidr: string, family: 4 | 6, prefixLen: number): boolean {
+  for (const rfc of RFC1918_AND_ULA_CIDRS) {
+    const parsedRfc = parseIpOrCidr(rfc);
+    if (!parsedRfc || parsedRfc.family !== family) continue;
+    if (prefixLen >= parsedRfc.prefixLen && cidrOverlaps(normalizedCidr, rfc)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+interface PortSpecAnalysis {
+  err?: string;
+  isWildcard: boolean;
+  overlapsMgmt: boolean;
+  coversPrivileged: boolean;
+  isBroadSpan: boolean;
+  totalPorts: number;
+}
+
+function analyzePortSpecForGuard(
+  rawInput: string | undefined,
+  state: DesiredState,
+  mgmtPorts: Set<number>,
+  options?: { allowZeroStartWildcard?: boolean }
+): PortSpecAnalysis {
+  const raw = (rawInput || '').trim();
+  const lower = raw.toLowerCase();
+  if (!lower || lower === 'any' || lower === '*') {
+    return {
+      isWildcard: true,
+      overlapsMgmt: true,
+      coversPrivileged: true,
+      isBroadSpan: true,
+      totalPorts: 65535,
+    };
+  }
+
+  let tokens: string[];
+  if (raw.startsWith('$')) {
+    const aliasName = raw.slice(1);
+    const aliasObj = (state.aliases ?? []).find((a) => a.name === aliasName && a.type === 'port');
+    if (!aliasObj || !aliasObj.entries || aliasObj.entries.length === 0) {
+      return {
+        err: `Referenced port alias '${raw}' in destinationPort does not exist or has no entries`,
+        isWildcard: false,
+        overlapsMgmt: false,
+        coversPrivileged: false,
+        isBroadSpan: false,
+        totalPorts: 0,
+      };
+    }
+    tokens = aliasObj.entries.map((e) => e.trim());
+  } else {
+    tokens = raw.split(',').map((s) => s.trim());
+    if (tokens.length === 0 || tokens.some((p) => p.length === 0)) {
+      return {
+        err: `Invalid empty destinationPort token in '${raw}'`,
+        isWildcard: false,
+        overlapsMgmt: false,
+        coversPrivileged: false,
+        isBroadSpan: false,
+        totalPorts: 0,
+      };
+    }
+  }
+
+  let isWildcard = false;
+  let overlapsMgmt = false;
+  let coversPrivileged = false;
+  let totalPorts = 0;
+
+  for (const token of tokens) {
+    const normalized = token.toLowerCase().replace(/\s*([-:])\s*/g, '-');
+    if (normalized === 'any' || normalized === '*') {
+      isWildcard = true;
+      overlapsMgmt = true;
+      coversPrivileged = true;
+      totalPorts += 65535;
+      continue;
+    }
+    if (/^\d+$/.test(normalized)) {
+      const portNum = Number(normalized);
+      if (portNum < 1 || portNum > 65535) {
+        return {
+          err: `Invalid destinationPort '${token}'`,
+          isWildcard: false,
+          overlapsMgmt: false,
+          coversPrivileged: false,
+          isBroadSpan: false,
+          totalPorts: 0,
+        };
+      }
+      if (mgmtPorts.has(portNum)) overlapsMgmt = true;
+      if (portNum <= 1023) coversPrivileged = true;
+      totalPorts += 1;
+      continue;
+    }
+    const rangeMatch = normalized.match(/^(\d+)-(\d+)$/);
+    if (rangeMatch) {
+      const a = Number(rangeMatch[1]);
+      const b = Number(rangeMatch[2]);
+      const start = Math.min(a, b);
+      const end = Math.max(a, b);
+      if (options?.allowZeroStartWildcard && start === 0 && end === 65535) {
+        isWildcard = true;
+        overlapsMgmt = true;
+        coversPrivileged = true;
+        totalPorts += 65535;
+        continue;
+      }
+      if (start < 1 || end > 65535) {
+        return {
+          err: `Invalid port range '${token}'`,
+          isWildcard: false,
+          overlapsMgmt: false,
+          coversPrivileged: false,
+          isBroadSpan: false,
+          totalPorts: 0,
+        };
+      }
+      if (start === 1 && end === 65535) {
+        isWildcard = true;
+      }
+      for (const mp of mgmtPorts) {
+        if (mp >= start && mp <= end) {
+          overlapsMgmt = true;
+          break;
+        }
+      }
+      if (start <= 1023) coversPrivileged = true;
+      totalPorts += end - start + 1;
+      continue;
+    }
+    return {
+      err: `Invalid or unresolvable destinationPort token '${token}'`,
+      isWildcard: false,
+      overlapsMgmt: false,
+      coversPrivileged: false,
+      isBroadSpan: false,
+      totalPorts: 0,
+    };
+  }
+
+  return {
+    isWildcard,
+    overlapsMgmt,
+    coversPrivileged,
+    isBroadSpan: totalPorts > 100,
+    totalPorts,
+  };
+}
+
 function validateFirewallRuleAgainstGuard(
   rule: DesiredState['rules'][number],
   state: DesiredState,
@@ -477,25 +644,143 @@ function validateFirewallRuleAgainstGuard(
     if (dstErr) return dstErr;
 
     const ruleIface = (rule.interface || 'any').trim().toLowerCase();
-    const matchedIface = (state.interfaces ?? []).find((i) => i.name.toLowerCase() === ruleIface);
-    const isWanIface = matchedIface ? inferInterfaceRole(matchedIface) === 'wan' : /^wan\d*$/i.test(ruleIface);
-    const isWanOrFloatingOrAny = ruleIface === 'wan' || ruleIface === 'any' || ruleIface === 'floating' || isWanIface;
-
-    const rawSrc = (rule.source || '').trim().toLowerCase();
-    const rawDst = (rule.destination || '').trim().toLowerCase();
-    const rawPassDport = (rule.destinationPort || '').trim().toLowerCase().replace(/:/g, '-');
-    const isWildcardAddr = (v: string) => v === '' || v === 'any' || v === '0.0.0.0/0' || v === '::/0';
-    const isWildcardPort = (v: string) =>
-      v === '' || v === 'any' || v === '0-65535' || v === '1-65535' || v === '*';
-
-    // Inverted endpoints on a pass rule effectively match every address except one exclusion.
-    const effectiveWildcardSrc = Boolean(rule.invertSource) || isWildcardAddr(rawSrc);
-    const effectiveWildcardDst =
-      Boolean(rule.invertDestination) || isWildcardAddr(rawDst) || rawDst === 'self' || rawDst === 'wan_ip';
-
-    if (isWanOrFloatingOrAny && effectiveWildcardSrc && effectiveWildcardDst && isWildcardPort(rawPassDport)) {
-      return `Unscoped wildcard pass rule on '${ruleIface}' is prohibited via MCP`;
+    const isWanOrFloatingOrAny = isWanOrFloatingOrAnyInterface(rule.interface, state);
+    if (!isWanOrFloatingOrAny) {
+      return null;
     }
+
+    const mgmtPorts = new Set<number>([
+      ...MANAGEMENT_AND_ANTILOCKOUT_PORTS,
+      ...(ctx.antiLockoutPorts ?? []),
+    ]);
+    const proto = (rule.protocol || 'any').trim().toLowerCase();
+    const usesPorts = proto === 'any' || proto === 'tcp' || proto === 'udp' || proto === 'tcp_udp';
+    const rawPassDport = (rule.destinationPort || '').trim();
+
+    let portInfo: PortSpecAnalysis;
+    if (usesPorts || (rawPassDport !== '' && rawPassDport.toLowerCase() !== 'any')) {
+      portInfo = analyzePortSpecForGuard(rule.destinationPort, state, mgmtPorts, {
+        allowZeroStartWildcard: true,
+      });
+      if (portInfo.err) return portInfo.err;
+    } else {
+      portInfo = {
+        isWildcard: true,
+        overlapsMgmt: false,
+        coversPrivileged: false,
+        isBroadSpan: false,
+        totalPorts: 0,
+      };
+    }
+
+    const inspectPassEndpoint = (
+      endpointVal: string | undefined,
+      isInverted: boolean,
+      label: 'source' | 'destination'
+    ): { err?: string; isBroadPrefixOrWildcard: boolean; isPublicNonRfc1918: boolean; isApplianceOrLan: boolean } => {
+      if (isInverted) {
+        return { isBroadPrefixOrWildcard: true, isPublicNonRfc1918: true, isApplianceOrLan: true };
+      }
+      const trimmed = (endpointVal || '').trim();
+      const lower = trimmed.toLowerCase();
+      if (!lower || lower === 'any' || lower === '0.0.0.0/0' || lower === '::/0') {
+        return { isBroadPrefixOrWildcard: true, isPublicNonRfc1918: true, isApplianceOrLan: label === 'destination' };
+      }
+      if (lower === 'self' || lower === 'wan_ip' || lower === 'lan_net') {
+        return { isBroadPrefixOrWildcard: true, isPublicNonRfc1918: true, isApplianceOrLan: true };
+      }
+
+      const checkSingleEntry = (entry: string, aliasType?: string) => {
+        const eLower = entry.trim().toLowerCase();
+        if (!eLower || eLower === 'any' || eLower === '0.0.0.0/0' || eLower === '::/0') {
+          return { isBroadPrefixOrWildcard: true, isPublicNonRfc1918: true, isApplianceOrLan: label === 'destination' };
+        }
+        if (eLower === 'self' || eLower === 'wan_ip' || eLower === 'lan_net') {
+          return { isBroadPrefixOrWildcard: true, isPublicNonRfc1918: true, isApplianceOrLan: true };
+        }
+        const parsed = parseIpOrCidr(entry);
+        if (!parsed) {
+          if (aliasType === 'geoip' || aliasType === 'asn' || aliasType === 'urltable' || aliasType === 'fqdn') {
+            return { isBroadPrefixOrWildcard: true, isPublicNonRfc1918: true, isApplianceOrLan: false };
+          }
+          return {
+            err: `Invalid or unparseable ${label} endpoint '${entry}' on '${ruleIface}' pass rule`,
+            isBroadPrefixOrWildcard: true,
+            isPublicNonRfc1918: true,
+            isApplianceOrLan: false,
+          };
+        }
+        const minPrefix = parsed.family === 4 ? ctx.policyLimits.maxIpv4PrefixLen : ctx.policyLimits.maxIpv6PrefixLen;
+        const broadPrefix = parsed.prefixLen < minPrefix;
+        const internal = isCidrWhollyInternal(parsed.normalizedCidr, parsed.family, parsed.prefixLen);
+        let hitsAppliance = false;
+        for (const hostIp of [...ctx.applianceHostIps, ...ctx.gatewayAndHaIps]) {
+          const clean = hostIp.split('/')[0]?.trim();
+          if (clean && cidrOverlaps(parsed.normalizedCidr, clean)) {
+            hitsAppliance = true;
+            break;
+          }
+        }
+        return {
+          isBroadPrefixOrWildcard: broadPrefix,
+          isPublicNonRfc1918: !internal,
+          isApplianceOrLan: hitsAppliance,
+        };
+      };
+
+      if (trimmed.startsWith('$')) {
+        const aliasName = trimmed.slice(1);
+        const aliasObj = (state.aliases ?? []).find((a) => a.name === aliasName);
+        if (!aliasObj || !aliasObj.entries || aliasObj.entries.length === 0) {
+          return {
+            err: `Referenced alias '${trimmed}' in ${label} does not exist or has no entries`,
+            isBroadPrefixOrWildcard: true,
+            isPublicNonRfc1918: true,
+            isApplianceOrLan: false,
+          };
+        }
+        let isBroadPrefixOrWildcard = false;
+        let isPublicNonRfc1918 = false;
+        let isApplianceOrLan = false;
+        for (const entry of aliasObj.entries) {
+          const res = checkSingleEntry(entry, aliasObj.type);
+          if (res.err) return res;
+          if (res.isBroadPrefixOrWildcard) isBroadPrefixOrWildcard = true;
+          if (res.isPublicNonRfc1918) isPublicNonRfc1918 = true;
+          if (res.isApplianceOrLan) isApplianceOrLan = true;
+        }
+        return { isBroadPrefixOrWildcard, isPublicNonRfc1918, isApplianceOrLan };
+      }
+
+      return checkSingleEntry(trimmed);
+    };
+
+    const srcAnalysis = inspectPassEndpoint(rule.source, Boolean(rule.invertSource), 'source');
+    if (srcAnalysis.err) return srcAnalysis.err;
+    const dstAnalysis = inspectPassEndpoint(rule.destination, Boolean(rule.invertDestination), 'destination');
+    if (dstAnalysis.err) return dstAnalysis.err;
+
+    const sourceCoversBroadOrPublic = srcAnalysis.isBroadPrefixOrWildcard || srcAnalysis.isPublicNonRfc1918;
+    const destIsRestricted = dstAnalysis.isBroadPrefixOrWildcard || dstAnalysis.isApplianceOrLan;
+
+    if (!usesPorts) {
+      if (srcAnalysis.isBroadPrefixOrWildcard && destIsRestricted) {
+        return `Unscoped wildcard pass rule on '${ruleIface}' is prohibited via MCP`;
+      }
+      return null;
+    }
+
+    if (
+      (portInfo.isWildcard || portInfo.overlapsMgmt || portInfo.coversPrivileged || portInfo.isBroadSpan) &&
+      (sourceCoversBroadOrPublic || destIsRestricted)
+    ) {
+      return `Pass rule on '${ruleIface}' exposes management/privileged/broad ports (${rule.destinationPort || 'any'}) to broad/public source or appliance/any destination and is prohibited via MCP`;
+    }
+
+    if (srcAnalysis.isBroadPrefixOrWildcard && destIsRestricted) {
+      return `Unscoped broad pass rule on '${ruleIface}' (${rule.source || 'any'} -> ${rule.destination || 'any'}) is prohibited via MCP`;
+    }
+
     return null;
   }
 
@@ -560,13 +845,238 @@ function validateFirewallRuleAgainstGuard(
         if (portErr) return portErr;
       }
     } else {
-      for (const part of rawDport.split(',').map((s) => s.trim()).filter(Boolean)) {
+      const parts = rawDport.split(',').map((s) => s.trim());
+      if (parts.length === 0 || parts.some((p) => p.length === 0)) {
+        return `Invalid empty destinationPort token in '${rawDport}'`;
+      }
+      for (const part of parts) {
         const portErr = validatePortToken(part);
         if (portErr) return portErr;
       }
     }
   }
   return null;
+}
+
+function validateImportedNatRuleAgainstGuard(
+  natRule: DesiredState['nat'][number],
+  state: DesiredState,
+  ctx: McpGuardContext,
+  key: McpApiKey
+): string | null {
+  for (const [label, val] of [
+    ['source', natRule.source],
+    ['destination', natRule.destination],
+  ] as const) {
+    if (val && val.startsWith('$')) {
+      const aliasName = val.slice(1);
+      const aliasObj = (state.aliases ?? []).find((a) => a.name === aliasName);
+      if (!aliasObj || !aliasObj.entries || aliasObj.entries.length === 0) {
+        return `NAT ${label} alias '${val}' does not exist or has no entries`;
+      }
+    }
+  }
+
+  if (natRule.type === 'masquerade') {
+    const ifaceName = (natRule.interface || '').trim().toLowerCase();
+    const matchedIface = (state.interfaces ?? []).find((i) => i.name.toLowerCase() === ifaceName);
+    const isWanIface = matchedIface ? inferInterfaceRole(matchedIface) === 'wan' : /^wan\d*$/i.test(ifaceName);
+    if (!isWanIface) {
+      return `Imported masquerade NAT rule on non-WAN interface '${natRule.interface}' is prohibited via MCP`;
+    }
+    if (natRule.targetIp && natRule.targetIp !== 'wan_ip') {
+      const allowCheck = validateRedirectTargetAllowlist(
+        natRule.targetIp,
+        key.policyLimits.allowedRedirectTargets
+      );
+      if (!allowCheck.valid) {
+        return allowCheck.reason || `Imported NAT target '${natRule.targetIp}' not in allowedRedirectTargets`;
+      }
+      const safety = validateMcpTarget(natRule.targetIp, ctx);
+      if (!safety.valid) {
+        return safety.reason || `Imported NAT target '${natRule.targetIp}' rejected by guard`;
+      }
+    }
+    return null;
+  }
+
+  // dnat, binat, snat, nptv6
+  const rawTargetIp = (natRule.targetIp || '').trim();
+  if (!rawTargetIp) {
+    return `Imported ${natRule.type} NAT rule is missing required targetIp`;
+  }
+  if (natRule.type === 'snat' && rawTargetIp === 'wan_ip') {
+    // Outbound SNAT to wan_ip still requires WAN interface check
+    const ifaceName = (natRule.interface || '').trim().toLowerCase();
+    const matchedIface = (state.interfaces ?? []).find((i) => i.name.toLowerCase() === ifaceName);
+    const isWanIface = matchedIface ? inferInterfaceRole(matchedIface) === 'wan' : /^wan\d*$/i.test(ifaceName);
+    if (!isWanIface) {
+      return `Imported SNAT rule to wan_ip on non-WAN interface '${natRule.interface}' is prohibited via MCP`;
+    }
+    return null;
+  }
+
+  const parsedTarget = parseIpOrCidr(rawTargetIp);
+  if (!parsedTarget) {
+    return `Imported ${natRule.type} NAT rule has invalid targetIp '${rawTargetIp}'`;
+  }
+
+  let allowTarget = parsedTarget.isSingleHost ? parsedTarget.address : rawTargetIp;
+  const rawTargetPort = (natRule.targetPort || '').trim();
+  if (parsedTarget.isSingleHost && rawTargetPort && /^\d+$/.test(rawTargetPort)) {
+    allowTarget = parsedTarget.family === 6 ? `[${parsedTarget.address}]:${rawTargetPort}` : `${parsedTarget.address}:${rawTargetPort}`;
+  }
+  const allowCheck = validateRedirectTargetAllowlist(allowTarget, key.policyLimits.allowedRedirectTargets);
+  if (!allowCheck.valid) {
+    return allowCheck.reason || `Imported ${natRule.type} target '${allowTarget}' not in allowedRedirectTargets`;
+  }
+  const safety = validateMcpTarget(rawTargetIp, ctx);
+  if (!safety.valid) {
+    return safety.reason || `Imported ${natRule.type} target '${rawTargetIp}' rejected by guard`;
+  }
+
+  // Anti-lockout protection on inbound DNAT/BINAT rules: never hijack management/anti-lockout ports
+  if (natRule.type === 'dnat' || natRule.type === 'binat') {
+    const proto = (natRule.protocol || 'any').toLowerCase();
+    const affectsTcp = proto === 'any' || proto === 'tcp' || proto === 'tcp_udp';
+    const affectsUdp = proto === 'any' || proto === 'udp' || proto === 'tcp_udp';
+    const protectedPorts = new Set<number>([
+      ...(affectsTcp ? [...MANAGEMENT_AND_ANTILOCKOUT_PORTS, ...(ctx.antiLockoutPorts ?? [])] : []),
+      ...(affectsUdp ? [53, 67, 68, 51820] : []),
+    ]);
+    if (affectsTcp || affectsUdp) {
+      const portInfo = analyzePortSpecForGuard(natRule.destinationPort, state, protectedPorts, {
+        allowZeroStartWildcard: true,
+      });
+      if (portInfo.err) return portInfo.err;
+      if (portInfo.isWildcard || portInfo.overlapsMgmt) {
+        return `Imported ${natRule.type} NAT rule overlaps protected management/anti-lockout port (${natRule.destinationPort || 'any'})`;
+      }
+    }
+  }
+
+  return null;
+}
+
+function isSafeVirtName(val: string): boolean {
+  const trimmed = val.trim();
+  return Boolean(trimmed) && !trimmed.includes('..') && /^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}$/.test(trimmed);
+}
+
+function isSafeBackupArchivePath(rawPath: string): { valid: boolean; archiveName?: string; reason?: string } {
+  const trimmed = rawPath.trim();
+  if (!trimmed || trimmed.startsWith('-') || trimmed.includes('..') || trimmed.includes('\\') || trimmed.includes('\0')) {
+    return { valid: false, reason: `Unsafe backupArchivePath '${rawPath}': leading '-' and '..' traversal are prohibited` };
+  }
+  const base = path.posix.basename(trimmed);
+  if (base.includes('..') || !/^[a-zA-Z0-9][a-zA-Z0-9_.-]*\.vma\.zst$/.test(base)) {
+    return {
+      valid: false,
+      reason: `Invalid backupArchivePath basename '${base}': must match /^[a-zA-Z0-9][a-zA-Z0-9_.-]*\\.vma\\.zst$/`,
+    };
+  }
+  return { valid: true, archiveName: base };
+}
+
+function collectConfiguredLiveMigrationPeers(state: DesiredState | null): Set<string> {
+  const peers = new Set<string>();
+  if (!state) return peers;
+
+  const applianceOwnIps = new Set<string>();
+  for (const iface of state.interfaces ?? []) {
+    for (const raw of [iface.ipv4Address, iface.ipv6Address]) {
+      const host = raw?.split('/')[0]?.trim();
+      const p = host ? parseIpOrCidr(host) : null;
+      if (p && p.isSingleHost) applianceOwnIps.add(p.address);
+    }
+  }
+
+  const addCandidate = (raw?: string | null) => {
+    if (!raw || typeof raw !== 'string') return;
+    const hostPart = raw.trim().split('/')[0]?.trim();
+    if (!hostPart) return;
+    const parsed = parseIpOrCidr(hostPart);
+    if (!parsed || !parsed.isSingleHost) return;
+    const immList = parsed.family === 4 ? IMMUTABLE_PROTECTED_CIDRS_V4 : IMMUTABLE_PROTECTED_CIDRS_V6;
+    if (immList.some((c) => cidrOverlaps(parsed.normalizedCidr, c))) return;
+    if (applianceOwnIps.has(parsed.address)) return;
+    peers.add(parsed.address);
+  };
+
+  addCandidate(state.ha?.peerAddress);
+  addCandidate(state.ha?.peerIp);
+  addCandidate(state.ha?.conntrackSync?.peerAddress);
+  addCandidate(state.ha?.sqliteSync?.peerAddress);
+  for (const vi of state.ha?.vrrpInstances ?? []) {
+    const anyVi = vi as unknown as { peerAddress?: string; peerIp?: string; unicastPeers?: string[] };
+    addCandidate(anyVi.peerAddress);
+    addCandidate(anyVi.peerIp);
+    if (Array.isArray(anyVi.unicastPeers)) {
+      for (const up of anyVi.unicastPeers) addCandidate(up);
+    }
+  }
+
+  for (const peer of state.topology?.peers ?? []) {
+    if (peer.enabled === false || !peer.apiUrl) continue;
+    try {
+      const u = new URL(peer.apiUrl.trim());
+      const host = u.hostname.replace(/^\[|\]$/g, '');
+      addCandidate(host);
+    } catch {
+      // ignore invalid URL
+    }
+  }
+
+  for (const node of state.fleet?.nodes ?? []) {
+    addCandidate(node.ip);
+    addCandidate(node.wireguard?.tunnelIp);
+  }
+
+  return peers;
+}
+
+function getProtectedSystemZfsPools(): Set<string> {
+  const pools = new Set<string>(PROTECTED_SYSTEM_ZFS_POOLS_BASE);
+  const systemMountpoints = new Set(['/', '/boot', '/var', '/var/lib', '/etc', '/usr', '/opt']);
+  try {
+    const mountsPath = process.env.AXONWALL_PROC_MOUNTS_PATH?.trim() || '/proc/mounts';
+    if (fs.existsSync(mountsPath)) {
+      const raw = fs.readFileSync(mountsPath, 'utf8');
+      for (const line of raw.split('\n')) {
+        const parts = line.trim().split(/\s+/);
+        if (parts.length >= 3 && parts[2] === 'zfs' && parts[1] && systemMountpoints.has(parts[1])) {
+          const pool = parts[0]?.split('/')[0]?.trim();
+          if (pool) pools.add(pool.toLowerCase());
+        }
+      }
+    }
+  } catch {
+    // ignore unreadable mounts file
+  }
+  try {
+    const cmdlinePath = process.env.AXONWALL_PROC_CMDLINE_PATH?.trim() || '/proc/cmdline';
+    if (fs.existsSync(cmdlinePath)) {
+      const cmdline = fs.readFileSync(cmdlinePath, 'utf8');
+      for (const tok of cmdline.trim().split(/\s+/)) {
+        const m = tok.match(/^(?:root=ZFS=|zfs=)([a-zA-Z0-9_.:-]+)/i);
+        if (m && m[1]) {
+          const pool = m[1].split('/')[0]?.trim();
+          if (pool) pools.add(pool.toLowerCase());
+        }
+      }
+    }
+  } catch {
+    // ignore unreadable cmdline file
+  }
+  return pools;
+}
+
+function extractZfsRootPool(datasetOrPool: string): string {
+  const trimmed = datasetOrPool.trim();
+  if (!trimmed || trimmed.startsWith('/') || trimmed.endsWith('/') || trimmed.includes('//')) {
+    return '';
+  }
+  return trimmed.split('/')[0]?.trim().toLowerCase() ?? '';
 }
 
 function escapeLogsQlString(raw: string): string {
@@ -1942,7 +2452,7 @@ export async function handleMcpCallTool(
         toolName,
         requiredScope: 'mcp:telemetry:read',
         decision: 'allowed',
-        paramsSummary: args,
+        paramsSummary: redactSensitiveArgs(args) as Record<string, unknown>,
       });
 
       return {
@@ -1997,7 +2507,7 @@ export async function handleMcpCallTool(
         toolName,
         requiredScope: 'mcp:telemetry:read',
         decision: 'allowed',
-        paramsSummary: args,
+        paramsSummary: redactSensitiveArgs(args) as Record<string, unknown>,
       });
 
       return {
@@ -2456,13 +2966,13 @@ export async function handleMcpCallTool(
     }
 
     case 'mcp_revert_lease': {
-      const hasAnyWriteScope =
+      const hasAnyRevertScope =
         hasMcpScope(env.key, 'mcp:traffic:blackhole') ||
         hasMcpScope(env.key, 'mcp:traffic:shape') ||
         hasMcpScope(env.key, 'mcp:traffic:redirect') ||
-        hasMcpScope(env.key, 'mcp:firewall:write');
-      if (!hasAnyWriteScope) {
-        return deny('mcp:traffic:*', 'MCP key lacks any traffic control write scope to revert leases');
+        hasMcpScope(env.key, 'mcp:ebpf:manage');
+      if (!hasAnyRevertScope) {
+        return deny('mcp:traffic:*', 'MCP key lacks any tactical lease write scope to revert leases');
       }
 
       const leaseId = typeof args.leaseId === 'string' ? args.leaseId.trim() : '';
@@ -2475,33 +2985,36 @@ export async function handleMcpCallTool(
       const targetLease = leasesRes.ok && Array.isArray(leasesRes.data?.leases)
         ? leasesRes.data.leases.find((l) => l.id === leaseId)
         : undefined;
-      if (!hasMcpScope(env.key, 'mcp:firewall:write')) {
-        if (!leasesRes.ok) {
-          return deny('mcp:traffic:*', 'Cannot verify authorization scope while daemon leases endpoint is unavailable');
-        }
-        if (!targetLease) {
-          return deny('mcp:traffic:*', 'Cannot verify authorization scope (requested lease not found)');
-        }
-        if (targetLease.kind) {
-          const requiredForKind =
-            targetLease.kind === 'blackhole'
-              ? 'mcp:traffic:blackhole'
-              : targetLease.kind === 'shape'
-                ? 'mcp:traffic:shape'
-                : targetLease.kind === 'redirect' || targetLease.kind === 'dns_sinkhole'
-                  ? 'mcp:traffic:redirect'
-                  : targetLease.kind === 'xdp_drop'
-                    ? 'mcp:ebpf:manage'
-                    : null;
-          if (requiredForKind && !hasMcpScope(env.key, requiredForKind)) {
-            return deny(requiredForKind, `MCP key lacks required scope '${requiredForKind}' to revert ${targetLease.kind} lease '${leaseId}'`);
-          }
-        }
+      if (!leasesRes.ok) {
+        return deny('mcp:traffic:*', 'Cannot verify authorization scope while daemon leases endpoint is unavailable');
+      }
+      if (!targetLease) {
+        return deny('mcp:traffic:*', 'Cannot verify authorization scope (requested lease not found)');
+      }
+
+      const requiredForKind: McpScope | null =
+        targetLease.kind === 'blackhole'
+          ? 'mcp:traffic:blackhole'
+          : targetLease.kind === 'shape'
+            ? 'mcp:traffic:shape'
+            : targetLease.kind === 'redirect' || targetLease.kind === 'dns_sinkhole'
+              ? 'mcp:traffic:redirect'
+              : targetLease.kind === 'xdp_drop'
+                ? 'mcp:ebpf:manage'
+                : null;
+      if (!requiredForKind) {
+        return deny(
+          'mcp:traffic:*',
+          `Cannot verify authorization scope: unrecognized or missing lease kind '${targetLease.kind || 'unknown'}' for lease '${leaseId}'`
+        );
+      }
+      if (!hasMcpScope(env.key, requiredForKind)) {
+        return deny(requiredForKind, `MCP key lacks required scope '${requiredForKind}' to revert ${targetLease.kind} lease '${leaseId}'`);
       }
 
       const daemonRes = await callAxonwalldApi('POST', '/v1/mcp/revert', { leaseId });
       if (!daemonRes.ok) {
-        return deny('mcp:traffic:*', daemonRes.data?.error || `Failed to revert lease '${leaseId}'`);
+        return deny(requiredForKind, daemonRes.data?.error || `Failed to revert lease '${leaseId}'`);
       }
 
       // B-H1 (round 3): a reverted blackhole lease must also be
@@ -2513,7 +3026,12 @@ export async function handleMcpCallTool(
       // transport (stdio) the count stays 0 and the response says
       // so; the hub lease is still reverted.
       let fleetUnblockedSatellites = 0;
-      if (targetLease?.kind === 'blackhole' && targetLease.normalizedTarget && env.onFleetBroadcastUnblock) {
+      if (
+        targetLease.kind === 'blackhole' &&
+        targetLease.normalizedTarget &&
+        env.onFleetBroadcastUnblock &&
+        hasMcpScope(env.key, 'mcp:fleet:broadcast')
+      ) {
         fleetUnblockedSatellites = env.onFleetBroadcastUnblock(targetLease.normalizedTarget, reason);
       }
 
@@ -2523,7 +3041,7 @@ export async function handleMcpCallTool(
         agentType: env.key.agentType,
         clientIp: env.clientIp,
         toolName,
-        requiredScope: 'mcp:traffic:*',
+        requiredScope: requiredForKind,
         decision: 'allowed',
         paramsSummary: { leaseId, reason, fleetUnblockedSatellites },
         leaseId,
@@ -3235,6 +3753,13 @@ export async function handleMcpCallTool(
       const scopeErr = requireScope('mcp:virt:manage', req.audit);
       if (scopeErr) return scopeErr;
 
+      if (req.snapshotName !== undefined && !isSafeVirtName(req.snapshotName)) {
+        return deny('mcp:virt:manage', `Invalid snapshotName '${req.snapshotName}': leading '-' and '..' are prohibited`, req.audit);
+      }
+      if (req.newName !== undefined && !isSafeVirtName(req.newName)) {
+        return deny('mcp:virt:manage', `Invalid newName '${req.newName}': leading '-' and '..' are prohibited`, req.audit);
+      }
+
       const localState = loadLocalDesiredState();
       let workloadName: string | undefined;
       if (req.workloadType === 'vm') {
@@ -3285,6 +3810,10 @@ export async function handleMcpCallTool(
         if (!req.backupArchivePath) {
           return deny('mcp:virt:manage', 'backupArchivePath (.vma.zst filename) is required for restore action', req.audit);
         }
+        const archiveCheck = isSafeBackupArchivePath(req.backupArchivePath);
+        if (!archiveCheck.valid || !archiveCheck.archiveName) {
+          return deny('mcp:virt:manage', archiveCheck.reason || 'Invalid backupArchivePath', req.audit);
+        }
         const poolName = req.storagePool || 'tank';
         const poolCheck = validateZfsResourcePath(poolName, false);
         if (!poolCheck.valid) {
@@ -3292,15 +3821,15 @@ export async function handleMcpCallTool(
         }
         daemonRes = await callAxonwalldApi('POST', '/v1/virt/backups', {
           action: 'restore',
-          archiveName: path.basename(req.backupArchivePath),
+          archiveName: archiveCheck.archiveName,
           targetType: req.workloadType,
           targetId: req.id,
           pool: poolCheck.normalizedTarget,
         }, 120_000);
       } else if (req.action === 'snapshot' || req.action === 'rollback') {
-        const label = req.snapshotName || (req.action === 'snapshot' ? `mcp-${Date.now()}` : '');
-        if (!label) {
-          return deny('mcp:virt:manage', 'snapshotName is required for rollback action', req.audit);
+        const label = req.snapshotName ? req.snapshotName.trim() : (req.action === 'snapshot' ? `mcp-${Date.now()}` : '');
+        if (!label || !isSafeVirtName(label)) {
+          return deny('mcp:virt:manage', 'snapshotName is required and must be a valid safe identifier for snapshot/rollback action', req.audit);
         }
         daemonRes = await callAxonwalldApi('POST', '/v1/virt/snapshots', {
           action: req.action === 'snapshot' ? 'create' : 'rollback',
@@ -3315,16 +3844,28 @@ export async function handleMcpCallTool(
         daemonRes = await callAxonwalldApi('POST', '/v1/virt/clone', {
           sourceVmid: req.id,
           newVmid: req.newId,
-          newName: req.newName || '',
+          newName: req.newName ? req.newName.trim() : '',
           linked: req.linkedClone !== false,
         }, 120_000);
       } else if (req.action === 'live_migrate') {
         if (req.workloadType !== 'vm' || !req.targetHostIp) {
           return deny('mcp:virt:manage', 'live_migrate requires workloadType="vm" and targetHostIp', req.audit);
         }
+        const parsedTarget = parseIpOrCidr(req.targetHostIp);
+        if (!parsedTarget || !parsedTarget.isSingleHost) {
+          return deny('mcp:virt:manage', `Invalid targetHostIp '${req.targetHostIp}': must be a single valid host IP`, req.audit);
+        }
+        const configuredPeers = collectConfiguredLiveMigrationPeers(localState);
+        if (configuredPeers.size === 0 || !configuredPeers.has(parsedTarget.address)) {
+          return deny(
+            'mcp:virt:manage',
+            `Live migration target '${parsedTarget.address}' is not a configured HA peer, topology peer, or fleet node IP in DesiredState`,
+            req.audit,
+          );
+        }
         daemonRes = await callAxonwalldApi('POST', '/v1/virt/migrate', {
           vmid: req.id,
-          targetPeerIp: req.targetHostIp,
+          targetPeerIp: parsedTarget.address,
         }, 120_000);
       } else if (req.action === 'qga_interfaces') {
         daemonRes = await callAxonwalldApi('GET', `/v1/virt/qga?vmid=${encodeURIComponent(String(req.id))}`);
@@ -3679,7 +4220,7 @@ export async function handleMcpCallTool(
         toolName,
         requiredScope: matched!,
         decision: 'allowed',
-        paramsSummary: req,
+        paramsSummary: redactSensitiveArgs(req) as Record<string, unknown>,
       });
 
       return {
@@ -3773,11 +4314,15 @@ export async function handleMcpCallTool(
 
       let daemonRes: { ok: boolean; status: number; data: any };
       const summaryParams: Record<string, unknown> = { action: req.action, target: req.target };
+      const protectedSystemPools = getProtectedSystemZfsPools();
 
       switch (req.action) {
         case 'snapshot': {
           const targetCheck = validateZfsResourcePath(req.target, true);
-          if (!targetCheck.valid) return deny('mcp:nas:manage', targetCheck.reason || 'Invalid ZFS dataset path', req.audit);
+          const dsRootPool = targetCheck.valid && targetCheck.normalizedTarget ? extractZfsRootPool(targetCheck.normalizedTarget) : '';
+          if (!targetCheck.valid || !dsRootPool) {
+            return deny('mcp:nas:manage', targetCheck.reason || 'Invalid ZFS dataset path', req.audit);
+          }
           const label = req.snapshotLabel ? req.snapshotLabel.trim() : `mcp-${Date.now()}`;
           const labelCheck = validateZfsResourcePath(label, false);
           if (!labelCheck.valid) return deny('mcp:nas:manage', labelCheck.reason || 'Invalid ZFS snapshot label', req.audit);
@@ -3797,8 +4342,16 @@ export async function handleMcpCallTool(
           }
           const dsCheck = validateZfsResourcePath(snapParts[0]!, true);
           const lblCheck = validateZfsResourcePath(snapParts[1]!, false);
-          if (!dsCheck.valid || !lblCheck.valid) {
+          const rootPool = dsCheck.valid && dsCheck.normalizedTarget ? extractZfsRootPool(dsCheck.normalizedTarget) : '';
+          if (!dsCheck.valid || !lblCheck.valid || !rootPool) {
             return deny('mcp:nas:manage', dsCheck.reason || lblCheck.reason || 'Invalid ZFS snapshot identifier', req.audit);
+          }
+          if (protectedSystemPools.has(rootPool)) {
+            return deny(
+              'mcp:nas:manage',
+              `Protected system ZFS pool '${rootPool}': '${req.action}' on '${dsCheck.normalizedTarget}' is prohibited via MCP`,
+              req.audit,
+            );
           }
           const fullSnap = `${dsCheck.normalizedTarget}@${lblCheck.normalizedTarget}`;
           daemonRes =
@@ -3812,8 +4365,17 @@ export async function handleMcpCallTool(
         case 'checkpoint':
         case 'discard_checkpoint': {
           const poolCheck = validateZfsResourcePath(req.target, false);
-          if (!poolCheck.valid) return deny('mcp:nas:manage', poolCheck.reason || 'Invalid ZFS pool name', req.audit);
+          if (!poolCheck.valid || !poolCheck.normalizedTarget) {
+            return deny('mcp:nas:manage', poolCheck.reason || 'Invalid ZFS pool name', req.audit);
+          }
           const pool = poolCheck.normalizedTarget;
+          if (req.action === 'discard_checkpoint' && protectedSystemPools.has(pool.toLowerCase())) {
+            return deny(
+              'mcp:nas:manage',
+              `Protected system ZFS pool '${pool}': 'discard_checkpoint' is prohibited via MCP`,
+              req.audit,
+            );
+          }
           if (req.action === 'scrub') {
             daemonRes = await callAxonwalldApi('POST', '/v1/nas/scrub', { pool });
           } else if (req.action === 'trim') {
@@ -3829,7 +4391,17 @@ export async function handleMcpCallTool(
         case 'unlock_dataset':
         case 'lock_dataset': {
           const dsCheck = validateZfsResourcePath(req.target, true);
-          if (!dsCheck.valid) return deny('mcp:nas:manage', dsCheck.reason || 'Invalid ZFS dataset name', req.audit);
+          const rootPool = dsCheck.valid && dsCheck.normalizedTarget ? extractZfsRootPool(dsCheck.normalizedTarget) : '';
+          if (!dsCheck.valid || !rootPool) {
+            return deny('mcp:nas:manage', dsCheck.reason || 'Invalid ZFS dataset name', req.audit);
+          }
+          if (req.action === 'lock_dataset' && protectedSystemPools.has(rootPool)) {
+            return deny(
+              'mcp:nas:manage',
+              `Protected system ZFS pool '${rootPool}': 'lock_dataset' on '${dsCheck.normalizedTarget}' is prohibited via MCP`,
+              req.audit,
+            );
+          }
           daemonRes = await callAxonwalldApi('POST', '/v1/nas/encryption', {
             dataset: dsCheck.normalizedTarget,
             action: req.action === 'unlock_dataset' ? 'load-key' : 'unload-key',
@@ -3848,11 +4420,12 @@ export async function handleMcpCallTool(
           break;
         }
         case 'cloud_sync': {
-          if (!/^[a-zA-Z0-9_.-]+$/.test(req.target.trim())) {
+          const cloudTarget = req.target.trim();
+          if (cloudTarget.includes('..') || !/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(cloudTarget)) {
             return deny('mcp:nas:manage', `Invalid cloud sync task name '${req.target}'`, req.audit);
           }
           daemonRes = await callAxonwalldApi('POST', '/v1/nas/cloudsync', {
-            taskName: req.target.trim(),
+            taskName: cloudTarget,
           }, 120_000);
           break;
         }
@@ -4005,12 +4578,29 @@ export async function handleMcpCallTool(
       let staged = false;
       if (req.stageToDesiredState) {
         const hasVirtObjects =
-          (report.state.virt?.vms?.length || 0) > 0 || (report.state.virt?.containers?.length || 0) > 0;
+          (report.state.virt?.vms?.length || 0) > 0 ||
+          (report.state.virt?.containers?.length || 0) > 0 ||
+          (report.state.bridges?.length || 0) > 0 ||
+          (report.state.virt?.securityGroups?.length || 0) > 0 ||
+          (report.state.virt?.vxlanZones?.length || 0) > 0 ||
+          (report.state.virt?.backupJobs?.length || 0) > 0 ||
+          (report.state.virt?.isos?.length || 0) > 0 ||
+          (report.state.virt?.pciDevices?.length || 0) > 0;
         const hasNasObjects =
           (report.state.nas?.pools?.length || 0) > 0 ||
           (report.state.nas?.datasets?.length || 0) > 0 ||
           (report.state.nas?.smbShares?.length || 0) > 0 ||
-          (report.state.nas?.nfsExports?.length || 0) > 0;
+          (report.state.nas?.nfsExports?.length || 0) > 0 ||
+          (report.state.nas?.iscsiTargets?.length || 0) > 0 ||
+          (report.state.nas?.snapshotPolicies?.length || 0) > 0 ||
+          (report.state.nas?.cloudSyncTasks?.length || 0) > 0 ||
+          Boolean(report.state.nas?.s3?.enabled);
+        const hasNatObjects = (report.state.nat?.length || 0) > 0;
+        const hasNetworkInfraObjects =
+          (report.state.vlans?.length || 0) > 0 ||
+          (report.state.routes?.length || 0) > 0 ||
+          (report.state.dns?.hostOverrides?.length || 0) > 0 ||
+          (report.state.dhcp?.subnets?.length || 0) > 0;
 
         if (hasVirtObjects) {
           const vErr = requireScope('mcp:virt:manage', req.audit);
@@ -4020,9 +4610,29 @@ export async function handleMcpCallTool(
           const nErr = requireScope('mcp:nas:manage', req.audit);
           if (nErr) return nErr;
         }
+        if (hasNatObjects) {
+          const natErr = requireScope('mcp:traffic:redirect', req.audit);
+          if (natErr) return natErr;
+        }
+        if (hasNetworkInfraObjects) {
+          const netErr = requireScope('mcp:firewall:apply', req.audit);
+          if (netErr) return netErr;
+        }
+
+        const mergeOpts: MergeOptions = {
+          includeInterfaces: false,
+          includeAliases: true,
+          includeRules: true,
+          includeNat: hasMcpScope(env.key, 'mcp:traffic:redirect'),
+          includeVirt: hasMcpScope(env.key, 'mcp:virt:manage'),
+          includeNas: hasMcpScope(env.key, 'mcp:nas:manage'),
+          includeDnsOverrides: hasMcpScope(env.key, 'mcp:firewall:apply'),
+          includeDhcpStaticLeases: hasMcpScope(env.key, 'mcp:firewall:apply'),
+          includeRoutes: hasMcpScope(env.key, 'mcp:firewall:apply'),
+          includeVlans: hasMcpScope(env.key, 'mcp:firewall:apply'),
+        };
 
         const { ctx } = await buildGuardContext(env.key, env.clientIp);
-        const importedRules = report.state.rules ?? [];
 
         let releaseLock: (() => void) | null = null;
         try {
@@ -4032,13 +4642,25 @@ export async function handleMcpCallTool(
             return deny('mcp:firewall:write', `Could not lock DesiredState (${lockErr?.message || lockErr})`, req.audit);
           }
           const active = loadLocalDesiredState();
-          const nextState = active ? mergeFirewallConfigs(active, report.state) : report.state;
-          for (const importedRule of importedRules) {
-            const ruleErr = validateFirewallRuleAgainstGuard(importedRule, nextState, ctx);
+          const activeNatCount = active?.nat?.length ?? 0;
+          const baseState = active ?? DesiredStateSchema.parse({});
+          const nextState = mergeFirewallConfigs(baseState, report.state, mergeOpts);
+
+          for (const postMergeRule of nextState.rules ?? []) {
+            const ruleErr = validateFirewallRuleAgainstGuard(postMergeRule, nextState, ctx);
             if (ruleErr) {
               return deny('mcp:firewall:write', `Imported rule rejected by MCP safety guard: ${ruleErr}`, req.audit);
             }
           }
+
+          const importedNatRules = (nextState.nat ?? []).slice(activeNatCount);
+          for (const importedNat of importedNatRules) {
+            const natGuardErr = validateImportedNatRuleAgainstGuard(importedNat, nextState, ctx, env.key);
+            if (natGuardErr) {
+              return deny('mcp:traffic:redirect', `Imported NAT rule rejected by MCP safety guard: ${natGuardErr}`, req.audit);
+            }
+          }
+
           // Preserve existing antiLockout protections so imported settings cannot disable or strip them.
           if (active?.system?.antiLockout && active.system.antiLockout.enabled !== false) {
             const prevAl = active.system.antiLockout;
@@ -4059,9 +4681,19 @@ export async function handleMcpCallTool(
               },
             };
           }
+
+          const validatedState = DesiredStateSchema.safeParse(nextState);
+          if (!validatedState.success) {
+            return deny(
+              'mcp:firewall:write',
+              `Merged DesiredState failed schema validation: ${validatedState.error.message}`,
+              req.audit,
+            );
+          }
+
           // B-M4: fail closed when the import cannot be persisted —
           // staging must not be reported for a merge disk never recorded.
-          if (!persistDesiredStateToDisk(nextState)) {
+          if (!persistDesiredStateToDisk(validatedState.data)) {
             return deny('mcp:firewall:write', 'Could not persist the imported configuration to disk (DesiredState write failed); nothing was staged', req.audit);
           }
           staged = true;

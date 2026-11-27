@@ -1,18 +1,22 @@
-import { Client } from 'ldapts';
+import { Client, type ClientOptions } from 'ldapts';
 import { SignJWT, jwtVerify } from 'jose';
 import * as crypto from 'node:crypto';
+import type * as tls from 'node:tls';
 import { type Privilege, type UserSession, DEFAULT_ROLES } from '../rbac/index.js';
 
 export interface LdapConfig {
-  url: string; // e.g. ldap://127.0.0.1:389
+  url: string; // e.g. ldap://127.0.0.1:389 or ldaps://ldap.example.com:636
   baseDn: string; // e.g. dc=axonwall,dc=local
+  groupBaseDn?: string; // e.g. ou=groups,dc=axonwall,dc=local (defaults to ou=groups,<baseDn>)
   bindDn?: string; // service account DN e.g. cn=admin,dc=axonwall,dc=local
   bindPassword?: string;
   userSearchFilter: string; // e.g. (&(objectClass=inetOrgPerson)(uid={{username}}))
   groupSearchFilter: string; // e.g. (&(objectClass=groupOfNames)(member={{userDn}}))
-  groupRoleMap?: Record<string, string>; // e.g. { "admins": "admin", "operators": "operator" }
+  groupRoleMap?: Record<string, string>; // e.g. { "cn=admins,ou=groups,dc=axonwall,dc=local": "admin" } or { "admins": "admin" }
   groupMapping?: Record<string, string>;
   allowUnmappedReadonly?: boolean;
+  startTls?: boolean;
+  tlsOptions?: tls.ConnectionOptions;
   timeoutMs?: number;
 }
 
@@ -26,6 +30,89 @@ export function escapeLdapFilter(str: string): string {
   return str.replace(/[*()\\\x00]/g, (c) => '\\' + c.charCodeAt(0).toString(16).padStart(2, '0'));
 }
 
+function splitDnRdns(dn: string): string[] {
+  const parts: string[] = [];
+  let current = '';
+  let escaped = false;
+  for (let i = 0; i < dn.length; i++) {
+    const ch = dn[i]!;
+    if (escaped) {
+      current += ch;
+      escaped = false;
+    } else if (ch === '\\') {
+      current += ch;
+      escaped = true;
+    } else if (ch === ',') {
+      parts.push(current);
+      current = '';
+    } else {
+      current += ch;
+    }
+  }
+  parts.push(current);
+  return parts;
+}
+
+export function normalizeLdapDn(dn: string): string {
+  return splitDnRdns(dn)
+    .map((rdn) => {
+      const eqIdx = rdn.indexOf('=');
+      if (eqIdx === -1) return rdn.trim().toLowerCase();
+      const attr = rdn.slice(0, eqIdx).trim().toLowerCase();
+      const val = rdn.slice(eqIdx + 1).trim().toLowerCase();
+      return `${attr}=${val}`;
+    })
+    .filter(Boolean)
+    .join(',');
+}
+
+function resolveGroupBaseDn(config: LdapConfig): string {
+  const explicit = config.groupBaseDn?.trim();
+  if (explicit) return normalizeLdapDn(explicit);
+  const base = config.baseDn?.trim();
+  if (base) return normalizeLdapDn(`ou=groups,${base}`);
+  return '';
+}
+
+function resolveRoleForGroupDn(
+  rawGroupDn: string,
+  expectedGroupBaseDn: string,
+  fullDnRoleMap: Record<string, string>,
+  cnRoleMap: Record<string, string>,
+): string | null {
+  const normDn = normalizeLdapDn(rawGroupDn);
+  if (!normDn) return null;
+
+  if (Object.prototype.hasOwnProperty.call(fullDnRoleMap, normDn)) {
+    return fullDnRoleMap[normDn]!;
+  }
+
+  // Short CN keys are ONLY accepted when the entry's normalized DN resides under the
+  // configured groupBaseDn (or ou=groups,<baseDn>) and its leading RDN is cn=<name>.
+  if (expectedGroupBaseDn && normDn.endsWith(`,${expectedGroupBaseDn}`)) {
+    const rdns = splitDnRdns(normDn);
+    const firstRdn = rdns[0] ?? '';
+    if (firstRdn.startsWith('cn=')) {
+      const cn = firstRdn.slice(3).trim();
+      if (cn && Object.prototype.hasOwnProperty.call(cnRoleMap, cn)) {
+        return cnRoleMap[cn]!;
+      }
+    }
+  }
+
+  return null;
+}
+
+function buildLdapClientConfig(config: LdapConfig, isLdaps: boolean, tlsOpts?: tls.ConnectionOptions): ClientOptions {
+  const timeout = config.timeoutMs || 5000;
+  return {
+    url: config.url,
+    timeout,
+    connectTimeout: timeout,
+    ...(isLdaps && tlsOpts ? { tlsOptions: tlsOpts } : {}),
+  };
+}
+
 export async function authenticateLdap(
   config: LdapConfig,
   username: string,
@@ -35,13 +122,20 @@ export async function authenticateLdap(
     return { success: false, error: 'Username and password are required' };
   }
 
-  const client = new Client({
-    url: config.url,
-    timeout: config.timeoutMs || 5000,
-    connectTimeout: config.timeoutMs || 5000,
-  });
+  const isLdaps = config.url.trim().toLowerCase().startsWith('ldaps://');
+  const useStartTls = !isLdaps && Boolean(config.startTls);
+  const tlsOpts: tls.ConnectionOptions | undefined =
+    isLdaps || useStartTls || config.tlsOptions
+      ? { rejectUnauthorized: true, ...(config.tlsOptions ?? {}) }
+      : undefined;
+
+  const client = new Client(buildLdapClientConfig(config, isLdaps, tlsOpts));
 
   try {
+    if (useStartTls) {
+      await client.startTLS(tlsOpts);
+    }
+
     // 1. Initial bind as service account or anonymous
     if (config.bindDn && config.bindPassword) {
       await client.bind(config.bindDn, config.bindPassword);
@@ -67,12 +161,12 @@ export async function authenticateLdap(
     const userDn = userEntry.dn;
 
     // 3. Authenticate by rebinding as the target user
-    const userClient = new Client({
-      url: config.url,
-      timeout: config.timeoutMs || 5000,
-    });
+    const userClient = new Client(buildLdapClientConfig(config, isLdaps, tlsOpts));
 
     try {
+      if (useStartTls) {
+        await userClient.startTLS(tlsOpts);
+      }
       await userClient.bind(userDn, password);
     } catch {
       return { success: false, error: 'Invalid credentials' };
@@ -84,56 +178,58 @@ export async function authenticateLdap(
       }
     }
 
-    // 4. Resolve group memberships
-    let groups: string[] = [];
+    // 4. Resolve group memberships using full normalized DNs / verified groupBaseDn
+    const expectedGroupBaseDn = resolveGroupBaseDn(config);
+    const groupDns: string[] = [];
     const memberOfRaw = userEntry.memberOf
       ? (Array.isArray(userEntry.memberOf) ? userEntry.memberOf : [userEntry.memberOf])
           .map((g) => String(g).trim())
           .filter(Boolean)
       : [];
     if (memberOfRaw.length > 0) {
-      groups = memberOfRaw.map((g) => {
-        // extract CN if full DN
-        const match = /cn=([^,]+)/i.exec(g);
-        return (match ? match[1] : g).trim().toLowerCase();
-      });
+      groupDns.push(...memberOfRaw);
     } else if (config.groupSearchFilter) {
-      // Query groupOfNames / posixGroup by member DN or username
+      // Query groupOfNames / posixGroup under verified groupBaseDn (or baseDn if configured)
       const safeUserDn = escapeLdapFilter(userDn);
       const groupFilter = config.groupSearchFilter
         .replace(/\{\{userDn\}\}/g, () => safeUserDn)
         .replace(/\{\{username\}\}/g, () => safeUsername);
-      const groupSearch = await client.search(config.baseDn, {
+      const searchBase = config.groupBaseDn?.trim() || (config.baseDn?.trim() ? `ou=groups,${config.baseDn.trim()}` : config.baseDn);
+      const groupSearch = await client.search(searchBase, {
         filter: groupFilter,
         scope: 'sub',
-        attributes: ['cn'],
+        attributes: ['dn', 'cn'],
       });
-      groups = groupSearch.searchEntries
-        .map((e) => (e.cn ? String(e.cn).trim().toLowerCase() : ''))
-        .filter(Boolean);
+      for (const entry of groupSearch.searchEntries) {
+        if (entry.dn) {
+          groupDns.push(String(entry.dn).trim());
+        }
+      }
     }
 
-    // 5. Map LDAP groups to Axonwall roles and privileges
-    const configuredRoleMap = config.groupRoleMap ?? config.groupMapping;
-    const rawRoleMap = configuredRoleMap || {
-      admins: 'admin',
-      operators: 'operator',
-      readonly: 'readonly',
-    };
-    const roleMap: Record<string, string> = {};
-    for (const [k, v] of Object.entries(rawRoleMap)) {
-      roleMap[k.trim().toLowerCase()] = v;
+    // 5. Map LDAP groups to Axonwall roles and privileges (fail closed when unmapped)
+    const configuredRoleMap = config.groupRoleMap ?? config.groupMapping ?? {};
+    const fullDnRoleMap: Record<string, string> = {};
+    const cnRoleMap: Record<string, string> = {};
+    for (const [k, v] of Object.entries(configuredRoleMap)) {
+      const trimmedKey = k.trim();
+      if (!trimmedKey) continue;
+      if (trimmedKey.includes('=')) {
+        fullDnRoleMap[normalizeLdapDn(trimmedKey)] = v;
+      } else {
+        cnRoleMap[trimmedKey.toLowerCase()] = v;
+      }
     }
 
     const roles = new Set<string>();
-    for (const g of groups) {
-      if (Object.prototype.hasOwnProperty.call(roleMap, g)) {
-        roles.add(roleMap[g]);
+    for (const dn of groupDns) {
+      const mapped = resolveRoleForGroupDn(dn, expectedGroupBaseDn, fullDnRoleMap, cnRoleMap);
+      if (mapped) {
+        roles.add(mapped);
       }
     }
-    // Fail-closed for unmapped users when groupMapping/groupRoleMap is explicitly configured (unless allowUnmappedReadonly)
     if (roles.size === 0) {
-      if (configuredRoleMap !== undefined && !config.allowUnmappedReadonly) {
+      if (config.allowUnmappedReadonly !== true) {
         return { success: false, error: 'User is not a member of any mapped LDAP group' };
       }
       roles.add('readonly');

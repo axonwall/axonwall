@@ -35,6 +35,20 @@ export function desiredStateLockPath(): string {
   return fs.existsSync('/etc/axonwall') ? '/etc/axonwall/state.json.lock' : '/var/lib/axonwall/state.json.lock';
 }
 
+function readLockContentSafe(lockPath: string): { raw: string; stat: fs.Stats } {
+  const stat = fs.lstatSync(lockPath);
+  if (stat.isSymbolicLink()) {
+    throw new Error(`Refusing symlinked lockfile ${lockPath}`);
+  }
+  if (!stat.isFile()) {
+    throw new Error(`Lockfile ${lockPath} is not a regular file`);
+  }
+  if (stat.size > 65536) {
+    throw new Error(`Lockfile ${lockPath} exceeds maximum size (${stat.size} bytes)`);
+  }
+  return { raw: fs.readFileSync(lockPath, 'utf8'), stat };
+}
+
 export function acquireMcpLockFile(lockPath: string, timeoutMs = 10000): () => void {
   const deadline = Date.now() + timeoutMs;
   const staleThresholdMs = Math.min(Math.max(1000, timeoutMs - 500), 10000);
@@ -75,7 +89,7 @@ export function acquireMcpLockFile(lockPath: string, timeoutMs = 10000): () => v
       const heartbeatMs = Math.max(250, Math.min(2000, Math.floor(staleThresholdMs / 3)));
       const heartbeat = setInterval(() => {
         try {
-          const raw = fs.readFileSync(lockPath, 'utf8');
+          const { raw } = readLockContentSafe(lockPath);
           if (JSON.parse(raw)?.token !== token) {
             clearInterval(heartbeat);
             return;
@@ -100,7 +114,7 @@ export function acquireMcpLockFile(lockPath: string, timeoutMs = 10000): () => v
           fs.closeSync(fd);
         } catch {}
         try {
-          const raw = fs.readFileSync(lockPath, 'utf8');
+          const { raw } = readLockContentSafe(lockPath);
           const parsed = JSON.parse(raw);
           if (parsed?.token !== token) {
             // Another holder owns the lock at this path now; our
@@ -117,6 +131,16 @@ export function acquireMcpLockFile(lockPath: string, timeoutMs = 10000): () => v
       };
     } catch (err: any) {
       if (err?.code !== 'EEXIST') throw err;
+      // Fail closed if an existing lockPath is a symlink rather than a regular lockfile.
+      try {
+        if (fs.lstatSync(lockPath).isSymbolicLink()) {
+          throw new Error(`Refusing symlinked lockfile ${lockPath}`);
+        }
+      } catch (lstatErr: any) {
+        if (lstatErr?.message?.startsWith('Refusing symlinked lockfile')) {
+          throw lstatErr;
+        }
+      }
       // Lock is held. Break it only when the holder is actually
       // gone: R4-B-L6 — mtime staleness alone is NOT enough, because
       // a live-but-slow holder (or one whose heartbeat is briefly
@@ -131,11 +155,10 @@ export function acquireMcpLockFile(lockPath: string, timeoutMs = 10000): () => v
       let holderPidAlive: boolean | null = null;
       let observedMtimeMs = 0;
       try {
-        const stat = fs.statSync(lockPath);
+        const { raw, stat } = readLockContentSafe(lockPath);
         observedMtimeMs = stat.mtimeMs;
         const mtimeStale = Date.now() - stat.mtimeMs > staleThresholdMs;
         if (stat.size > 0) {
-          const raw = fs.readFileSync(lockPath, 'utf8');
           const parsed = JSON.parse(raw);
           if (typeof parsed?.pid === 'number' && parsed.pid > 0 && parsed.pid !== process.pid) {
             holderPid = parsed.pid;
@@ -175,10 +198,9 @@ export function acquireMcpLockFile(lockPath: string, timeoutMs = 10000): () => v
         // the first read vetoes the break.
         let stillStale = true;
         try {
-          const restat = fs.statSync(lockPath);
+          const { raw, stat: restat } = readLockContentSafe(lockPath);
           if (restat.mtimeMs !== observedMtimeMs) stillStale = false;
           if (stillStale && holderPid !== null && restat.size > 0) {
-            const raw = fs.readFileSync(lockPath, 'utf8');
             const parsed = JSON.parse(raw);
             if (parsed?.pid !== holderPid) stillStale = false;
             if (stillStale && typeof parsed?.pid === 'number' && parsed.pid > 0 && parsed.pid !== process.pid) {

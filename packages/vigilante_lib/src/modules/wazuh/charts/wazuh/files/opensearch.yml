@@ -13,7 +13,7 @@ plugins.security.ssl.transport.pemcert_filepath: /usr/share/wazuh-indexer/config
 plugins.security.ssl.transport.pemkey_filepath: /usr/share/wazuh-indexer/config/certs/wazuh-indexer-key.pem
 plugins.security.ssl.transport.pemtrustedcas_filepath: /usr/share/wazuh-indexer/config/certs/root-ca.pem
 plugins.security.ssl.http.enabled: true
-plugins.security.ssl.transport.enforce_hostname_verification: false
+plugins.security.ssl.transport.enforce_hostname_verification: true
 plugins.security.ssl.transport.resolve_hostname: false
 plugins.security.ssl.http.enabled_ciphers:
  - "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"

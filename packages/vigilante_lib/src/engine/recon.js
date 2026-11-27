@@ -14,7 +14,7 @@ import {
 import { autoSignIfConfigured } from './gpg.js';
 import { saveEvidenceFile } from './evidence.js';
 import { detectNetworkSubnets } from './nmap.js';
-import { assertSafeOutboundTarget } from './ssrf.js';
+import { assertSafeOutboundTarget, safeFetch, readResponseWithLimit, createPinnedLookup } from './ssrf.js';
 import { logger } from '../utils/logger.js';
 
 function assertBoundedInt(value, label, min, max) {
@@ -39,7 +39,9 @@ async function assertSafeReconTarget(targetUrl, label = 'recon target', opts = {
     allowBareHost: true,
     allowPrivate: opts.allowPrivate,
     allowLoopback: opts.allowLoopback,
-    allowMetadata: false
+    allowMetadata: false,
+    dnsLookup: opts.dnsLookup,
+    failOnDnsError: opts.failOnDnsError
   });
 }
 
@@ -101,7 +103,7 @@ export const RECON_PROFILES = [
     args: ['-title', '-tech-detect', '-status-code', '-json'],
     buildArgs: (target, opts = {}) => {
       const { cleanTarget, validated } = validateReconTargetAndOptions(target, opts);
-      const a = ['-u', cleanTarget, '-title', '-tech-detect', '-status-code', '-tls-grab', '-json'];
+      const a = ['-u', cleanTarget, '-fr=false', '-title', '-tech-detect', '-status-code', '-tls-grab', '-json'];
       if (validated.ports) a.push('-ports', validated.ports);
       if (validated.threads) a.push('-threads', validated.threads);
       return a;
@@ -178,8 +180,9 @@ export async function probePortsNative(host, ports = [80, 443, 22, 53, 8080, 844
   if (!isValidHostname(bareHost) && !net.isIP(bareHost)) {
     throw new Error(`Invalid probe host '${host}': must be a valid hostname or IP`);
   }
-  const { hostname: safeHost } = await assertSafeReconTarget(cleanHost, 'recon port probe target', opts);
+  const { hostname: safeHost, addresses } = await assertSafeReconTarget(cleanHost, 'recon port probe target', opts);
   const validPorts = ports.map((p) => Number(assertBoundedInt(p, 'probe port', 1, 65535)));
+  const pinnedLookup = createPinnedLookup(addresses);
 
   const open = [];
   const promises = validPorts.map((port) => {
@@ -203,7 +206,7 @@ export async function probePortsNative(host, ports = [80, 443, 22, 53, 8080, 844
         resolve(false);
       });
 
-      socket.connect(port, safeHost);
+      socket.connect({ port, host: safeHost, lookup: pinnedLookup });
     });
   });
 
@@ -218,20 +221,29 @@ export async function probePortsNative(host, ports = [80, 443, 22, 53, 8080, 844
  * @returns {Promise<object>}
  */
 export async function probeHttpNative(targetUrl, opts = {}) {
-  const { url: parsedUrl } = await assertSafeReconTarget(targetUrl, 'recon HTTP probe URL', opts);
+  const validatedTarget = await assertSafeReconTarget(targetUrl, 'recon HTTP probe URL', opts);
+  const { url: parsedUrl } = validatedTarget;
   const safeUrl = parsedUrl.toString();
 
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 3500);
+  const timeout = setTimeout(() => controller.abort(), opts.timeoutMs || 3500);
   try {
-    const res = await fetch(safeUrl, {
+    const res = await safeFetch(safeUrl, {
       method: 'GET',
       redirect: 'error',
       signal: controller.signal,
       headers: { 'User-Agent': 'Vigilante-Recon/1.0' }
+    }, {
+      validatedTarget,
+      label: 'recon HTTP probe URL',
+      allowBareHost: true,
+      allowPrivate: opts.allowPrivate,
+      allowLoopback: opts.allowLoopback,
+      allowMetadata: false,
+      maxBytes: opts.maxBytes
     });
 
-    const bodyText = await res.text();
+    const bodyText = await readResponseWithLimit(res, opts.maxBytes);
     const titleMatch = bodyText.match(/<title[^>]*>([^<]+)<\/title>/i);
     const title = titleMatch ? titleMatch[1].trim() : '';
     const server = res.headers.get('server') || 'unknown';
@@ -364,7 +376,7 @@ async function runScannerCli(bin, args) {
 
 export async function runReconScan(target, profileId = 'fast-ports', opts = {}) {
   const { cleanTarget } = validateReconTargetAndOptions(target, opts);
-  const { hostname: safeHost } = await assertSafeReconTarget(cleanTarget, 'recon scan target', opts);
+  const { hostname: safeHost, addresses } = await assertSafeReconTarget(cleanTarget, 'recon scan target', opts);
   await ensureVigilanteConfig();
   const reconDir = getVigilanteReconDir();
   const profile = RECON_PROFILES.find((p) => p.id === profileId) || RECON_PROFILES[0];
@@ -378,7 +390,8 @@ export async function runReconScan(target, profileId = 'fast-ports', opts = {}) 
 
   if (profile.tool === 'naabu') {
     if (tools.naabu.runner === 'host') {
-      const args = profile.buildArgs(cleanTarget, opts);
+      const pinnedTarget = addresses.length > 0 ? addresses[0] : safeHost;
+      const args = profile.buildArgs(pinnedTarget, opts);
       rawOutput = await runScannerCli('naabu', args);
       openPorts = parseNaabuOutput(rawOutput);
     } else {
