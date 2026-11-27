@@ -6,6 +6,44 @@ Official build artifacts, SHA-256 checksums, and detached RSA-4096 SHA-256 signa
 
 ---
 
+## `v0.16.4` (2026-11-27) — Comprehensive Defensive Security Hardening, Ring-0 BPF Bounds Verification & Supply-Chain Hardening
+
+### Highlights
+- **Ring-0 BPF-LSM, Threat Harvester & eBPF Engine Hardening (`apps/axonwalld`)**:
+  - Eliminated `BPF_NEG` (`0x84`/`0x87`) operations across `lsm_guard.c` and compiler toolchains to prevent verifier rejections and boundary errors on Linux 6.12+ kernels; added bytecode regression test suites.
+  - Hardened Threat Harvester uprobes against namespace injection, enforced strict binary path allowlisting, and guaranteed truncated TLS PEM key scrubbing in memory.
+  - Implemented `http_safe.go` providing SSRF-resistant HTTP client transports with link-local, private IP, and IPv6 mapped metadata range blocks across daemon webhook and telemetry egress.
+  - Restored `os.ModeSticky` (`1777`) on `/var/lib/axonwall` shared runtime directories, confined QEMU/LXC socket paths, and prevented downgrade attacks in SQLite sync.
+- **Console, Updater & Systemd Defense-in-Depth (`apps/axonwall-console`, `packaging/`)**:
+  - Validated network interface assignments and sanitized `interfaces.yaml` generation with `yaml.v3` AST marshaling; preserved `@wan_interfaces` configuration sets across transient carrier drop events.
+  - Re-architected `axonwall-update` inside a self-contained `main()` wrapper with atomic binary installation (`mv -f`), strict `.sha256` filename/edition/version bindings, anti-downgrade protections, and secured `0700` staging directories under `/run`.
+  - Configured `LimitCORE=0` across all K3s, Axonwall, and SeaweedFS systemd units, complemented by `DefaultLimitCORE=0` and `kernel.core_pattern = |/bin/false` to prevent process memory dump leaks; separated service execution identities across Vault, Headscale, and API daemons.
+- **Satellite, Fleet Controller & Guardrailed MCP (`apps/axonwall-satellite`, `apps/axonwall-controller`)**:
+  - Hardened Satellite agent PID-1 initialization by gating IMDS probing on cloud/bare-metal detection, enforced fail-closed baseline `nftables` policies prior to network attachment, and passed Tailscale pre-auth keys strictly via secure file descriptors.
+  - Enforced mutual TLS (mTLS) Subject Alternative Name (SAN) and Common Name (CN) binding on `/ws/satellite` controller WebSocket connections.
+  - Implemented centralized MCP tool/resource role-based access control (RBAC), enforced ZFS, firewall, and migration guardrails, and sanitized outbound telemetry streams.
+- **Web Console & API Gateway Hardening (`apps/axonwall`)**:
+  - Added strict interactive session assertions (`assertInteractiveSession()`), DNS-pinned SSRF validation on remote webhook destinations, and sandboxed offline documentation `<iframe>` contexts with restrictive Content Security Policies.
+  - Enforced S256 PKCE verification and validated `email_verified` claims across OIDC SSO authentication flows; converted sensitive preview endpoints to `POST` transactions and eliminated `'unsafe-eval'` script policies.
+- **Vigilante Autonomous SOC & NastyMap Hardening (`packages/vigilante_lib`, `packages/nastymap`)**:
+  - Implemented centralized MCP RBAC policies, masked scanning credentials, and restricted `/proc/<pid>/mem` inspection.
+  - Enforced RFC 6962 Merkle tree domain separation and tamper-evident manifest signing in forensic evidence dossiers (`evidencepack.js`, `ledger.js`).
+  - Added XML depth and 25 MB payload limits in NastyMap network import parsing; added scoped Kubernetes `NetworkPolicy` manifests across all Vigilante module charts.
+- **Supply Chain, Release Automation & Single-Source Documentation**:
+  - Isolated release signing keys to protected tag-only GitHub Actions jobs with SHA-256 pinned action references.
+  - Automated `axonwall.com` release documentation synchronization via single-source `releases.json` and `@/lib/release`.
+
+---
+
+## `v0.16.3` (2026-11-27) — Post-`v0.16.2` Defensive Audit & Emergency Security Fixes
+
+### Highlights
+- **Full-Stack Security & Reliability Remediation (5 Waves)**: Enforced scoped `axw_svc_*` service-token RBAC and interactive-route exclusions, SSRF/origin/proxy guards across web APIs, MCP tools, and Vigilante scanners, atomic state/lockout/revocation persistence, secret redaction (WAN knock sequences, metadata sync tokens, harvester salts, DDNS custom URLs), LogsQL filter prepending before pipes, and HTTP 429/400/401 validation ordering.
+- **Daemon, eBPF, Compilers & Web Console Stability**: Hardened QEMU/LXC allowlists, ZFSBootMenu/Btrfs/GRUB rollback guards, ClassID pending-cleanup reservations, bounded [-4095, 0] LSM eBPF returns, VyOS ! negation & custom BPF-token schema validation, topology peer targeted patching, Zod render/useMemo crash & XSS protections, and untouched-field preservation on save.
+- **CI, ISO & Packaging Hardening**: Fixed unified Debian 13 ISO size under the 1.9 GiB GitHub Release asset limit, ensured world-readable ISO output permissions under sudo, fixed Alpine checksum loop exit codes in Compute Checksums, and hardened `extract_deb()` tar-slip/archive validation.
+
+---
+
 ## `v0.16.2` (2026-11-25) — Edge-to-Central-Analytics Observability, Hardened WAN Headscale Invites & Port Knocking, Scoped Service Tokens & K3s Analytics Stack
 
 ### Highlights
