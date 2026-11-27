@@ -249,7 +249,7 @@
   },
   "dependencies": {
     "fast-xml-parser": "^5.4.1",
-    "jose": "^6.0.8",
+    "jose": "^6.2.18",
     "ldapts": "^9.2.0",
     "yaml": "^2.9.1",
     "zod": "^4.6.7"
