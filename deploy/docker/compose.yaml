@@ -143,7 +143,7 @@ services:
       - supabase_data:/var/lib/postgresql/data
 
   clickhouse:
-    image: clickhouse/clickhouse-server:24.8-alpine@sha256:b002e56ed5c16e224c312527f6fcba7e77216fec5d7a88a7828f59efc614feb5
+    image: clickhouse/clickhouse-server:26.7-alpine@sha256:6bbe0bff74fb1456b8113c30371aea860c5a8c7a84116b5b5508999ff838c474
     container_name: axonwall-clickhouse
     restart: unless-stopped
     security_opt:
