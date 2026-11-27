@@ -32,6 +32,6 @@
     "react-dom": "^19.3.1"
   },
   "dependencies": {
-    "postcss": "^8.5.32"
+    "postcss": "^8.5.33"
   }
 }
